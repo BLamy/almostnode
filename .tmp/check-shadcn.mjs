@@ -1,0 +1,11 @@
+import { chromium } from '@playwright/test';
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+await page.goto('http://127.0.0.1:4173/examples/shadcn-demo.html', { waitUntil: 'domcontentloaded' });
+await page.waitForTimeout(8000);
+const inner = await page.$eval('#terminal', el => el.innerHTML);
+console.log('inner len', inner.length);
+console.log(inner);
+const term = await page.$eval('#terminal', el => ({innerHeight: el.scrollHeight, rect: el.getBoundingClientRect().toJSON()}));
+console.log(JSON.stringify(term, null, 2));
+await browser.close();

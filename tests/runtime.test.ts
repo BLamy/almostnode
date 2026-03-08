@@ -200,6 +200,111 @@ describe('Runtime', () => {
   });
 
   describe('module resolution', () => {
+    it('should resolve stream/promises builtin module', () => {
+      const { exports } = runtime.execute(`
+        const streamPromises = require('stream/promises');
+        const nodeStreamPromises = require('node:stream/promises');
+        module.exports = {
+          hasFinished: typeof streamPromises.finished,
+          hasPipeline: typeof streamPromises.pipeline,
+          nodeHasFinished: typeof nodeStreamPromises.finished,
+        };
+      `);
+
+      expect(exports).toEqual({
+        hasFinished: 'function',
+        hasPipeline: 'function',
+        nodeHasFinished: 'function',
+      });
+    });
+
+    it('should normalize signal-exit object exports to callable function', () => {
+      vfs.writeFileSync(
+        '/node_modules/signal-exit/package.json',
+        JSON.stringify({
+          name: 'signal-exit',
+          main: './index.js',
+        })
+      );
+      vfs.writeFileSync(
+        '/node_modules/signal-exit/index.js',
+        `
+module.exports = {
+  onExit: () => () => {},
+  load: () => {},
+  unload: () => {},
+};
+`
+      );
+
+      const { exports } = runtime.execute(`
+        const onExit = require('signal-exit');
+        const cleanup = onExit(() => {});
+        module.exports = {
+          type: typeof onExit,
+          hasLoad: typeof onExit.load,
+          hasUnload: typeof onExit.unload,
+          cleanupType: typeof cleanup,
+        };
+      `);
+
+      expect(exports).toEqual({
+        type: 'function',
+        hasLoad: 'function',
+        hasUnload: 'function',
+        cleanupType: 'function',
+      });
+    });
+
+    it('should provide a default export for __esModule CJS packages missing default', () => {
+      vfs.writeFileSync(
+        '/node_modules/@xterm/headless/package.json',
+        JSON.stringify({
+          name: '@xterm/headless',
+          main: 'index.js',
+        })
+      );
+      vfs.writeFileSync(
+        '/node_modules/@xterm/headless/index.js',
+        `
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Terminal = class Terminal {};
+`
+      );
+
+      const { exports } = runtime.execute(`
+        var __create = Object.create;
+        var __defProp = Object.defineProperty;
+        var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+        var __getOwnPropNames = Object.getOwnPropertyNames;
+        var __getProtoOf = Object.getPrototypeOf;
+        var __hasOwnProp = Object.prototype.hasOwnProperty;
+        var __copyProps = (to, from, except, desc) => {
+          if (from && typeof from === "object" || typeof from === "function") {
+            for (let key of __getOwnPropNames(from))
+              if (!__hasOwnProp.call(to, key) && key !== except)
+                __defProp(to, key, {
+                  get: () => from[key],
+                  enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+                });
+          }
+          return to;
+        };
+        var __toESM = (mod, isNodeMode, target) => (
+          target = mod != null ? __create(__getProtoOf(mod)) : {},
+          __copyProps(isNodeMode || !mod || !mod.__esModule
+            ? __defProp(target, "default", { value: mod, enumerable: true })
+            : target, mod)
+        );
+
+        var import_headless = __toESM(require('@xterm/headless'));
+        const { Terminal } = import_headless.default;
+        module.exports = typeof Terminal;
+      `);
+
+      expect(exports).toBe('function');
+    });
+
     it('should resolve relative modules', () => {
       vfs.writeFileSync('/lib/helper.js', 'module.exports = { value: 42 };');
 
@@ -209,6 +314,54 @@ describe('Runtime', () => {
       `);
 
       expect(exports).toBe(42);
+    });
+
+    it('should resolve legacy build/src deep imports to build/cjs/src fallback', () => {
+      vfs.writeFileSync(
+        '/node_modules/gaxios/package.json',
+        JSON.stringify({
+          name: 'gaxios',
+          version: '7.1.3',
+          main: 'build/cjs/src/index.js',
+          exports: {
+            '.': {
+              require: './build/cjs/src/index.js',
+            },
+          },
+        })
+      );
+      vfs.writeFileSync('/node_modules/gaxios/build/cjs/src/common.js', 'module.exports = { ok: true };');
+      vfs.writeFileSync('/node_modules/gaxios/build/cjs/src/index.js', 'module.exports = { index: true };');
+      vfs.writeFileSync(
+        '/node_modules/googleapis-common/build/src/http2.js',
+        'module.exports = require("gaxios/build/src/common");'
+      );
+
+      const { exports } = runtime.execute(`
+        module.exports = require('googleapis-common/build/src/http2');
+      `);
+
+      expect(exports).toEqual({ ok: true });
+    });
+
+    it('should resolve package directories with index.json when main is absent', () => {
+      vfs.writeFileSync(
+        '/node_modules/spdx-license-ids/package.json',
+        JSON.stringify({
+          name: 'spdx-license-ids',
+          version: '3.0.22',
+        })
+      );
+      vfs.writeFileSync(
+        '/node_modules/spdx-license-ids/index.json',
+        JSON.stringify(['MIT', 'Apache-2.0'])
+      );
+
+      const { exports } = runtime.execute(`
+        module.exports = require('spdx-license-ids');
+      `);
+
+      expect(exports).toEqual(['MIT', 'Apache-2.0']);
     });
 
     it('should resolve modules with .js extension', () => {
@@ -280,6 +433,134 @@ describe('Runtime', () => {
       `);
 
       expect(exports).toBe('simple');
+    });
+
+    it('should load http2-wrapper js-stream-socket probe without crashing', () => {
+      vfs.writeFileSync(
+        '/node_modules/http2-wrapper/package.json',
+        JSON.stringify({
+          name: 'http2-wrapper',
+          main: 'source/utils/js-stream-socket.js',
+        })
+      );
+      vfs.writeFileSync(
+        '/node_modules/http2-wrapper/source/utils/js-stream-socket.js',
+        `
+const stream = require('stream');
+const tls = require('tls');
+const JSStreamSocket = (new tls.TLSSocket(new stream.PassThrough()))._handle._parentWrap.constructor;
+module.exports = JSStreamSocket;
+`
+      );
+
+      const { exports } = runtime.execute(`
+        const JSStreamSocket = require('http2-wrapper');
+        const stream = require('stream');
+        const socket = new JSStreamSocket(new stream.PassThrough());
+        module.exports = {
+          ctorType: typeof JSStreamSocket,
+          hasHandle: typeof socket._handle,
+        };
+      `);
+
+      expect(exports).toEqual({
+        ctorType: 'function',
+        hasHandle: 'object',
+      });
+    });
+
+    it('should handle top-level await import syntax in transformed modules', () => {
+      vfs.writeFileSync(
+        '/node_modules/tla-pkg/index.js',
+        `
+if (process.env['DEV'] === 'true') {
+  await import('./devtools.js');
+}
+module.exports = 'ok';
+`
+      );
+      vfs.writeFileSync(
+        '/node_modules/tla-pkg/devtools.js',
+        'module.exports = { enabled: true };'
+      );
+
+      const { exports } = runtime.execute(`
+        module.exports = require('tla-pkg');
+      `);
+
+      expect(exports).toBe('ok');
+    });
+
+    it('should handle awaited __dynamicImport syntax from partially transformed modules', () => {
+      vfs.writeFileSync(
+        '/node_modules/tla-dyn/index.js',
+        `
+if (process.env['DEV'] === 'true') {
+  await __dynamicImport('./devtools.js');
+}
+module.exports = 'ok';
+`
+      );
+      vfs.writeFileSync(
+        '/node_modules/tla-dyn/devtools.js',
+        'module.exports = { enabled: true };'
+      );
+
+      const { exports } = runtime.execute(`
+        module.exports = require('tla-dyn');
+      `);
+
+      expect(exports).toBe('ok');
+    });
+
+    it('should resolve aliased package directories with exports field', () => {
+      vfs.writeFileSync(
+        '/node_modules/ink/package.json',
+        JSON.stringify({
+          name: '@jrichman/ink',
+          exports: {
+            default: './build/index.js',
+          },
+        })
+      );
+      vfs.writeFileSync(
+        '/node_modules/ink/build/index.js',
+        'module.exports = "ink via alias";'
+      );
+
+      const { exports } = runtime.execute(`
+        module.exports = require('ink');
+      `);
+
+      expect(exports).toBe('ink via alias');
+    });
+
+    it('should use preloaded yoga-layout shim when available', () => {
+      const g = globalThis as any;
+      const prevYoga = g.__almostnodeYogaLayout;
+      const prevYogaError = g.__almostnodeYogaLayoutError;
+      g.__almostnodeYogaLayout = {
+        EDGE_LEFT: 0,
+        Node: {
+          create: () => 'ok',
+        },
+      };
+      g.__almostnodeYogaLayoutError = undefined;
+
+      try {
+        const { exports } = runtime.execute(`
+          const yoga = require('yoga-layout');
+          module.exports = {
+            edge: yoga.EDGE_LEFT,
+            created: yoga.Node.create(),
+          };
+        `);
+
+        expect(exports).toEqual({ edge: 0, created: 'ok' });
+      } finally {
+        g.__almostnodeYogaLayout = prevYoga;
+        g.__almostnodeYogaLayoutError = prevYogaError;
+      }
     });
 
     it('should cache modules', () => {

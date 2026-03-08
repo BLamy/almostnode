@@ -69,19 +69,27 @@ export function createVfsRequire(
 
   // ── Resolution ──
 
+  function resolveDirectoryIndex(dirPath: string): string | null {
+    for (const indexFile of ['index.js', 'index.json', 'index.node']) {
+      const indexPath = pathShim.join(dirPath, indexFile);
+      if (vfs.existsSync(indexPath)) return indexPath;
+    }
+    return null;
+  }
+
   function tryResolveFile(basePath: string): string | null {
     // Exact path
     if (vfs.existsSync(basePath)) {
       try {
         const stats = vfs.statSync(basePath);
         if (stats.isFile()) return basePath;
-        // Directory → index.js
-        const indexPath = pathShim.join(basePath, 'index.js');
-        if (vfs.existsSync(indexPath)) return indexPath;
+        // Directory -> index.js/index.json/index.node
+        const indexPath = resolveDirectoryIndex(basePath);
+        if (indexPath) return indexPath;
       } catch { /* ignore */ }
     }
     // Try extensions
-    for (const ext of ['.js', '.json']) {
+    for (const ext of ['.js', '.json', '.node']) {
       const withExt = basePath + ext;
       if (vfs.existsSync(withExt)) return withExt;
     }

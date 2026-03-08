@@ -338,6 +338,43 @@ describe('fs module (Node.js compat)', () => {
     });
   });
 
+  describe('fs.utimesSync()', () => {
+    it('should not throw for existing file', () => {
+      vfs.writeFileSync('/file.txt', 'content');
+      fs.utimesSync('/file.txt', new Date(), new Date());
+      assert.strictEqual(fs.existsSync('/file.txt'), true);
+    });
+
+    it('should throw ENOENT for non-existent file', () => {
+      assert.throws(
+        () => fs.utimesSync('/nonexistent', new Date(), new Date()),
+        /ENOENT/
+      );
+    });
+  });
+
+  describe('fs.utimes()', () => {
+    it('should invoke callback with null for existing file', async () => {
+      vfs.writeFileSync('/file.txt', 'content');
+      await new Promise<void>((resolve) => {
+        fs.utimes('/file.txt', new Date(), new Date(), (err) => {
+          expect(err).toBeNull();
+          resolve();
+        });
+      });
+    });
+
+    it('should invoke callback with ENOENT for missing file', async () => {
+      await new Promise<void>((resolve) => {
+        fs.utimes('/nonexistent', new Date(), new Date(), (err) => {
+          expect(err).toBeInstanceOf(Error);
+          expect((err as Error).message).toMatch(/ENOENT/);
+          resolve();
+        });
+      });
+    });
+  });
+
   describe('fs.openSync() / fs.closeSync()', () => {
     it('should open and close file', () => {
       vfs.writeFileSync('/file.txt', 'content');
@@ -522,6 +559,17 @@ describe('fs module (Node.js compat)', () => {
         vfs.writeFileSync('/src.txt', 'content');
         await fs.promises.copyFile('/src.txt', '/dest.txt');
         assert.strictEqual(vfs.readFileSync('/dest.txt', 'utf8'), 'content');
+      });
+    });
+
+    describe('utimes', () => {
+      it('should resolve for existing file', async () => {
+        vfs.writeFileSync('/file.txt', 'content');
+        await fs.promises.utimes('/file.txt', new Date(), new Date());
+      });
+
+      it('should reject for non-existent file', async () => {
+        await expect(fs.promises.utimes('/nonexistent', new Date(), new Date())).rejects.toThrow(/ENOENT/);
       });
     });
   });

@@ -89,6 +89,27 @@ function transformDynamicImportsRegex(code: string): string {
   return code.replace(/(?<![.$\w])import\s*\(/g, '__dynamicImport(');
 }
 
+function hasAwaitedDynamicImports(code: string): boolean {
+  return /\bawait\s+__dynamicImport\s*\(/.test(code) || /\bawait\s+import\s*\(/.test(code);
+}
+
+function findFirstAwaitLine(code: string): string | null {
+  const match = code.match(/^[^\n]*\bawait\b[^\n]*$/m);
+  if (!match) return null;
+  return match[0].trim().slice(0, 200);
+}
+
+/**
+ * CJS wrappers can't parse top-level await.
+ * Rewrite awaited dynamic imports to synchronous require(...) for compatibility.
+ */
+function rewriteAwaitedDynamicImports(code: string): string {
+  let rewritten = code;
+  rewritten = rewritten.replace(/\bawait\s+__dynamicImport\s*\(/g, 'require(');
+  rewritten = rewritten.replace(/\bawait\s+import\s*\(/g, 'require(');
+  return rewritten;
+}
+
 /**
  * All-in-one ESM to CJS transform using AST.
  * Handles import/export declarations, import.meta, and dynamic imports in a single pass.
@@ -96,8 +117,8 @@ function transformDynamicImportsRegex(code: string): string {
  */
 function transformEsmToCjs(code: string, filename: string): string {
   // Quick check: does the code have any ESM-like patterns?
-  const maybeEsm = /\bimport\b|\bexport\b/.test(code);
-  if (!maybeEsm) return code;
+  const maybeEsm = /\bimport\b|\bexport\b|\bimport\.meta\b/.test(code) || hasAwaitedDynamicImports(code);
+  if (!maybeEsm) return rewriteAwaitedDynamicImports(code);
 
   try {
     return transformEsmToCjsAst(code, filename);
@@ -154,7 +175,7 @@ function transformEsmToCjsAst(code: string, filename: string): string {
     }
   }
 
-  return transformed;
+  return rewriteAwaitedDynamicImports(transformed);
 }
 
 /**
@@ -182,7 +203,7 @@ function transformEsmToCjsRegexFallback(code: string, filename: string): string 
     }
   }
 
-  return transformed;
+  return rewriteAwaitedDynamicImports(transformed);
 }
 
 /**
@@ -212,6 +233,82 @@ function createDynamicImport(moduleRequire: RequireFunction): (specifier: string
   };
 }
 
+/**
+ * signal-exit v3 exports a callable function; v4 exports an object with onExit().
+ * Some packages (e.g. proper-lockfile) still call require('signal-exit') as a function.
+ * Return a callable wrapper when the installed module is the v4 object shape.
+ */
+function normalizeSignalExitExport(moduleExports: unknown): unknown {
+  if (typeof moduleExports === 'function') {
+    const fn = moduleExports as ((...args: unknown[]) => unknown) & Record<string, unknown>;
+    if (typeof fn.onExit !== 'function') {
+      fn.onExit = (...args: unknown[]) => fn(...args);
+    }
+    if (!('default' in fn)) {
+      fn.default = fn;
+    }
+    return fn;
+  }
+
+  if (!moduleExports || typeof moduleExports !== 'object') {
+    return moduleExports;
+  }
+
+  const signalExitObj = moduleExports as Record<string, unknown>;
+  const onExit = signalExitObj.onExit;
+  if (typeof onExit !== 'function') {
+    return moduleExports;
+  }
+
+  const compat = ((...args: unknown[]) => (onExit as (...a: unknown[]) => unknown)(...args)) as
+    ((...args: unknown[]) => unknown) & Record<string, unknown>;
+  Object.assign(compat, signalExitObj);
+  if (!('default' in compat)) {
+    compat.default = compat;
+  }
+  return compat;
+}
+
+/**
+ * Some transpiled CJS bundles mark exports with __esModule but omit a default export.
+ * esbuild's __toESM(require(...)) helper then exposes .default as undefined.
+ * Provide a fallback default pointing at the module namespace object.
+ */
+function normalizeMissingEsmDefault(moduleExports: unknown): unknown {
+  if (!moduleExports || (typeof moduleExports !== 'object' && typeof moduleExports !== 'function')) {
+    return moduleExports;
+  }
+
+  const mod = moduleExports as Record<string, unknown>;
+  if (!('__esModule' in mod) || 'default' in mod) {
+    return moduleExports;
+  }
+
+  try {
+    Object.defineProperty(mod, 'default', {
+      value: moduleExports,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    return moduleExports;
+  } catch {
+    if (typeof moduleExports === 'function') {
+      const original = moduleExports as (...args: unknown[]) => unknown;
+      const wrapped = ((...args: unknown[]) => original(...args)) as
+        ((...args: unknown[]) => unknown) & Record<string, unknown>;
+      Object.assign(wrapped, mod);
+      wrapped.default = moduleExports;
+      return wrapped;
+    }
+
+    return {
+      ...mod,
+      default: moduleExports,
+    };
+  }
+}
+
 export interface Module {
   id: string;
   filename: string;
@@ -233,6 +330,11 @@ export interface RequireFunction {
   (id: string): unknown;
   resolve: (id: string) => string;
   cache: Record<string, Module>;
+}
+
+interface ResolverCaches {
+  resolutionCache: Map<string, string | null>;
+  packageJsonCache: Map<string, PackageJson | null>;
 }
 
 /**
@@ -266,6 +368,85 @@ function createTimersModule() {
     clearTimeout: globalThis.clearTimeout,
     clearInterval: globalThis.clearInterval,
     clearImmediate: globalThis.clearTimeout,
+  };
+}
+
+/**
+ * Minimal execa shim backed by child_process.exec.
+ * Supports the APIs used by shadcn CLI: named export `execa` and default callable.
+ */
+function createExecaModule() {
+  const quoteArg = (value: string) => JSON.stringify(value);
+
+  const run = (
+    command: string,
+    options?: { cwd?: string; env?: Record<string, string>; reject?: boolean }
+  ) => new Promise<{
+    command: string;
+    escapedCommand: string;
+    cwd: string;
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    failed: boolean;
+    signal: string | null;
+  }>((resolve, reject) => {
+    const execOptions = {
+      cwd: options?.cwd,
+      env: options?.env,
+    };
+
+    childProcessShim.exec(command, execOptions, (error, stdout, stderr) => {
+      const exitCode = error && typeof (error as { code?: unknown }).code === 'number'
+        ? ((error as { code: number }).code)
+        : 0;
+      const result = {
+        command,
+        escapedCommand: command,
+        cwd: options?.cwd || '/',
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+        exitCode,
+        failed: exitCode !== 0,
+        signal: null as string | null,
+      };
+
+      if (exitCode !== 0 && options?.reject !== false) {
+        const execaError = new Error(`Command failed with exit code ${exitCode}: ${command}`) as Error & typeof result;
+        Object.assign(execaError, result);
+        reject(execaError);
+        return;
+      }
+
+      resolve(result);
+    });
+  });
+
+  const execa = (
+    file: string,
+    args: string[] = [],
+    options?: { cwd?: string; env?: Record<string, string>; reject?: boolean }
+  ) => {
+    const command = [file, ...args].map(quoteArg).join(' ');
+    return run(command, options);
+  };
+
+  const execaCommand = (
+    command: string,
+    options?: { cwd?: string; env?: Record<string, string>; reject?: boolean }
+  ) => run(command, options);
+
+  // Default export is callable and also exposes helpers.
+  const execaDefault = Object.assign(execa, {
+    execa,
+    command: execaCommand,
+    execaCommand,
+  });
+
+  return {
+    execa,
+    execaCommand,
+    default: execaDefault,
   };
 }
 
@@ -313,6 +494,7 @@ const builtinModules: Record<string, unknown> = {
   net: netShim,
   events: eventsShim,
   stream: streamShim,
+  'stream/promises': streamShim.promises,
   buffer: bufferShim,
   url: urlShim,
   querystring: querystringShim,
@@ -322,6 +504,7 @@ const builtinModules: Record<string, unknown> = {
   crypto: cryptoShim,
   zlib: zlibShim,
   dns: dnsShim,
+  'dns/promises': dnsShim.promises,
   child_process: childProcessShim,
   assert: assertShim,
   string_decoder: createStringDecoderModule(),
@@ -351,6 +534,29 @@ const builtinModules: Record<string, unknown> = {
   async_hooks: asyncHooksShim,
   domain: domainShim,
   diagnostics_channel: diagnosticsChannelShim,
+  execa: createExecaModule(),
+  // Node.js 'constants' module (deprecated alias for os.constants + fs.constants)
+  // Used by graceful-fs and other packages for file open flags
+  constants: {
+    O_RDONLY: 0,
+    O_WRONLY: 1,
+    O_RDWR: 2,
+    O_CREAT: 64,
+    O_EXCL: 128,
+    O_TRUNC: 512,
+    O_APPEND: 1024,
+    O_SYNC: 1052672,
+    O_SYMLINK: 0x200000,  // 2097152
+    O_NONBLOCK: 2048,
+    S_IFMT: 61440,
+    S_IFREG: 32768,
+    S_IFDIR: 16384,
+    S_IFLNK: 40960,
+    F_OK: 0,
+    R_OK: 4,
+    W_OK: 2,
+    X_OK: 1,
+  },
   // prettier uses createRequire which doesn't work in our runtime, so we shim it
   prettier: prettierShim,
   // Some packages explicitly require 'console' (with Console constructor)
@@ -426,17 +632,24 @@ function createRequire(
   currentDir: string,
   moduleCache: Record<string, Module>,
   options: RuntimeOptions,
-  processedCodeCache?: Map<string, string>
+  processedCodeCache?: Map<string, string>,
+  resolverCaches?: ResolverCaches
 ): RequireFunction {
   // Module resolution cache for faster repeated imports
-  const resolutionCache: Map<string, string | null> = new Map();
+  const resolutionCache: Map<string, string | null> =
+    resolverCaches?.resolutionCache ?? new Map();
 
   // Package.json parsing cache
-  const packageJsonCache: Map<string, PackageJson | null> = new Map();
+  const packageJsonCache: Map<string, PackageJson | null> =
+    resolverCaches?.packageJsonCache ?? new Map();
 
   const getParsedPackageJson = (pkgPath: string): PackageJson | null => {
     if (packageJsonCache.has(pkgPath)) {
       return packageJsonCache.get(pkgPath)!;
+    }
+    if (!vfs.existsSync(pkgPath)) {
+      packageJsonCache.set(pkgPath, null);
+      return null;
     }
     try {
       const content = vfs.readFileSync(pkgPath, 'utf8');
@@ -447,6 +660,17 @@ function createRequire(
       packageJsonCache.set(pkgPath, null);
       return null;
     }
+  };
+
+  const resolveDirectoryIndex = (dirPath: string): string | null => {
+    const indexCandidates = ['index.js', 'index.json', 'index.node'];
+    for (const indexFile of indexCandidates) {
+      const indexPath = pathShim.join(dirPath, indexFile);
+      if (vfs.existsSync(indexPath)) {
+        return indexPath;
+      }
+    }
+    return null;
   };
 
   const resolveModule = (id: string, fromDir: string): string => {
@@ -505,9 +729,9 @@ function createRequire(
           resolutionCache.set(cacheKey, resolved);
           return resolved;
         }
-        // Directory - look for index.js
-        const indexPath = pathShim.join(resolved, 'index.js');
-        if (vfs.existsSync(indexPath)) {
+        // Directory - Node falls back to index.js/index.json/index.node
+        const indexPath = resolveDirectoryIndex(resolved);
+        if (indexPath) {
           resolutionCache.set(cacheKey, indexPath);
           return indexPath;
         }
@@ -535,9 +759,9 @@ function createRequire(
         if (stats.isFile()) {
           return basePath;
         }
-        // Directory - look for index.js
-        const indexPath = pathShim.join(basePath, 'index.js');
-        if (vfs.existsSync(indexPath)) {
+        // Directory - Node falls back to index.js/index.json/index.node
+        const indexPath = resolveDirectoryIndex(basePath);
+        if (indexPath) {
           return indexPath;
         }
       }
@@ -552,6 +776,18 @@ function createRequire(
       }
 
       return null;
+    };
+
+    // Some packages moved CJS output from build/src/* to build/cjs/src/*.
+    // Allow legacy deep imports (e.g. gaxios/build/src/common) to resolve.
+    const tryResolveBuildCjsFallback = (
+      nodeModulesDir: string,
+      moduleId: string
+    ): string | null => {
+      if (!moduleId.includes('/build/src/')) return null;
+      const cjsModuleId = moduleId.replace('/build/src/', '/build/cjs/src/');
+      if (cjsModuleId === moduleId) return null;
+      return tryResolveFile(pathShim.join(nodeModulesDir, cjsModuleId));
     };
 
     // Apply browser field object remapping for a resolved file within a package
@@ -585,6 +821,23 @@ function createRequire(
       // Check package.json first — it controls entry points (browser, main, exports)
       const pkg = getParsedPackageJson(pkgPath);
       if (pkg) {
+        // npm alias installs can place package files under an alias directory
+        // (e.g. node_modules/ink) while package.json name is different
+        // (e.g. "@jrichman/ink"). resolve.exports needs the declared specifier.
+        const exportsModuleId = (() => {
+          const declaredName = typeof pkg.name === 'string' ? pkg.name : null;
+          if (!declaredName || declaredName === pkgName) {
+            return moduleId;
+          }
+          if (moduleId === pkgName) {
+            return declaredName;
+          }
+          if (moduleId.startsWith(`${pkgName}/`)) {
+            return `${declaredName}${moduleId.slice(pkgName.length)}`;
+          }
+          return moduleId;
+        })();
+
         // Use resolve.exports to handle the exports field
         if (pkg.exports) {
           // Try require first, then import. Some packages have broken ESM builds (convex).
@@ -592,7 +845,7 @@ function createRequire(
           // fallback will retry with the import condition.
           for (const conditions of [{ require: true }, { import: true }] as const) {
             try {
-              const resolved = resolveExports(pkg, moduleId, conditions);
+              const resolved = resolveExports(pkg, exportsModuleId, conditions);
               if (resolved && resolved.length > 0) {
                 const exportPath = resolved[0];
                 const fullExportPath = pathShim.join(pkgRoot, exportPath);
@@ -642,6 +895,9 @@ function createRequire(
       const resolved = tryResolveFile(fullPath);
       if (resolved) return resolved;
 
+      const cjsFallback = tryResolveBuildCjsFallback(nodeModulesDir, moduleId);
+      if (cjsFallback) return cjsFallback;
+
       return null;
     };
 
@@ -690,7 +946,9 @@ function createRequire(
 
     // Evict oldest entry if cache exceeds bounds
     const cacheKeys = Object.keys(moduleCache);
-    if (cacheKeys.length > 2000) {
+    // Large CLIs (e.g. gemini-cli-core) can legitimately load thousands of modules.
+    // Keep a higher cap to avoid eviction/reload thrash that can cause stalls.
+    if (cacheKeys.length > 20000) {
       delete moduleCache[cacheKeys[0]];
     }
 
@@ -738,7 +996,8 @@ function createRequire(
       dirname,
       moduleCache,
       options,
-      processedCodeCache
+      processedCodeCache,
+      resolverCaches
     );
     moduleRequire.cache = moduleCache;
 
@@ -752,7 +1011,7 @@ function createRequire(
     // - import.meta is provided for ESM code that uses it
     try {
       const importMetaUrl = 'file://' + resolvedPath;
-      const wrappedCode = `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport) {
+      const createWrappedCode = (moduleCode: string) => `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport) {
 var exports = $exports;
 var require = $require;
 var module = $module;
@@ -767,16 +1026,38 @@ var global = globalThis;
 globalThis.process = $process;
 global.process = $process;
 return (function() {
-${code}
+${moduleCode}
 }).call(this);
 })`;
 
       let fn;
       try {
-        fn = eval(wrappedCode);
+        fn = eval(createWrappedCode(code));
       } catch (evalError) {
         const msg = evalError instanceof Error ? evalError.message : String(evalError);
-        throw new SyntaxError(`${msg} (in ${resolvedPath})`);
+        const mightBeTopLevelAwait =
+          msg.includes('await is only valid') ||
+          msg.includes("Unexpected reserved word 'await'") ||
+          msg.includes('Unexpected identifier');
+
+        if (mightBeTopLevelAwait) {
+          const rewrittenCode = rewriteAwaitedDynamicImports(code);
+          if (rewrittenCode !== code) {
+            try {
+              fn = eval(createWrappedCode(rewrittenCode));
+              code = rewrittenCode;
+              processedCodeCache?.set(codeCacheKey, code);
+            } catch {
+              // Fall through to a clearer syntax error below.
+            }
+          }
+        }
+
+        if (!fn) {
+          const awaitLine = findFirstAwaitLine(code);
+          const awaitDetail = awaitLine ? `\n[almostnode] first await line: ${awaitLine}` : '';
+          throw new SyntaxError(`${msg} (in ${resolvedPath})${awaitDetail}`);
+        }
       }
       // Create dynamic import function for this module context
       const dynamicImport = createDynamicImport(moduleRequire);
@@ -823,6 +1104,20 @@ ${code}
     if (id === 'process') {
       return process;
     }
+    // yoga-layout v3 uses top-level await in its default entry, which cannot
+    // be synchronously required from transformed CJS. node command preloads it.
+    if (id === 'yoga-layout') {
+      const preloadedYoga = (globalThis as any).__almostnodeYogaLayout;
+      if (preloadedYoga) {
+        return preloadedYoga;
+      }
+      const yogaLoadError = (globalThis as any).__almostnodeYogaLayoutError;
+      if (yogaLoadError) {
+        throw yogaLoadError instanceof Error
+          ? yogaLoadError
+          : new Error(String(yogaLoadError));
+      }
+    }
     // Special handling for 'module' - provide a working createRequire
     if (id === 'module') {
       return {
@@ -846,7 +1141,9 @@ ${code}
             process,
             fromDir,
             moduleCache,
-            options
+            options,
+            processedCodeCache,
+            resolverCaches
           );
           newRequire.cache = moduleCache;
           return newRequire;
@@ -891,7 +1188,14 @@ ${code}
       return builtinModules['prettier'];
     }
 
-    return loadModule(resolved).exports;
+    let loadedExports = loadModule(resolved).exports;
+    if (resolved.includes('/node_modules/')) {
+      loadedExports = normalizeMissingEsmDefault(loadedExports);
+    }
+    if (id === 'signal-exit' || resolved.includes('/node_modules/signal-exit/')) {
+      loadedExports = normalizeSignalExitExport(loadedExports);
+    }
+    return loadedExports;
   };
 
   require.resolve = (id: string): string => {
@@ -970,6 +1274,11 @@ export class Runtime {
   private options: RuntimeOptions;
   /** Cache for pre-processed code (after ESM transform) before eval */
   private processedCodeCache: Map<string, string> = new Map();
+  /** Shared resolver caches to avoid per-module duplication and exception churn */
+  private resolverCaches: ResolverCaches = {
+    resolutionCache: new Map(),
+    packageJsonCache: new Map(),
+  };
 
   constructor(vfs: VirtualFS, options: RuntimeOptions = {}) {
     this.vfs = vfs;
@@ -998,6 +1307,107 @@ export class Runtime {
     if (typeof globalThis.setImmediate === 'undefined') {
       (globalThis as any).setImmediate = (fn: (...args: unknown[]) => void, ...args: unknown[]) => setTimeout(fn, 0, ...args);
       (globalThis as any).clearImmediate = (id: number) => clearTimeout(id);
+    }
+
+    // Patch globalThis.fetch to route cross-origin requests through CORS proxy.
+    // Node.js code (native fetch, node-fetch v3) calls globalThis.fetch directly.
+    // In the browser, cross-origin requests will fail without CORS headers.
+    if (!(globalThis.fetch as any).__almostnode) {
+      const origFetch = globalThis.fetch.bind(globalThis);
+      const CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
+      const MAX_REDIRECTS = 10;
+      (globalThis as any).fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        // Only proxy absolute cross-origin HTTP(S) URLs
+        if (url.startsWith('http') && !url.includes(location.host) && !url.includes('almostnode-cors-proxy')) {
+          // When input is a Request object, extract its properties so they aren't lost.
+          // init values take precedence over Request properties.
+          let effectiveInit: RequestInit = { ...init };
+          if (input instanceof Request) {
+            const req = input;
+            if (!effectiveInit.method && req.method !== 'GET') effectiveInit.method = req.method;
+            if (!effectiveInit.headers) {
+              effectiveInit.headers = new Headers(req.headers);
+            }
+            if (!effectiveInit.body && req.body && req.method !== 'GET' && req.method !== 'HEAD') {
+              effectiveInit.body = req.body;
+            }
+            if (!effectiveInit.signal && req.signal) effectiveInit.signal = req.signal;
+            if (effectiveInit.redirect === undefined && req.redirect) effectiveInit.redirect = req.redirect;
+            if (effectiveInit.credentials === undefined && req.credentials) effectiveInit.credentials = req.credentials;
+          }
+
+          // Strip accept-encoding — the proxy returns raw bytes, browser handles its own compression
+          const headers = new Headers(effectiveInit.headers);
+          headers.delete('accept-encoding');
+          headers.delete('host');
+          effectiveInit.headers = headers;
+
+          // Follow redirects through the CORS proxy instead of letting the browser follow them
+          // (browser would follow to the final URL directly, bypassing the proxy → opaque/empty response)
+          let currentUrl = url;
+          let currentMethod = effectiveInit.method || 'GET';
+          let currentBody = effectiveInit.body;
+          for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
+            const proxiedUrl = CORS_PROXY + encodeURIComponent(currentUrl);
+            console.log(`[almostnode DEBUG] fetch proxy: ${currentUrl} -> ${proxiedUrl.slice(0, 120)}...`);
+            const resp = await origFetch(proxiedUrl, {
+              ...effectiveInit,
+              method: currentMethod,
+              body: currentBody,
+              redirect: 'manual',
+            });
+            console.log(`[almostnode DEBUG] fetch response: status=${resp.status}, content-type=${resp.headers.get('content-type')}, content-length=${resp.headers.get('content-length')}`);
+
+            // Handle redirects: 301, 302, 303, 307, 308
+            if (resp.status >= 300 && resp.status < 400) {
+              const location = resp.headers.get('location');
+              if (location) {
+                // Resolve relative redirect URLs against the current URL
+                currentUrl = new URL(location, currentUrl).href;
+                // 303: change method to GET and drop body
+                if (resp.status === 303) {
+                  currentMethod = 'GET';
+                  currentBody = undefined;
+                }
+                // 301, 302: change method to GET for non-GET/HEAD (per browser behavior)
+                if ((resp.status === 301 || resp.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
+                  currentMethod = 'GET';
+                  currentBody = undefined;
+                }
+                // 307, 308: preserve method and body
+                if (redirectCount === MAX_REDIRECTS) {
+                  throw new TypeError('Failed to fetch: too many redirects');
+                }
+                continue;
+              }
+            }
+            return resp;
+          }
+          // Should not reach here, but just in case
+          throw new TypeError('Failed to fetch: too many redirects');
+        }
+        return origFetch(input, init);
+      }, { __almostnode: true });
+    }
+
+    // DEBUG: Patch JSON.parse to log details when it fails on truncated data
+    // This helps diagnose "Unexpected end of JSON input" errors from packages
+    if (!(JSON.parse as any).__almostnode_debug) {
+      const origJsonParse = JSON.parse;
+      (JSON as any).parse = Object.assign(function debugJsonParse(text: string, ...rest: unknown[]) {
+        try {
+          return origJsonParse.call(JSON, text, ...rest as []);
+        } catch (err) {
+          if (err instanceof SyntaxError && err.message.includes('end of JSON')) {
+            const preview = typeof text === 'string' ? text.slice(0, 500) : String(text);
+            console.error(`[almostnode DEBUG] JSON.parse failed: ${err.message}`);
+            console.error(`[almostnode DEBUG] Input length: ${typeof text === 'string' ? text.length : 'N/A'}, preview: ${JSON.stringify(preview)}`);
+            console.error(`[almostnode DEBUG] Stack:`, new Error().stack);
+          }
+          throw err;
+        }
+      }, { __almostnode_debug: true });
     }
 
     // Patch setTimeout/setInterval to return Node.js-compatible Timeout objects
@@ -1257,7 +1667,8 @@ export class Runtime {
       dirname,
       this.moduleCache,
       this.options,
-      this.processedCodeCache
+      this.processedCodeCache,
+      this.resolverCaches
     );
 
     // Create module object
@@ -1380,6 +1791,9 @@ ${code}
     for (const key of Object.keys(this.moduleCache)) {
       delete this.moduleCache[key];
     }
+    this.processedCodeCache.clear();
+    this.resolverCaches.resolutionCache.clear();
+    this.resolverCaches.packageJsonCache.clear();
   }
 
   /**
@@ -1421,7 +1835,8 @@ ${code}
       '/',
       this.moduleCache,
       this.options,
-      this.processedCodeCache
+      this.processedCodeCache,
+      this.resolverCaches
     );
     const consoleWrapper = createConsoleWrapper(this.options.onConsole);
     const process = this.process;

@@ -10,6 +10,7 @@ export interface FSNode {
   content?: Uint8Array;
   children?: Map<string, FSNode>;
   mtime: number;
+  ino: number;
 }
 
 // Simple EventEmitter for VFS change notifications
@@ -108,13 +109,19 @@ export class VirtualFS {
   private decoder = new TextDecoder();
   private watchers = new Map<string, Set<WatcherEntry>>();
   private eventListeners = new Map<string, Set<VFSEventListener>>();
+  private nextInode = 2;
 
   constructor() {
     this.root = {
       type: 'directory',
       children: new Map(),
       mtime: Date.now(),
+      ino: 1,
     };
+  }
+
+  private allocateInode(): number {
+    return this.nextInode++;
   }
 
   /**
@@ -247,6 +254,7 @@ export class VirtualFS {
       type: 'file',
       content,
       mtime: Date.now(),
+      ino: this.allocateInode(),
     });
 
     if (emitEvent) {
@@ -339,7 +347,7 @@ export class VirtualFS {
 
       let child = current.children.get(segment);
       if (!child) {
-        child = { type: 'directory', children: new Map(), mtime: Date.now() };
+        child = { type: 'directory', children: new Map(), mtime: Date.now(), ino: this.allocateInode() };
         current.children.set(segment, child);
       } else if (child.type !== 'directory') {
         throw new Error(`ENOTDIR: not a directory, '${path}'`);
@@ -392,7 +400,7 @@ export class VirtualFS {
       uid: 1000,
       gid: 1000,
       dev: 0,
-      ino: 0,
+      ino: node.ino,
       rdev: 0,
       blksize: 4096,
       blocks: Math.ceil(size / 512),
@@ -474,6 +482,7 @@ export class VirtualFS {
       type: 'directory',
       children: new Map(),
       mtime: Date.now(),
+      ino: this.allocateInode(),
     });
   }
 

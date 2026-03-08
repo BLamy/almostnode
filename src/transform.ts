@@ -109,8 +109,15 @@ export async function transformFile(
   else if (filename.endsWith('.tsx')) loader = 'tsx';
   else if (filename.endsWith('.mjs')) loader = 'js';
 
-  try {
-    const result = await esbuild.transform(code, {
+  const rewriteAwaitImportsForCjs = (input: string): string => {
+    let rewritten = input;
+    rewritten = rewritten.replace(/\bawait\s+import\s*\(/g, 'require(');
+    rewritten = rewritten.replace(/\bawait\s+__dynamicImport\s*\(/g, 'require(');
+    return rewritten;
+  };
+
+  const runTransform = async (inputCode: string): Promise<string> => {
+    const result = await esbuild.transform(inputCode, {
       loader,
       format: 'cjs',
       target: 'esnext',
@@ -148,13 +155,24 @@ export async function transformFile(
       transformed = transformed.replace(pattern, `Promise.resolve(require("${builtin}"))`);
     }
 
-    return transformed;
+    return rewriteAwaitImportsForCjs(transformed);
+  };
+
+  try {
+    return await runTransform(code);
   } catch (error: unknown) {
-    // Check if it's a top-level await error - these files are usually CLI entry points
+    // Check if it's a top-level await error and try rewriting awaited imports.
     const errorMsg = error instanceof Error ? error.message : String(error);
     if (errorMsg.includes('Top-level await')) {
-      console.log(`[transform] Skipping ${filename} (has top-level await, likely CLI entry point)`);
-      // Return original code - it won't be require()'d directly anyway
+      const rewritten = rewriteAwaitImportsForCjs(code);
+      if (rewritten !== code) {
+        try {
+          return await runTransform(rewritten);
+        } catch (rewriteError) {
+          console.warn(`[transform] Top-level await rewrite failed for ${filename}:`, rewriteError);
+        }
+      }
+      console.log(`[transform] Skipping ${filename} (has unsupported top-level await)`);
       return code;
     }
 
@@ -182,8 +200,9 @@ function needsTransform(filename: string, code: string): boolean {
   const hasImport = /\bimport\s+[\w{*'"]/m.test(code);
   const hasExport = /\bexport\s+(?:default|const|let|var|function|class|{|\*)/m.test(code);
   const hasImportMeta = /\bimport\.meta\b/.test(code);
+  const hasDynamicImport = /\bimport\s*\(/.test(code);
 
-  return hasImport || hasExport || hasImportMeta;
+  return hasImport || hasExport || hasImportMeta || hasDynamicImport;
 }
 
 /**
@@ -206,6 +225,8 @@ function hasDynamicNodeImports(code: string): boolean {
  */
 function patchDynamicImports(code: string): string {
   let patched = code;
+  patched = patched.replace(/\bawait\s+import\s*\(/g, 'require(');
+  patched = patched.replace(/\bawait\s+__dynamicImport\s*\(/g, 'require(');
 
   // Convert dynamic import() of node: modules to require()
   patched = patched.replace(

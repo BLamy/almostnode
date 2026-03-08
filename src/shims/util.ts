@@ -270,6 +270,7 @@ export function stripVTControlCharacters(str: string): string {
 }
 
 export const types = {
+  // Legacy helpers (also on util directly)
   isArray,
   isBoolean,
   isNull,
@@ -284,6 +285,104 @@ export const types = {
   isFunction,
   isPrimitive,
   isBuffer,
+  // Node.js util.types API
+  isBoxedPrimitive(value: unknown): boolean {
+    return value instanceof Number || value instanceof String || value instanceof Boolean ||
+      value instanceof BigInt || (typeof Symbol === 'function' && value instanceof Symbol);
+  },
+  isArrayBuffer(value: unknown): value is ArrayBuffer {
+    return value instanceof ArrayBuffer;
+  },
+  isSharedArrayBuffer(value: unknown): boolean {
+    return typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer;
+  },
+  isTypedArray(value: unknown): boolean {
+    return ArrayBuffer.isView(value) && !(value instanceof DataView);
+  },
+  isDataView(value: unknown): value is DataView {
+    return value instanceof DataView;
+  },
+  isMap(value: unknown): value is Map<unknown, unknown> {
+    return value instanceof Map;
+  },
+  isSet(value: unknown): value is Set<unknown> {
+    return value instanceof Set;
+  },
+  isWeakMap(value: unknown): value is WeakMap<object, unknown> {
+    return value instanceof WeakMap;
+  },
+  isWeakSet(value: unknown): value is WeakSet<object> {
+    return value instanceof WeakSet;
+  },
+  isPromise(value: unknown): value is Promise<unknown> {
+    return value instanceof Promise;
+  },
+  isGeneratorFunction(value: unknown): boolean {
+    return typeof value === 'function' && value.constructor?.name === 'GeneratorFunction';
+  },
+  isAsyncFunction(value: unknown): boolean {
+    return typeof value === 'function' && value.constructor?.name === 'AsyncFunction';
+  },
+  isGeneratorObject(value: unknown): boolean {
+    return value != null && typeof value === 'object' && typeof (value as Iterator<unknown>).next === 'function' &&
+      typeof (value as Iterator<unknown>).throw === 'function';
+  },
+  isNativeError(value: unknown): value is Error {
+    return value instanceof Error;
+  },
+  isNumberObject(value: unknown): boolean {
+    return value instanceof Number;
+  },
+  isStringObject(value: unknown): boolean {
+    return value instanceof String;
+  },
+  isBooleanObject(value: unknown): boolean {
+    return value instanceof Boolean;
+  },
+  isBigIntObject(value: unknown): boolean {
+    return typeof BigInt !== 'undefined' && value instanceof Object && typeof (value as { valueOf(): unknown }).valueOf() === 'bigint';
+  },
+  isSymbolObject(value: unknown): boolean {
+    return typeof Symbol === 'function' && value instanceof Object &&
+      Object.prototype.toString.call(value) === '[object Symbol]';
+  },
+  isUint8Array(value: unknown): value is Uint8Array {
+    return value instanceof Uint8Array;
+  },
+  isUint16Array(value: unknown): value is Uint16Array {
+    return value instanceof Uint16Array;
+  },
+  isUint32Array(value: unknown): value is Uint32Array {
+    return value instanceof Uint32Array;
+  },
+  isInt8Array(value: unknown): value is Int8Array {
+    return value instanceof Int8Array;
+  },
+  isInt16Array(value: unknown): value is Int16Array {
+    return value instanceof Int16Array;
+  },
+  isInt32Array(value: unknown): value is Int32Array {
+    return value instanceof Int32Array;
+  },
+  isFloat32Array(value: unknown): value is Float32Array {
+    return value instanceof Float32Array;
+  },
+  isFloat64Array(value: unknown): value is Float64Array {
+    return value instanceof Float64Array;
+  },
+  isAnyArrayBuffer(value: unknown): boolean {
+    return value instanceof ArrayBuffer ||
+      (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer);
+  },
+  isProxy(_value: unknown): boolean {
+    return false; // Cannot detect proxies in JS
+  },
+  isExternal(_value: unknown): boolean {
+    return false; // Not applicable in browser
+  },
+  isModuleNamespaceObject(_value: unknown): boolean {
+    return false; // Cannot reliably detect in browser
+  },
 };
 
 // Re-export TextEncoder and TextDecoder from global

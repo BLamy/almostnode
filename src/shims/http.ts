@@ -498,12 +498,16 @@ export const METHODS = [
   'TRACE',
 ];
 
-// CORS proxy getter - checks localStorage for configured proxy
+// Default CORS proxy for Node.js HTTP requests running in the browser
+const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
+
+// CORS proxy getter - checks localStorage override, falls back to default
 function getCorsProxy(): string | null {
   if (typeof localStorage !== 'undefined') {
-    return localStorage.getItem('__corsProxyUrl') || null;
+    const override = localStorage.getItem('__corsProxyUrl');
+    if (override) return override;
   }
-  return null;
+  return DEFAULT_CORS_PROXY;
 }
 
 /**
@@ -630,6 +634,7 @@ export class ClientRequest extends Writable {
       if (!hostname) hostname = 'localhost';
       const path = this._options.path || '/';
       const url = `${protocol}//${hostname}${port}${path}`;
+      console.log(`[almostnode DEBUG] http request: ${this.method} ${url}`);
 
       // WebSocket upgrade requests can't use fetch() — browsers strip
       // Connection/Upgrade headers. Bridge to the browser's native WebSocket.
@@ -644,10 +649,21 @@ export class ClientRequest extends Writable {
         ? corsProxy + encodeURIComponent(url)
         : url;
 
-      // Build fetch options
+      // Build fetch options — clone headers to avoid mutating the original
+      const fetchHeaders = { ...this.headers };
+      // When going through a CORS proxy, strip accept-encoding so the target
+      // server returns uncompressed data. The browser handles its own
+      // compression on the proxy-to-browser leg. Passing accept-encoding: br
+      // through the proxy causes the proxy to return compressed bytes that the
+      // browser can't properly decompress (it doesn't see the content-encoding).
+      if (corsProxy) {
+        delete fetchHeaders['accept-encoding'];
+        // Also strip host header — it would reference the original host, not the proxy
+        delete fetchHeaders['host'];
+      }
       const fetchOptions: RequestInit = {
         method: this.method,
-        headers: this.headers,
+        headers: fetchHeaders,
       };
 
       // Add body if we have one (not for GET/HEAD)
@@ -666,8 +682,52 @@ export class ClientRequest extends Writable {
         }, this._timeout);
       }
 
-      // Make the request
-      const response = await fetch(fetchUrl, fetchOptions);
+      // Make the request — follow redirects through the CORS proxy so the
+      // browser doesn't follow them directly (which would bypass the proxy
+      // and produce opaque/empty responses).
+      const MAX_REDIRECTS = 10;
+      let currentUrl = fetchUrl;
+      let currentMethod = fetchOptions.method || 'GET';
+      let currentBody = fetchOptions.body;
+      let response: Response;
+
+      for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
+        // When going through a CORS proxy, use redirect: 'manual' so we can
+        // re-proxy redirect targets instead of letting the browser follow them.
+        response = await fetch(currentUrl, {
+          ...fetchOptions,
+          method: currentMethod,
+          body: currentBody,
+          redirect: corsProxy ? 'manual' : (fetchOptions.redirect || 'follow'),
+        });
+        console.log(`[almostnode DEBUG] http fetch status: ${response.status} ${response.url.slice(0, 120)}`);
+
+        // Handle redirects when proxied
+        if (corsProxy && response.status >= 300 && response.status < 400) {
+          const redirectLocation = response.headers.get('location');
+          if (redirectLocation) {
+            // Resolve relative URLs against the original (non-proxied) URL
+            const resolvedUrl = new URL(redirectLocation, url).href;
+            currentUrl = corsProxy + encodeURIComponent(resolvedUrl);
+            // 303: change method to GET and drop body
+            if (response.status === 303) {
+              currentMethod = 'GET';
+              currentBody = undefined;
+            }
+            // 301, 302: change method to GET for non-GET/HEAD (per browser behavior)
+            if ((response.status === 301 || response.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
+              currentMethod = 'GET';
+              currentBody = undefined;
+            }
+            // 307, 308: preserve method and body
+            if (redirectCount === MAX_REDIRECTS) {
+              throw new Error('Too many redirects');
+            }
+            continue;
+          }
+        }
+        break;
+      }
 
       // Clear timeout
       if (this._timeoutId) {
@@ -678,7 +738,7 @@ export class ClientRequest extends Writable {
       if (this._aborted) return;
 
       // Convert response to IncomingMessage
-      const incomingMessage = await this._responseToIncomingMessage(response);
+      const incomingMessage = await this._responseToIncomingMessage(response!);
 
       // Emit response event
       this.emit('response', incomingMessage);
@@ -706,14 +766,21 @@ export class ClientRequest extends Writable {
     msg.statusCode = response.status;
     msg.statusMessage = response.statusText || STATUS_CODES[response.status] || '';
 
-    // Copy headers
+    // Copy headers — skip content-encoding and content-length since the
+    // browser's fetch API already decompresses the body (gzip/br/deflate).
+    // content-encoding would cause node-fetch to double-decompress.
+    // content-length reflects the compressed size, not the decompressed body
+    // size from response.arrayBuffer(), which would cause truncation.
     response.headers.forEach((value, key) => {
-      msg.headers[key.toLowerCase()] = value;
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === 'content-encoding' || lowerKey === 'content-length' || lowerKey === 'transfer-encoding') return;
+      msg.headers[lowerKey] = value;
       msg.rawHeaders.push(key, value);
     });
 
     // Read body and push to stream
     const body = await response.arrayBuffer();
+    console.log(`[almostnode DEBUG] http response body: ${body.byteLength} bytes for ${response.url.slice(0, 120)}`);
     msg._setBody(Buffer.from(body));
 
     return msg;

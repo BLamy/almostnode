@@ -270,6 +270,7 @@ export type StreamingMockResponse = ReturnType<typeof createStreamingMockRespons
 export async function createBuiltinModules(
   createFsShim?: () => unknown | Promise<unknown>
 ): Promise<Record<string, unknown>> {
+  const streamModule = await import('../shims/stream');
   const modules: Record<string, unknown> = {
     https: await import('../shims/https'),
     http: await import('../shims/http'),
@@ -278,7 +279,8 @@ export async function createBuiltinModules(
     querystring: await import('../shims/querystring'),
     util: await import('../shims/util'),
     events: await import('../shims/events'),
-    stream: await import('../shims/stream'),
+    stream: streamModule,
+    'stream/promises': streamModule.promises,
     buffer: await import('../shims/buffer'),
     crypto: await import('../shims/crypto'),
   };

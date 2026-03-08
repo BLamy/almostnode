@@ -19,6 +19,7 @@ import tls, {
   DEFAULT_MIN_VERSION,
   rootCertificates,
 } from '../../src/shims/tls';
+import { PassThrough } from '../../src/shims/stream';
 import { assert } from './common';
 
 describe('tls module (Node.js compat)', () => {
@@ -76,6 +77,17 @@ describe('tls module (Node.js compat)', () => {
       const cb = vi.fn();
       assert.strictEqual(socket.renegotiate({}, cb), false);
       expect(cb).toHaveBeenCalledTimes(0);
+    });
+
+    it('should expose _handle._parentWrap.constructor for http2-wrapper compatibility', () => {
+      const socket = new TLSSocket(new PassThrough());
+      const ctor = (socket as any)._handle?._parentWrap?.constructor;
+
+      expect(typeof ctor).toBe('function');
+
+      const wrapped = new ctor(new PassThrough());
+      expect(typeof (wrapped as any)._handle).toBe('object');
+      expect((wrapped as any).encrypted).toBe(false);
     });
   });
 

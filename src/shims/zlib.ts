@@ -3,7 +3,7 @@
  * Provides basic compression utilities
  */
 
-import { Buffer } from './stream';
+import { Buffer, Transform } from './stream';
 import pako from 'pako';
 
 // Brotli WASM instance - loaded lazily
@@ -205,6 +205,132 @@ export function inflateRawSync(buffer: Buffer): Buffer {
   return Buffer.from(pako.inflateRaw(buffer));
 }
 
+// Streaming factory functions — return Transform streams that collect input
+// and decompress/compress on flush. Used by node-fetch, got, etc.
+
+class ZlibTransform extends Transform {
+  private _chunks: Uint8Array[] = [];
+  private _processor: (buf: Uint8Array) => Uint8Array;
+
+  constructor(processor: (buf: Uint8Array) => Uint8Array) {
+    super();
+    this._processor = processor;
+  }
+
+  _transform(
+    chunk: Buffer | Uint8Array,
+    _encoding: string,
+    callback: (error?: Error | null, data?: Buffer | Uint8Array) => void
+  ): void {
+    this._chunks.push(new Uint8Array(chunk));
+    callback();
+  }
+
+  _flush(callback: (error?: Error | null, data?: Buffer) => void): void {
+    try {
+      const totalLen = this._chunks.reduce((sum, c) => sum + c.length, 0);
+      const combined = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const chunk of this._chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      const result = this._processor(combined);
+      callback(null, Buffer.from(result));
+    } catch (error) {
+      callback(error as Error);
+    }
+  }
+}
+
+class BrotliTransform extends Transform {
+  private _chunks: Uint8Array[] = [];
+  private _mode: 'compress' | 'decompress';
+
+  constructor(mode: 'compress' | 'decompress') {
+    super();
+    this._mode = mode;
+  }
+
+  _transform(
+    chunk: Buffer | Uint8Array,
+    _encoding: string,
+    callback: (error?: Error | null, data?: Buffer | Uint8Array) => void
+  ): void {
+    this._chunks.push(new Uint8Array(chunk));
+    callback();
+  }
+
+  _flush(callback: (error?: Error | null, data?: Buffer) => void): void {
+    const totalLen = this._chunks.reduce((sum, c) => sum + c.length, 0);
+    const combined = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const chunk of this._chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    loadBrotli().then(brotli => {
+      if (!brotli) {
+        callback(new Error('Brotli WASM failed to load'));
+        return;
+      }
+      try {
+        const result = this._mode === 'compress'
+          ? brotli.compress(combined)
+          : brotli.decompress(combined);
+        callback(null, Buffer.from(result));
+      } catch (error) {
+        callback(error as Error);
+      }
+    }).catch(error => callback(error as Error));
+  }
+}
+
+export function createGzip(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => pako.gzip(buf));
+}
+
+export function createGunzip(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => pako.ungzip(buf));
+}
+
+export function createDeflate(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => pako.deflate(buf));
+}
+
+export function createInflate(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => pako.inflate(buf));
+}
+
+export function createDeflateRaw(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => pako.deflateRaw(buf));
+}
+
+export function createInflateRaw(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => pako.inflateRaw(buf));
+}
+
+export function createBrotliCompress(_options?: unknown): Transform {
+  return new BrotliTransform('compress');
+}
+
+export function createBrotliDecompress(_options?: unknown): Transform {
+  return new BrotliTransform('decompress');
+}
+
+// Unzip handles both gzip and deflate
+export function createUnzip(_options?: unknown): Transform {
+  return new ZlibTransform((buf) => {
+    // Try gzip first, fall back to inflate
+    try {
+      return pako.ungzip(buf);
+    } catch {
+      return pako.inflate(buf);
+    }
+  });
+}
+
 // Constants
 export const constants = {
   Z_NO_FLUSH: 0,
@@ -285,5 +411,14 @@ export default {
   brotliDecompress,
   brotliCompressSync,
   brotliDecompressSync,
+  createGzip,
+  createGunzip,
+  createDeflate,
+  createInflate,
+  createDeflateRaw,
+  createInflateRaw,
+  createBrotliCompress,
+  createBrotliDecompress,
+  createUnzip,
   constants,
 };

@@ -15,7 +15,7 @@ import {
 } from '../src/shims/http';
 import { EventEmitter } from '../src/shims/events';
 import { ServerBridge, resetServerBridge } from '../src/server-bridge';
-import { Buffer } from '../src/shims/stream';
+import { Buffer, Stream } from '../src/shims/stream';
 
 describe('http module', () => {
   describe('IncomingMessage', () => {
@@ -52,6 +52,20 @@ describe('http module', () => {
       });
 
       expect(body).toBe('{"name":"test"}');
+    });
+
+    it('should behave like a Stream for node-fetch style body consumption', async () => {
+      const req = new IncomingMessage();
+      req._setBody(Buffer.from('{"ok":true}'));
+
+      expect(req instanceof Stream).toBe(true);
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(chunk as Buffer);
+      }
+
+      expect(Buffer.concat(chunks).toString()).toBe('{"ok":true}');
     });
   });
 
@@ -553,7 +567,7 @@ describe('HTTP Client', () => {
     });
 
     it('should build correct URL from host option', async () => {
-      // Intercept fetch to capture the URL
+      // Intercept fetch to capture the URL — the CORS proxy wraps the target URL
       const originalFetch = globalThis.fetch;
       let capturedUrl = '';
       globalThis.fetch = async (url: any, _opts: any) => {
@@ -574,7 +588,7 @@ describe('HTTP Client', () => {
           req.end();
         });
 
-        expect(capturedUrl).toBe('https://deploy.convex.cloud/api/sync');
+        expect(capturedUrl).toContain(encodeURIComponent('https://deploy.convex.cloud/api/sync'));
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -601,7 +615,7 @@ describe('HTTP Client', () => {
           req.end();
         });
 
-        expect(capturedUrl).toBe('https://example.com:8443/data');
+        expect(capturedUrl).toContain(encodeURIComponent('https://example.com:8443/data'));
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -629,7 +643,7 @@ describe('HTTP Client', () => {
           req.end();
         });
 
-        expect(capturedUrl).toBe('http://preferred.example.com/');
+        expect(capturedUrl).toContain(encodeURIComponent('http://preferred.example.com/'));
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -655,7 +669,7 @@ describe('HTTP Client', () => {
           req.end();
         });
 
-        expect(capturedUrl).toBe('http://localhost/test');
+        expect(capturedUrl).toContain(encodeURIComponent('http://localhost/test'));
       } finally {
         globalThis.fetch = originalFetch;
       }

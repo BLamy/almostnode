@@ -19,7 +19,7 @@ import { initTransformer, transformPackage, isTransformerReady } from '../transf
  * Normalize a package.json bin field into a consistent Record<string, string>.
  * Handles both string form ("bin": "cli.js") and object form ("bin": {"cmd": "cli.js"}).
  */
-function normalizeBin(pkgName: string, bin?: Record<string, string> | string): Record<string, string> {
+export function normalizeBin(pkgName: string, bin?: Record<string, string> | string): Record<string, string> {
   if (!bin) return {};
   if (typeof bin === 'string') {
     // String form uses the package name (without scope) as the command name

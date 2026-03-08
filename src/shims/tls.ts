@@ -6,12 +6,85 @@
 import { EventEmitter } from './events';
 import * as net from './net';
 
+class JSStreamSocket extends net.Socket {
+  _handle: Record<string, unknown>;
+  encrypted: boolean;
+  private _stream?: {
+    on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+    write?: (...args: unknown[]) => unknown;
+    end?: (...args: unknown[]) => unknown;
+    destroy?: (...args: unknown[]) => unknown;
+  };
+
+  constructor(stream?: unknown) {
+    super();
+    this._stream = stream as JSStreamSocket['_stream'];
+    this._handle = {};
+    this.encrypted = false;
+
+    if (this._stream && typeof this._stream.on === 'function') {
+      this._stream.on('data', (chunk: unknown) => this.emit('data', chunk));
+      this._stream.on('end', () => this.emit('end'));
+      this._stream.on('close', (hadError?: unknown) => this.emit('close', hadError));
+      this._stream.on('error', (error: unknown) => this.emit('error', error));
+    }
+  }
+
+  write(
+    chunk: unknown,
+    encodingOrCallback?: string | ((error?: Error | null) => void),
+    callback?: (error?: Error | null) => void
+  ): boolean {
+    if (this._stream && typeof this._stream.write === 'function') {
+      if (typeof encodingOrCallback === 'function') {
+        this._stream.write(chunk, encodingOrCallback);
+      } else if (callback) {
+        this._stream.write(chunk, encodingOrCallback, callback);
+      } else {
+        this._stream.write(chunk, encodingOrCallback);
+      }
+      return true;
+    }
+
+    return super.write(
+      chunk as Uint8Array | string,
+      encodingOrCallback,
+      callback
+    );
+  }
+
+  end(
+    chunkOrCallback?: Uint8Array | string | (() => void),
+    encodingOrCallback?: string | (() => void),
+    callback?: () => void
+  ): this {
+    if (this._stream && typeof this._stream.end === 'function') {
+      this._stream.end(chunkOrCallback, encodingOrCallback, callback);
+    }
+    return super.end(chunkOrCallback, encodingOrCallback, callback);
+  }
+
+  destroy(error?: Error): this {
+    if (this._stream && typeof this._stream.destroy === 'function') {
+      this._stream.destroy(error);
+    }
+    return super.destroy(error);
+  }
+}
+
 export class TLSSocket extends EventEmitter {
   authorized = false;
   encrypted = true;
+  _handle: { _parentWrap: { constructor: typeof JSStreamSocket } };
 
   constructor(_socket?: unknown, _options?: unknown) {
     super();
+    // Compatibility shape used by http2-wrapper to discover JSStreamSocket.
+    this._handle = {
+      _parentWrap: {
+        constructor: JSStreamSocket,
+      },
+    };
   }
 
   getPeerCertificate(_detailed?: boolean): object {

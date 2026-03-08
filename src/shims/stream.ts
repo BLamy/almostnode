@@ -9,7 +9,14 @@ import { uint8ToBase64, uint8ToHex, uint8ToBinaryString } from '../utils/binary-
 const _encoder = new TextEncoder();
 const _decoder = new TextDecoder('utf-8');
 
-export class Readable extends EventEmitter {
+// Base Stream class that stream consumers use for instanceof checks.
+export class Stream extends EventEmitter {
+  pipe<T extends Writable>(destination: T): T {
+    return destination;
+  }
+}
+
+export class Readable extends Stream {
   private _buffer: Uint8Array[] = [];
   private _ended: boolean = false;
   private _flowing: boolean = false;
@@ -120,6 +127,51 @@ export class Readable extends EventEmitter {
     return chunks.length > 0 ? Buffer.concat(chunks as BufferPolyfill[]) : null;
   }
 
+  async *[Symbol.asyncIterator](): AsyncIterableIterator<Buffer> {
+    while (true) {
+      const buffered = this.read();
+      if (buffered !== null) {
+        yield buffered;
+        continue;
+      }
+
+      if (this._ended) {
+        return;
+      }
+
+      const nextChunk = await new Promise<Buffer | null>((resolve, reject) => {
+        const onData = (chunk: unknown) => {
+          cleanup();
+          resolve(chunk as Buffer);
+        };
+        const onEnd = () => {
+          cleanup();
+          resolve(null);
+        };
+        const onError = (error: unknown) => {
+          cleanup();
+          reject(error);
+        };
+        const cleanup = () => {
+          this.off('data', onData);
+          this.off('end', onEnd);
+          this.off('error', onError);
+        };
+
+        this.on('data', onData);
+        this.on('end', onEnd);
+        this.on('error', onError);
+        this.resume();
+      });
+
+      if (nextChunk === null) {
+        return;
+      }
+
+      yield nextChunk;
+    }
+  }
+
   resume(): this {
     this._flowing = true;
     this.readableFlowing = true;
@@ -203,7 +255,7 @@ export class Readable extends EventEmitter {
   }
 }
 
-export class Writable extends EventEmitter {
+export class Writable extends Stream {
   private _chunks: Uint8Array[] = [];
   private _ended: boolean = false;
   writable: boolean = true;
@@ -343,6 +395,10 @@ export class Duplex extends Readable {
     this._writeEnded = true;
     this.writable = false;
     this.writableEnded = true;
+    // End readable side when writable side ends (Node.js Duplex behavior).
+    if (!this.readableEnded) {
+      this.push(null);
+    }
 
     queueMicrotask(() => {
       this.writableFinished = true;
@@ -436,13 +492,6 @@ export class Transform extends Duplex {
   }
 }
 
-// Base Stream class that some code extends
-export class Stream extends EventEmitter {
-  pipe<T extends Writable>(destination: T): T {
-    return destination;
-  }
-}
-
 // Make Stream also have static references to all stream types
 // This allows: const Stream = require('stream'); class X extends Stream {}
 // And also: const { Readable } = require('stream');
@@ -457,26 +506,110 @@ export class Stream extends EventEmitter {
 
 // Promises API
 export const promises = {
-  pipeline: async (...streams: unknown[]): Promise<void> => {
-    // Simplified pipeline
-    return Promise.resolve();
+  pipeline: (...streams: unknown[]): Promise<void> => {
+    return new Promise<void>((resolve, reject) => {
+      pipeline(...streams, (err?: Error | null) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
   },
   finished: async (stream: unknown): Promise<void> => {
-    return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      finished(stream, (err?: Error) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
   },
 };
 
 export function pipeline(...args: unknown[]): unknown {
-  const callback = args[args.length - 1];
-  if (typeof callback === 'function') {
-    setTimeout(() => (callback as () => void)(), 0);
+  const maybeCallback = args[args.length - 1];
+  const callback = typeof maybeCallback === 'function'
+    ? maybeCallback as (err?: Error | null) => void
+    : undefined;
+  const streams = (callback ? args.slice(0, -1) : args) as Array<Readable | Writable | Duplex | Transform>;
+
+  if (streams.length === 0) {
+    callback?.();
+    return undefined;
   }
-  return args[args.length - 2] || args[0];
+
+  if (streams.length === 1) {
+    callback?.();
+    return streams[0];
+  }
+
+  let done = false;
+  const cleanups: Array<() => void> = [];
+
+  const finish = (err?: Error | null) => {
+    if (done) return;
+    done = true;
+    for (const cleanup of cleanups) cleanup();
+    callback?.(err ?? null);
+  };
+
+  // Pipe left-to-right
+  for (let i = 0; i < streams.length - 1; i++) {
+    const src = streams[i] as Readable;
+    const dest = streams[i + 1] as Writable;
+    src.pipe(dest);
+  }
+
+  // Propagate errors from all streams
+  for (const stream of streams) {
+    const onError = (err: unknown) => {
+      finish(err instanceof Error ? err : new Error(String(err)));
+    };
+    (stream as any).on?.('error', onError);
+    cleanups.push(() => (stream as any).off?.('error', onError));
+  }
+
+  const last = streams[streams.length - 1] as any;
+  const onComplete = () => finish();
+
+  // Writable terminus emits 'finish', readable terminus emits 'end'.
+  if (typeof last.on === 'function') {
+    last.on('finish', onComplete);
+    last.on('end', onComplete);
+    cleanups.push(() => last.off?.('finish', onComplete));
+    cleanups.push(() => last.off?.('end', onComplete));
+  }
+
+  return last;
 }
 
 export function finished(stream: unknown, callback: (err?: Error) => void): () => void {
-  setTimeout(() => callback(), 0);
-  return () => {};
+  const target = stream as any;
+  let done = false;
+
+  const cleanup = () => {
+    target?.off?.('end', onEnd);
+    target?.off?.('finish', onFinish);
+    target?.off?.('close', onClose);
+    target?.off?.('error', onError);
+  };
+
+  const complete = (err?: Error) => {
+    if (done) return;
+    done = true;
+    cleanup();
+    callback(err);
+  };
+
+  const onEnd = () => complete();
+  const onFinish = () => complete();
+  const onClose = () => complete();
+  const onError = (err: unknown) => complete(err instanceof Error ? err : new Error(String(err)));
+
+  target?.on?.('end', onEnd);
+  target?.on?.('finish', onFinish);
+  target?.on?.('close', onClose);
+  target?.on?.('error', onError);
+
+  return cleanup;
 }
 
 // Simple Buffer polyfill for browser

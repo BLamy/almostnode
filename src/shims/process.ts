@@ -36,6 +36,14 @@ interface ProcessStream {
 interface ProcessWritableStream extends ProcessStream {
   write: (data: string | Buffer, encoding?: string, callback?: () => void) => boolean;
   end?: (data?: string, callback?: () => void) => void;
+  cursorTo?: (x: number, y?: number | (() => void), callback?: () => void) => boolean;
+  moveCursor?: (dx: number, dy: number, callback?: () => void) => boolean;
+  clearLine?: (dir: number, callback?: () => void) => boolean;
+  clearScreenDown?: (callback?: () => void) => boolean;
+  columns?: number;
+  rows?: number;
+  getColorDepth?: () => number;
+  hasColors?: () => boolean;
 }
 
 interface ProcessReadableStream extends ProcessStream {
@@ -47,6 +55,7 @@ export interface Process {
   env: ProcessEnv;
   cwd: () => string;
   chdir: (directory: string) => void;
+  arch: string;
   platform: string;
   version: string;
   versions: { node: string; v8: string; uv: string };
@@ -83,10 +92,11 @@ export interface Process {
   eventNames: () => string[];
   setMaxListeners: (n: number) => Process;
   getMaxListeners: () => number;
+  emitWarning: (warning: string | Error, typeOrOptions?: string | { type?: string; code?: string }, code?: string) => void;
   // IPC support (used by child_process.fork)
   send?: (message: unknown, callback?: (error: Error | null) => void) => boolean;
   connected?: boolean;
-  // Internal debug counter
+  // Internal field kept for backward compatibility with previous runtime code.
   _cwdCallCount?: number;
 }
 
@@ -99,6 +109,8 @@ function createProcessStream(
 
   const stream: ProcessWritableStream & ProcessReadableStream = {
     isTTY: false,
+    columns: 80,
+    rows: 24,
 
     on(event: string, listener: EventListener) {
       emitter.on(event, listener);
@@ -178,6 +190,29 @@ function createProcessStream(
     setRawMode(_mode: boolean) {
       return stream;
     },
+    cursorTo(_x: number, yOrCb?: number | (() => void), callback?: () => void) {
+      const cb = typeof yOrCb === 'function' ? yOrCb : callback;
+      if (cb) queueMicrotask(cb);
+      return true;
+    },
+    moveCursor(_dx: number, _dy: number, callback?: () => void) {
+      if (callback) queueMicrotask(callback);
+      return true;
+    },
+    clearLine(_dir: number, callback?: () => void) {
+      if (callback) queueMicrotask(callback);
+      return true;
+    },
+    clearScreenDown(callback?: () => void) {
+      if (callback) queueMicrotask(callback);
+      return true;
+    },
+    getColorDepth() {
+      return 1;
+    },
+    hasColors() {
+      return false;
+    },
   };
 
   // Override write for actual writable streams
@@ -215,24 +250,17 @@ export function createProcess(options?: {
     env,
 
     cwd() {
-      // Debug: Log cwd calls (limited to first 5)
-      if (!proc._cwdCallCount) proc._cwdCallCount = 0;
-      proc._cwdCallCount++;
-      if (proc._cwdCallCount <= 5 || proc._cwdCallCount % 100 === 0) {
-        console.log(`[process] cwd() called (${proc._cwdCallCount}x), returning:`, currentDir);
-      }
       return currentDir;
     },
 
     chdir(directory: string) {
-      console.log('[process] chdir called:', directory, 'from:', currentDir);
       if (!directory.startsWith('/')) {
         directory = currentDir + '/' + directory;
       }
       currentDir = directory;
-      console.log('[process] chdir result:', currentDir);
     },
 
+    arch: 'x64',
     platform: 'linux', // Pretend to be linux for better compatibility
     version: 'v20.0.0',
     versions: { node: '20.0.0', v8: '11.3.244.8', uv: '1.44.2' },
@@ -311,6 +339,15 @@ export function createProcess(options?: {
 
     cpuUsage() {
       return { user: 0, system: 0 };
+    },
+
+    emitWarning(warning: string | Error, typeOrOptions?: string | { type?: string; code?: string }, code?: string) {
+      const msg = warning instanceof Error ? warning.message : warning;
+      const type = typeof typeOrOptions === 'string' ? typeOrOptions : typeOrOptions?.type || 'Warning';
+      const warnCode = code || (typeof typeOrOptions === 'object' ? typeOrOptions?.code : undefined);
+      const prefix = warnCode ? `[${warnCode}] ` : '';
+      console.warn(`(node:${proc.pid}) ${type}: ${prefix}${msg}`);
+      emitter.emit('warning', warning instanceof Error ? warning : new Error(msg));
     },
 
     // EventEmitter methods - delegate to emitter but return proc for chaining

@@ -15,6 +15,7 @@ const statusEl = document.getElementById('status') as HTMLSpanElement;
 const commandHistory: string[] = [];
 let historyIndex = -1;
 let isRunning = false;
+let activeRunController: AbortController | null = null;
 
 // Create the container
 const container = createContainer();
@@ -34,11 +35,20 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
-function appendToTerminal(text: string, className: string = 'stdout') {
+function sanitizeTerminalText(text: string): string {
+  return text
+    // Strip ANSI escape sequences from interactive CLIs.
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    // Drop carriage returns used to redraw prompt lines.
+    .replace(/\r/g, '');
+}
+
+function appendToTerminal(text: string, className: string = 'stdout', appendNewline: boolean = true) {
   const span = document.createElement('span');
   span.className = className;
-  span.innerHTML = escapeHtml(text);
-  if (!text.endsWith('\n')) span.innerHTML += '\n';
+  const sanitized = sanitizeTerminalText(text);
+  span.innerHTML = escapeHtml(sanitized);
+  if (appendNewline && !sanitized.endsWith('\n')) span.innerHTML += '\n';
   terminalOutput.appendChild(span);
   terminalOutput.scrollTop = terminalOutput.scrollHeight;
 }
@@ -58,8 +68,8 @@ async function executeCommand(command: string) {
   if (isRunning) return;
 
   isRunning = true;
-  terminalInput.disabled = true;
   statusEl.textContent = 'Running...';
+  activeRunController = new AbortController();
 
   // Add to history
   commandHistory.push(command);
@@ -72,9 +82,11 @@ async function executeCommand(command: string) {
   syncPackageJson();
 
   try {
-    const result = await container.run(command);
-    if (result.stdout) appendToTerminal(result.stdout, 'stdout');
-    if (result.stderr) appendToTerminal(result.stderr, 'stderr');
+    const result = await container.run(command, {
+      onStdout: (data: string) => appendToTerminal(data, 'stdout', false),
+      onStderr: (data: string) => appendToTerminal(data, 'stderr', false),
+      signal: activeRunController.signal,
+    });
     if (result.exitCode !== 0) {
       appendToTerminal(`exit code: ${result.exitCode}`, 'dim');
     }
@@ -83,24 +95,40 @@ async function executeCommand(command: string) {
   }
 
   isRunning = false;
-  terminalInput.disabled = false;
+  activeRunController = null;
   terminalInput.focus();
   statusEl.textContent = 'Ready';
 }
 
 // Terminal input handling
 terminalInput.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && isRunning) {
+    e.preventDefault();
+    activeRunController?.abort();
+    appendToTerminal('^C', 'dim');
+    return;
+  }
+
   if (e.key === 'Enter') {
-    const command = terminalInput.value.trim();
+    const value = terminalInput.value;
     terminalInput.value = '';
+    if (isRunning) {
+      container.sendInput(value + '\n');
+      return;
+    }
+
+    const command = value.trim();
     executeCommand(command);
+    return;
   } else if (e.key === 'ArrowUp') {
+    if (isRunning) return;
     e.preventDefault();
     if (historyIndex > 0) {
       historyIndex--;
       terminalInput.value = commandHistory[historyIndex];
     }
   } else if (e.key === 'ArrowDown') {
+    if (isRunning) return;
     e.preventDefault();
     if (historyIndex < commandHistory.length - 1) {
       historyIndex++;

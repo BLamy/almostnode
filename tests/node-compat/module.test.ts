@@ -59,6 +59,7 @@ describe('module module (Node.js compat)', () => {
       expect(builtinModules).toContain('http');
       expect(builtinModules).toContain('worker_threads');
       expect(builtinModules).toContain('v8');
+      expect(builtinModules).toContain('stream/promises');
     });
 
     it('isBuiltin() should return true for listed builtins', () => {
@@ -70,6 +71,7 @@ describe('module module (Node.js compat)', () => {
     it('isBuiltin() should support node: prefix', () => {
       assert.strictEqual(isBuiltin('node:fs'), true);
       assert.strictEqual(isBuiltin('node:path'), true);
+      assert.strictEqual(isBuiltin('node:stream/promises'), true);
     });
 
     it('isBuiltin() should return false for non-builtins', () => {

@@ -5,11 +5,20 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { VirtualFS } from '../src/virtual-fs';
 import { Runtime } from '../src/runtime';
+import { setStreamingCallbacks, clearStreamingCallbacks } from '../src/shims/child_process';
 
 describe('child_process Integration', () => {
   let vfs: VirtualFS;
   let runtime: Runtime;
   let consoleOutput: string[] = [];
+
+  const waitFor = async (predicate: () => boolean, timeoutMs = 3000): Promise<void> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  };
 
   beforeEach(() => {
     vfs = new VirtualFS();
@@ -107,6 +116,149 @@ exec('cat /hello.txt', (error, stdout, stderr) => {
 
       expect(consoleOutput.some(o => o.includes('Hello, World!'))).toBe(true);
     });
+
+    it('should default exec cwd to process.cwd()', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('pwd', (error, stdout, stderr) => {
+  if (error) {
+    console.log('error:', error.message);
+    return;
+  }
+  console.log('PWD:' + stdout.trim());
+});
+      `;
+
+      runtime.execute(code, '/workspace/test.js');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(consoleOutput.some(o => o.includes('PWD:/workspace'))).toBe(true);
+    });
+
+    it('should preload yoga-layout for node scripts', async () => {
+      vfs.writeFileSync(
+        '/workspace/node_modules/yoga-layout/dist/src/load.js',
+        `module.exports = {
+  loadYoga: async () => ({
+    EDGE_LEFT: 0,
+    Node: { create: () => 'from-preload' },
+  }),
+};`
+      );
+      // If require('yoga-layout') falls back to package resolution, this should crash.
+      vfs.writeFileSync(
+        '/workspace/node_modules/yoga-layout/dist/src/index.js',
+        'const broken = (;\n'
+      );
+
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('node /workspace/app.js', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout.trim());
+  if (stderr) console.log('STDERR:' + stderr.trim());
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      vfs.writeFileSync(
+        '/workspace/app.js',
+        'const yoga = require("yoga-layout"); console.log("YOGA:" + yoga.Node.create());'
+      );
+
+      runtime.execute(code, '/workspace/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('YOGA:from-preload')));
+
+      expect(consoleOutput.some(o => o.includes('YOGA:from-preload'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
+
+    it('should enable TTY for node commands when streaming callbacks are set', async () => {
+      vfs.writeFileSync('/workspace/tty-check.js', 'console.log(`TTY:${process.stdout.isTTY ? 1 : 0}`);');
+
+      try {
+        setStreamingCallbacks({
+          onStdout: () => {},
+        });
+
+        const code = `
+const { exec } = require('child_process');
+exec('node /workspace/tty-check.js', (error, stdout, stderr) => {
+  if (error) {
+    console.log('ERROR:' + error.message);
+    return;
+  }
+  console.log('OUT:' + stdout.trim());
+});
+        `;
+
+        runtime.execute(code, '/test.js');
+        await waitFor(() => consoleOutput.some(o => o.includes('OUT:TTY:1')));
+      } finally {
+        clearStreamingCallbacks();
+      }
+
+      expect(consoleOutput.some(o => o.includes('OUT:TTY:1'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
+  });
+
+  describe('execFileSync', () => {
+    it('should support architecture probe commands like getconf LONG_BIT', () => {
+      const { exports } = runtime.execute(`
+        const cp = require('child_process');
+        module.exports = cp.execFileSync('getconf', ['LONG_BIT'], { encoding: 'utf8' }).trim();
+      `, '/test.js');
+
+      expect(exports).toBe('64');
+    });
+
+    it('should expose execFileSync on default import interop shape', () => {
+      const { exports } = runtime.execute(`
+        var __create = Object.create;
+        var __defProp = Object.defineProperty;
+        var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+        var __getOwnPropNames = Object.getOwnPropertyNames;
+        var __getProtoOf = Object.getPrototypeOf;
+        var __hasOwnProp = Object.prototype.hasOwnProperty;
+        var __copyProps = (to, from, except, desc) => {
+          if (from && typeof from === "object" || typeof from === "function") {
+            for (let key of __getOwnPropNames(from))
+              if (!__hasOwnProp.call(to, key) && key !== except)
+                __defProp(to, key, {
+                  get: () => from[key],
+                  enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+                });
+          }
+          return to;
+        };
+        var __toESM = (mod, isNodeMode, target) => (
+          target = mod != null ? __create(__getProtoOf(mod)) : {},
+          __copyProps(isNodeMode || !mod || !mod.__esModule
+            ? __defProp(target, "default", { value: mod, enumerable: true })
+            : target, mod)
+        );
+
+        var import_node_child_process = __toESM(require('node:child_process'));
+        module.exports = typeof import_node_child_process.default.execFileSync;
+      `, '/test.js');
+
+      expect(exports).toBe('function');
+    });
   });
 
   describe('spawn', () => {
@@ -132,6 +284,31 @@ child.on('exit', (code) => {
 
       // Check that the process completed successfully
       expect(consoleOutput.some(o => o.includes('exit code: 0') || o.includes('process exited with: 0'))).toBe(true);
+    });
+
+    it('should default spawn cwd to process.cwd()', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { spawn } = require('child_process');
+const child = spawn('mkdir', ['-p', 'spawned-from-spawn']);
+child.on('close', () => {
+  console.log('SPAWN_DONE');
+});
+      `;
+
+      runtime.execute(code, '/workspace/test.js');
+      await new Promise(resolve => setTimeout(resolve, 120));
+
+      expect(consoleOutput.some(o => o.includes('SPAWN_DONE'))).toBe(true);
+      expect(vfs.existsSync('/workspace/spawned-from-spawn')).toBe(true);
+      expect(vfs.existsSync('/spawned-from-spawn')).toBe(false);
     });
   });
 
@@ -451,6 +628,261 @@ exec('npm foobar', (error, stdout, stderr) => {
     });
   });
 
+  describe('npx command', () => {
+    it('should run an already-installed bin command without installing', async () => {
+      // Set up a pre-installed package with bin stub
+      vfs.mkdirSync('/node_modules/.bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/.bin/hello', 'node "/node_modules/hello/cli.js" "$@"\n');
+      vfs.mkdirSync('/node_modules/hello', { recursive: true });
+      vfs.writeFileSync('/node_modules/hello/cli.js', 'console.log("hello from npx");');
+
+      runtime = new Runtime(vfs, {
+        onConsole: (method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx hello', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('ERROR_CODE:1')));
+
+      expect(consoleOutput.some(o => o.includes('hello from npx'))).toBe(true);
+    });
+
+    it('should pass arguments through to the bin command', async () => {
+      vfs.mkdirSync('/node_modules/.bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/.bin/greeter', 'node "/node_modules/greeter/index.js" "$@"\n');
+      vfs.mkdirSync('/node_modules/greeter', { recursive: true });
+      vfs.writeFileSync('/node_modules/greeter/index.js', 'console.log("greeting: " + process.argv.slice(2).join(" "));');
+
+      runtime = new Runtime(vfs, {
+        onConsole: (method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx greeter world foo', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('ERROR_CODE:1')));
+
+      expect(consoleOutput.some(o => o.includes('greeting: world foo'))).toBe(true);
+    });
+
+    it('should return error when no command is given', async () => {
+      const code = `
+const { exec } = require('child_process');
+exec('npx', (error, stdout, stderr) => {
+  console.log('STDERR:' + stderr);
+  if (error) console.log('FAILED');
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      expect(consoleOutput.some(o => o.includes('missing command'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('FAILED'))).toBe(true);
+    });
+
+    it('should strip version specifier for bin lookup', async () => {
+      // Install a package as "mypkg" — npx mypkg@1.0.0 should find "mypkg" bin
+      vfs.mkdirSync('/node_modules/.bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/.bin/mypkg', 'node "/node_modules/mypkg/cli.js" "$@"\n');
+      vfs.mkdirSync('/node_modules/mypkg', { recursive: true });
+      vfs.writeFileSync('/node_modules/mypkg/cli.js', 'console.log("mypkg ran");');
+      vfs.writeFileSync('/node_modules/mypkg/package.json', JSON.stringify({
+        name: 'mypkg',
+        bin: { mypkg: './cli.js' },
+      }));
+
+      runtime = new Runtime(vfs, {
+        onConsole: (method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx mypkg@1.0.0', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      expect(consoleOutput.some(o => o.includes('mypkg ran'))).toBe(true);
+    });
+
+    it('should support -p package flag', async () => {
+      // -p installs one package, runs a different command
+      vfs.mkdirSync('/node_modules/.bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/.bin/babel', 'node "/node_modules/@babel/cli/bin/babel.js" "$@"\n');
+      vfs.mkdirSync('/node_modules/@babel/cli/bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/@babel/cli/bin/babel.js', 'console.log("babel ran");');
+
+      runtime = new Runtime(vfs, {
+        onConsole: (method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx -p @babel/cli babel', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      expect(consoleOutput.some(o => o.includes('babel ran'))).toBe(true);
+    });
+
+    it('should include command diagnostics when npx exits non-zero', async () => {
+      vfs.mkdirSync('/node_modules/failpkg', { recursive: true });
+      vfs.writeFileSync('/node_modules/failpkg/package.json', JSON.stringify({
+        name: 'failpkg',
+        bin: './cli.js',
+      }));
+      vfs.writeFileSync(
+        '/node_modules/failpkg/cli.js',
+        'console.log("about to fail"); process.exit(1);'
+      );
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx failpkg', (error, stdout, stderr) => {
+  console.log('STDERR:' + stderr);
+  if (error) console.log('ERROR_CODE:' + error.code);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      expect(consoleOutput.some(o => o.includes('ERROR_CODE:1'))).toBe(true);
+      expect(
+        consoleOutput.some(o =>
+          o.includes('npx: command "failpkg" exited with code 1 while running node /node_modules/failpkg/')
+        )
+      ).toBe(true);
+      expect(consoleOutput.some(o => o.includes('npx: stdout tail:'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('about to fail'))).toBe(true);
+    });
+
+    it('should include the first stderr line in npx diagnostics', async () => {
+      vfs.mkdirSync('/node_modules/failstderr', { recursive: true });
+      vfs.writeFileSync('/node_modules/failstderr/package.json', JSON.stringify({
+        name: 'failstderr',
+        bin: './cli.js',
+      }));
+      vfs.writeFileSync(
+        '/node_modules/failstderr/cli.js',
+        'console.error("boom reason"); process.exit(1);'
+      );
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx failstderr', (error, stdout, stderr) => {
+  console.log('STDERR:' + stderr);
+  if (error) console.log('ERROR_CODE:' + error.code);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      expect(consoleOutput.some(o => o.includes('ERROR_CODE:1'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('npx: first stderr line: boom reason'))).toBe(true);
+    });
+
+    it('should run bins that require packages with top-level await import syntax', async () => {
+      vfs.mkdirSync('/node_modules/gemini-cli/dist', { recursive: true });
+      vfs.writeFileSync('/node_modules/gemini-cli/package.json', JSON.stringify({
+        name: 'gemini-cli',
+        bin: {
+          'gemini-cli': './dist/index.js',
+        },
+      }));
+      vfs.writeFileSync(
+        '/node_modules/gemini-cli/dist/index.js',
+        'const ink = require("ink"); console.log("gemini uses " + ink);'
+      );
+
+      vfs.mkdirSync('/node_modules/ink/build', { recursive: true });
+      vfs.writeFileSync('/node_modules/ink/package.json', JSON.stringify({
+        name: '@jrichman/ink',
+        exports: {
+          default: './build/reconciler.js',
+        },
+      }));
+      vfs.writeFileSync(
+        '/node_modules/ink/build/reconciler.js',
+        `
+import process from 'node:process';
+if (process.env['DEV'] === 'true') {
+  await import('./devtools.js');
+}
+module.exports = 'ink-ok';
+`
+      );
+      vfs.writeFileSync('/node_modules/ink/build/devtools.js', 'module.exports = { enabled: true };');
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx gemini-cli', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  console.log('STDERR:' + stderr);
+  if (error) console.log('ERROR_CODE:' + error.code);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      const output = consoleOutput.join('\n');
+      expect(output).toContain('gemini uses ink-ok');
+      expect(output).not.toContain('await is only valid in async functions');
+      expect(output).not.toContain('ERROR_CODE:1');
+    });
+  });
+
   describe('bin stubs', () => {
     it('should resolve commands from /node_modules/.bin/ via PATH', async () => {
       // Create a simple bin stub like npm install would
@@ -480,6 +912,38 @@ exec('hello', (error, stdout, stderr) => {
 
       const output = consoleOutput.join('\n');
       expect(output).toContain('hello from bin stub');
+    });
+  });
+
+  describe('execa shim', () => {
+    it('should expose named execa export compatible with shadcn usage', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      vfs.writeFileSync('/workspace/echo.js', 'console.log("execa-ok");');
+
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { execa } = require('execa');
+(async () => {
+  try {
+    const result = await execa('node', ['/workspace/echo.js']);
+    console.log('EXECA_STDOUT:' + result.stdout.trim());
+  } catch (error) {
+    console.log('EXECA_ERROR:' + error.message);
+  }
+})();
+      `;
+
+      runtime.execute(code, '/workspace/test-execa.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      expect(consoleOutput.some(o => o.includes('EXECA_STDOUT:execa-ok'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('EXECA_ERROR:'))).toBe(false);
     });
   });
 });

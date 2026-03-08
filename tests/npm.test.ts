@@ -117,6 +117,28 @@ describe('npm', () => {
         expect(satisfies('3.0.0', '1.0.0 || 2.0.0')).toBe(false);
       });
 
+      it('should handle incomplete version ranges (2-part)', () => {
+        // ^3.25 should match 3.25.0, 3.26.0, etc. but not 4.0.0
+        expect(satisfies('3.25.0', '^3.25')).toBe(true);
+        expect(satisfies('3.26.0', '^3.25')).toBe(true);
+        expect(satisfies('3.24.9', '^3.25')).toBe(false);
+        expect(satisfies('4.0.0', '^3.25')).toBe(false);
+        // ^4.0 should match 4.0.0, 4.1.0, etc. but not 5.0.0
+        expect(satisfies('4.0.0', '^4.0')).toBe(true);
+        expect(satisfies('4.3.6', '^4.0')).toBe(true);
+        expect(satisfies('5.0.0', '^4.0')).toBe(false);
+        // || with incomplete versions (shadcn's zod dep)
+        expect(satisfies('3.25.0', '^3.25 || ^4.0')).toBe(true);
+        expect(satisfies('4.3.6', '^3.25 || ^4.0')).toBe(true);
+        expect(satisfies('3.24.0', '^3.25 || ^4.0')).toBe(false);
+        // ~2.1 should match 2.1.x
+        expect(satisfies('2.1.5', '~2.1')).toBe(true);
+        expect(satisfies('2.2.0', '~2.1')).toBe(false);
+        // >=3.25 with 2 parts
+        expect(satisfies('3.25.0', '>=3.25')).toBe(true);
+        expect(satisfies('3.24.9', '>=3.25')).toBe(false);
+      });
+
       it('should match hyphen ranges', () => {
         expect(satisfies('1.5.0', '1.0.0 - 2.0.0')).toBe(true);
         expect(satisfies('1.0.0', '1.0.0 - 2.0.0')).toBe(true);
@@ -143,6 +165,17 @@ describe('npm', () => {
 
       it('should return null if no match', () => {
         expect(findBestVersion(versions, '^3.0.0')).toBeNull();
+      });
+
+      it('should prefer leftmost sub-range for || ranges', () => {
+        // Simulates zod scenario: "^3.25 || ^4.0" should prefer v3 over v4
+        const zodVersions = ['3.24.0', '3.25.0', '3.25.1', '4.0.0', '4.3.6'];
+        expect(findBestVersion(zodVersions, '^3.25 || ^4.0')).toBe('3.25.1');
+        // If only v4 matches, should still return v4
+        const onlyV4 = ['4.0.0', '4.1.0'];
+        expect(findBestVersion(onlyV4, '^3.25 || ^4.0')).toBe('4.1.0');
+        // Simple OR with exact versions
+        expect(findBestVersion(versions, '1.0.0 || 2.0.0')).toBe('1.0.0');
       });
     });
   });
@@ -176,6 +209,13 @@ describe('npm', () => {
       expect(parsePackageSpec('express@^4.0.0')).toEqual({
         name: 'express',
         version: '^4.0.0',
+      });
+    });
+
+    it('should parse npm alias package specs', () => {
+      expect(parsePackageSpec('ink@npm:@jrichman/ink@6.4.11')).toEqual({
+        name: 'ink',
+        version: 'npm:@jrichman/ink@6.4.11',
       });
     });
   });
@@ -531,6 +571,90 @@ describe('npm', () => {
 
       expect(vfs.existsSync('/node_modules/pkg-a/package.json')).toBe(true);
       expect(vfs.existsSync('/node_modules/pkg-b/package.json')).toBe(true);
+    });
+
+    it('should resolve npm alias dependencies', async () => {
+      const manifestHost = {
+        name: 'alias-host',
+        'dist-tags': { latest: '1.0.0' },
+        versions: {
+          '1.0.0': {
+            name: 'alias-host',
+            version: '1.0.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/alias-host/-/alias-host-1.0.0.tgz',
+              shasum: 'host',
+            },
+            dependencies: {
+              ink: 'npm:@jrichman/ink@6.4.11',
+            },
+          },
+        },
+      };
+
+      const manifestInk = {
+        name: '@jrichman/ink',
+        'dist-tags': { latest: '6.4.11' },
+        versions: {
+          '6.4.11': {
+            name: '@jrichman/ink',
+            version: '6.4.11',
+            dist: {
+              tarball: 'https://registry.npmjs.org/@jrichman/ink/-/ink-6.4.11.tgz',
+              shasum: 'ink',
+            },
+            dependencies: {},
+          },
+        },
+      };
+
+      const tarballHost = pako.gzip(
+        createMinimalTarball({
+          'package/package.json': '{"name":"alias-host","version":"1.0.0"}',
+        })
+      );
+
+      const tarballInk = pako.gzip(
+        createMinimalTarball({
+          'package/package.json': '{"name":"@jrichman/ink","version":"6.4.11"}',
+        })
+      );
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+        if (urlStr.includes('/alias-host') && !urlStr.includes('.tgz')) {
+          return new Response(JSON.stringify(manifestHost), { status: 200 });
+        }
+        if (urlStr.includes('/@jrichman%2fink') && !urlStr.includes('.tgz')) {
+          return new Response(JSON.stringify(manifestInk), { status: 200 });
+        }
+        if (urlStr.includes('alias-host-1.0.0.tgz')) {
+          return new Response(tarballHost, { status: 200 });
+        }
+        if (urlStr.includes('ink-6.4.11.tgz')) {
+          return new Response(tarballInk, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const result = await pm.install('alias-host');
+
+      expect(result.installed.has('alias-host')).toBe(true);
+      expect(result.installed.has('ink')).toBe(true);
+      expect(result.installed.get('ink')?.version).toBe('6.4.11');
+      expect(vfs.existsSync('/node_modules/ink/package.json')).toBe(true);
+
+      const installedAliasPkg = JSON.parse(
+        vfs.readFileSync('/node_modules/ink/package.json', 'utf8')
+      );
+      expect(installedAliasPkg.name).toBe('@jrichman/ink');
+
+      const requestedUrls = fetchSpy.mock.calls.map(([url]) => url.toString());
+      expect(
+        requestedUrls.some(
+          (url) => url.includes('/@jrichman%2fink') && !url.includes('.tgz')
+        )
+      ).toBe(true);
     });
   });
 });

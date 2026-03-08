@@ -74,14 +74,15 @@ function* parseTar(data: Uint8Array): Generator<TarEntry> {
         type = 'unknown';
     }
 
-    // Read file content (empty files get an empty Uint8Array)
+    // Read entry payload when present.
+    // Tar stores payload blocks for many non-file records too (e.g. PAX headers),
+    // so we must always advance the offset to keep header alignment correct.
     let content: Uint8Array | undefined;
     if (type === 'file') {
       content = size > 0 ? data.slice(offset, offset + size) : new Uint8Array(0);
-      if (size > 0) {
-        // Move past content, rounded up to 512-byte boundary
-        offset += Math.ceil(size / 512) * 512;
-      }
+    }
+    if (size > 0) {
+      offset += Math.ceil(size / 512) * 512;
     }
 
     yield {
@@ -153,6 +154,12 @@ export function extractTarball(
         continue;
       }
       entryPath = parts.slice(stripComponents).join('/');
+    }
+
+    // Ignore macOS metadata records that can appear in tar archives.
+    const segments = entryPath.split('/').filter(Boolean);
+    if (segments.some((segment) => segment === '__MACOSX' || segment.startsWith('._'))) {
+      continue;
     }
 
     // Apply filter if provided

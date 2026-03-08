@@ -79,6 +79,7 @@ export default defineConfig({
         'examples/vite-demo': resolve(__dirname, 'examples/vite-demo.html'),
         'examples/express-demo': resolve(__dirname, 'examples/express-demo.html'),
         'examples/npm-scripts-demo': resolve(__dirname, 'examples/npm-scripts-demo.html'),
+        'examples/shadcn-demo': resolve(__dirname, 'examples/shadcn-demo.html'),
         'examples/vitest-demo': resolve(__dirname, 'examples/vitest-demo.html'),
         'examples/demo-convex-app': resolve(__dirname, 'examples/demo-convex-app.html'),
         'examples/demo-vercel-ai-sdk': resolve(__dirname, 'examples/demo-vercel-ai-sdk.html'),

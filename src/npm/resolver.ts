@@ -22,6 +22,7 @@ export interface ResolveOptions {
 interface ResolveContext {
   registry: Registry;
   resolved: Map<string, ResolvedPackage>;
+  resolvedSource: Map<string, string>;
   resolving: Set<string>;
   options: ResolveOptions;
 }
@@ -76,6 +77,18 @@ function compareVersions(a: string, b: string): number {
   }
 
   return 0;
+}
+
+/**
+ * Pad an incomplete version string to X.Y.Z format.
+ * "3" -> "3.0.0", "3.25" -> "3.25.0", "3.25.1" -> "3.25.1" (unchanged)
+ */
+function padVersion(v: string): string {
+  // Strip leading 'v' if present
+  v = v.replace(/^v/, '');
+  const parts = v.split('.');
+  while (parts.length < 3) parts.push('0');
+  return parts.join('.');
 }
 
 /**
@@ -138,7 +151,7 @@ function satisfies(version: string, range: string): boolean {
 
   // Caret range: ^1.2.3 means >=1.2.3 <2.0.0 (or <1.3.0 if major is 0)
   if (range.startsWith('^')) {
-    const base = range.slice(1);
+    const base = padVersion(range.slice(1));
     const baseParsed = parseVersion(base);
     if (!baseParsed) return false;
 
@@ -161,7 +174,7 @@ function satisfies(version: string, range: string): boolean {
 
   // Tilde range: ~1.2.3 means >=1.2.3 <1.3.0
   if (range.startsWith('~')) {
-    const base = range.slice(1);
+    const base = padVersion(range.slice(1));
     const baseParsed = parseVersion(base);
     if (!baseParsed) return false;
 
@@ -174,25 +187,25 @@ function satisfies(version: string, range: string): boolean {
 
   // Greater than or equal: >=1.2.3
   if (range.startsWith('>=')) {
-    const base = range.slice(2).trim();
+    const base = padVersion(range.slice(2).trim());
     return compareVersions(version, base) >= 0;
   }
 
   // Greater than: >1.2.3
   if (range.startsWith('>')) {
-    const base = range.slice(1).trim();
+    const base = padVersion(range.slice(1).trim());
     return compareVersions(version, base) > 0;
   }
 
   // Less than or equal: <=1.2.3
   if (range.startsWith('<=')) {
-    const base = range.slice(2).trim();
+    const base = padVersion(range.slice(2).trim());
     return compareVersions(version, base) <= 0;
   }
 
   // Less than: <1.2.3
   if (range.startsWith('<')) {
-    const base = range.slice(1).trim();
+    const base = padVersion(range.slice(1).trim());
     return compareVersions(version, base) < 0;
   }
 
@@ -228,6 +241,21 @@ function findBestVersion(versions: string[], range: string): string | null {
   // Sort versions in descending order
   const sorted = [...versions].sort((a, b) => compareVersions(b, a));
 
+  // For OR ranges (||), prefer the leftmost sub-range that has matches.
+  // Package authors list their primary/preferred range first (e.g. "^3.25 || ^4.0"
+  // means "prefer v3, but v4 is also acceptable"). This matches npm's behavior.
+  if (range.includes('||')) {
+    const subRanges = range.split('||').map(r => r.trim());
+    for (const subRange of subRanges) {
+      for (const version of sorted) {
+        if (satisfies(version, subRange)) {
+          return version;
+        }
+      }
+    }
+    return null;
+  }
+
   // Find the first version that satisfies the range
   for (const version of sorted) {
     if (satisfies(version, range)) {
@@ -236,6 +264,65 @@ function findBestVersion(versions: string[], range: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Parse npm alias dependency range:
+ * "npm:@scope/pkg@1.2.3" -> { packageName: "@scope/pkg", versionRange: "1.2.3" }
+ */
+function parseNpmAliasRange(
+  range: string
+): { packageName: string; versionRange: string } | null {
+  if (!range.startsWith('npm:')) {
+    return null;
+  }
+
+  const target = range.slice(4).trim();
+  if (!target) {
+    throw new Error(`Invalid npm alias spec: ${range}`);
+  }
+
+  return parsePackageNameAndRange(target);
+}
+
+/**
+ * Parse a package identifier that may include "@version" suffix.
+ * Supports scoped names like "@scope/pkg@1.2.3".
+ */
+function parsePackageNameAndRange(spec: string): {
+  packageName: string;
+  versionRange: string;
+} {
+  if (spec.startsWith('@')) {
+    const slashIndex = spec.indexOf('/');
+    if (slashIndex === -1) {
+      throw new Error(`Invalid package spec: ${spec}`);
+    }
+
+    const afterSlash = spec.slice(slashIndex + 1);
+    const atIndex = afterSlash.indexOf('@');
+
+    if (atIndex === -1) {
+      return { packageName: spec, versionRange: 'latest' };
+    }
+
+    const versionRange = afterSlash.slice(atIndex + 1) || 'latest';
+    return {
+      packageName: spec.slice(0, slashIndex + 1 + atIndex),
+      versionRange,
+    };
+  }
+
+  const atIndex = spec.indexOf('@');
+  if (atIndex === -1) {
+    return { packageName: spec, versionRange: 'latest' };
+  }
+
+  const versionRange = spec.slice(atIndex + 1) || 'latest';
+  return {
+    packageName: spec.slice(0, atIndex),
+    versionRange,
+  };
 }
 
 /**
@@ -250,6 +337,7 @@ export async function resolveDependencies(
   const context: ResolveContext = {
     registry,
     resolved: new Map(),
+    resolvedSource: new Map(),
     resolving: new Set(),
     options,
   };
@@ -273,6 +361,7 @@ export async function resolveFromPackageJson(
   const context: ResolveContext = {
     registry,
     resolved: new Map(),
+    resolvedSource: new Map(),
     resolving: new Set(),
     options,
   };
@@ -298,7 +387,10 @@ async function resolvePackage(
   versionRange: string,
   context: ResolveContext
 ): Promise<void> {
-  const { registry, resolved, resolving, options } = context;
+  const { registry, resolved, resolvedSource, resolving, options } = context;
+  const aliasTarget = parseNpmAliasRange(versionRange);
+  const sourcePackageName = aliasTarget?.packageName || packageName;
+  const sourceVersionRange = aliasTarget?.versionRange || versionRange;
 
   // Create a key for this package request
   const key = `${packageName}@${versionRange}`;
@@ -311,7 +403,11 @@ async function resolvePackage(
   // Check if we've already resolved a compatible version
   if (resolved.has(packageName)) {
     const existing = resolved.get(packageName)!;
-    if (satisfies(existing.version, versionRange)) {
+    const existingSourcePackage = resolvedSource.get(packageName) || packageName;
+    if (
+      existingSourcePackage === sourcePackageName &&
+      satisfies(existing.version, sourceVersionRange)
+    ) {
       return;
     }
     // If existing version doesn't satisfy, we might need nested deps
@@ -325,21 +421,21 @@ async function resolvePackage(
     options.onProgress?.(`Resolving ${packageName}@${versionRange}`);
 
     // Fetch package manifest
-    const manifest = await registry.getPackageManifest(packageName);
+    const manifest = await registry.getPackageManifest(sourcePackageName);
 
     // Find best matching version
     const versions = Object.keys(manifest.versions);
     let targetVersion: string;
 
-    if (versionRange === 'latest' || versionRange === '*') {
+    if (sourceVersionRange === 'latest' || sourceVersionRange === '*') {
       targetVersion = manifest['dist-tags'].latest;
-    } else if (manifest['dist-tags'][versionRange]) {
-      targetVersion = manifest['dist-tags'][versionRange];
+    } else if (manifest['dist-tags'][sourceVersionRange]) {
+      targetVersion = manifest['dist-tags'][sourceVersionRange];
     } else {
-      const best = findBestVersion(versions, versionRange);
+      const best = findBestVersion(versions, sourceVersionRange);
       if (!best) {
         throw new Error(
-          `No matching version found for ${packageName}@${versionRange}`
+          `No matching version found for ${sourcePackageName}@${sourceVersionRange}`
         );
       }
       targetVersion = best;
@@ -357,6 +453,7 @@ async function resolvePackage(
     };
 
     resolved.set(packageName, resolvedPackage);
+    resolvedSource.set(packageName, sourcePackageName);
 
     // Resolve dependencies in parallel
     // Include non-optional peerDependencies (npm v7+ behavior).

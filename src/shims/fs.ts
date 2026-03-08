@@ -13,6 +13,7 @@ const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
 
 export type PathLike = string | URL;
+export type TimeLike = string | number | Date;
 
 export interface FsShim {
   readFileSync(path: PathLike): Buffer;
@@ -34,6 +35,7 @@ export interface FsShim {
   realpathSync(path: PathLike): string;
   accessSync(path: PathLike, mode?: number): void;
   copyFileSync(src: PathLike, dest: PathLike): void;
+  utimesSync(path: PathLike, atime: TimeLike, mtime: TimeLike): void;
   openSync(path: string, flags: string | number, mode?: number): number;
   closeSync(fd: number): void;
   readSync(fd: number, buffer: Buffer | Uint8Array, offset: number, length: number, position: number | null): number;
@@ -42,17 +44,33 @@ export interface FsShim {
   fsyncSync(fd: number): void;
   fdatasyncSync(fd: number): void;
   mkdtempSync(prefix: string): string;
+  mkdtemp(prefix: string, callback: (err: Error | null, directory?: string) => void): void;
   rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
   watch(filename: string, options?: { persistent?: boolean; recursive?: boolean }, listener?: WatchListener): FSWatcher;
   watch(filename: string, listener?: WatchListener): FSWatcher;
   readFile(path: string, callback: (err: Error | null, data?: Uint8Array) => void): void;
+  readFile(path: string, options: string, callback: (err: Error | null, data?: string | Uint8Array) => void): void;
   readFile(path: string, options: { encoding: string }, callback: (err: Error | null, data?: string) => void): void;
+  writeFile(path: string, data: string | Uint8Array, callback: (err: Error | null) => void): void;
+  writeFile(path: string, data: string | Uint8Array, options: { encoding?: string; mode?: number; flag?: string }, callback: (err: Error | null) => void): void;
   stat(path: string, callback: (err: Error | null, stats?: Stats) => void): void;
+  stat(path: string, options: unknown, callback: (err: Error | null, stats?: Stats) => void): void;
   lstat(path: string, callback: (err: Error | null, stats?: Stats) => void): void;
+  lstat(path: string, options: unknown, callback: (err: Error | null, stats?: Stats) => void): void;
   readdir(path: string, callback: (err: Error | null, files?: string[]) => void): void;
+  mkdir(path: string, callback: (err: Error | null) => void): void;
+  mkdir(path: string, options: { recursive?: boolean; mode?: number }, callback: (err: Error | null) => void): void;
+  unlink(path: string, callback: (err: Error | null) => void): void;
+  rmdir(path: string, callback: (err: Error | null) => void): void;
+  rename(oldPath: string, newPath: string, callback: (err: Error | null) => void): void;
+  copyFile(src: string, dest: string, callback: (err: Error | null) => void): void;
+  rm(path: string, callback: (err: Error | null) => void): void;
+  rm(path: string, options: { recursive?: boolean; force?: boolean }, callback: (err: Error | null) => void): void;
   realpath(path: string, callback: (err: Error | null, resolvedPath?: string) => void): void;
+  realpath(path: string, options: unknown, callback: (err: Error | null, resolvedPath?: string) => void): void;
   access(path: string, callback: (err: Error | null) => void): void;
   access(path: string, mode: number, callback: (err: Error | null) => void): void;
+  utimes(path: string, atime: TimeLike, mtime: TimeLike, callback: (err: Error | null) => void): void;
   createReadStream(path: string): unknown;
   createWriteStream(path: string): unknown;
   promises: FsPromises;
@@ -71,9 +89,12 @@ export interface FsPromises {
   unlink(path: PathLike): Promise<void>;
   rmdir(path: PathLike): Promise<void>;
   rename(oldPath: PathLike, newPath: PathLike): Promise<void>;
+  rm(path: PathLike, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  mkdtemp(prefix: string): Promise<string>;
   access(path: PathLike, mode?: number): Promise<void>;
   realpath(path: PathLike): Promise<string>;
   copyFile(src: PathLike, dest: PathLike): Promise<void>;
+  utimes(path: PathLike, atime: TimeLike, mtime: TimeLike): Promise<void>;
 }
 
 export interface FsConstants {
@@ -356,12 +377,75 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         }
       });
     },
+    rm(pathLike: unknown, options?: { recursive?: boolean; force?: boolean }): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          const path = resolvePath(pathLike);
+          const opts = options || {};
+
+          if (!vfs.existsSync(path)) {
+            if (opts.force) {
+              resolve();
+              return;
+            }
+            reject(createNodeError('ENOENT', 'rm', path));
+            return;
+          }
+
+          const removeRecursive = (target: string) => {
+            const stats = vfs.statSync(target);
+            if (!stats.isDirectory()) {
+              vfs.unlinkSync(target);
+              return;
+            }
+
+            const entries = vfs.readdirSync(target);
+            for (const entry of entries) {
+              const child = target.endsWith('/') ? `${target}${entry}` : `${target}/${entry}`;
+              removeRecursive(child);
+            }
+            vfs.rmdirSync(target);
+          };
+
+          const stats = vfs.statSync(path);
+          if (stats.isDirectory()) {
+            if (!opts.recursive) {
+              reject(createNodeError('EISDIR', 'rm', path));
+              return;
+            }
+            removeRecursive(path);
+            resolve();
+            return;
+          }
+
+          vfs.unlinkSync(path);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    mkdtemp(prefix: string): Promise<string> {
+      return new Promise((resolve, reject) => {
+        try {
+          const suffix = Math.random().toString(36).slice(2, 8);
+          const tempDir = resolvePath(`${prefix}${suffix}`);
+          vfs.mkdirSync(tempDir, { recursive: true });
+          resolve(tempDir);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
     access(path: string, mode?: number): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
+          console.log(`[almostnode DEBUG] fs.promises.access start: ${path}`);
           vfs.accessSync(path, mode);
+          console.log(`[almostnode DEBUG] fs.promises.access ok: ${path}`);
           resolve();
         } catch (err) {
+          console.log(`[almostnode DEBUG] fs.promises.access error: ${path} -> ${(err as Error).message}`);
           reject(err);
         }
       });
@@ -379,6 +463,21 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       return new Promise((resolve, reject) => {
         try {
           vfs.copyFileSync(src, dest);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    utimes(pathLike: unknown, _atime: TimeLike, _mtime: TimeLike): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          const path = resolvePath(pathLike);
+          if (!vfs.existsSync(path)) {
+            reject(createNodeError('ENOENT', 'utimes', path));
+            return;
+          }
+          // No-op: VirtualFS does not currently persist explicit atime/mtime updates.
           resolve();
         } catch (err) {
           reject(err);
@@ -715,7 +814,9 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     ),
 
     accessSync(pathLike: unknown, _mode?: number): void {
-      vfs.accessSync(resolvePath(pathLike));
+      const path = resolvePath(pathLike);
+      console.log(`[almostnode DEBUG] fs.accessSync: ${path}`);
+      vfs.accessSync(path);
     },
 
     copyFileSync(srcLike: unknown, destLike: unknown): void {
@@ -723,6 +824,14 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       const dest = resolvePath(destLike);
       const data = vfs.readFileSync(src);
       vfs.writeFileSync(dest, data);
+    },
+
+    utimesSync(pathLike: unknown, _atime: TimeLike, _mtime: TimeLike): void {
+      const path = resolvePath(pathLike);
+      if (!vfs.existsSync(path)) {
+        throw createNodeError('ENOENT', 'utimes', path);
+      }
+      // No-op: VirtualFS does not currently persist explicit atime/mtime updates.
     },
 
     watch(
@@ -735,19 +844,82 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
     readFile(
       pathLike: unknown,
-      optionsOrCallback?: { encoding?: string } | ((err: Error | null, data?: string | Uint8Array) => void),
+      optionsOrCallback?: string | { encoding?: string } | ((err: Error | null, data?: string | Uint8Array) => void),
       callback?: (err: Error | null, data?: string | Uint8Array) => void
     ): void {
       const path = resolvePath(pathLike);
-      vfs.readFile(path, optionsOrCallback as { encoding?: string }, callback);
+      const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+      const opts = typeof optionsOrCallback === 'string'
+        ? { encoding: optionsOrCallback }
+        : (typeof optionsOrCallback === 'object' ? optionsOrCallback : undefined);
+
+      if (!cb) return;
+      if (opts) {
+        vfs.readFile(path, opts, cb);
+      } else {
+        vfs.readFile(path, cb);
+      }
     },
 
-    stat(pathLike: unknown, callback: (err: Error | null, stats?: Stats) => void): void {
-      vfs.stat(resolvePath(pathLike), callback);
+    writeFile(
+      pathLike: unknown,
+      data: string | Uint8Array,
+      optionsOrCallback?: { encoding?: string; mode?: number; flag?: string } | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+      try {
+        vfs.writeFileSync(resolvePath(pathLike), data);
+        if (cb) queueMicrotask(() => cb(null));
+      } catch (err) {
+        if (cb) queueMicrotask(() => cb(err as Error));
+      }
     },
 
-    lstat(pathLike: unknown, callback: (err: Error | null, stats?: Stats) => void): void {
-      vfs.lstat(resolvePath(pathLike), callback);
+    mkdir(
+      pathLike: unknown,
+      optionsOrCallback?: { recursive?: boolean; mode?: number } | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+      const options = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
+      try {
+        vfs.mkdirSync(resolvePath(pathLike), options);
+        if (cb) queueMicrotask(() => cb(null));
+      } catch (err) {
+        if (cb) queueMicrotask(() => cb(err as Error));
+      }
+    },
+
+    mkdtemp(prefix: string, callback: (err: Error | null, directory?: string) => void): void {
+      promises.mkdtemp(prefix).then(
+        (dir) => queueMicrotask(() => callback(null, dir)),
+        (err) => queueMicrotask(() => callback(err as Error))
+      );
+    },
+
+    stat(
+      pathLike: unknown,
+      optionsOrCallback: unknown,
+      callback?: (err: Error | null, stats?: Stats) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function'
+        ? optionsOrCallback as (err: Error | null, stats?: Stats) => void
+        : callback;
+      if (!cb) return;
+      vfs.stat(resolvePath(pathLike), cb);
+    },
+
+    lstat(
+      pathLike: unknown,
+      optionsOrCallback: unknown,
+      callback?: (err: Error | null, stats?: Stats) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function'
+        ? optionsOrCallback as (err: Error | null, stats?: Stats) => void
+        : callback;
+      if (!cb) return;
+      vfs.lstat(resolvePath(pathLike), cb);
     },
 
     readdir(
@@ -783,8 +955,85 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       }
     },
 
-    realpath(pathLike: unknown, callback: (err: Error | null, resolvedPath?: string) => void): void {
-      vfs.realpath(resolvePath(pathLike), callback);
+    realpath: Object.assign(
+      function realpath(
+        pathLike: unknown,
+        optionsOrCallback: unknown,
+        callback?: (err: Error | null, resolvedPath?: string) => void
+      ): void {
+        const cb = typeof optionsOrCallback === 'function'
+          ? optionsOrCallback as (err: Error | null, resolvedPath?: string) => void
+          : callback;
+        if (!cb) return;
+        vfs.realpath(resolvePath(pathLike), cb);
+      },
+      {
+        native(
+          pathLike: unknown,
+          optionsOrCallback: unknown,
+          callback?: (err: Error | null, resolvedPath?: string) => void
+        ): void {
+          const cb = typeof optionsOrCallback === 'function'
+            ? optionsOrCallback as (err: Error | null, resolvedPath?: string) => void
+            : callback;
+          if (!cb) return;
+          vfs.realpath(resolvePath(pathLike), cb);
+        },
+      }
+    ),
+
+    unlink(pathLike: unknown, callback: (err: Error | null) => void): void {
+      try {
+        vfs.unlinkSync(resolvePath(pathLike));
+        queueMicrotask(() => callback(null));
+      } catch (err) {
+        queueMicrotask(() => callback(err as Error));
+      }
+    },
+
+    rmdir(pathLike: unknown, callback: (err: Error | null) => void): void {
+      try {
+        vfs.rmdirSync(resolvePath(pathLike));
+        queueMicrotask(() => callback(null));
+      } catch (err) {
+        queueMicrotask(() => callback(err as Error));
+      }
+    },
+
+    rename(oldPathLike: unknown, newPathLike: unknown, callback: (err: Error | null) => void): void {
+      try {
+        vfs.renameSync(resolvePath(oldPathLike), resolvePath(newPathLike));
+        queueMicrotask(() => callback(null));
+      } catch (err) {
+        queueMicrotask(() => callback(err as Error));
+      }
+    },
+
+    copyFile(srcLike: unknown, destLike: unknown, callback: (err: Error | null) => void): void {
+      try {
+        const src = resolvePath(srcLike);
+        const dest = resolvePath(destLike);
+        const data = vfs.readFileSync(src);
+        vfs.writeFileSync(dest, data);
+        queueMicrotask(() => callback(null));
+      } catch (err) {
+        queueMicrotask(() => callback(err as Error));
+      }
+    },
+
+    rm(
+      pathLike: unknown,
+      optionsOrCallback?: { recursive?: boolean; force?: boolean } | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+      const options = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
+      if (!cb) return;
+
+      promises.rm(pathLike as PathLike, options).then(
+        () => queueMicrotask(() => cb(null)),
+        (err) => queueMicrotask(() => cb(err as Error))
+      );
     },
 
     access(
@@ -792,7 +1041,23 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       modeOrCallback?: number | ((err: Error | null) => void),
       callback?: (err: Error | null) => void
     ): void {
-      vfs.access(resolvePath(pathLike), modeOrCallback, callback);
+      const path = resolvePath(pathLike);
+      console.log(`[almostnode DEBUG] fs.access: ${path}`);
+      vfs.access(path, modeOrCallback, callback);
+    },
+
+    utimes(pathLike: unknown, _atime: TimeLike, _mtime: TimeLike, callback: (err: Error | null) => void): void {
+      try {
+        const path = resolvePath(pathLike);
+        if (!vfs.existsSync(path)) {
+          queueMicrotask(() => callback(createNodeError('ENOENT', 'utimes', path)));
+          return;
+        }
+        // No-op: VirtualFS does not currently persist explicit atime/mtime updates.
+        queueMicrotask(() => callback(null));
+      } catch (err) {
+        queueMicrotask(() => callback(err as Error));
+      }
     },
 
     createReadStream(pathLike: unknown): unknown {
