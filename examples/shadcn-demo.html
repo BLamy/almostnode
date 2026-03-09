@@ -83,6 +83,56 @@
         content: 'No files yet';
         color: var(--text-dim);
       }
+      .settings-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.82);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+      }
+      .settings-overlay.hidden {
+        display: none;
+      }
+      .settings-dialog {
+        width: min(520px, 92vw);
+        border: 1px solid var(--border);
+        background: var(--surface);
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .settings-dialog h3 {
+        margin: 0;
+        font-size: 0.9rem;
+      }
+      .settings-dialog label {
+        font-size: 0.66rem;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .settings-dialog input {
+        width: 100%;
+        border: 1px solid var(--border);
+        background: #0a0a0a;
+        color: var(--text);
+        padding: 8px 10px;
+        font-family: var(--mono, monospace);
+        font-size: 0.72rem;
+      }
+      .settings-dialog .actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .settings-status {
+        min-height: 1.2rem;
+        font-size: 0.68rem;
+        color: var(--text-dim);
+      }
     </style>
   </head>
   <body>
@@ -107,6 +157,7 @@
 
         <div class="toolbar">
           <button class="btn btn-primary" id="runBtn">Run shadcn create command</button>
+          <button class="btn btn-secondary" id="gitSettingsBtn">Git Auth Settings</button>
           <button class="btn btn-secondary" id="seedBtn">Reset workspace</button>
           <button class="btn btn-secondary" id="abortBtn">Abort running process</button>
           <button class="btn btn-secondary" id="refreshBtn">Refresh file tree</button>
@@ -119,7 +170,7 @@
         </div>
 
         <div class="muted-note">
-          Working directory: <code>/workspace</code><br />
+          Working directory: <code>/project</code><br />
           This shell supports live prompts; type commands below the terminal prompt and press Enter.
         </div>
 
@@ -133,6 +184,31 @@
         </div>
         <div id="terminal"><span class="status-text" style="padding: 10px; display: block;">Loading terminal shell…</span></div>
       </section>
+    </div>
+
+    <div class="settings-overlay hidden" id="gitSettingsOverlay">
+      <div class="settings-dialog">
+        <h3>Git Auth Settings</h3>
+        <p class="muted-note">
+          Configure PAT + CORS proxy for git clone/fetch/pull/push. Session-only apply is always available.
+          Use passkey unlock to encrypt/decrypt PAT in local storage.
+        </p>
+        <label for="gitPatInput">GitHub PAT</label>
+        <input id="gitPatInput" type="password" placeholder="ghp_..." autocomplete="off" />
+
+        <label for="gitCorsInput">CORS Proxy</label>
+        <input id="gitCorsInput" type="text" placeholder="https://almostnode-cors-proxy.langtail.workers.dev/?url=" />
+
+        <div class="actions">
+          <button class="btn btn-secondary" id="gitUnlockBtn">Use Passkey</button>
+          <button class="btn btn-secondary" id="gitLoadEncryptedBtn">Load Encrypted</button>
+          <button class="btn btn-secondary" id="gitSaveEncryptedBtn">Save Encrypted</button>
+          <button class="btn btn-secondary" id="gitApplySessionBtn">Apply Session Only</button>
+          <button class="btn btn-secondary" id="gitClearBtn">Clear Stored Auth</button>
+          <button class="btn btn-secondary" id="gitCloseBtn">Close</button>
+        </div>
+        <div class="settings-status" id="gitSettingsStatus"></div>
+      </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>

@@ -3,6 +3,7 @@
  * Provides cryptographic utilities using Web Crypto API
  */
 
+import shajs from 'sha.js';
 import { Buffer } from './stream';
 import { EventEmitter } from './events';
 
@@ -536,6 +537,26 @@ function normalizeHashAlgorithm(alg: string): string {
   }
 }
 
+function normalizeShaJsAlgorithm(alg: string): 'sha' | 'sha1' | 'sha224' | 'sha256' | 'sha384' | 'sha512' | null {
+  const normalized = alg.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  switch (normalized) {
+    case 'SHA':
+      return 'sha';
+    case 'SHA1':
+      return 'sha1';
+    case 'SHA224':
+      return 'sha224';
+    case 'SHA256':
+      return 'sha256';
+    case 'SHA384':
+      return 'sha384';
+    case 'SHA512':
+      return 'sha512';
+    default:
+      return null;
+  }
+}
+
 function getWebCryptoAlgorithm(nodeAlgorithm: string): { name: string; hash?: string } {
   const alg = nodeAlgorithm.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
@@ -646,21 +667,67 @@ function encodeResult(data: Uint8Array, encoding?: string): string | Buffer {
 
 // Synchronous hash fallback using a simple but consistent algorithm
 function syncHash(data: Uint8Array, algorithm: string): Uint8Array {
-  // Use a deterministic hash that produces consistent output
-  // This is NOT cryptographically secure but provides consistent behavior
+  const shaAlgorithm = normalizeShaJsAlgorithm(algorithm);
+  if (!shaAlgorithm) {
+    return legacySyncHashFallback(data, algorithm);
+  }
+
+  const digest = shajs(shaAlgorithm).update(Buffer.from(data)).digest();
+  return Buffer.from(digest);
+}
+
+function syncHmac(data: Uint8Array, key: Uint8Array, algorithm: string): Uint8Array {
+  const shaAlgorithm = normalizeShaJsAlgorithm(algorithm);
+  if (!shaAlgorithm) {
+    const combined = new Uint8Array(key.length + data.length);
+    combined.set(key, 0);
+    combined.set(data, key.length);
+    return legacySyncHashFallback(combined, algorithm);
+  }
+
+  const blockSize = shaAlgorithm === 'sha384' || shaAlgorithm === 'sha512' ? 128 : 64;
+  let normalizedKey = Buffer.from(key);
+
+  if (normalizedKey.length > blockSize) {
+    normalizedKey = Buffer.from(syncHash(normalizedKey, algorithm));
+  }
+
+  const paddedKey = new Uint8Array(blockSize);
+  paddedKey.set(normalizedKey.subarray(0, blockSize));
+
+  const innerPad = new Uint8Array(blockSize);
+  const outerPad = new Uint8Array(blockSize);
+
+  for (let i = 0; i < blockSize; i++) {
+    innerPad[i] = paddedKey[i] ^ 0x36;
+    outerPad[i] = paddedKey[i] ^ 0x5c;
+  }
+
+  const inner = new Uint8Array(blockSize + data.length);
+  inner.set(innerPad, 0);
+  inner.set(data, blockSize);
+
+  const innerDigest = syncHash(inner, algorithm);
+  const outer = new Uint8Array(blockSize + innerDigest.length);
+  outer.set(outerPad, 0);
+  outer.set(innerDigest, blockSize);
+
+  return syncHash(outer, algorithm);
+}
+
+function legacySyncHashFallback(data: Uint8Array, algorithm: string): Uint8Array {
+  // Deterministic fallback for unsupported algorithms.
   let size: number;
   if (algorithm.includes('512')) {
-    size = 64; // SHA-512 = 64 bytes
+    size = 64;
   } else if (algorithm.includes('384')) {
-    size = 48; // SHA-384 = 48 bytes
+    size = 48;
   } else if (algorithm.includes('1') || algorithm === 'SHA-1') {
-    size = 20; // SHA-1 = 20 bytes
+    size = 20;
   } else {
-    size = 32; // SHA-256 = 32 bytes (default)
+    size = 32;
   }
   const result = new Uint8Array(size);
-
-  // Simple but deterministic mixing function
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
 
@@ -672,7 +739,6 @@ function syncHash(data: Uint8Array, algorithm: string): Uint8Array {
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
 
-  // Fill result buffer
   for (let i = 0; i < size; i++) {
     const mix = i < size / 2 ? h1 : h2;
     result[i] = (mix >>> ((i % 4) * 8)) & 0xff;
@@ -681,14 +747,6 @@ function syncHash(data: Uint8Array, algorithm: string): Uint8Array {
   }
 
   return result;
-}
-
-function syncHmac(data: Uint8Array, key: Uint8Array, algorithm: string): Uint8Array {
-  // Combine key and data for HMAC-like behavior
-  const combined = new Uint8Array(key.length + data.length);
-  combined.set(key, 0);
-  combined.set(data, key.length);
-  return syncHash(combined, algorithm);
 }
 
 // Async implementations using WebCrypto

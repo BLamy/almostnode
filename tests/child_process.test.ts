@@ -215,6 +215,33 @@ exec('node /workspace/tty-check.js', (error, stdout, stderr) => {
       expect(consoleOutput.some(o => o.includes('OUT:TTY:1'))).toBe(true);
       expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
     });
+
+    it('should not hold one-shot node_modules CLIs open under long idle mode', async () => {
+      vfs.mkdirSync('/node_modules/cli', { recursive: true });
+      vfs.writeFileSync('/node_modules/cli/cli.js', 'console.log("cli-version");');
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('node /node_modules/cli/cli.js --version', {
+  env: { ...process.env, ALMOSTNODE_LONG_NODE_IDLE: '1' }
+}, (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout.trim());
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('STDOUT:cli-version')), 3000);
+
+      expect(consoleOutput.some(o => o.includes('STDOUT:cli-version'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
   });
 
   describe('execFileSync', () => {
@@ -261,6 +288,48 @@ exec('node /workspace/tty-check.js', (error, stdout, stderr) => {
     });
   });
 
+  describe('execSync', () => {
+    it('should support shell detection probes used by interactive CLIs', () => {
+      const { exports } = runtime.execute(`
+        const cp = require('child_process');
+        module.exports = {
+          shellPath: cp.execSync('which bash', { encoding: 'utf8' }).trim(),
+          shellVersion: cp.execSync('/bin/bash --version', { encoding: 'utf8' }).split('\\n')[0],
+        };
+      `, '/test.js');
+
+      expect(exports).toEqual({
+        shellPath: '/bin/bash',
+        shellVersion: 'GNU bash, version 5.2.15(1)-release (x86_64-pc-linux-gnu)',
+      });
+    });
+  });
+
+  describe('spawnSync', () => {
+    it('should support which-style dependency probes used by CLIs', () => {
+      const { exports } = runtime.execute(`
+        const cp = require('child_process');
+        const found = cp.spawnSync('which', ['node'], { encoding: 'utf8' });
+        const missing = cp.spawnSync('which', ['rg'], { encoding: 'utf8' });
+        module.exports = {
+          foundStatus: found.status,
+          foundStdout: found.stdout.trim(),
+          missingStatus: missing.status,
+          missingStdout: missing.stdout,
+          missingStderr: missing.stderr,
+        };
+      `, '/test.js');
+
+      expect(exports).toEqual({
+        foundStatus: 0,
+        foundStdout: '/usr/bin/node',
+        missingStatus: 1,
+        missingStdout: '',
+        missingStderr: '',
+      });
+    });
+  });
+
   describe('spawn', () => {
     it('should spawn echo command and emit exit', async () => {
       const code = `
@@ -286,6 +355,38 @@ child.on('exit', (code) => {
       expect(consoleOutput.some(o => o.includes('exit code: 0') || o.includes('process exited with: 0'))).toBe(true);
     });
 
+    it('should write spawn output to numeric stdio file descriptors', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const fs = require('fs');
+const { spawn } = require('child_process');
+
+const outputPath = '/workspace/claude-shell-output.txt';
+const fd = fs.openSync(outputPath, 'a');
+const child = spawn('pwd', [], {
+  cwd: '/workspace',
+  stdio: ['pipe', fd, fd],
+});
+
+child.on('close', (code) => {
+  fs.closeSync(fd);
+  console.log('RESULT:' + code + ':' + fs.readFileSync(outputPath, 'utf8').trim());
+});
+      `;
+
+      runtime.execute(code, '/workspace/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('RESULT:0:/workspace')));
+
+      expect(consoleOutput.some(o => o.includes('RESULT:0:/workspace'))).toBe(true);
+    });
+
     it('should default spawn cwd to process.cwd()', async () => {
       vfs.mkdirSync('/workspace', { recursive: true });
       runtime = new Runtime(vfs, {
@@ -309,6 +410,25 @@ child.on('close', () => {
       expect(consoleOutput.some(o => o.includes('SPAWN_DONE'))).toBe(true);
       expect(vfs.existsSync('/workspace/spawned-from-spawn')).toBe(true);
       expect(vfs.existsSync('/spawned-from-spawn')).toBe(false);
+    });
+  });
+
+  describe('execFile', () => {
+    it('should execute synthetic shell paths used by interactive CLIs', async () => {
+      const code = `
+const { execFile } = require('child_process');
+
+execFile('/bin/bash', ['-lc', 'echo shell-path-ready'], (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout.trim());
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(consoleOutput.some(o => o.includes('STDOUT:shell-path-ready'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
     });
   });
 
@@ -879,6 +999,55 @@ exec('npx gemini-cli', (error, stdout, stderr) => {
       const output = consoleOutput.join('\n');
       expect(output).toContain('gemini uses ink-ok');
       expect(output).not.toContain('await is only valid in async functions');
+      expect(output).not.toContain('ERROR_CODE:1');
+    });
+
+    it('should run npx bins whose ESM entrypoints use arbitrary top-level await', async () => {
+      vfs.mkdirSync('/node_modules/@openai/codex/bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/@openai/codex/package.json', JSON.stringify({
+        name: '@openai/codex',
+        type: 'module',
+        bin: {
+          codex: './bin/codex.js',
+        },
+      }));
+      vfs.writeFileSync(
+        '/node_modules/@openai/codex/bin/codex.js',
+        `
+import process from 'node:process';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
+const childResult = await Promise.resolve({ type: 'code', exitCode: 0 });
+
+console.log(pkg.name + ' ready');
+process.exit(childResult.exitCode);
+`
+      );
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('npx @openai/codex', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  console.log('STDERR:' + stderr);
+  if (error) console.log('ERROR_CODE:' + error.code);
+});
+      `;
+
+      runtime.execute(code, '/test.js');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      const output = consoleOutput.join('\n');
+      expect(output).toContain('@openai/codex ready');
+      expect(output).not.toContain('await is only valid in async functions');
+      expect(output).not.toContain('SyntaxError');
       expect(output).not.toContain('ERROR_CODE:1');
     });
   });

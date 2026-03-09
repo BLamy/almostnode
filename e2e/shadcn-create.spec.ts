@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 
 const CREATE_COMMAND = 'npx shadcn@latest create --template next --base radix --preset nova --name next-app --no-monorepo --yes';
-const WORKSPACE = '/workspace';
-const PROJECT_PATH = '/workspace/next-app';
+const WORKSPACE = '/project';
+const PROJECT_PATH = '/project/next-app';
 
 type AttemptResult = {
   attempt: number;
@@ -22,7 +22,7 @@ type AttemptResult = {
 };
 
 test.describe('shadcn create in VFS', () => {
-  test('creates a project scaffold in /workspace', async ({ page }) => {
+  test('creates a project scaffold in /project', async ({ page }) => {
     test.setTimeout(5 * 60 * 1000);
 
     await page.goto('/examples/shadcn-demo.html');

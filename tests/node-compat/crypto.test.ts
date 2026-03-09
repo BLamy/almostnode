@@ -134,6 +134,13 @@ describe('crypto module (Node.js compat)', () => {
         assert.strictEqual(hash.length, 64);
         expect(hash).toMatch(/^[0-9a-f]+$/);
       });
+
+      it('should match the RFC 7636 PKCE challenge digest', () => {
+        const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+        const digest = createHash('sha256').update(verifier).digest('base64');
+        const challenge = digest.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        assert.strictEqual(challenge, 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
+      });
     });
 
     describe('multiple algorithms', () => {
@@ -257,6 +264,13 @@ describe('crypto module (Node.js compat)', () => {
       const key = Buffer.from('secret');
       const hmac = createHmac('sha256', key).update('data').digest('hex');
       expect(typeof hmac).toBe('string');
+    });
+
+    it('should match Node HMAC-SHA256 output for a known vector', () => {
+      const digest = createHmac('sha256', 'key')
+        .update('The quick brown fox jumps over the lazy dog')
+        .digest('hex');
+      assert.strictEqual(digest, 'f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8');
     });
 
     it('should support multiple updates', () => {

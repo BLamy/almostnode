@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import events, { EventEmitter } from '../../src/shims/events';
+import events, { EventEmitter, getMaxListeners, setMaxListeners } from '../../src/shims/events';
 import { assert } from './common';
 
 describe('events module (Node.js compat)', () => {
@@ -510,6 +510,34 @@ describe('events module (Node.js compat)', () => {
         emitter.on('test', () => {});
 
         assert.strictEqual(events.listenerCount(emitter, 'test'), 2);
+      });
+    });
+
+    describe('events.setMaxListeners() / events.getMaxListeners()', () => {
+      it('should update EventEmitter instances through the module helpers', () => {
+        const emitter = new EventEmitter();
+
+        setMaxListeners(24, emitter);
+
+        assert.strictEqual(emitter.getMaxListeners(), 24);
+        assert.strictEqual(getMaxListeners(emitter), 24);
+      });
+
+      it('should support AbortSignal targets', () => {
+        const signal = new AbortController().signal;
+
+        events.setMaxListeners(18, signal);
+
+        assert.strictEqual(events.getMaxListeners(signal), 18);
+      });
+
+      it('should not change the module default when targeting a specific signal', () => {
+        const signal = new AbortController().signal;
+        const emitter = new EventEmitter();
+
+        events.setMaxListeners(19, signal);
+
+        assert.strictEqual(emitter.getMaxListeners(), 10);
       });
     });
   });

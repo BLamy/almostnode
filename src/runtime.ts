@@ -56,6 +56,8 @@ import { resolve as resolveExports, imports as resolveImports } from 'resolve.ex
 import { transformEsmToCjsSimple } from './frameworks/code-transforms';
 import * as acorn from 'acorn';
 
+const CJS_REQUIRE_HELPER = '__almostnodeRequire';
+
 /**
  * Walk an acorn AST recursively, calling the callback for every node.
  */
@@ -99,14 +101,42 @@ function findFirstAwaitLine(code: string): string | null {
   return match[0].trim().slice(0, 200);
 }
 
+function isLikelyTopLevelAwaitSyntaxError(message: string): boolean {
+  return message.includes('await is only valid') ||
+    message.includes("Unexpected reserved word 'await'") ||
+    message.includes('Unexpected identifier');
+}
+
+function createWrappedModuleCode(moduleCode: string, asyncBody = false): string {
+  return `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport) {
+var exports = $exports;
+var require = $require;
+var ${CJS_REQUIRE_HELPER} = $require;
+var module = $module;
+var __filename = $filename;
+var __dirname = $dirname;
+var process = $process;
+var console = $console;
+var import_meta = $importMeta;
+var __dynamicImport = $dynamicImport;
+// Set up global.process and globalThis.process for code that accesses them directly
+var global = globalThis;
+globalThis.process = $process;
+global.process = $process;
+return (${asyncBody ? 'async ' : ''}function() {
+${moduleCode}
+}).call(this);
+})`;
+}
+
 /**
  * CJS wrappers can't parse top-level await.
  * Rewrite awaited dynamic imports to synchronous require(...) for compatibility.
  */
 function rewriteAwaitedDynamicImports(code: string): string {
   let rewritten = code;
-  rewritten = rewritten.replace(/\bawait\s+__dynamicImport\s*\(/g, 'require(');
-  rewritten = rewritten.replace(/\bawait\s+import\s*\(/g, 'require(');
+  rewritten = rewritten.replace(/\bawait\s+__dynamicImport\s*\(/g, `${CJS_REQUIRE_HELPER}(`);
+  rewritten = rewritten.replace(/\bawait\s+import\s*\(/g, `${CJS_REQUIRE_HELPER}(`);
   return rewritten;
 }
 
@@ -316,6 +346,7 @@ export interface Module {
   loaded: boolean;
   children: Module[];
   paths: string[];
+  executionPromise?: Promise<unknown>;
 }
 
 export interface RuntimeOptions {
@@ -324,6 +355,7 @@ export interface RuntimeOptions {
   onConsole?: (method: string, args: unknown[]) => void;
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
+  childProcessController?: childProcessShim.ChildProcessController;
 }
 
 export interface RequireFunction {
@@ -483,6 +515,58 @@ function makeMutable(mod: Record<string, unknown>): Record<string, unknown> {
   return mutable;
 }
 
+const CONSOLE_METHOD_NAMES = [
+  'log', 'error', 'warn', 'info', 'debug', 'trace', 'dir', 'dirxml',
+  'time', 'timeEnd', 'timeLog', 'assert', 'clear', 'count', 'countReset',
+  'group', 'groupCollapsed', 'groupEnd', 'table',
+] as const;
+
+type ConsoleMethodName = typeof CONSOLE_METHOD_NAMES[number];
+
+const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
+const FORBIDDEN_XHR_HEADERS = new Set([
+  'accept-charset',
+  'accept-encoding',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'connection',
+  'content-length',
+  'cookie',
+  'cookie2',
+  'date',
+  'dnt',
+  'expect',
+  'host',
+  'keep-alive',
+  'origin',
+  'referer',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'user-agent',
+  'via',
+]);
+
+function getRuntimeCorsProxy(): string {
+  if (typeof localStorage !== 'undefined') {
+    const override = localStorage.getItem('__corsProxyUrl');
+    if (override) return override;
+  }
+  return DEFAULT_CORS_PROXY;
+}
+
+function shouldProxyBrowserUrl(rawUrl: string): boolean {
+  if (typeof rawUrl !== 'string' || !rawUrl.startsWith('http')) return false;
+  if (rawUrl.includes('almostnode-cors-proxy')) return false;
+  if (typeof location !== 'undefined' && rawUrl.includes(location.host)) return false;
+  return true;
+}
+
+function getProxiedBrowserUrl(rawUrl: string): string {
+  return getRuntimeCorsProxy() + encodeURIComponent(rawUrl);
+}
+
 /**
  * Built-in modules registry
  */
@@ -505,7 +589,6 @@ const builtinModules: Record<string, unknown> = {
   zlib: zlibShim,
   dns: dnsShim,
   'dns/promises': dnsShim.promises,
-  child_process: childProcessShim,
   assert: assertShim,
   string_decoder: createStringDecoderModule(),
   timers: createTimersModule(),
@@ -580,6 +663,13 @@ const builtinModules: Record<string, unknown> = {
           this._stdout = null;
           this._stderr = null;
         }
+
+        for (const methodName of CONSOLE_METHOD_NAMES) {
+          const method = (this as Record<string, unknown>)[methodName];
+          if (typeof method === 'function') {
+            (this as Record<string, unknown>)[methodName] = method.bind(this);
+          }
+        }
       }
       private _write(stream: 'out' | 'err', args: unknown[]) {
         const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ') + '\n';
@@ -595,6 +685,7 @@ const builtinModules: Record<string, unknown> = {
       debug(...args: unknown[]) { this._write('out', args); }
       trace(...args: unknown[]) { this._write('err', args); }
       dir(obj: unknown) { this._write('out', [obj]); }
+      dirxml(...args: unknown[]) { this._write('out', args); }
       time(_label?: string) {}
       timeEnd(_label?: string) {}
       timeLog(_label?: string) {}
@@ -643,6 +734,20 @@ function createRequire(
   const packageJsonCache: Map<string, PackageJson | null> =
     resolverCaches?.packageJsonCache ?? new Map();
 
+  const childProcessModule = childProcessShim.createChildProcessModule({
+    controller: options.childProcessController ?? childProcessShim.getDefaultChildProcessController(),
+    getDefaultCwd: () => process.cwd(),
+    getDefaultEnv: () => {
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (typeof value === 'string') {
+          env[key] = value;
+        }
+      }
+      return env;
+    },
+  });
+
   const getParsedPackageJson = (pkgPath: string): PackageJson | null => {
     if (packageJsonCache.has(pkgPath)) {
       return packageJsonCache.get(pkgPath)!;
@@ -680,7 +785,7 @@ function createRequire(
     }
 
     // Built-in modules
-    if (builtinModules[id] || id === 'fs' || id === 'process' || id === 'url' || id === 'querystring' || id === 'util') {
+    if (id === 'child_process' || builtinModules[id] || id === 'fs' || id === 'process' || id === 'url' || id === 'querystring' || id === 'util') {
       return id;
     }
 
@@ -1011,40 +1116,16 @@ function createRequire(
     // - import.meta is provided for ESM code that uses it
     try {
       const importMetaUrl = 'file://' + resolvedPath;
-      const createWrappedCode = (moduleCode: string) => `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport) {
-var exports = $exports;
-var require = $require;
-var module = $module;
-var __filename = $filename;
-var __dirname = $dirname;
-var process = $process;
-var console = $console;
-var import_meta = $importMeta;
-var __dynamicImport = $dynamicImport;
-// Set up global.process and globalThis.process for code that accesses them directly
-var global = globalThis;
-globalThis.process = $process;
-global.process = $process;
-return (function() {
-${moduleCode}
-}).call(this);
-})`;
-
       let fn;
       try {
-        fn = eval(createWrappedCode(code));
+        fn = eval(createWrappedModuleCode(code));
       } catch (evalError) {
         const msg = evalError instanceof Error ? evalError.message : String(evalError);
-        const mightBeTopLevelAwait =
-          msg.includes('await is only valid') ||
-          msg.includes("Unexpected reserved word 'await'") ||
-          msg.includes('Unexpected identifier');
-
-        if (mightBeTopLevelAwait) {
+        if (isLikelyTopLevelAwaitSyntaxError(msg)) {
           const rewrittenCode = rewriteAwaitedDynamicImports(code);
           if (rewrittenCode !== code) {
             try {
-              fn = eval(createWrappedCode(rewrittenCode));
+              fn = eval(createWrappedModuleCode(rewrittenCode));
               code = rewrittenCode;
               processedCodeCache?.set(codeCacheKey, code);
             } catch {
@@ -1062,7 +1143,7 @@ ${moduleCode}
       // Create dynamic import function for this module context
       const dynamicImport = createDynamicImport(moduleRequire);
 
-      fn(
+      const executionResult = fn(
         module.exports,
         moduleRequire,
         module,
@@ -1073,6 +1154,9 @@ ${moduleCode}
         { url: importMetaUrl, dirname, filename: resolvedPath },
         dynamicImport
       );
+      if (executionResult && typeof (executionResult as Promise<unknown>).then === 'function') {
+        module.executionPromise = executionResult as Promise<unknown>;
+      }
 
       module.loaded = true;
     } catch (error) {
@@ -1103,6 +1187,9 @@ ${moduleCode}
     }
     if (id === 'process') {
       return process;
+    }
+    if (id === 'child_process') {
+      return childProcessModule;
     }
     // yoga-layout v3 uses top-level await in its default entry, which cannot
     // be synchronously required from transformed CJS. node command preloads it.
@@ -1199,7 +1286,7 @@ ${moduleCode}
   };
 
   require.resolve = (id: string): string => {
-    if (id === 'fs' || id === 'process' || builtinModules[id]) {
+    if (id === 'fs' || id === 'process' || id === 'child_process' || builtinModules[id]) {
       return id;
     }
     return resolveModule(id, currentDir);
@@ -1216,6 +1303,7 @@ ${moduleCode}
 function createConsoleWrapper(
   onConsole?: (method: string, args: unknown[]) => void
 ): Console {
+  const ConsoleCtor = (builtinModules.console as { Console?: unknown }).Console;
   const wrapper = {
     log: (...args: unknown[]) => {
       console.log(...args);
@@ -1245,6 +1333,10 @@ function createConsoleWrapper(
       console.dir(obj);
       onConsole?.('dir', [obj]);
     },
+    dirxml: (...args: unknown[]) => {
+      console.dirxml?.(...args);
+      onConsole?.('dirxml', args);
+    },
     time: console.time.bind(console),
     timeEnd: console.timeEnd.bind(console),
     timeLog: console.timeLog.bind(console),
@@ -1256,6 +1348,7 @@ function createConsoleWrapper(
     groupCollapsed: console.groupCollapsed.bind(console),
     groupEnd: console.groupEnd.bind(console),
     table: console.table.bind(console),
+    Console: ConsoleCtor,
   };
 
   return wrapper as unknown as Console;
@@ -1282,6 +1375,7 @@ export class Runtime {
 
   constructor(vfs: VirtualFS, options: RuntimeOptions = {}) {
     this.vfs = vfs;
+    const childProcessController = options.childProcessController ?? initChildProcess(vfs);
     // Create process first so we can get cwd for fs shim
     this.process = createProcess({
       cwd: options.cwd || '/',
@@ -1291,10 +1385,10 @@ export class Runtime {
     });
     // Create fs shim with cwd getter for relative path resolution
     this.fsShim = createFsShim(vfs, () => this.process.cwd());
-    this.options = options;
-
-    // Initialize child_process with VFS for bash command support
-    initChildProcess(vfs);
+    this.options = {
+      ...options,
+      childProcessController,
+    };
 
     // Initialize file watcher shims with VFS
     chokidarShim.setVFS(vfs);
@@ -1314,12 +1408,11 @@ export class Runtime {
     // In the browser, cross-origin requests will fail without CORS headers.
     if (!(globalThis.fetch as any).__almostnode) {
       const origFetch = globalThis.fetch.bind(globalThis);
-      const CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
       const MAX_REDIRECTS = 10;
       (globalThis as any).fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         // Only proxy absolute cross-origin HTTP(S) URLs
-        if (url.startsWith('http') && !url.includes(location.host) && !url.includes('almostnode-cors-proxy')) {
+        if (shouldProxyBrowserUrl(url)) {
           // When input is a Request object, extract its properties so they aren't lost.
           // init values take precedence over Request properties.
           let effectiveInit: RequestInit = { ...init };
@@ -1349,7 +1442,7 @@ export class Runtime {
           let currentMethod = effectiveInit.method || 'GET';
           let currentBody = effectiveInit.body;
           for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-            const proxiedUrl = CORS_PROXY + encodeURIComponent(currentUrl);
+            const proxiedUrl = getProxiedBrowserUrl(currentUrl);
             console.log(`[almostnode DEBUG] fetch proxy: ${currentUrl} -> ${proxiedUrl.slice(0, 120)}...`);
             const resp = await origFetch(proxiedUrl, {
               ...effectiveInit,
@@ -1389,6 +1482,58 @@ export class Runtime {
         }
         return origFetch(input, init);
       }, { __almostnode: true });
+    }
+
+    // Patch XMLHttpRequest to use the same CORS proxy path as fetch().
+    // Some CLIs bundle axios/XHR adapters and bypass global fetch entirely.
+    if (typeof globalThis.XMLHttpRequest === 'function' && !(globalThis.XMLHttpRequest as any).__almostnode) {
+      const xhrProto = globalThis.XMLHttpRequest.prototype as XMLHttpRequest['prototype'] & {
+        __almostnodeOriginalOpen?: typeof XMLHttpRequest.prototype.open;
+        __almostnodeOriginalSetRequestHeader?: typeof XMLHttpRequest.prototype.setRequestHeader;
+      };
+      const origOpen = xhrProto.open;
+      const origSetRequestHeader = xhrProto.setRequestHeader;
+
+      xhrProto.open = function (
+        method: string,
+        url: string | URL,
+        async?: boolean,
+        username?: string | null,
+        password?: string | null
+      ) {
+        const requestedUrl = typeof url === 'string' ? url : String(url);
+        const proxied = shouldProxyBrowserUrl(requestedUrl);
+        const effectiveUrl = proxied ? getProxiedBrowserUrl(requestedUrl) : requestedUrl;
+        (this as any).__almostnodeOriginalUrl = requestedUrl;
+        (this as any).__almostnodeProxied = proxied;
+        return origOpen.call(this, method, effectiveUrl, async ?? true, username ?? null, password ?? null);
+      };
+
+      xhrProto.setRequestHeader = function (name: string, value: string) {
+        const lowerName = String(name || '').toLowerCase();
+        if (FORBIDDEN_XHR_HEADERS.has(lowerName)) {
+          return;
+        }
+
+        if ((this as any).__almostnodeProxied && (lowerName === 'host' || lowerName === 'accept-encoding')) {
+          return;
+        }
+
+        try {
+          return origSetRequestHeader.call(this, name, value);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/unsafe header/i.test(message)) {
+            return;
+          }
+          throw error;
+        }
+      };
+
+      Object.defineProperty(globalThis.XMLHttpRequest, '__almostnode', {
+        value: true,
+        configurable: true,
+      });
     }
 
     // DEBUG: Patch JSON.parse to log details when it fails on truncated data
@@ -1702,31 +1847,47 @@ export class Runtime {
     // Use the same wrapper pattern as loadModule for consistency
     try {
       const importMetaUrl = 'file://' + filename;
-      const wrappedCode = `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport) {
-var exports = $exports;
-var require = $require;
-var module = $module;
-var __filename = $filename;
-var __dirname = $dirname;
-var process = $process;
-var console = $console;
-var import_meta = $importMeta;
-var __dynamicImport = $dynamicImport;
-// Set up global.process and globalThis.process for code that accesses them directly
-var global = globalThis;
-globalThis.process = $process;
-global.process = $process;
-
-return (function() {
-${code}
-}).call(this);
-})`;
-
       // Create dynamic import function for this module context
       const dynamicImport = createDynamicImport(require);
+      let fn;
+      let wrappedAsync = false;
 
-      const fn = eval(wrappedCode);
-      fn(
+      try {
+        fn = eval(createWrappedModuleCode(code));
+      } catch (evalError) {
+        const msg = evalError instanceof Error ? evalError.message : String(evalError);
+        if (isLikelyTopLevelAwaitSyntaxError(msg)) {
+          const rewrittenCode = rewriteAwaitedDynamicImports(code);
+          const candidateCode = rewrittenCode !== code ? rewrittenCode : code;
+
+          if (rewrittenCode !== code) {
+            try {
+              fn = eval(createWrappedModuleCode(rewrittenCode));
+              code = rewrittenCode;
+            } catch {
+              // Fall through to async entrypoint execution below.
+            }
+          }
+
+          if (!fn && findFirstAwaitLine(candidateCode)) {
+            try {
+              fn = eval(createWrappedModuleCode(candidateCode, true));
+              code = candidateCode;
+              wrappedAsync = true;
+            } catch {
+              // Fall through to a clearer syntax error below.
+            }
+          }
+        }
+
+        if (!fn) {
+          const awaitLine = findFirstAwaitLine(code);
+          const awaitDetail = awaitLine ? `\n[almostnode] first await line: ${awaitLine}` : '';
+          throw new SyntaxError(`${msg} (in ${filename})${awaitDetail}`);
+        }
+      }
+
+      const executionResult = fn(
         module.exports,
         require,
         module,
@@ -1737,6 +1898,9 @@ ${code}
         { url: importMetaUrl, dirname, filename },
         dynamicImport
       );
+      if (wrappedAsync && executionResult && typeof (executionResult as Promise<unknown>).then === 'function') {
+        module.executionPromise = executionResult as Promise<unknown>;
+      }
 
       module.loaded = true;
     } catch (error) {

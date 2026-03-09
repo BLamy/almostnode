@@ -9,10 +9,55 @@ export type EventListener = (...args: any[]) => void;
 // Symbol for storing events on arbitrary objects (like Express app function)
 const kEvents = Symbol('events');
 const kMaxListeners = Symbol('maxListeners');
+const eventTargetMaxListeners = new WeakMap<object, number>();
+let defaultMaxListeners = 10;
 
 interface EventStorage {
   [kEvents]?: Map<string, EventListener[]>;
   [kMaxListeners]?: number;
+}
+
+type EventTargetLike = EventStorage & {
+  addEventListener?: (...args: unknown[]) => void;
+  removeEventListener?: (...args: unknown[]) => void;
+};
+
+function isObjectLike(value: unknown): value is object {
+  return typeof value === 'object' && value !== null;
+}
+
+function isAbortSignal(value: unknown): boolean {
+  return typeof AbortSignal !== 'undefined' && value instanceof AbortSignal;
+}
+
+function isListenerTarget(value: unknown): value is EventTargetLike {
+  if (!isObjectLike(value)) {
+    return false;
+  }
+  return typeof (value as { setMaxListeners?: unknown }).setMaxListeners === 'function'
+    || typeof (value as { getMaxListeners?: unknown }).getMaxListeners === 'function'
+    || (
+      typeof (value as { addEventListener?: unknown }).addEventListener === 'function'
+      && typeof (value as { removeEventListener?: unknown }).removeEventListener === 'function'
+    );
+}
+
+function applyMaxListeners(target: EventTargetLike, n: number): void {
+  if (typeof target.setMaxListeners === 'function') {
+    target.setMaxListeners(n);
+    return;
+  }
+  eventTargetMaxListeners.set(target, n);
+}
+
+function readMaxListeners(target: EventTargetLike): number {
+  if (typeof target.getMaxListeners === 'function') {
+    return target.getMaxListeners();
+  }
+  if (isAbortSignal(target)) {
+    return eventTargetMaxListeners.get(target) ?? 0;
+  }
+  return eventTargetMaxListeners.get(target) ?? defaultMaxListeners;
 }
 
 export class EventEmitter {
@@ -125,7 +170,7 @@ export class EventEmitter {
   }
 
   getMaxListeners(): number {
-    return (this as EventStorage)[kMaxListeners] || 10;
+    return (this as EventStorage)[kMaxListeners] ?? defaultMaxListeners;
   }
 
   prependListener(event: string, listener: EventListener): this {
@@ -151,6 +196,25 @@ export class EventEmitter {
   }
 }
 
+export function setMaxListeners(n: number, ...targets: EventTargetLike[]): void {
+  if (targets.length === 0) {
+    defaultMaxListeners = n;
+    return;
+  }
+  for (const target of targets) {
+    if (isListenerTarget(target)) {
+      applyMaxListeners(target, n);
+    }
+  }
+}
+
+export function getMaxListeners(target: EventTargetLike): number {
+  if (!isListenerTarget(target)) {
+    throw new TypeError('The "emitter" argument must be an instance of EventEmitter or EventTarget. Received undefined');
+  }
+  return readMaxListeners(target);
+}
+
 // For Node.js compatibility, the module itself should be the EventEmitter class
 // but also have EventEmitter as a property
 // This allows both: `const EE = require('events')` and `const { EventEmitter } = require('events')`
@@ -160,6 +224,9 @@ const events = EventEmitter as typeof EventEmitter & {
   on: (emitter: EventEmitter, event: string) => AsyncIterable<unknown[]>;
   getEventListeners: (emitter: EventEmitter, event: string) => EventListener[];
   listenerCount: (emitter: EventEmitter, event: string) => number;
+  setMaxListeners: typeof setMaxListeners;
+  getMaxListeners: typeof getMaxListeners;
+  defaultMaxListeners: number;
 };
 
 events.EventEmitter = EventEmitter;
@@ -192,5 +259,15 @@ events.on = (emitter: EventEmitter, event: string) => {
 };
 events.getEventListeners = (emitter: EventEmitter, event: string) => emitter.listeners(event);
 events.listenerCount = (emitter: EventEmitter, event: string) => emitter.listenerCount(event);
+events.setMaxListeners = setMaxListeners;
+events.getMaxListeners = getMaxListeners;
+Object.defineProperty(events, 'defaultMaxListeners', {
+  get() {
+    return defaultMaxListeners;
+  },
+  set(value: number) {
+    defaultMaxListeners = value;
+  },
+});
 
 export default events;

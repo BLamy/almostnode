@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { createProcess, process as defaultProcess } from '../../src/shims/process';
+import { homedir } from '../../src/shims/os';
 import { assert } from './common';
 
 describe('process module (Node.js compat)', () => {
@@ -24,6 +25,8 @@ describe('process module (Node.js compat)', () => {
       expect(proc.env.NODE_ENV).toBeDefined();
       expect(proc.env.PATH).toBeDefined();
       expect(proc.env.HOME).toBeDefined();
+      expect(proc.env.HOME).toBe(homedir());
+      expect(proc.env.SHELL).toBe('/bin/bash');
     });
 
     it('should accept custom environment variables', () => {
@@ -257,6 +260,12 @@ describe('process module (Node.js compat)', () => {
       const result = proc.stdout.write('test');
       expect(typeof result).toBe('boolean');
     });
+
+    it('should report writable/readable state like a writable stream', () => {
+      const proc = createProcess();
+      expect(proc.stdout.writable).toBe(true);
+      expect(proc.stdout.readable).toBe(false);
+    });
   });
 
   describe('process.stderr', () => {
@@ -292,6 +301,14 @@ describe('process module (Node.js compat)', () => {
     it('should have setRawMode method', () => {
       const proc = createProcess();
       expect(typeof proc.stdin.setRawMode).toBe('function');
+    });
+
+    it('should expose readable state and ref helpers', () => {
+      const proc = createProcess();
+      expect(proc.stdin.readable).toBe(true);
+      expect(proc.stdin.writable).toBe(false);
+      expect(typeof proc.stdin.ref).toBe('function');
+      expect(typeof proc.stdin.unref).toBe('function');
     });
   });
 

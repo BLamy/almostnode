@@ -4,6 +4,8 @@
 
 import type { VFSSnapshot, VFSFileEntry } from './runtime-interface';
 import { uint8ToBase64, base64ToUint8 } from './utils/binary-encoding';
+import { EventEmitter, EventListener } from './shims/events';
+import { isSyntheticExecutablePath } from './shims/synthetic-shells';
 
 export interface FSNode {
   type: 'file' | 'directory';
@@ -53,12 +55,43 @@ export interface FSWatcher {
   close(): void;
   ref(): this;
   unref(): this;
+  on(event: string, listener: EventListener): this;
+  once(event: string, listener: EventListener): this;
+  off(event: string, listener: EventListener): this;
+  addListener(event: string, listener: EventListener): this;
+  removeListener(event: string, listener: EventListener): this;
+  removeAllListeners(event?: string): this;
+  emit(event: string, ...args: unknown[]): boolean;
 }
 
 interface WatcherEntry {
   listener: WatchListener;
   recursive: boolean;
   closed: boolean;
+  watcher: VirtualFSWatcher;
+}
+
+class VirtualFSWatcher extends EventEmitter implements FSWatcher {
+  private closed = false;
+
+  constructor(private readonly closeImpl: () => void) {
+    super();
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.closeImpl();
+    this.emit('close');
+  }
+
+  ref(): this {
+    return this;
+  }
+
+  unref(): this {
+    return this;
+  }
 }
 
 /**
@@ -248,7 +281,9 @@ export class VirtualFS {
     const parent = this.ensureDirectory(parentPath);
     const existed = parent.children!.has(basename);
 
-    const content = typeof data === 'string' ? this.encoder.encode(data) : data;
+    const content = typeof data === 'string'
+      ? this.encoder.encode(data)
+      : new Uint8Array(data);
 
     parent.children!.set(basename, {
       type: 'file',
@@ -436,7 +471,7 @@ export class VirtualFS {
       return this.decoder.decode(content);
     }
 
-    return content;
+    return new Uint8Array(content);
   }
 
   /**
@@ -717,11 +752,12 @@ export class VirtualFS {
     }
 
     // Create watcher entry
-    const entry: WatcherEntry = {
+    const entry = {
       listener: actualListener || (() => {}),
       recursive: options.recursive || false,
       closed: false,
-    };
+      watcher: undefined as unknown as VirtualFSWatcher,
+    } satisfies WatcherEntry;
 
     // Add to watchers map
     if (!this.watchers.has(normalized)) {
@@ -729,21 +765,17 @@ export class VirtualFS {
     }
     this.watchers.get(normalized)!.add(entry);
 
-    // Return FSWatcher interface
-    const watcher: FSWatcher = {
-      close: () => {
-        entry.closed = true;
-        const watcherSet = this.watchers.get(normalized);
-        if (watcherSet) {
-          watcherSet.delete(entry);
-          if (watcherSet.size === 0) {
-            this.watchers.delete(normalized);
-          }
+    const watcher = new VirtualFSWatcher(() => {
+      entry.closed = true;
+      const watcherSet = this.watchers.get(normalized);
+      if (watcherSet) {
+        watcherSet.delete(entry);
+        if (watcherSet.size === 0) {
+          this.watchers.delete(normalized);
         }
-      },
-      ref: () => watcher,
-      unref: () => watcher,
-    };
+      }
+    });
+    entry.watcher = watcher;
 
     return watcher;
   }
@@ -762,6 +794,7 @@ export class VirtualFS {
         if (!entry.closed) {
           try {
             entry.listener(eventType, basename);
+            entry.watcher.emit('change', eventType, basename);
           } catch (err) {
             console.error('Error in file watcher:', err);
           }
@@ -783,6 +816,7 @@ export class VirtualFS {
             if (entry.recursive || isDirectChild) {
               try {
                 entry.listener(eventType, relativePath);
+                entry.watcher.emit('change', eventType, relativePath);
               } catch (err) {
                 console.error('Error in file watcher:', err);
               }
@@ -801,6 +835,9 @@ export class VirtualFS {
    * Access check - in our VFS, always succeeds if file exists
    */
   accessSync(path: string, mode?: number): void {
+    if (isSyntheticExecutablePath(this.normalizePath(path))) {
+      return;
+    }
     if (!this.existsSync(path)) {
       throw createNodeError('ENOENT', 'access', path);
     }

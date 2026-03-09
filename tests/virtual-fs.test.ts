@@ -22,6 +22,25 @@ describe('VirtualFS', () => {
       expect(content).toEqual(data);
     });
 
+    it('should copy binary input buffers when writing files', () => {
+      const source = new Uint8Array([9, 8, 7, 6]);
+      vfs.writeFileSync('/copied.bin', source);
+      source[0] = 1;
+      source[1] = 2;
+
+      const content = vfs.readFileSync('/copied.bin');
+      expect(content).toEqual(new Uint8Array([9, 8, 7, 6]));
+    });
+
+    it('should return a copy of binary data when reading files', () => {
+      vfs.writeFileSync('/immutable.bin', new Uint8Array([4, 3, 2, 1]));
+      const readA = vfs.readFileSync('/immutable.bin');
+      readA[0] = 99;
+
+      const readB = vfs.readFileSync('/immutable.bin');
+      expect(readB).toEqual(new Uint8Array([4, 3, 2, 1]));
+    });
+
     it('should create parent directories automatically', () => {
       vfs.writeFileSync('/deep/nested/path/file.txt', 'content');
       expect(vfs.existsSync('/deep')).toBe(true);

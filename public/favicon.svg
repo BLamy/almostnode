@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="almostnode-favicon-gradient" x1="14" y1="12" x2="50" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffc352" />
+      <stop offset="1" stop-color="#ff7a59" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="#071018" />
+  <rect x="8" y="8" width="48" height="48" rx="14" fill="url(#almostnode-favicon-gradient)" />
+  <path d="M32 17l12 30h-7l-2.1-5.7H29.2L27 47h-7l12-30zm0 10.1l-3.3 9.2h6.5z" fill="#071018" />
+</svg>

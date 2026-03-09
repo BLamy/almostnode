@@ -470,6 +470,17 @@ describe('fs module (Node.js compat)', () => {
     it('should have X_OK constant', () => {
       assert.strictEqual(fs.constants.X_OK, 1);
     });
+
+    it('should expose file open flag constants', () => {
+      assert.strictEqual(fs.constants.O_RDONLY, 0);
+      assert.strictEqual(fs.constants.O_WRONLY, 1);
+      assert.strictEqual(fs.constants.O_RDWR, 2);
+      assert.strictEqual(fs.constants.O_CREAT, 64);
+      assert.strictEqual(fs.constants.O_EXCL, 128);
+      assert.strictEqual(fs.constants.O_TRUNC, 512);
+      assert.strictEqual(fs.constants.O_APPEND, 1024);
+      assert.strictEqual(fs.constants.O_NOFOLLOW, 131072);
+    });
   });
 
   describe('fs.promises', () => {
@@ -491,6 +502,67 @@ describe('fs module (Node.js compat)', () => {
       it('should write file', async () => {
         await fs.promises.writeFile('/test.txt', 'hello world');
         assert.strictEqual(vfs.readFileSync('/test.txt', 'utf8'), 'hello world');
+      });
+    });
+
+    describe('open', () => {
+      it('should return a file handle with stat/read/close', async () => {
+        vfs.writeFileSync('/handle.txt', 'hello world');
+
+        const handle = await fs.promises.open('/handle.txt', 'r');
+        const stats = await handle.stat();
+        const buffer = new Uint8Array(5);
+        const { bytesRead } = await handle.read(buffer, 0, 5, 0);
+        await handle.close();
+
+        expect(handle.fd).toBeGreaterThanOrEqual(3);
+        assert.strictEqual(stats.size, 11);
+        assert.strictEqual(bytesRead, 5);
+        assert.strictEqual(new TextDecoder().decode(buffer), 'hello');
+      });
+
+      it('should reject for missing files', async () => {
+        await expect(fs.promises.open('/missing.txt', 'r')).rejects.toThrow(/ENOENT/);
+      });
+
+      it('should support numeric write flags with create and append', async () => {
+        const handle = await fs.promises.open(
+          '/tmp/claude-0/-project/tasks/task.output',
+          fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW
+        );
+
+        await handle.appendFile('hello');
+        await handle.appendFile('\nworld');
+        await handle.close();
+
+        assert.strictEqual(vfs.readFileSync('/tmp/claude-0/-project/tasks/task.output', 'utf8'), 'hello\nworld');
+      });
+
+      it('should reject exclusive numeric create when the file already exists', async () => {
+        vfs.writeFileSync('/tmp/existing.output', 'content');
+
+        await expect(
+          fs.promises.open(
+            '/tmp/existing.output',
+            fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
+          )
+        ).rejects.toThrow(/EEXIST/);
+      });
+    });
+
+    describe('appendFile', () => {
+      it('should append to existing files', async () => {
+        vfs.writeFileSync('/append.txt', 'hello');
+
+        await fs.promises.appendFile('/append.txt', ' world');
+
+        assert.strictEqual(vfs.readFileSync('/append.txt', 'utf8'), 'hello world');
+      });
+
+      it('should create files that do not exist yet', async () => {
+        await fs.promises.appendFile('/new-append.txt', 'hello');
+
+        assert.strictEqual(vfs.readFileSync('/new-append.txt', 'utf8'), 'hello');
       });
     });
 

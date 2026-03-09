@@ -1,7 +1,7 @@
 import { createContainer } from './index';
 
 const COMMAND = 'npx shadcn@latest create';
-const WORK_DIR = '/workspace';
+const WORK_DIR = '/project';
 
 const terminalElement = document.getElementById('terminal') as HTMLDivElement;
 const statusElement = document.getElementById('status') as HTMLSpanElement;
@@ -10,12 +10,27 @@ const commandReadout = document.getElementById('commandReadout') as HTMLDivEleme
 const fileTreeElement = document.getElementById('fileTree') as HTMLPreElement;
 
 const runButton = document.getElementById('runBtn') as HTMLButtonElement;
+const gitSettingsButton = document.getElementById('gitSettingsBtn') as HTMLButtonElement;
 const seedButton = document.getElementById('seedBtn') as HTMLButtonElement;
 const abortButton = document.getElementById('abortBtn') as HTMLButtonElement;
 const refreshButton = document.getElementById('refreshBtn') as HTMLButtonElement;
 const clearButton = document.getElementById('clearBtn') as HTMLButtonElement;
+const gitSettingsOverlay = document.getElementById('gitSettingsOverlay') as HTMLDivElement;
+const gitPatInput = document.getElementById('gitPatInput') as HTMLInputElement;
+const gitCorsInput = document.getElementById('gitCorsInput') as HTMLInputElement;
+const gitUnlockButton = document.getElementById('gitUnlockBtn') as HTMLButtonElement;
+const gitLoadEncryptedButton = document.getElementById('gitLoadEncryptedBtn') as HTMLButtonElement;
+const gitSaveEncryptedButton = document.getElementById('gitSaveEncryptedBtn') as HTMLButtonElement;
+const gitApplySessionButton = document.getElementById('gitApplySessionBtn') as HTMLButtonElement;
+const gitClearButton = document.getElementById('gitClearBtn') as HTMLButtonElement;
+const gitCloseButton = document.getElementById('gitCloseBtn') as HTMLButtonElement;
+const gitSettingsStatus = document.getElementById('gitSettingsStatus') as HTMLDivElement;
 
 const container = createContainer();
+
+const DEFAULT_GIT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
+const GIT_AUTH_STORAGE_KEY = 'almostnode.shadcn.gitAuth.encrypted';
+const GIT_CORS_STORAGE_KEY = 'almostnode.shadcn.gitAuth.corsProxy';
 
 let terminal: any = null;
 let fitAddon: any = null;
@@ -26,6 +41,165 @@ let historyIndex = -1;
 let skipPrompt = false;
 
 const commandHistory: string[] = [];
+let gitEncryptionKey: CryptoKey | null = null;
+
+function setGitSettingsStatus(message: string, type: 'info' | 'error' | 'success' = 'info') {
+  gitSettingsStatus.textContent = message;
+  if (type === 'error') {
+    gitSettingsStatus.style.color = 'var(--error)';
+    return;
+  }
+  if (type === 'success') {
+    gitSettingsStatus.style.color = 'var(--accent)';
+    return;
+  }
+  gitSettingsStatus.style.color = 'var(--text-dim)';
+}
+
+function toBase64Url(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function fromBase64Url(value: string): ArrayBuffer {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+  const binary = atob(padded);
+  const buffer = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    buffer[i] = binary.charCodeAt(i);
+  }
+  return buffer.buffer;
+}
+
+async function deriveEncryptionKey(source: ArrayBuffer): Promise<CryptoKey> {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    source,
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey']
+  );
+
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: new TextEncoder().encode('almostnode-git-auth-salt'),
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function encryptText(key: CryptoKey, value: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(value);
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+  const payload = new Uint8Array(iv.length + encrypted.byteLength);
+  payload.set(iv);
+  payload.set(new Uint8Array(encrypted), iv.length);
+  return toBase64Url(payload.buffer);
+}
+
+async function decryptText(key: CryptoKey, payload: string): Promise<string> {
+  const data = new Uint8Array(fromBase64Url(payload));
+  const iv = data.slice(0, 12);
+  const ciphertext = data.slice(12);
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return new TextDecoder().decode(decrypted);
+}
+
+function isWebAuthnAvailable(): boolean {
+  return typeof window.PublicKeyCredential !== 'undefined' && !!navigator.credentials;
+}
+
+async function startAuthenticationCredential(): Promise<PublicKeyCredential> {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge,
+      timeout: 60000,
+      userVerification: 'required',
+      rpId: window.location.hostname,
+    },
+  });
+
+  if (!assertion || !(assertion instanceof PublicKeyCredential)) {
+    throw new Error('Passkey authentication was not completed');
+  }
+
+  return assertion;
+}
+
+async function startRegistrationCredential(): Promise<PublicKeyCredential> {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = crypto.getRandomValues(new Uint8Array(16));
+
+  const credential = await navigator.credentials.create({
+    publicKey: {
+      challenge,
+      rp: {
+        name: 'almostnode',
+        id: window.location.hostname,
+      },
+      user: {
+        id: userId,
+        name: 'git-auth@almostnode.local',
+        displayName: 'almostnode Git Auth',
+      },
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 },
+        { type: 'public-key', alg: -257 },
+      ],
+      timeout: 60000,
+      attestation: 'none',
+      authenticatorSelection: {
+        userVerification: 'required',
+        residentKey: 'required',
+      },
+    },
+  });
+
+  if (!credential || !(credential instanceof PublicKeyCredential)) {
+    throw new Error('Passkey registration was not completed');
+  }
+
+  return credential;
+}
+
+async function ensureGitEncryptionKey(): Promise<CryptoKey> {
+  if (!isWebAuthnAvailable()) {
+    throw new Error('WebAuthn is unavailable in this browser');
+  }
+
+  try {
+    const assertion = await startAuthenticationCredential();
+    return deriveEncryptionKey(assertion.rawId);
+  } catch {
+    const credential = await startRegistrationCredential();
+    return deriveEncryptionKey(credential.rawId);
+  }
+}
+
+function applyGitAuthFromInputs(tokenOverride?: string | null) {
+  const token = typeof tokenOverride === 'string'
+    ? tokenOverride.trim()
+    : gitPatInput.value.trim();
+  const corsProxy = gitCorsInput.value.trim();
+
+  container.setGitAuth({
+    token: token ? token : null,
+    corsProxy: corsProxy ? corsProxy : null,
+  });
+}
 
 function setStatus(text: string, running = false) {
   statusElement.textContent = text;
@@ -193,6 +367,21 @@ function writeSeedFiles() {
 
   for (const entry of entries) {
     removePathRecursive(`${WORK_DIR}/${entry}`);
+  }
+}
+
+async function ensureGitRepoInitialized() {
+  if (!container.vfs.existsSync(WORK_DIR)) {
+    container.vfs.mkdirSync(WORK_DIR, { recursive: true });
+  }
+  if (container.vfs.existsSync(`${WORK_DIR}/.git`)) {
+    return;
+  }
+
+  const result = await container.run('git init', { cwd: WORK_DIR });
+  if (result.exitCode !== 0) {
+    const reason = (result.stderr || result.stdout || 'git init failed').trim();
+    throw new Error(reason);
   }
 }
 
@@ -453,17 +642,121 @@ function setupTerminal() {
   });
 }
 
+function openGitSettings() {
+  gitSettingsOverlay.classList.remove('hidden');
+  setGitSettingsStatus(
+    'Session-only auth works without passkey. Use passkey to encrypt/decrypt stored PAT.',
+    'info'
+  );
+}
+
+function closeGitSettings() {
+  gitSettingsOverlay.classList.add('hidden');
+}
+
+function hydrateGitSettingsFromStorage() {
+  const savedCors = localStorage.getItem(GIT_CORS_STORAGE_KEY);
+  gitCorsInput.value = savedCors || DEFAULT_GIT_CORS_PROXY;
+
+  if (savedCors) {
+    container.setGitAuth({ corsProxy: savedCors });
+  }
+
+  if (localStorage.getItem(GIT_AUTH_STORAGE_KEY)) {
+    setGitSettingsStatus('Encrypted PAT detected. Click \"Use Passkey\" then \"Load Encrypted\".', 'info');
+  }
+}
+
+async function handleGitUnlock() {
+  try {
+    gitEncryptionKey = await ensureGitEncryptionKey();
+    setGitSettingsStatus('Passkey verified. You can now load/save encrypted PAT.', 'success');
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    setGitSettingsStatus(`Passkey unavailable (${msg}). Session-only mode still works.`, 'error');
+  }
+}
+
+async function handleGitSaveEncrypted() {
+  const token = gitPatInput.value.trim();
+  const corsProxy = gitCorsInput.value.trim();
+
+  localStorage.setItem(GIT_CORS_STORAGE_KEY, corsProxy || DEFAULT_GIT_CORS_PROXY);
+  applyGitAuthFromInputs(token);
+
+  if (!token) {
+    setGitSettingsStatus('PAT is empty. Session auth cleared and proxy saved.', 'success');
+    return;
+  }
+
+  if (!gitEncryptionKey) {
+    setGitSettingsStatus('No passkey key in memory. Use \"Apply Session Only\" or unlock passkey first.', 'error');
+    return;
+  }
+
+  const payload = JSON.stringify({ token, corsProxy: corsProxy || DEFAULT_GIT_CORS_PROXY });
+  const encrypted = await encryptText(gitEncryptionKey, payload);
+  localStorage.setItem(GIT_AUTH_STORAGE_KEY, encrypted);
+  setGitSettingsStatus('Encrypted PAT saved locally and applied to current session.', 'success');
+}
+
+async function handleGitLoadEncrypted() {
+  const stored = localStorage.getItem(GIT_AUTH_STORAGE_KEY);
+  if (!stored) {
+    setGitSettingsStatus('No encrypted PAT found in local storage.', 'error');
+    return;
+  }
+  if (!gitEncryptionKey) {
+    setGitSettingsStatus('Unlock with passkey before loading encrypted PAT.', 'error');
+    return;
+  }
+
+  const decrypted = await decryptText(gitEncryptionKey, stored);
+  const parsed = JSON.parse(decrypted) as { token?: string; corsProxy?: string };
+  gitPatInput.value = parsed.token || '';
+  gitCorsInput.value = parsed.corsProxy || DEFAULT_GIT_CORS_PROXY;
+  applyGitAuthFromInputs(parsed.token || null);
+  localStorage.setItem(GIT_CORS_STORAGE_KEY, gitCorsInput.value.trim() || DEFAULT_GIT_CORS_PROXY);
+  setGitSettingsStatus('Encrypted PAT loaded and applied to the running container.', 'success');
+}
+
+function handleGitApplySessionOnly() {
+  const token = gitPatInput.value.trim();
+  const corsProxy = gitCorsInput.value.trim();
+  localStorage.setItem(GIT_CORS_STORAGE_KEY, corsProxy || DEFAULT_GIT_CORS_PROXY);
+  applyGitAuthFromInputs(token);
+  setGitSettingsStatus('Session-only git auth applied to running container.', 'success');
+}
+
+function handleGitClearAuth() {
+  gitPatInput.value = '';
+  localStorage.removeItem(GIT_AUTH_STORAGE_KEY);
+  container.setGitAuth({ token: null, username: null, password: null });
+  setGitSettingsStatus('Stored PAT cleared. Session git token removed.', 'success');
+}
+
 function bindUiControls() {
   runButton.onclick = () => {
     if (isRunning) return;
     submitCommand(COMMAND, true);
   };
 
-  seedButton.onclick = () => {
+  gitSettingsButton.onclick = () => {
+    openGitSettings();
+  };
+
+  seedButton.onclick = async () => {
+    if (isRunning) return;
     writeSeedFiles();
-    refreshWorkspaceTree();
-    write('\x1b[2mworkspace reset\x1b[0m\r\n');
-    showPrompt();
+    try {
+      await ensureGitRepoInitialized();
+      refreshWorkspaceTree();
+      write('\x1b[2mworkspace reset complete (git initialized in /project)\x1b[0m\r\n');
+      showPrompt();
+    } catch (error) {
+      write(`\x1b[31mworkspace reset failed: ${String(error)}\x1b[0m\r\n`);
+      showPrompt();
+    }
   };
 
   clearButton.onclick = () => {
@@ -482,12 +775,45 @@ function bindUiControls() {
     container.sendInput('\u0003');
     write('^C\r\n');
   };
+
+  gitCloseButton.onclick = () => {
+    closeGitSettings();
+  };
+  gitSettingsOverlay.onclick = (event) => {
+    if (event.target === gitSettingsOverlay) {
+      closeGitSettings();
+    }
+  };
+
+  gitUnlockButton.onclick = () => {
+    handleGitUnlock().catch((error) => {
+      setGitSettingsStatus(`Passkey unlock failed: ${String(error)}`, 'error');
+    });
+  };
+  gitSaveEncryptedButton.onclick = () => {
+    handleGitSaveEncrypted().catch((error) => {
+      setGitSettingsStatus(`Unable to save encrypted PAT: ${String(error)}`, 'error');
+    });
+  };
+  gitLoadEncryptedButton.onclick = () => {
+    handleGitLoadEncrypted().catch((error) => {
+      setGitSettingsStatus(`Unable to load encrypted PAT: ${String(error)}`, 'error');
+    });
+  };
+  gitApplySessionButton.onclick = () => {
+    handleGitApplySessionOnly();
+  };
+  gitClearButton.onclick = () => {
+    handleGitClearAuth();
+  };
 }
 
 async function init() {
   writeSeedFiles();
+  await ensureGitRepoInitialized();
   setupTerminal();
   bindUiControls();
+  hydrateGitSettingsFromStorage();
 
   refreshWorkspaceTree();
   commandReadout.textContent = COMMAND;

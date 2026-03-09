@@ -5,6 +5,8 @@
  */
 
 import { EventEmitter, EventListener } from './events';
+import { homedir } from './os';
+import { DEFAULT_POSIX_SHELL } from './synthetic-shells';
 
 export interface ProcessEnv {
   [key: string]: string | undefined;
@@ -13,6 +15,9 @@ export interface ProcessEnv {
 // Stream-like interface with EventEmitter methods
 interface ProcessStream {
   isTTY: boolean;
+  readable: boolean;
+  writable: boolean;
+  destroyed: boolean;
   on: (event: string, listener: EventListener) => ProcessStream;
   once: (event: string, listener: EventListener) => ProcessStream;
   off: (event: string, listener: EventListener) => ProcessStream;
@@ -31,6 +36,9 @@ interface ProcessStream {
   pause?: () => ProcessStream;
   resume?: () => ProcessStream;
   setEncoding?: (encoding: string) => ProcessStream;
+  ref?: () => ProcessStream;
+  unref?: () => ProcessStream;
+  destroy?: () => ProcessStream;
 }
 
 interface ProcessWritableStream extends ProcessStream {
@@ -106,9 +114,13 @@ function createProcessStream(
   writeImpl?: (data: string) => boolean
 ): ProcessWritableStream | ProcessReadableStream {
   const emitter = new EventEmitter();
+  const queuedReads: Array<string | Buffer> = [];
 
   const stream: ProcessWritableStream & ProcessReadableStream = {
     isTTY: false,
+    readable: !isWritable,
+    writable: isWritable,
+    destroyed: false,
     columns: 80,
     rows: 24,
 
@@ -185,9 +197,22 @@ function createProcessStream(
     },
     // Default read implementation (for stdin)
     read() {
-      return null;
+      return queuedReads.length > 0 ? queuedReads.shift()! : null;
     },
     setRawMode(_mode: boolean) {
+      return stream;
+    },
+    ref() {
+      return stream;
+    },
+    unref() {
+      return stream;
+    },
+    destroy() {
+      stream.destroyed = true;
+      stream.readable = false;
+      stream.writable = false;
+      emitter.emit('close');
       return stream;
     },
     cursorTo(_x: number, yOrCb?: number | (() => void), callback?: () => void) {
@@ -224,6 +249,15 @@ function createProcessStream(
     };
   }
 
+  Object.defineProperty(stream, '__almostnodePushInput', {
+    value: (data: string | Buffer) => {
+      if (stream.destroyed) return;
+      queuedReads.push(data);
+      emitter.emit('readable');
+    },
+    configurable: true,
+  });
+
   return stream;
 }
 
@@ -235,10 +269,12 @@ export function createProcess(options?: {
   onStderr?: (data: string) => void;
 }): Process {
   let currentDir = options?.cwd || '/';
+  const defaultHome = homedir();
   const env: ProcessEnv = {
     NODE_ENV: 'development',
     PATH: '/usr/local/bin:/usr/bin:/bin',
-    HOME: '/',
+    HOME: defaultHome,
+    SHELL: DEFAULT_POSIX_SHELL,
     ...options?.env,
   };
 

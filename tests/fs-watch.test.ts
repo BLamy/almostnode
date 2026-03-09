@@ -180,6 +180,28 @@ describe('VirtualFS fs.watch', () => {
 
       watcher.close();
     });
+
+    it('should return an EventEmitter-style watcher', async () => {
+      const fs = createFsShim(vfs);
+      vfs.writeFileSync('/test/file.txt', 'initial');
+
+      const events: { eventType: string; filename: string | null }[] = [];
+      let closed = false;
+
+      const watcher = fs.watch('/test/file.txt');
+      watcher.on('change', (eventType, filename) => {
+        events.push({ eventType, filename: filename as string | null });
+      });
+      watcher.on('close', () => {
+        closed = true;
+      });
+
+      fs.writeFileSync('/test/file.txt', 'updated');
+      watcher.close();
+
+      expect(events).toEqual([{ eventType: 'change', filename: 'file.txt' }]);
+      expect(closed).toBe(true);
+    });
   });
 });
 

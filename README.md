@@ -156,6 +156,8 @@ await container.run('ls /');
 Supported npm commands: `npm run <script>`, `npm start`, `npm test`, `npm install`, `npm ls`.
 Pre/post lifecycle scripts (`prebuild`, `postbuild`, etc.) run automatically.
 
+Supported git commands (v1): `git init`, `git clone`, `git status`, `git add`, `git commit`, `git log`, `git branch`, `git checkout`, `git diff`, `git rebase <upstream>`, `git fetch`, `git pull`, `git push`.
+
 ### Running CLI Tools
 
 Any npm package with a `bin` field works automatically after install — no configuration needed.
@@ -444,7 +446,17 @@ Creates a new container with all components initialized.
 interface ContainerOptions {
   cwd?: string;           // Working directory (default: '/')
   env?: Record<string, string>;  // Environment variables
+  git?: GitAuthOptions;   // Default git auth/proxy/author config
   onConsole?: (method: string, args: any[]) => void;  // Console hook
+}
+
+interface GitAuthOptions {
+  token?: string;
+  username?: string;
+  password?: string;
+  corsProxy?: string;
+  authorName?: string;
+  authorEmail?: string;
 }
 
 const container = createContainer({
@@ -460,6 +472,8 @@ Returns:
 - `container.npm` - PackageManager instance
 - `container.serverBridge` - ServerBridge instance
 - `container.run(command, options?)` - Run a shell command (returns `Promise<RunResult>`)
+- `container.setGitAuth(updates)` - Update PAT/proxy/author defaults for future git commands
+- `container.getGitAuth()` - Get current git auth settings
 - `container.sendInput(data)` - Send stdin data to the currently running process
 - `container.execute(code)` - Execute JavaScript code
 - `container.runFile(filename)` - Run a file from VirtualFS
@@ -474,6 +488,7 @@ interface RunResult {
 }
 
 interface RunOptions {
+  env?: Record<string, string>;   // Per-command env overrides
   onStdout?: (data: string) => void;  // Stream stdout in real-time
   onStderr?: (data: string) => void;  // Stream stderr in real-time
   signal?: AbortSignal;                // Cancel the command

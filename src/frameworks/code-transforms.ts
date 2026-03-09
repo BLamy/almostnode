@@ -9,6 +9,8 @@ import * as csstree from 'css-tree';
 import { simpleHash } from '../utils/hash';
 import { REACT_CDN, REACT_DOM_CDN } from '../config/cdn';
 
+const CJS_REQUIRE_HELPER = '__almostnodeRequire';
+
 /**
  * Interface for file system operations needed by CSS module transforms.
  */
@@ -367,7 +369,7 @@ function transformEsmToCjsAst(code: string): string {
 
       if (specs.length === 0) {
         // Side-effect import: import './polyfill'
-        replacements.push([node.start, node.end, `require(${JSON.stringify(source)})`]);
+        replacements.push([node.start, node.end, `${CJS_REQUIRE_HELPER}(${JSON.stringify(source)})`]);
       } else {
         const defaultSpec = specs.find((s: any) => s.type === 'ImportDefaultSpecifier');
         const nsSpec = specs.find((s: any) => s.type === 'ImportNamespaceSpecifier');
@@ -375,23 +377,17 @@ function transformEsmToCjsAst(code: string): string {
 
         const parts: string[] = [];
         if (defaultSpec) {
-          parts.push(`const ${defaultSpec.local.name} = require(${JSON.stringify(source)})`);
+          parts.push(`const ${defaultSpec.local.name} = ${CJS_REQUIRE_HELPER}(${JSON.stringify(source)})`);
         }
         if (nsSpec) {
-          parts.push(`const ${nsSpec.local.name} = require(${JSON.stringify(source)})`);
+          parts.push(`const ${nsSpec.local.name} = ${CJS_REQUIRE_HELPER}(${JSON.stringify(source)})`);
         }
         if (namedSpecs.length > 0) {
           const bindings = namedSpecs.map((s: any) => {
             if (s.imported.name === s.local.name) return s.local.name;
             return `${s.imported.name}: ${s.local.name}`;
           }).join(', ');
-          if (defaultSpec) {
-            // Mixed: import React, { useState } from 'react'
-            // Default already handled, just destructure from same require
-            parts.push(`const { ${bindings} } = require(${JSON.stringify(source)})`);
-          } else {
-            parts.push(`const { ${bindings} } = require(${JSON.stringify(source)})`);
-          }
+          parts.push(`const { ${bindings} } = ${CJS_REQUIRE_HELPER}(${JSON.stringify(source)})`);
         }
         replacements.push([node.start, node.end, parts.join(';\n')]);
       }
@@ -435,7 +431,7 @@ function transformEsmToCjsAst(code: string): string {
         const source = node.source.value;
         const parts: string[] = [];
         const tmpVar = `__reexport_${node.start}`;
-        parts.push(`const ${tmpVar} = require(${JSON.stringify(source)})`);
+        parts.push(`const ${tmpVar} = ${CJS_REQUIRE_HELPER}(${JSON.stringify(source)})`);
         for (const spec of node.specifiers) {
           parts.push(`exports.${spec.exported.name} = ${tmpVar}.${spec.local.name}`);
         }
@@ -451,7 +447,7 @@ function transformEsmToCjsAst(code: string): string {
     } else if (node.type === 'ExportAllDeclaration') {
       // export * from './helpers'
       const source = node.source.value;
-      replacements.push([node.start, node.end, `Object.assign(exports, require(${JSON.stringify(source)}))`]);
+      replacements.push([node.start, node.end, `Object.assign(exports, ${CJS_REQUIRE_HELPER}(${JSON.stringify(source)}))`]);
     }
   }
 
@@ -471,11 +467,11 @@ function transformEsmToCjsRegex(code: string): string {
 
   transformed = transformed.replace(
     /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g,
-    'const $1 = require("$2")',
+    `const $1 = ${CJS_REQUIRE_HELPER}("$2")`,
   );
   transformed = transformed.replace(
     /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g,
-    'const {$1} = require("$2")',
+    `const {$1} = ${CJS_REQUIRE_HELPER}("$2")`,
   );
   transformed = transformed.replace(
     /export\s+default\s+function\s+(\w+)/g,

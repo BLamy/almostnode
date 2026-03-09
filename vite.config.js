@@ -2,6 +2,24 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import wasm from 'vite-plugin-wasm';
 
+const monacoVscodePackages = [
+  '@codingame/monaco-vscode-api',
+  '@codingame/monaco-vscode-configuration-service-override',
+  '@codingame/monaco-vscode-css-default-extension',
+  '@codingame/monaco-vscode-extensions-service-override',
+  '@codingame/monaco-vscode-files-service-override',
+  '@codingame/monaco-vscode-html-default-extension',
+  '@codingame/monaco-vscode-javascript-default-extension',
+  '@codingame/monaco-vscode-json-default-extension',
+  '@codingame/monaco-vscode-keybindings-service-override',
+  '@codingame/monaco-vscode-languages-service-override',
+  '@codingame/monaco-vscode-search-service-override',
+  '@codingame/monaco-vscode-textmate-service-override',
+  '@codingame/monaco-vscode-theme-defaults-default-extension',
+  '@codingame/monaco-vscode-theme-service-override',
+  '@codingame/monaco-vscode-typescript-basics-default-extension',
+  '@codingame/monaco-vscode-workbench-service-override',
+];
 
 const isTest = process.env.VITEST === 'true';
 export default defineConfig({
@@ -51,16 +69,39 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: isTest ? {} : {
-      'node:zlib': resolve(__dirname, 'src/shims/zlib.ts'),
-      'zlib': resolve(__dirname, 'src/shims/zlib.ts'),
-      'buffer': 'buffer',
-      'process': 'process/browser',
-    },
+    alias: isTest ? [] : [
+      {
+        find: /^@codingame\/monaco-vscode-api\/vscode\/(.*)$/,
+        replacement: resolve(__dirname, 'node_modules/@codingame/monaco-vscode-api/vscode/src/$1'),
+      },
+      {
+        find: 'node:zlib',
+        replacement: resolve(__dirname, 'src/shims/zlib.ts'),
+      },
+      {
+        find: 'zlib',
+        replacement: resolve(__dirname, 'src/shims/zlib.ts'),
+      },
+      {
+        find: 'buffer',
+        replacement: 'buffer',
+      },
+      {
+        find: 'process',
+        replacement: 'process/browser',
+      },
+    ],
   },
   optimizeDeps: {
     include: isTest ? [] : ['buffer', 'process', 'pako'],
-    exclude: ['brotli-wasm', 'convex'],
+    // Keep the Monaco VS Code stack out of dep prebundling so every package shares
+    // the same singleton module instances, and relative assets like extension
+    // `resources/*` and `external/vscode-oniguruma/release/onig.wasm` stay addressable.
+    exclude: [
+      'brotli-wasm',
+      'convex',
+      ...monacoVscodePackages,
+    ],
     esbuildOptions: { target: 'esnext' },
   },
   worker: {
@@ -80,6 +121,7 @@ export default defineConfig({
         'examples/express-demo': resolve(__dirname, 'examples/express-demo.html'),
         'examples/npm-scripts-demo': resolve(__dirname, 'examples/npm-scripts-demo.html'),
         'examples/shadcn-demo': resolve(__dirname, 'examples/shadcn-demo.html'),
+        'examples/web-ide-demo': resolve(__dirname, 'examples/web-ide-demo.html'),
         'examples/vitest-demo': resolve(__dirname, 'examples/vitest-demo.html'),
         'examples/demo-convex-app': resolve(__dirname, 'examples/demo-convex-app.html'),
         'examples/demo-vercel-ai-sdk': resolve(__dirname, 'examples/demo-vercel-ai-sdk.html'),
@@ -96,5 +138,5 @@ export default defineConfig({
     },
     outDir: 'dist-site',
   },
-  assetsInclude: ['**/*.wasm'],
+  assetsInclude: ['**/*.wasm', '**/*.vsix', '**/*.zip', '**/*.sigzip'],
 });

@@ -81,6 +81,8 @@ export interface FsPromises {
   readFile(path: PathLike): Promise<Buffer>;
   readFile(path: PathLike, encoding: 'utf8' | 'utf-8'): Promise<string>;
   readFile(path: PathLike, options: { encoding: 'utf8' | 'utf-8' }): Promise<string>;
+  open(path: PathLike, flags?: string | number, mode?: number): Promise<FileHandle>;
+  appendFile(path: PathLike, data: string | Uint8Array): Promise<void>;
   writeFile(path: PathLike, data: string | Uint8Array): Promise<void>;
   stat(path: PathLike): Promise<Stats>;
   lstat(path: PathLike): Promise<Stats>;
@@ -97,11 +99,33 @@ export interface FsPromises {
   utimes(path: PathLike, atime: TimeLike, mtime: TimeLike): Promise<void>;
 }
 
+export interface FileHandle {
+  readonly fd: number;
+  stat(): Promise<Stats>;
+  read<T extends Buffer | Uint8Array>(
+    buffer: T,
+    offset?: number,
+    length?: number,
+    position?: number | null
+  ): Promise<{ bytesRead: number; buffer: T }>;
+  appendFile(data: string | Uint8Array): Promise<void>;
+  writeFile(data: string | Uint8Array): Promise<void>;
+  close(): Promise<void>;
+}
+
 export interface FsConstants {
   F_OK: number;
   R_OK: number;
   W_OK: number;
   X_OK: number;
+  O_RDONLY: number;
+  O_WRONLY: number;
+  O_RDWR: number;
+  O_CREAT: number;
+  O_EXCL: number;
+  O_TRUNC: number;
+  O_APPEND: number;
+  O_NOFOLLOW: number;
 }
 
 /**
@@ -215,11 +239,103 @@ interface FileDescriptor {
   path: string;
   position: number;
   flags: string;
+  writable: boolean;
+  append: boolean;
   content: Uint8Array;
+  vfs: VirtualFS;
 }
 
 const fdMap = new Map<number, FileDescriptor>();
 let nextFd = 3; // Start at 3 (0, 1, 2 are stdin, stdout, stderr)
+
+function getOpenFileDescriptor(fd: number): FileDescriptor {
+  const entry = fdMap.get(fd);
+  if (!entry) {
+    const err = new Error(`EBADF: bad file descriptor, write`) as Error & { code: string; errno: number };
+    err.code = 'EBADF';
+    err.errno = -9;
+    throw err;
+  }
+  return entry;
+}
+
+function persistFileDescriptor(entry: FileDescriptor): void {
+  if (entry.writable) {
+    entry.vfs.writeFileSync(entry.path, entry.content);
+  }
+}
+
+export function writeToFdSync(
+  fd: number,
+  buffer: Buffer | Uint8Array | string,
+  offset?: number,
+  length?: number,
+  position?: number | null
+): number {
+  const entry = getOpenFileDescriptor(fd);
+
+  let data: Uint8Array;
+  if (typeof buffer === 'string') {
+    data = _encoder.encode(buffer);
+    offset = 0;
+    length = data.length;
+  } else {
+    data = buffer;
+    offset = offset ?? 0;
+    length = length ?? (data.length - offset);
+  }
+
+  const writePos =
+    position !== null && position !== undefined
+      ? position
+      : entry.append
+        ? entry.content.length
+        : entry.position;
+  const endPos = writePos + length;
+
+  if (endPos > entry.content.length) {
+    const newContent = new Uint8Array(endPos);
+    newContent.set(entry.content);
+    entry.content = newContent;
+  }
+
+  for (let i = 0; i < length; i++) {
+    entry.content[writePos + i] = data[offset + i];
+  }
+
+  if (position === null || position === undefined) {
+    entry.position = endPos;
+  }
+
+  persistFileDescriptor(entry);
+  return length;
+}
+
+export function writeFileDescriptorSync(fd: number, data: string | Uint8Array): void {
+  const entry = getOpenFileDescriptor(fd);
+  const bytes = typeof data === 'string' ? _encoder.encode(data) : data;
+  entry.content = new Uint8Array(bytes);
+  entry.position = bytes.length;
+  persistFileDescriptor(entry);
+}
+
+export function truncateFdSync(fd: number, len: number = 0): void {
+  const entry = getOpenFileDescriptor(fd);
+
+  if (len < entry.content.length) {
+    entry.content = entry.content.slice(0, len);
+  } else if (len > entry.content.length) {
+    const newContent = new Uint8Array(len);
+    newContent.set(entry.content);
+    entry.content = newContent;
+  }
+
+  if (entry.position > len) {
+    entry.position = len;
+  }
+
+  persistFileDescriptor(entry);
+}
 
 // Call tracking for infinite loop detection
 const callTracker = {
@@ -253,14 +369,90 @@ function trackCall(method: 'statSync' | 'readdirSync', path: string): void {
   }
 }
 
+interface NormalizedOpenFlags {
+  flagStr: string;
+  readable: boolean;
+  writable: boolean;
+  create: boolean;
+  exclusive: boolean;
+  truncate: boolean;
+  append: boolean;
+}
+
+function normalizeStringOpenFlags(flags: string): NormalizedOpenFlags {
+  const normalizedFlags = flags.replace(/[bs]/g, '');
+  const append = normalizedFlags.startsWith('a');
+  const truncate = normalizedFlags.startsWith('w');
+  const readable = normalizedFlags.startsWith('r') || normalizedFlags.includes('+');
+  const writable = append || truncate || normalizedFlags.includes('+');
+  const create = append || truncate;
+  const exclusive = normalizedFlags.includes('x');
+
+  return {
+    flagStr: normalizedFlags,
+    readable,
+    writable,
+    create,
+    exclusive,
+    truncate,
+    append,
+  };
+}
+
+function normalizeNumericOpenFlags(flags: number, constants: FsConstants): NormalizedOpenFlags {
+  const accessMode = flags & 3;
+  const append = (flags & constants.O_APPEND) !== 0;
+  const truncate = (flags & constants.O_TRUNC) !== 0;
+  const create = (flags & constants.O_CREAT) !== 0;
+  const exclusive = (flags & constants.O_EXCL) !== 0;
+  const readable = accessMode === constants.O_RDONLY || accessMode === constants.O_RDWR;
+  const writable = accessMode === constants.O_WRONLY || accessMode === constants.O_RDWR;
+
+  let flagStr = 'r';
+  if (append) {
+    flagStr = readable ? 'a+' : 'a';
+  } else if (truncate) {
+    flagStr = readable ? 'w+' : 'w';
+  } else if (readable && writable) {
+    flagStr = 'r+';
+  } else if (writable) {
+    flagStr = 'w';
+  }
+
+  return {
+    flagStr,
+    readable,
+    writable,
+    create,
+    exclusive,
+    truncate,
+    append,
+  };
+}
+
+function normalizeOpenFlags(flags: string | number, constants: FsConstants): NormalizedOpenFlags {
+  return typeof flags === 'number'
+    ? normalizeNumericOpenFlags(flags, constants)
+    : normalizeStringOpenFlags(flags);
+}
+
 export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
   // Helper to resolve paths with cwd
   const resolvePath = (pathLike: unknown) => toPath(pathLike, getCwd);
+  let shim!: FsShim;
   const constants: FsConstants = {
     F_OK: 0,
     R_OK: 4,
     W_OK: 2,
     X_OK: 1,
+    O_RDONLY: 0,
+    O_WRONLY: 1,
+    O_RDWR: 2,
+    O_CREAT: 64,
+    O_EXCL: 128,
+    O_TRUNC: 512,
+    O_APPEND: 1024,
+    O_NOFOLLOW: 131072,
   };
 
   const promises: FsPromises = {
@@ -281,6 +473,64 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
             resolve(createBuffer(vfs.readFileSync(path)));
           }
         } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    open(pathLike: unknown, flags: string | number = 'r', mode?: number): Promise<FileHandle> {
+      return new Promise((resolve, reject) => {
+        try {
+          const fd = shim.openSync(resolvePath(pathLike), flags, mode);
+          resolve({
+            get fd() {
+              return fd;
+            },
+            async stat(): Promise<Stats> {
+              return shim.fstatSync(fd);
+            },
+            async read<T extends Buffer | Uint8Array>(
+              buffer: T,
+              offset: number = 0,
+              length: number = buffer.byteLength - offset,
+              position: number | null = null
+            ): Promise<{ bytesRead: number; buffer: T }> {
+              const bytesRead = shim.readSync(fd, buffer, offset, length, position);
+              return { bytesRead, buffer };
+            },
+            async appendFile(data: string | Uint8Array): Promise<void> {
+              const entry = fdMap.get(fd);
+              const position = entry?.append ? null : entry?.content.length ?? null;
+              shim.writeSync(fd, data, undefined, undefined, position);
+            },
+            async writeFile(data: string | Uint8Array): Promise<void> {
+              shim.ftruncateSync(fd, 0);
+              shim.writeSync(fd, data, undefined, undefined, 0);
+            },
+            async close(): Promise<void> {
+              shim.closeSync(fd);
+            },
+          });
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    appendFile(pathLike: unknown, data: string | Uint8Array): Promise<void> {
+      return new Promise((resolve, reject) => {
+        let fd: number | undefined;
+        try {
+          fd = shim.openSync(resolvePath(pathLike), 'a');
+          shim.writeSync(fd, data);
+          shim.closeSync(fd);
+          resolve();
+        } catch (err) {
+          if (fd !== undefined) {
+            try {
+              shim.closeSync(fd);
+            } catch {
+              // Ignore close failures while surfacing the original append error.
+            }
+          }
           reject(err);
         }
       });
@@ -486,7 +736,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     },
   } as FsPromises;
 
-  return {
+  shim = {
     readFileSync(
       pathLike: unknown,
       encodingOrOptions?: string | { encoding?: string | null }
@@ -519,11 +769,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
           err.errno = -9;
           throw err;
         }
-        // Convert string to Uint8Array if needed
-        const bytes = typeof data === 'string' ? _encoder.encode(data) : data;
-        // Replace entire content
-        entry.content = new Uint8Array(bytes);
-        entry.position = bytes.length;
+        writeFileDescriptorSync(fd, data);
         return;
       }
       const path = resolvePath(pathLike);
@@ -604,14 +850,15 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
     openSync(pathLike: unknown, flags: string | number, _mode?: number): number {
       const path = resolvePath(pathLike);
-      const flagStr = typeof flags === 'number' ? 'r' : flags;
+      const normalizedFlags = normalizeOpenFlags(flags, constants);
 
-      // Check if file exists for read modes
-      const exists = vfs.existsSync(path);
-      const isWriteMode = flagStr.includes('w') || flagStr.includes('a');
-      const isReadMode = flagStr.includes('r') && !flagStr.includes('+');
+      let exists = vfs.existsSync(path);
 
-      if (!exists && isReadMode) {
+      if (exists && normalizedFlags.create && normalizedFlags.exclusive) {
+        throw createNodeError('EEXIST', 'open', path);
+      }
+
+      if (!exists && !normalizedFlags.create) {
         const err = new Error(`ENOENT: no such file or directory, open '${path}'`) as Error & { code: string; errno: number; path: string };
         err.code = 'ENOENT';
         err.errno = -2;
@@ -619,27 +866,33 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         throw err;
       }
 
-      // Get or create content
-      let content: Uint8Array;
-      if (exists && !flagStr.includes('w')) {
-        content = vfs.readFileSync(path);
-      } else {
-        content = new Uint8Array(0);
-        if (isWriteMode) {
-          // Ensure parent directory exists
-          const parentPath = path.substring(0, path.lastIndexOf('/')) || '/';
-          if (!vfs.existsSync(parentPath)) {
-            vfs.mkdirSync(parentPath, { recursive: true });
-          }
+      if ((normalizedFlags.writable || normalizedFlags.create) && !exists) {
+        const parentPath = path.substring(0, path.lastIndexOf('/')) || '/';
+        if (!vfs.existsSync(parentPath)) {
+          vfs.mkdirSync(parentPath, { recursive: true });
         }
+      }
+
+      if (!exists && normalizedFlags.create) {
+        vfs.writeFileSync(path, new Uint8Array(0));
+        exists = true;
+      }
+
+      let content = exists ? vfs.readFileSync(path) : new Uint8Array(0);
+      if (normalizedFlags.truncate) {
+        content = new Uint8Array(0);
+        vfs.writeFileSync(path, content);
       }
 
       const fd = nextFd++;
       fdMap.set(fd, {
         path,
-        position: flagStr.includes('a') ? content.length : 0,
-        flags: flagStr,
+        position: normalizedFlags.append ? content.length : 0,
+        flags: normalizedFlags.flagStr,
+        writable: normalizedFlags.writable,
+        append: normalizedFlags.append,
         content: new Uint8Array(content),
+        vfs,
       });
       return fd;
     },
@@ -650,9 +903,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         return; // Silently ignore
       }
       // Write back content if it was opened for writing
-      if (entry.flags.includes('w') || entry.flags.includes('a') || entry.flags.includes('+')) {
-        vfs.writeFileSync(entry.path, entry.content);
-      }
+      persistFileDescriptor(entry);
       fdMap.delete(fd);
     },
 
@@ -684,64 +935,11 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     },
 
     writeSync(fd: number, buffer: Buffer | Uint8Array | string, offset?: number, length?: number, position?: number | null): number {
-      const entry = fdMap.get(fd);
-      if (!entry) {
-        const err = new Error(`EBADF: bad file descriptor, write`) as Error & { code: string; errno: number };
-        err.code = 'EBADF';
-        err.errno = -9;
-        throw err;
-      }
-
-      // Handle string input
-      let data: Uint8Array;
-      if (typeof buffer === 'string') {
-        data = _encoder.encode(buffer);
-        offset = 0;
-        length = data.length;
-      } else {
-        data = buffer;
-        offset = offset ?? 0;
-        length = length ?? (data.length - offset);
-      }
-
-      const writePos = position !== null && position !== undefined ? position : entry.position;
-      const endPos = writePos + length;
-
-      // Expand content if needed
-      if (endPos > entry.content.length) {
-        const newContent = new Uint8Array(endPos);
-        newContent.set(entry.content);
-        entry.content = newContent;
-      }
-
-      // Write data
-      for (let i = 0; i < length; i++) {
-        entry.content[writePos + i] = data[offset + i];
-      }
-
-      if (position === null || position === undefined) {
-        entry.position = endPos;
-      }
-
-      return length;
+      return writeToFdSync(fd, buffer, offset, length, position);
     },
 
     ftruncateSync(fd: number, len: number = 0): void {
-      const entry = fdMap.get(fd);
-      if (!entry) {
-        const err = new Error(`EBADF: bad file descriptor, ftruncate`) as Error & { code: string; errno: number };
-        err.code = 'EBADF';
-        err.errno = -9;
-        throw err;
-      }
-
-      if (len < entry.content.length) {
-        entry.content = entry.content.slice(0, len);
-      } else if (len > entry.content.length) {
-        const newContent = new Uint8Array(len);
-        newContent.set(entry.content);
-        entry.content = newContent;
-      }
+      truncateFdSync(fd, len);
     },
 
     fsyncSync(_fd: number): void {
@@ -1071,6 +1269,8 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     promises,
     constants,
   } as FsShim;
+
+  return shim;
 }
 
 export default createFsShim;

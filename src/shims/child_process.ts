@@ -11,6 +11,7 @@ if (typeof globalThis.process === 'undefined') {
       USER: 'user',
       PATH: '/usr/local/bin:/usr/bin:/bin',
       NODE_ENV: 'development',
+      SHELL: '/bin/bash',
     },
     cwd: () => '/',
     arch: 'x64',
@@ -25,6 +26,7 @@ if (typeof globalThis.process === 'undefined') {
 import { Bash, defineCommand } from 'just-bash';
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import { EventEmitter } from './events';
+import { writeToFdSync } from './fs';
 import { Readable, Writable, Buffer } from './stream';
 import type { VirtualFS } from '../virtual-fs';
 import { VirtualFSAdapter } from './vfs-adapter';
@@ -32,19 +34,12 @@ import { Runtime } from '../runtime';
 import type { PackageJson } from '../types/package-json';
 import * as path from './path';
 import { extractTarball } from '../npm/tarball';
-
-// Singleton bash instance - uses VFS adapter for two-way file sync
-let bashInstance: Bash | null = null;
-let vfsAdapter: VirtualFSAdapter | null = null;
-let currentVfs: VirtualFS | null = null;
-
-// Track active forked child processes so the node command can detect when children exit.
-// When the last child exits, the node command uses a shorter idle timeout.
-let _activeForkedChildren = 0;
-let _onForkedChildExit: (() => void) | null = null;
-// Track active shell subprocesses started via exec/spawn.
-// This keeps parent node CLIs alive while nested commands (e.g. npm install) run.
-let _activeShellChildren = 0;
+import {
+  DEFAULT_POSIX_SHELL,
+  SYNTHETIC_SHELL_COMMAND_NAMES,
+  getSyntheticShellSpec,
+  getSyntheticShellVersion,
+} from './synthetic-shells';
 
 type ManagedFrameworkDevServer = {
   key: string;
@@ -53,9 +48,68 @@ type ManagedFrameworkDevServer = {
   stop: () => void;
 };
 
-// Track framework dev servers started from shell commands so we can replace
-// and tear them down deterministically across command reruns/containers.
-const _frameworkDevServers = new Map<string, ManagedFrameworkDevServer>();
+const CONTROLLER_ID_ENV_KEY = '__ALMOSTNODE_CONTROLLER_ID';
+const EXECUTION_ID_ENV_KEY = '__ALMOSTNODE_EXECUTION_ID';
+const INTERNAL_ENV_KEYS = [CONTROLLER_ID_ENV_KEY, EXECUTION_ID_ENV_KEY] as const;
+
+const DEFAULT_SHELL_ENV: Record<string, string> = {
+  HOME: '/home/user',
+  USER: 'user',
+  PATH: '/usr/local/bin:/usr/bin:/bin:/node_modules/.bin',
+  NODE_ENV: 'development',
+  SHELL: DEFAULT_POSIX_SHELL,
+};
+
+interface ActiveProcessStdin {
+  emit: (event: string, ...args: unknown[]) => void;
+  listenerCount?: (event: string) => number;
+}
+
+export interface ChildProcessExecutionContext {
+  id: string;
+  controllerId: string;
+  onStdout: ((data: string) => void) | null;
+  onStderr: ((data: string) => void) | null;
+  signal: AbortSignal | null;
+  activeProcessStdin: ActiveProcessStdin | null;
+  activeForkedChildren: number;
+  onForkedChildExit: (() => void) | null;
+  activeShellChildren: number;
+  /** Set to true by command handlers (e.g. node) that stream their own output via onStdout/onStderr */
+  outputStreamed: boolean;
+}
+
+export interface ChildProcessController {
+  id: string;
+  vfs: VirtualFS;
+  vfsAdapter: VirtualFSAdapter;
+  bashInstance: Bash;
+  frameworkDevServers: Map<string, ManagedFrameworkDevServer>;
+  executions: Map<string, ChildProcessExecutionContext>;
+  createExecution: (opts?: {
+    onStdout?: (data: string) => void;
+    onStderr?: (data: string) => void;
+    signal?: AbortSignal;
+  }) => ChildProcessExecutionContext;
+  destroyExecution: (executionId: string | null | undefined) => void;
+  runCommand: (
+    command: string,
+    options?: { cwd?: string; env?: Record<string, string> },
+    executionId?: string | null
+  ) => Promise<JustBashExecResult>;
+  sendInput: (executionId: string | null | undefined, data: string) => void;
+}
+
+export interface ChildProcessModuleBinding {
+  controller?: ChildProcessController | null;
+  getDefaultCwd?: () => string;
+  getDefaultEnv?: () => Record<string, string>;
+  getExecutionId?: () => string | null;
+}
+
+const controllersByVfs = new WeakMap<VirtualFS, ChildProcessController>();
+const controllersById = new Map<string, ChildProcessController>();
+let defaultChildProcessController: ChildProcessController | null = null;
 
 // Patch Object.defineProperty globally to force configurable: true on globalThis properties.
 // In real Node.js, each process has its own globalThis. In our browser environment,
@@ -69,11 +123,17 @@ Object.defineProperty = function(target: object, key: PropertyKey, descriptor: P
   return _realDefineProperty.call(Object, target, key, descriptor) as object;
 } as typeof Object.defineProperty;
 
-// Module-level streaming callbacks for long-running commands (e.g. vitest watch)
-// Set by container.run() before calling exec, cleared after
-let _streamStdout: ((data: string) => void) | null = null;
-let _streamStderr: ((data: string) => void) | null = null;
-let _abortSignal: AbortSignal | null = null;
+// Legacy compatibility hooks used by existing tests and callers that still rely
+// on the singleton-style "next command" streaming configuration.
+let legacyStreamingCallbacks: {
+  onStdout: ((data: string) => void) | null;
+  onStderr: ((data: string) => void) | null;
+  signal: AbortSignal | null;
+} = {
+  onStdout: null,
+  onStderr: null,
+  signal: null,
+};
 
 /**
  * Set streaming callbacks for the next command execution.
@@ -84,18 +144,163 @@ export function setStreamingCallbacks(opts: {
   onStderr?: (data: string) => void;
   signal?: AbortSignal;
 }): void {
-  _streamStdout = opts.onStdout || null;
-  _streamStderr = opts.onStderr || null;
-  _abortSignal = opts.signal || null;
+  legacyStreamingCallbacks = {
+    onStdout: opts.onStdout || null,
+    onStderr: opts.onStderr || null,
+    signal: opts.signal || null,
+  };
 }
 
 /**
  * Clear streaming callbacks after command execution.
  */
 export function clearStreamingCallbacks(): void {
-  _streamStdout = null;
-  _streamStderr = null;
-  _abortSignal = null;
+  legacyStreamingCallbacks = {
+    onStdout: null,
+    onStderr: null,
+    signal: null,
+  };
+}
+
+function createExecutionContext(
+  controller: ChildProcessController,
+  opts?: {
+    onStdout?: (data: string) => void;
+    onStderr?: (data: string) => void;
+    signal?: AbortSignal;
+  }
+): ChildProcessExecutionContext {
+  const execution: ChildProcessExecutionContext = {
+    id: crypto.randomUUID(),
+    controllerId: controller.id,
+    onStdout: opts?.onStdout || null,
+    onStderr: opts?.onStderr || null,
+    signal: opts?.signal || null,
+    activeProcessStdin: null,
+    activeForkedChildren: 0,
+    onForkedChildExit: null,
+    activeShellChildren: 0,
+    outputStreamed: false,
+  };
+  controller.executions.set(execution.id, execution);
+  return execution;
+}
+
+function destroyExecutionContext(
+  controller: ChildProcessController,
+  executionId: string | null | undefined
+): void {
+  if (!executionId) return;
+  controller.executions.delete(executionId);
+}
+
+function getControllerById(controllerId: string | undefined | null): ChildProcessController | null {
+  if (!controllerId) return null;
+  return controllersById.get(controllerId) ?? null;
+}
+
+function getActiveController(binding?: ChildProcessModuleBinding, env?: Record<string, string>): ChildProcessController | null {
+  return binding?.controller
+    ?? getControllerById(env?.[CONTROLLER_ID_ENV_KEY])
+    ?? getControllerById(binding?.getDefaultEnv?.()?.[CONTROLLER_ID_ENV_KEY])
+    ?? defaultChildProcessController;
+}
+
+function getExecutionContextFromEnv(
+  controller: ChildProcessController,
+  env?: Record<string, string>
+): ChildProcessExecutionContext | null {
+  const executionId = env?.[EXECUTION_ID_ENV_KEY];
+  if (!executionId) return null;
+  return controller.executions.get(executionId) ?? null;
+}
+
+function getActiveExecutionContext(
+  controller: ChildProcessController,
+  binding?: ChildProcessModuleBinding,
+  env?: Record<string, string>
+): ChildProcessExecutionContext | null {
+  return getExecutionContextFromEnv(controller, env)
+    ?? getExecutionContextFromEnv(controller, binding?.getDefaultEnv?.())
+    ?? (binding?.getExecutionId ? controller.executions.get(binding.getExecutionId() || '') ?? null : null);
+}
+
+function applyLegacyStreamingDefaults(
+  controller: ChildProcessController,
+  execution: ChildProcessExecutionContext | null
+): ChildProcessExecutionContext {
+  if (execution) return execution;
+  return createExecutionContext(controller, {
+    onStdout: legacyStreamingCallbacks.onStdout || undefined,
+    onStderr: legacyStreamingCallbacks.onStderr || undefined,
+    signal: legacyStreamingCallbacks.signal || undefined,
+  });
+}
+
+function withExecutionEnv(
+  controller: ChildProcessController,
+  execution: ChildProcessExecutionContext,
+  env: Record<string, string>
+): Record<string, string> {
+  return {
+    ...env,
+    [CONTROLLER_ID_ENV_KEY]: controller.id,
+    [EXECUTION_ID_ENV_KEY]: execution.id,
+  };
+}
+
+export function stripInternalChildProcessEnv(env: Record<string, string>): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if ((INTERNAL_ENV_KEYS as readonly string[]).includes(key)) continue;
+    next[key] = value;
+  }
+  return next;
+}
+
+async function runCommandInController(
+  controller: ChildProcessController,
+  command: string,
+  options?: { cwd?: string; env?: Record<string, string> },
+  executionId?: string | null
+): Promise<JustBashExecResult> {
+  const existingExecution = executionId ? controller.executions.get(executionId) ?? null : null;
+  const execution = existingExecution ?? createExecutionContext(controller, {
+    onStdout: legacyStreamingCallbacks.onStdout || undefined,
+    onStderr: legacyStreamingCallbacks.onStderr || undefined,
+    signal: legacyStreamingCallbacks.signal || undefined,
+  });
+  const ownsExecution = !existingExecution;
+  const resolvedCwd = options?.cwd ?? '/';
+  const resolvedEnv = addNodeModuleBinPaths(options?.env ? { ...options.env } : {}, resolvedCwd);
+  const envWithContext = withExecutionEnv(controller, execution, resolvedEnv);
+
+  execution.activeShellChildren++;
+  try {
+    const result = await (
+      maybeRunSyntheticShellCommand(controller, command, resolvedCwd, envWithContext)
+      ?? controller.bashInstance.exec(command, {
+        cwd: resolvedCwd,
+        env: envWithContext,
+      })
+    );
+
+    // Stream the result to callbacks for commands that don't handle their own
+    // streaming (bash built-ins like ls, cat, echo, pwd, mkdir, etc.).
+    // Custom command handlers (node, next, vite, npm install) already call
+    // execution.onStdout/onStderr directly and set outputStreamed = true.
+    if (!execution.outputStreamed) {
+      if (result.stdout && execution.onStdout) execution.onStdout(result.stdout);
+      if (result.stderr && execution.onStderr) execution.onStderr(result.stderr);
+    }
+
+    return result;
+  } finally {
+    execution.activeShellChildren = Math.max(0, execution.activeShellChildren - 1);
+    if (ownsExecution) {
+      destroyExecutionContext(controller, execution.id);
+    }
+  }
 }
 
 function shellQuote(value: string): string {
@@ -113,28 +318,28 @@ function resolveFromCwd(cwd: string, candidate: string): string {
   return path.normalize(path.join(cwd, candidate));
 }
 
-function stopManagedFrameworkServer(key: string): void {
-  const existing = _frameworkDevServers.get(key);
+function stopManagedFrameworkServer(controller: ChildProcessController, key: string): void {
+  const existing = controller.frameworkDevServers.get(key);
   if (!existing) return;
   try {
     existing.stop();
   } catch {
     // Ignore teardown errors during replacement.
   } finally {
-    _frameworkDevServers.delete(key);
+    controller.frameworkDevServers.delete(key);
   }
 }
 
-function stopAllManagedFrameworkServers(): void {
-  for (const key of _frameworkDevServers.keys()) {
-    stopManagedFrameworkServer(key);
+function stopAllManagedFrameworkServers(controller: ChildProcessController): void {
+  for (const key of controller.frameworkDevServers.keys()) {
+    stopManagedFrameworkServer(controller, key);
   }
 }
 
-function stopManagedFrameworkServersOnPort(port: number): void {
-  for (const [key, server] of _frameworkDevServers.entries()) {
+function stopManagedFrameworkServersOnPort(controller: ChildProcessController, port: number): void {
+  for (const [key, server] of controller.frameworkDevServers.entries()) {
     if (server.port === port) {
-      stopManagedFrameworkServer(key);
+      stopManagedFrameworkServer(controller, key);
     }
   }
 }
@@ -216,35 +421,58 @@ function getDefaultProcessEnv(): Record<string, string> {
   return env;
 }
 
-function emitStreamData(output: unknown, stream: 'stdout' | 'stderr') {
+function mergeWithDefaultProcessEnv(env?: Record<string, string>): Record<string, string> {
+  return {
+    ...getDefaultProcessEnv(),
+    ...(env || {}),
+  };
+}
+
+function addNodeModuleBinPaths(env: Record<string, string>, cwd: string): Record<string, string> {
+  const pathKey = Object.prototype.hasOwnProperty.call(env, 'PATH')
+    ? 'PATH'
+    : (Object.prototype.hasOwnProperty.call(env, 'Path') ? 'Path' : 'PATH');
+  const current = env[pathKey] || '';
+  const segments = current.split(':').filter(Boolean);
+  const normalizedCwd = normalizeCommandCwd(cwd || '/');
+  const candidateBins = [
+    path.normalize(path.join(normalizedCwd, 'node_modules/.bin')),
+    '/node_modules/.bin',
+  ];
+
+  const nextSegments = [...segments];
+  for (let i = candidateBins.length - 1; i >= 0; i--) {
+    const candidate = candidateBins[i];
+    if (!nextSegments.includes(candidate)) {
+      nextSegments.unshift(candidate);
+    }
+  }
+
+  return {
+    ...env,
+    [pathKey]: nextSegments.join(':'),
+  };
+}
+
+function emitStreamData(
+  execution: ChildProcessExecutionContext | null,
+  output: unknown,
+  stream: 'stdout' | 'stderr'
+) {
   if (typeof output !== 'string') return;
+  if (execution) execution.outputStreamed = true;
   if (stream === 'stdout') {
-    _streamStdout?.(output);
+    execution?.onStdout?.(output);
   } else {
-    _streamStderr?.(output);
+    execution?.onStderr?.(output);
   }
 }
 
-function emitBashLog(message: string, data: unknown) {
-  if (!data || typeof data !== 'object') return;
-  const payload = data as { output?: unknown };
-  if (payload.output === undefined) return;
-
-  // Node command output is already streamed directly from its runtime.
-  // Avoid double-emitting by skipping logs while stdin is actively wired.
-  if (_activeProcessStdin) return;
-
-  if (message === 'stdout' || message === 'stderr') {
-    emitStreamData(payload.output, message);
-  }
+function emitBashLog(_message: string, _data: unknown) {
+  // just-bash log callbacks do not include per-exec metadata, so streaming
+  // built-in shell output cannot be safely attributed across concurrent
+  // terminal sessions. Session-aware custom commands stream directly.
 }
-
-// Reference to the currently running node command's process stdin.
-// Used to send stdin input to long-running commands (e.g. vitest watch mode).
-let _activeProcessStdin: {
-  emit: (event: string, ...args: unknown[]) => void;
-  listenerCount?: (event: string) => number;
-} | null = null;
 
 interface KeypressMeta {
   sequence: string;
@@ -344,109 +572,123 @@ function decodeKeypressEvents(data: string): Array<{ ch: string | undefined; key
  * Emits both 'data' and 'keypress' events (vitest uses readline keypress events).
  */
 export function sendStdin(data: string): void {
-  if (_activeProcessStdin) {
-    const hasKeypressListeners = typeof _activeProcessStdin.listenerCount === 'function'
-      && _activeProcessStdin.listenerCount('keypress') > 0;
-    const decoded = decodeKeypressEvents(data);
+  const controller = defaultChildProcessController;
+  if (!controller) return;
+  const interactiveExecutions = Array.from(controller.executions.values()).filter((execution) => execution.activeProcessStdin);
+  const latestExecution = interactiveExecutions[interactiveExecutions.length - 1] || null;
+  if (!latestExecution?.activeProcessStdin) return;
+  pushInputToExecutionStdin(latestExecution.activeProcessStdin, data);
+}
 
-    const isControlSequenceOnly = decoded.length > 0 && decoded.every(({ ch, key }) => {
-      if (ch !== undefined) return false;
-      return key.name === 'up'
-        || key.name === 'down'
-        || key.name === 'left'
-        || key.name === 'right'
-        || key.name === 'escape';
-    });
+function pushInputToExecutionStdin(target: ActiveProcessStdin, data: string): void {
+  const normalized = data
+    .replace(/\u001b\[200~/g, '')
+    .replace(/\u001b\[201~/g, '');
+  if (!normalized) return;
 
-    // Avoid double-handling arrow/escape sequences in prompt UIs while still
-    // delivering normal text/enter input via 'data' (needed for text prompts).
-    if (!(hasKeypressListeners && isControlSequenceOnly)) {
-      _activeProcessStdin.emit('data', data);
-    }
+  (target as any).__almostnodePushInput?.(normalized);
+  const hasKeypressListeners = typeof target.listenerCount === 'function'
+    && target.listenerCount('keypress') > 0;
+  const decoded = decodeKeypressEvents(normalized);
 
-    for (const { ch, key } of decoded) {
-      _activeProcessStdin.emit('keypress', ch, key);
-    }
+  const isControlSequenceOnly = decoded.length > 0 && decoded.every(({ ch, key }) => {
+    if (ch !== undefined) return false;
+    return key.name === 'up'
+      || key.name === 'down'
+      || key.name === 'left'
+      || key.name === 'right'
+      || key.name === 'escape';
+  });
+
+  if (!(hasKeypressListeners && isControlSequenceOnly)) {
+    target.emit('data', normalized);
+  }
+
+  for (const { ch, key } of decoded) {
+    target.emit('keypress', ch, key);
   }
 }
 
 /**
  * Initialize the child_process shim with a VirtualFS instance
- * Creates a single Bash instance with VirtualFSAdapter for efficient file access
+ * Creates or reuses a controller-scoped Bash instance with VirtualFSAdapter.
  */
-export function initChildProcess(vfs: VirtualFS): void {
-  if (currentVfs && currentVfs !== vfs) {
-    stopAllManagedFrameworkServers();
+export function initChildProcess(vfs: VirtualFS): ChildProcessController {
+  const existing = controllersByVfs.get(vfs);
+  if (existing) {
+    defaultChildProcessController = existing;
+    return existing;
   }
-  currentVfs = vfs;
-  vfsAdapter = new VirtualFSAdapter(vfs);
 
-  // Create custom 'node' command that runs JS files using the Runtime
+  const controllerId = crypto.randomUUID();
+  const vfsAdapter = new VirtualFSAdapter(vfs);
+  let controller: ChildProcessController;
+
   const nodeCommand = defineCommand('node', async (args, ctx) => {
-    if (!currentVfs) {
-      return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-    }
+    const execution = getExecutionContextFromEnv(controller, ctx.env) ?? createExecutionContext(controller);
+    const ownsExecution = !getExecutionContextFromEnv(controller, ctx.env);
 
     const scriptPath = args[0];
     if (!scriptPath) {
+      if (ownsExecution) destroyExecutionContext(controller, execution.id);
       return { stdout: '', stderr: 'Usage: node <script.js> [args...]\n', exitCode: 1 };
     }
 
-    // Resolve the script path
     const resolvedPath = scriptPath.startsWith('/')
       ? scriptPath
       : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, '/');
     const isNodeModulesCli = resolvedPath.includes('/node_modules/');
+    const isOneShotNodeModulesCli = isNodeModulesCli && isLikelyOneShotCliInvocation(args.slice(1));
+    const isLongIdleNodeModulesCli =
+      isNodeModulesCli &&
+      !isOneShotNodeModulesCli &&
+      (ctx.env?.ALMOSTNODE_LONG_NODE_IDLE === '1' || ctx.env?.ALMOSTNODE_LONG_NODE_IDLE === 'true');
 
-    if (!currentVfs.existsSync(resolvedPath)) {
+    if (!controller.vfs.existsSync(resolvedPath)) {
+      if (ownsExecution) destroyExecutionContext(controller, execution.id);
       return { stdout: '', stderr: `Error: Cannot find module '${resolvedPath}'\n`, exitCode: 1 };
     }
 
     let stdout = '';
     let stderr = '';
     let lastActivityAt = Date.now();
-    const initialShellChildren = _activeShellChildren;
+    const initialShellChildren = execution.activeShellChildren;
 
-    // Track whether process.exit() was called
     let exitCalled = false;
     let exitCode = 0;
     let syncExecution = true;
     let exitResolve: ((code: number) => void) | null = null;
     const exitPromise = new Promise<number>((resolve) => { exitResolve = resolve; });
 
-    // Helper to append to stdout, also streaming if configured
+    execution.outputStreamed = true;
+
     const appendStdout = (data: string) => {
       stdout += data;
       lastActivityAt = Date.now();
-      if (_streamStdout) _streamStdout(data);
+      execution.onStdout?.(data);
     };
     const appendStderr = (data: string) => {
       stderr += data;
       lastActivityAt = Date.now();
-      if (_streamStderr) _streamStderr(data);
+      execution.onStderr?.(data);
     };
 
-    // Create a runtime with output capture for both console.log AND process.stdout.write
-    const runtime = new Runtime(currentVfs, {
+    const runtime = new Runtime(controller.vfs, {
       cwd: ctx.cwd,
       env: ctx.env,
+      childProcessController: controller,
       onConsole: (method, consoleArgs) => {
-        const msg = consoleArgs.map(a => String(a)).join(' ') + '\n';
+        const msg = consoleArgs.map((arg) => String(arg)).join(' ') + '\n';
         if (method === 'error') {
           appendStderr(msg);
         } else {
           appendStdout(msg);
         }
       },
-      onStdout: (data: string) => {
-        appendStdout(data);
-      },
-      onStderr: (data: string) => {
-        appendStderr(data);
-      },
+      onStdout: appendStdout,
+      onStderr: appendStderr,
     });
 
-    // Override process.exit to resolve the completion promise
     const proc = runtime.getProcess();
     proc.exit = ((code = 0) => {
       if (!exitCalled) {
@@ -455,21 +697,13 @@ export function initChildProcess(vfs: VirtualFS): void {
         proc.emit('exit', code);
         exitResolve!(code);
       }
-      // In sync context, throw to stop execution (like real process.exit)
-      // In async context, return silently to avoid unhandled rejections
       if (syncExecution) {
         throw new Error(`Process exited with code ${code}`);
       }
     }) as (code?: number) => never;
-
-    // Set up process.argv for the script
     proc.argv = ['node', resolvedPath, ...args.slice(1)];
 
-    // For interactive commands, report as TTY and track stdin so external
-    // code can forward input (e.g. Ctrl+C in demo terminals).
-    // Enable TTY whenever output is being streamed, not only when an abort
-    // signal is present. Some TUIs stream without passing a signal.
-    const shouldEnableTty = !!_abortSignal || !!_streamStdout || !!_streamStderr;
+    const shouldEnableTty = !!execution.signal || !!execution.onStdout || !!execution.onStderr;
     let stdinRawMode = false;
     if (shouldEnableTty) {
       proc.stdout.isTTY = true;
@@ -479,21 +713,18 @@ export function initChildProcess(vfs: VirtualFS): void {
         stdinRawMode = !!mode;
         return proc.stdin;
       };
-      _activeProcessStdin = proc.stdin;
+      execution.activeProcessStdin = proc.stdin;
     }
 
-    // Reset per-run yoga preload state.
     (globalThis as any).__almostnodeYogaLayout = undefined;
     (globalThis as any).__almostnodeYogaLayoutError = undefined;
 
-    // Preload yoga-layout when available so require('yoga-layout') can bypass
-    // the package's top-level-await ESM entry from CJS execution.
     const preloadYogaLayout = async (): Promise<void> => {
       const candidates = [
         `${ctx.cwd}/node_modules/yoga-layout/dist/src/load.js`.replace(/\/+/g, '/'),
         '/node_modules/yoga-layout/dist/src/load.js',
       ];
-      const yogaLoadPath = candidates.find((p) => currentVfs!.existsSync(p));
+      const yogaLoadPath = candidates.find((candidate) => controller.vfs.existsSync(candidate));
       if (!yogaLoadPath) return;
 
       const preloadCode = `
@@ -518,36 +749,25 @@ module.exports = (async () => {
 
     try {
       await preloadYogaLayout();
-      // Run the script (synchronous part)
       runtime.runFile(resolvedPath);
     } catch (error) {
-      // process.exit() throws to stop sync execution — this is expected
       if (error instanceof Error && error.message.startsWith('Process exited with code')) {
         return { stdout, stderr, exitCode };
       }
-      // Real error
       const errorMsg = error instanceof Error
         ? `${error.message}\n${error.stack || ''}`
         : String(error);
       return { stdout, stderr: stderr + `Error: ${errorMsg}\n`, exitCode: 1 };
     } finally {
-      // After runFile returns, switch to async mode (no more throwing from process.exit)
       syncExecution = false;
     }
 
-    // If process.exit was called synchronously (but didn't throw for some reason), return
     if (exitCalled) {
       return { stdout, stderr, exitCode };
     }
 
-    // Script returned without calling process.exit().
-    // Wait for process.exit() or until output stabilizes.
-    // Also catch unhandled rejections from async code to surface errors.
-
-    // Catch unhandled rejections from the script's async code
     const rejectionHandler = (event: PromiseRejectionEvent) => {
       const reason = event.reason;
-      // Ignore process.exit throws (they're expected)
       if (reason instanceof Error && reason.message.startsWith('Process exited with code')) {
         event.preventDefault();
         return;
@@ -556,6 +776,7 @@ module.exports = (async () => {
         ? `Unhandled rejection: ${reason.message}\n${reason.stack || ''}\n`
         : `Unhandled rejection: ${String(reason)}\n`;
       appendStderr(msg);
+      event.preventDefault();
     };
     const hasGlobalRejectionEvents =
       typeof (globalThis as any).addEventListener === 'function' &&
@@ -567,62 +788,54 @@ module.exports = (async () => {
     const vfsActivityHandler = () => {
       lastActivityAt = Date.now();
     };
-    currentVfs?.on('change', vfsActivityHandler);
-    currentVfs?.on('delete', vfsActivityHandler);
+    controller.vfs.on('change', vfsActivityHandler);
+    controller.vfs.on('delete', vfsActivityHandler);
 
-    // Listen for forked child exits to shorten the idle timeout.
-    // Many CLI tools (vitest, jest, etc.) fork workers and exit shortly after
-    // all children complete. We use a shorter timeout once children are done.
     let childrenExited = false;
     let hadActiveSubprocess = false;
-    const prevChildExitHandler = _onForkedChildExit;
-    _onForkedChildExit = () => {
-      if (_activeForkedChildren <= 0) childrenExited = true;
+    const prevChildExitHandler = execution.onForkedChildExit;
+    execution.onForkedChildExit = () => {
+      if (execution.activeForkedChildren <= 0) childrenExited = true;
       prevChildExitHandler?.();
     };
 
     try {
-      // Poll until process.exit is called, output stabilizes, or we time out.
-      // Keep the process alive indefinitely only while stdin is interactive
-      // (watch mode / prompts). This prevents one-shot CLIs from hanging.
-      // Package CLIs often have long silent async phases (network + scaffold)
-      // before they emit output or call process.exit().
-      const MAX_TOTAL_MS = isNodeModulesCli ? 5 * 60 * 1000 : 60000;
-      const IDLE_TIMEOUT_MS = isNodeModulesCli ? 60_000 : 500;
-      const NO_OUTPUT_IDLE_MS = isNodeModulesCli ? 120_000 : 1500;
-      const POST_CHILD_EXIT_IDLE_MS = isNodeModulesCli ? 2_000 : 100; // short timeout after children finish
-      const ACTIVE_SUBPROCESS_STALE_MS = isNodeModulesCli ? 20_000 : 3_000;
+      const MAX_TOTAL_MS = isLongIdleNodeModulesCli ? 5 * 60 * 1000 : 60_000;
+      const IDLE_TIMEOUT_MS = isLongIdleNodeModulesCli
+        ? 60_000
+        : (isNodeModulesCli ? 300 : 200);
+      const NO_OUTPUT_IDLE_MS = isLongIdleNodeModulesCli
+        ? 120_000
+        : (isNodeModulesCli ? 2_000 : 1_000);
+      const POST_CHILD_EXIT_IDLE_MS = isLongIdleNodeModulesCli ? 2_000 : 100;
+      const ACTIVE_SUBPROCESS_STALE_MS = isLongIdleNodeModulesCli ? 20_000 : 2_000;
       const CHECK_MS = 50;
       const startTime = Date.now();
       let lastOutputLen = stdout.length + stderr.length;
       let idleMs = 0;
 
       while (!exitCalled) {
-        // Always allow explicit abort from caller.
-        if (_abortSignal?.aborted) break;
+        if (execution.signal?.aborted) break;
 
-        // Check if exitPromise resolved (non-blocking)
         const raceResult = await Promise.race([
           exitPromise.then(() => 'exit' as const),
-          new Promise<'tick'>(r => setTimeout(() => r('tick'), CHECK_MS)),
+          new Promise<'tick'>((resolve) => setTimeout(() => resolve('tick'), CHECK_MS)),
         ]);
 
         if (raceResult === 'exit' || exitCalled) break;
-        if (_abortSignal?.aborted) break;
+        if (execution.signal?.aborted) break;
 
         const currentLen = stdout.length + stderr.length;
         if (currentLen > lastOutputLen) {
-          // New output — reset idle timer
           lastOutputLen = currentLen;
           idleMs = 0;
         } else {
           idleMs += CHECK_MS;
         }
 
-        // Hard timeout regardless of activity tracking.
         if (Date.now() - startTime >= MAX_TOTAL_MS) break;
 
-        const keepAliveForInteractiveInput = !!_abortSignal && (
+        const keepAliveForInteractiveInput = !!execution.signal && (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
         );
@@ -630,7 +843,7 @@ module.exports = (async () => {
           continue;
         }
 
-        const hasActiveSubprocess = _activeForkedChildren > 0 || _activeShellChildren > initialShellChildren;
+        const hasActiveSubprocess = execution.activeForkedChildren > 0 || execution.activeShellChildren > initialShellChildren;
         if (hasActiveSubprocess) {
           hadActiveSubprocess = true;
           const activityAge = Date.now() - lastActivityAt;
@@ -640,31 +853,27 @@ module.exports = (async () => {
           }
         }
 
-        // Use shorter idle timeout once all forked children have exited.
         const effectiveIdle = (childrenExited || hadActiveSubprocess) ? POST_CHILD_EXIT_IDLE_MS : IDLE_TIMEOUT_MS;
         if (lastOutputLen > 0 && idleMs >= effectiveIdle) break;
         if (lastOutputLen === 0 && idleMs >= NO_OUTPUT_IDLE_MS) break;
-
       }
 
       return { stdout, stderr, exitCode: exitCalled ? exitCode : 0 };
     } finally {
-      _activeProcessStdin = null;
-      _onForkedChildExit = prevChildExitHandler;
+      execution.activeProcessStdin = null;
+      execution.onForkedChildExit = prevChildExitHandler;
       if (hasGlobalRejectionEvents) {
         globalThis.removeEventListener('unhandledrejection', rejectionHandler);
       }
-      currentVfs?.off('change', vfsActivityHandler);
-      currentVfs?.off('delete', vfsActivityHandler);
+      controller.vfs.off('change', vfsActivityHandler);
+      controller.vfs.off('delete', vfsActivityHandler);
+      if (ownsExecution) {
+        destroyExecutionContext(controller, execution.id);
+      }
     }
   });
 
-  // Create custom 'npm' command that runs scripts from package.json
   const npmCommand = defineCommand('npm', async (args, ctx) => {
-    if (!currentVfs) {
-      return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-    }
-
     const subcommand = args[0];
 
     if (!subcommand || subcommand === 'help' || subcommand === '--help') {
@@ -678,20 +887,20 @@ module.exports = (async () => {
     switch (subcommand) {
       case 'run':
       case 'run-script':
-        return handleNpmRun(args.slice(1), ctx);
+        return handleNpmRun(controller, args.slice(1), ctx);
       case 'start':
-        return handleNpmRun(['start'], ctx);
+        return handleNpmRun(controller, ['start'], ctx);
       case 'test':
       case 't':
       case 'tst':
-        return handleNpmRun(['test'], ctx);
+        return handleNpmRun(controller, ['test'], ctx);
       case 'install':
       case 'i':
       case 'add':
-        return handleNpmInstall(args.slice(1), ctx);
+        return handleNpmInstall(controller, args.slice(1), ctx);
       case 'ls':
       case 'list':
-        return handleNpmList(ctx);
+        return handleNpmList(controller, ctx);
       default:
         return {
           stdout: '',
@@ -701,13 +910,8 @@ module.exports = (async () => {
     }
   });
 
-  // Create custom 'npx' command that runs package binaries
   const npxCommand = defineCommand('npx', async (args, ctx) => {
-    if (!currentVfs) {
-      return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-    }
-
-    // Parse flags
+    const execution = getExecutionContextFromEnv(controller, ctx.env);
     let packageSpec: string | null = null;
     const cmdArgs: string[] = [];
     let i = 0;
@@ -718,7 +922,6 @@ module.exports = (async () => {
         packageSpec = args[i + 1];
         i += 2;
       } else if (arg === '-y' || arg === '--yes') {
-        // Always auto-confirm in browser — skip
         i++;
       } else if (arg === '--') {
         cmdArgs.push(...args.slice(i + 1));
@@ -735,24 +938,19 @@ module.exports = (async () => {
 
     const commandName = cmdArgs[0];
     const commandArgs = cmdArgs.slice(1);
-    // If no -p flag, the first positional arg is both what to install and what to run
     const installSpec = packageSpec || commandName;
 
-    // Strip version specifier from command name for bin lookup
     const { parsePackageSpec } = await import('../npm/index');
     const {
       name: pkgName,
       version: requestedVersion,
     } = parsePackageSpec(typeof installSpec === 'string' ? installSpec : commandName);
     const forceLatestInstall = requestedVersion === 'latest';
-
-    // Derive the bin command name: for -p, use commandName as-is; otherwise derive from package name
     const binName = packageSpec ? commandName : (pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName);
-
     const quoteArg = (value: string) => JSON.stringify(value);
 
     const emitInstallProgress = (message: string) => {
-      emitStreamData(`${message}\n`, 'stdout');
+      emitStreamData(execution, `${message}\n`, 'stdout');
     };
 
     const formatOutputTail = (output: string, maxLines = 20, maxChars = 2000): string => {
@@ -764,10 +962,7 @@ module.exports = (async () => {
       return tail.length > maxChars ? tail.slice(-maxChars) : tail;
     };
 
-    const withNpxExecDiagnostics = (
-      result: JustBashExecResult,
-      executionTarget: string
-    ): JustBashExecResult => {
+    const withNpxExecDiagnostics = (result: JustBashExecResult, executionTarget: string): JustBashExecResult => {
       if (result.exitCode === 0) return result;
       const stderrText = result.stderr || '';
       const firstStderrLine = stderrText
@@ -775,12 +970,10 @@ module.exports = (async () => {
         .map((line) => line.trim())
         .find((line) => line.length > 0);
 
-      let diagnostic =
-        `npx: command "${binName}" exited with code ${result.exitCode} while running ${executionTarget}\n`;
+      let diagnostic = `npx: command "${binName}" exited with code ${result.exitCode} while running ${executionTarget}\n`;
       if (firstStderrLine) {
         diagnostic += `npx: first stderr line: ${firstStderrLine}\n`;
       }
-
       if (!stderrText.trim()) {
         const stdoutTail = formatOutputTail(result.stdout || '');
         if (stdoutTail) {
@@ -802,26 +995,25 @@ module.exports = (async () => {
       ];
 
       return {
-        binPath: binPaths.find((p) => currentVfs!.existsSync(p)) ?? null,
-        resolvedBinTarget: getPackageBinTarget(pkgName, binName, normalizedCwd),
+        binPath: binPaths.find((candidate) => controller.vfs.existsSync(candidate)) ?? null,
+        resolvedBinTarget: getPackageBinTarget(controller, pkgName, binName, normalizedCwd),
       };
     };
 
     const installPackage = async (installCwd: string) => {
       const { PackageManager } = await import('../npm/index');
-      const pm = new PackageManager(currentVfs!, { cwd: installCwd || '/' });
+      const pm = new PackageManager(controller.vfs, { cwd: installCwd || '/' });
       await pm.install(installSpec, { onProgress: emitInstallProgress });
     };
 
     let { binPath, resolvedBinTarget } = resolveBin(ctx.cwd);
+    let useExtendedNodeIdle = false;
 
-    // Install in cwd first if command is missing, or if @latest was requested.
     if (forceLatestInstall || (!binPath && !resolvedBinTarget)) {
+      useExtendedNodeIdle = true;
       try {
         await installPackage(ctx.cwd);
         ({ binPath, resolvedBinTarget } = resolveBin(ctx.cwd));
-
-        // Fallback: some flows install into root node_modules.
         if ((forceLatestInstall || (!binPath && !resolvedBinTarget)) && ctx.cwd !== '/') {
           emitInstallProgress('npx: retrying install in / to resolve command bin...');
           await installPackage('/');
@@ -845,14 +1037,13 @@ module.exports = (async () => {
       };
     }
 
-    // Prefer executing the actual bin entry directly to avoid PATH quirks.
+    const execEnv = useExtendedNodeIdle
+      ? { ...ctx.env, ALMOSTNODE_LONG_NODE_IDLE: '1' }
+      : ctx.env;
+
     if (resolvedBinTarget) {
-      const fullCommand = [
-        'node',
-        resolvedBinTarget,
-        ...commandArgs,
-      ].map((value) => quoteArg(value)).join(' ');
-      const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: ctx.env });
+      const fullCommand = ['node', resolvedBinTarget, ...commandArgs].map((value) => quoteArg(value)).join(' ');
+      const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
       return withNpxExecDiagnostics(result, `node ${resolvedBinTarget}`);
     }
 
@@ -860,32 +1051,26 @@ module.exports = (async () => {
       return { stdout: '', stderr: `npx: command not found: ${binName}\n`, exitCode: 1 };
     }
 
-    // Fallback to bin stub
     const fullCommand = [binPath, ...commandArgs].map((value) => quoteArg(value)).join(' ');
-    const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: ctx.env });
+    const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
     return withNpxExecDiagnostics(result, binPath);
   });
 
   const tarCommand = defineCommand('tar', async (args, ctx) => {
-    if (!currentVfs) {
-      return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-    }
-
     const parsed = parseTarOptions(args, ctx.cwd);
     if (!parsed.options) {
       return { stdout: '', stderr: `tar: ${parsed.error || 'invalid arguments'}\n`, exitCode: 2 };
     }
 
     const { archivePath, destPath, verbose } = parsed.options;
-
-    if (!currentVfs.existsSync(archivePath)) {
+    if (!controller.vfs.existsSync(archivePath)) {
       return { stdout: '', stderr: `tar: ${archivePath}: Cannot open: No such file or directory\n`, exitCode: 1 };
     }
 
     try {
-      currentVfs.mkdirSync(destPath, { recursive: true });
-      const archiveData = currentVfs.readFileSync(archivePath);
-      const extracted = extractTarball(archiveData, currentVfs, destPath, {
+      controller.vfs.mkdirSync(destPath, { recursive: true });
+      const archiveData = controller.vfs.readFileSync(archivePath);
+      const extracted = extractTarball(archiveData, controller.vfs, destPath, {
         stripComponents: 0,
         filter: isSafeTarEntryPath,
       });
@@ -900,10 +1085,7 @@ module.exports = (async () => {
   });
 
   const nextCommand = defineCommand('next', async (args, ctx) => {
-    if (!currentVfs) {
-      return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-    }
-
+    const execution = getExecutionContextFromEnv(controller, ctx.env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
     const explicitSubcommand = args[0] && !args[0].startsWith('-') ? args[0] : 'dev';
     const devArgs = explicitSubcommand === 'dev' ? args.slice(args[0] === 'dev' ? 1 : 0) : args.slice(1);
@@ -917,7 +1099,7 @@ module.exports = (async () => {
     }
 
     if (explicitSubcommand !== 'dev') {
-      return execInstalledPackageBin('next', 'next', args, ctx);
+      return execInstalledPackageBin(controller, 'next', 'next', args, ctx);
     }
 
     let port = 3000;
@@ -956,13 +1138,10 @@ module.exports = (async () => {
         hostname = value || hostname;
         continue;
       }
-      if (arg === '--turbopack' || arg === '--turbo') {
-        continue;
-      }
     }
 
     const key = `next:${port}`;
-    stopManagedFrameworkServersOnPort(port);
+    stopManagedFrameworkServersOnPort(controller, port);
 
     try {
       const [{ NextDevServer }, { getServerBridge }] = await Promise.all([
@@ -980,7 +1159,7 @@ module.exports = (async () => {
       }
 
       const root = normalizedCwd;
-      const server = new NextDevServer(currentVfs, {
+      const server = new NextDevServer(controller.vfs, {
         port,
         root,
         pagesDir: `${root}/pages`.replace(/\/+/g, '/'),
@@ -989,14 +1168,14 @@ module.exports = (async () => {
         env: { ...ctx.env },
       });
 
-      bridge.registerServer(createBridgeServerWrapper(server), port);
+      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
       const startup = `next dev server running at ${url} (host: ${hostname}, root: ${root})\n`;
-      emitStreamData(startup, 'stdout');
+      emitStreamData(execution, startup, 'stdout');
 
-      _frameworkDevServers.set(key, {
+      controller.frameworkDevServers.set(key, {
         key,
         framework: 'next',
         port,
@@ -1009,25 +1188,22 @@ module.exports = (async () => {
         },
       });
 
-      if (_abortSignal) {
-        await waitForAbort(_abortSignal);
-        stopManagedFrameworkServer(key);
+      if (execution?.signal) {
+        await waitForAbort(execution.signal);
+        stopManagedFrameworkServer(controller, key);
         return { stdout: startup, stderr: '', exitCode: 130 };
       }
 
       return { stdout: startup, stderr: '', exitCode: 0 };
     } catch (error) {
-      stopManagedFrameworkServer(key);
+      stopManagedFrameworkServer(controller, key);
       const message = error instanceof Error ? error.message : String(error);
       return { stdout: '', stderr: `next: failed to start dev server: ${message}\n`, exitCode: 1 };
     }
   });
 
   const viteCommand = defineCommand('vite', async (args, ctx) => {
-    if (!currentVfs) {
-      return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-    }
-
+    const execution = getExecutionContextFromEnv(controller, ctx.env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
     let root = normalizedCwd;
     let devArgs = args;
@@ -1035,7 +1211,7 @@ module.exports = (async () => {
     const firstArg = args[0];
     if (firstArg && !firstArg.startsWith('-')) {
       if (firstArg === 'build' || firstArg === 'preview' || firstArg === 'optimize' || firstArg === 'optimizeDeps') {
-        return execInstalledPackageBin('vite', 'vite', args, ctx);
+        return execInstalledPackageBin(controller, 'vite', 'vite', args, ctx);
       }
       if (firstArg === 'dev' || firstArg === 'serve') {
         devArgs = args.slice(1);
@@ -1097,7 +1273,7 @@ module.exports = (async () => {
     }
 
     const key = `vite:${port}`;
-    stopManagedFrameworkServersOnPort(port);
+    stopManagedFrameworkServersOnPort(controller, port);
 
     try {
       const [{ ViteDevServer }, { getServerBridge }] = await Promise.all([
@@ -1114,19 +1290,19 @@ module.exports = (async () => {
         }
       }
 
-      const server = new ViteDevServer(currentVfs, {
+      const server = new ViteDevServer(controller.vfs, {
         port,
         root,
       });
 
-      bridge.registerServer(createBridgeServerWrapper(server), port);
+      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
       const startup = `vite dev server running at ${url} (host: ${host}, root: ${root})\n`;
-      emitStreamData(startup, 'stdout');
+      emitStreamData(execution, startup, 'stdout');
 
-      _frameworkDevServers.set(key, {
+      controller.frameworkDevServers.set(key, {
         key,
         framework: 'vite',
         port,
@@ -1139,52 +1315,108 @@ module.exports = (async () => {
         },
       });
 
-      if (_abortSignal) {
-        await waitForAbort(_abortSignal);
-        stopManagedFrameworkServer(key);
+      if (execution?.signal) {
+        await waitForAbort(execution.signal);
+        stopManagedFrameworkServer(controller, key);
         return { stdout: startup, stderr: '', exitCode: 130 };
       }
 
       return { stdout: startup, stderr: '', exitCode: 0 };
     } catch (error) {
-      stopManagedFrameworkServer(key);
+      stopManagedFrameworkServer(controller, key);
       const message = error instanceof Error ? error.message : String(error);
       return { stdout: '', stderr: `vite: failed to start dev server: ${message}\n`, exitCode: 1 };
     }
   });
 
-  bashInstance = new Bash({
+  const gitCommand = defineCommand('git', async (args, ctx) => {
+    const { runGitCommand } = await import('./git-command');
+    return runGitCommand(args, ctx, controller.vfs);
+  });
+
+  const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
+    return defineCommand(commandName, async (args, ctx) => {
+      const shell = getSyntheticShellSpec(commandName);
+      const shellName = shell?.names[0] || path.basename(commandName);
+
+      if (args.includes('--version')) {
+        return {
+          stdout: getSyntheticShellVersion(commandName) || '',
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+
+      const parsed = parseSyntheticShellExec(args);
+      if (parsed.error) {
+        return {
+          stdout: '',
+          stderr: `${shellName}: ${parsed.error}`,
+          exitCode: 2,
+        };
+      }
+
+      if (parsed.script) {
+        if (!ctx.exec) {
+          return {
+            stdout: '',
+            stderr: `${shellName}: execution context unavailable\n`,
+            exitCode: 1,
+          };
+        }
+        return ctx.exec(parsed.script, { cwd: ctx.cwd, env: ctx.env });
+      }
+
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+  });
+
+  const bashInstance = new Bash({
     fs: vfsAdapter,
     cwd: '/',
-    env: {
-      HOME: '/home/user',
-      USER: 'user',
-      PATH: '/usr/local/bin:/usr/bin:/bin:/node_modules/.bin',
-      NODE_ENV: 'development',
-    },
+    env: DEFAULT_SHELL_ENV,
     logger: {
-      info: (message, data) => {
-        if (message === 'stderr' || message === 'stdout') {
-          emitBashLog(message, data);
-        }
-      },
-      debug: (message, data) => {
-        if (message === 'stdout' || message === 'stderr') {
-          emitBashLog(message, data);
-        }
-      },
+      info: emitBashLog,
+      debug: emitBashLog,
     },
-    customCommands: [nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand],
   });
+
+  controller = {
+    id: controllerId,
+    vfs,
+    vfsAdapter,
+    bashInstance,
+    frameworkDevServers: new Map(),
+    executions: new Map(),
+    createExecution: (opts) => createExecutionContext(controller, opts),
+    destroyExecution: (executionId) => destroyExecutionContext(controller, executionId),
+    runCommand: (command, options, executionId) => runCommandInController(controller, command, options, executionId),
+    sendInput: (executionId, data) => {
+      if (!executionId) return;
+      const execution = controller.executions.get(executionId);
+      if (!execution?.activeProcessStdin) return;
+      pushInputToExecutionStdin(execution.activeProcessStdin, data);
+    },
+  };
+
+  controllersByVfs.set(vfs, controller);
+  controllersById.set(controller.id, controller);
+  defaultChildProcessController = controller;
+
+  return controller;
 }
 
 /**
  * Read and parse package.json from the VFS
  */
-function readPackageJson(cwd: string): { pkgJson: PackageJson; error?: undefined } | { pkgJson?: undefined; error: JustBashExecResult } {
+function readPackageJson(
+  controller: ChildProcessController,
+  cwd: string
+): { pkgJson: PackageJson; error?: undefined } | { pkgJson?: undefined; error: JustBashExecResult } {
   const pkgJsonPath = `${cwd}/package.json`.replace(/\/+/g, '/');
 
-  if (!currentVfs!.existsSync(pkgJsonPath)) {
+  if (!controller.vfs.existsSync(pkgJsonPath)) {
     return {
       error: {
         stdout: '',
@@ -1195,7 +1427,7 @@ function readPackageJson(cwd: string): { pkgJson: PackageJson; error?: undefined
   }
 
   try {
-    const pkgJson = JSON.parse(currentVfs!.readFileSync(pkgJsonPath, 'utf8')) as PackageJson;
+    const pkgJson = JSON.parse(controller.vfs.readFileSync(pkgJsonPath, 'utf8')) as PackageJson;
     return { pkgJson };
   } catch {
     return {
@@ -1212,7 +1444,12 @@ function readPackageJson(cwd: string): { pkgJson: PackageJson; error?: undefined
  * Resolve a package bin target to a real entry file by reading package.json.
  * Returns the resolved JS file path if found, null otherwise.
  */
-function getPackageBinTarget(pkgName: string, binName: string, cwd: string): string | null {
+function getPackageBinTarget(
+  controller: ChildProcessController,
+  pkgName: string,
+  binName: string,
+  cwd: string
+): string | null {
   const searchDirs = [
     `${cwd}/node_modules`.replace(/\/+/g, '/'),
     '/node_modules',
@@ -1221,10 +1458,10 @@ function getPackageBinTarget(pkgName: string, binName: string, cwd: string): str
   for (const dir of searchDirs) {
     const packageDir = `${dir}/${pkgName}`.replace(/\/+/g, '/');
     const pkgJsonPath = `${packageDir}/package.json`;
-    if (!currentVfs!.existsSync(pkgJsonPath)) continue;
+    if (!controller.vfs.existsSync(pkgJsonPath)) continue;
 
     try {
-      const pkgJson = JSON.parse(currentVfs!.readFileSync(pkgJsonPath, 'utf8')) as { bin?: Record<string, string> | string };
+      const pkgJson = JSON.parse(controller.vfs.readFileSync(pkgJsonPath, 'utf8')) as { bin?: Record<string, string> | string };
 
       const bins: Record<string, string> =
         typeof pkgJson.bin === 'string'
@@ -1239,7 +1476,7 @@ function getPackageBinTarget(pkgName: string, binName: string, cwd: string): str
       if (!binPath) continue;
 
       const resolved = `${packageDir}/${binPath}`.replace(/\/+/g, '/');
-      if (currentVfs!.existsSync(resolved)) {
+      if (controller.vfs.existsSync(resolved)) {
         return resolved;
       }
     } catch {
@@ -1251,21 +1488,19 @@ function getPackageBinTarget(pkgName: string, binName: string, cwd: string): str
 }
 
 async function execInstalledPackageBin(
+  controller: ChildProcessController,
   pkgName: string,
   binName: string,
   args: string[],
   ctx: CommandContext
 ): Promise<JustBashExecResult> {
-  if (!currentVfs) {
-    return { stdout: '', stderr: 'VFS not initialized\n', exitCode: 1 };
-  }
   if (!ctx.exec) {
     return { stdout: '', stderr: `${binName}: execution context unavailable\n`, exitCode: 1 };
   }
 
   const normalizedCwd = normalizeCommandCwd(ctx.cwd);
-  const resolvedTarget = getPackageBinTarget(pkgName, binName, normalizedCwd)
-    || getPackageBinTarget(pkgName, binName, '/');
+  const resolvedTarget = getPackageBinTarget(controller, pkgName, binName, normalizedCwd)
+    || getPackageBinTarget(controller, pkgName, binName, '/');
 
   if (resolvedTarget) {
     const fullCommand = ['node', resolvedTarget, ...args].map((value) => shellQuote(value)).join(' ');
@@ -1276,7 +1511,7 @@ async function execInstalledPackageBin(
     `${normalizedCwd}/node_modules/.bin/${binName}`.replace(/\/+/g, '/'),
     `/node_modules/.bin/${binName}`,
   ];
-  const binPath = binCandidates.find((candidate) => currentVfs!.existsSync(candidate));
+  const binPath = binCandidates.find((candidate) => controller.vfs.existsSync(candidate));
   if (!binPath) {
     return { stdout: '', stderr: `bash: ${binName}: command not found\n`, exitCode: 127 };
   }
@@ -1290,6 +1525,30 @@ function hasActiveStdinListeners(stdin: { listenerCount?: (event: string) => num
   return stdin.listenerCount('data') > 0
     || stdin.listenerCount('keypress') > 0
     || stdin.listenerCount('readable') > 0;
+}
+
+function isLikelyOneShotCliInvocation(args: string[]): boolean {
+  if (args.length === 0) return false;
+
+  const helpOrVersionArgs = new Set(['--version', '-v', 'version', '--help', '-h', 'help']);
+  let sawHelpOrVersion = false;
+
+  for (const arg of args) {
+    if (!arg) continue;
+
+    if (helpOrVersionArgs.has(arg) || arg.startsWith('--version=') || arg.startsWith('--help=')) {
+      sawHelpOrVersion = true;
+      continue;
+    }
+
+    if (arg.startsWith('-')) {
+      continue;
+    }
+
+    return false;
+  }
+
+  return sawHelpOrVersion;
 }
 
 interface ParsedTarOptions {
@@ -1405,15 +1664,19 @@ function isSafeTarEntryPath(entryPath: string): boolean {
 /**
  * Handle `npm run [script]` — execute a script from package.json
  */
-async function handleNpmRun(args: string[], ctx: CommandContext): Promise<JustBashExecResult> {
+async function handleNpmRun(
+  controller: ChildProcessController,
+  args: string[],
+  ctx: CommandContext
+): Promise<JustBashExecResult> {
   const scriptName = args[0];
 
   // "npm run" with no script name: list available scripts
   if (!scriptName) {
-    return listScripts(ctx);
+    return listScripts(controller, ctx);
   }
 
-  const result = readPackageJson(ctx.cwd);
+  const result = readPackageJson(controller, ctx.cwd);
   if (result.error) return result.error;
   const pkgJson = result.pkgJson;
 
@@ -1493,8 +1756,8 @@ async function handleNpmRun(args: string[], ctx: CommandContext): Promise<JustBa
 /**
  * List available scripts from package.json (when `npm run` is called with no args)
  */
-function listScripts(ctx: CommandContext): JustBashExecResult {
-  const result = readPackageJson(ctx.cwd);
+function listScripts(controller: ChildProcessController, ctx: CommandContext): JustBashExecResult {
+  const result = readPackageJson(controller, ctx.cwd);
   if (result.error) return result.error;
   const pkgJson = result.pkgJson;
 
@@ -1526,15 +1789,20 @@ function listScripts(ctx: CommandContext): JustBashExecResult {
 /**
  * Handle `npm install [pkg]` — bridge to PackageManager
  */
-async function handleNpmInstall(args: string[], ctx: CommandContext): Promise<JustBashExecResult> {
+async function handleNpmInstall(
+  controller: ChildProcessController,
+  args: string[],
+  ctx: CommandContext
+): Promise<JustBashExecResult> {
   const { PackageManager } = await import('../npm/index');
-  const pm = new PackageManager(currentVfs!, { cwd: ctx.cwd });
+  const pm = new PackageManager(controller.vfs, { cwd: ctx.cwd });
 
   let stdout = '';
+  const execution = getExecutionContextFromEnv(controller, ctx.env);
   const emitProgress = (message: string) => {
     const line = `${message}\n`;
     stdout += line;
-    emitStreamData(line, 'stdout');
+    emitStreamData(execution, line, 'stdout');
   };
 
   try {
@@ -1565,9 +1833,12 @@ async function handleNpmInstall(args: string[], ctx: CommandContext): Promise<Ju
 /**
  * Handle `npm ls` — list installed packages
  */
-async function handleNpmList(ctx: CommandContext): Promise<JustBashExecResult> {
+async function handleNpmList(
+  controller: ChildProcessController,
+  ctx: CommandContext
+): Promise<JustBashExecResult> {
   const { PackageManager } = await import('../npm/index');
-  const pm = new PackageManager(currentVfs!, { cwd: ctx.cwd });
+  const pm = new PackageManager(controller.vfs, { cwd: ctx.cwd });
   const packages = pm.list();
   const entries = Object.entries(packages);
 
@@ -1617,10 +1888,35 @@ function getCurrentProcessArch(): string {
   return typeof proc?.arch === 'string' && proc.arch ? proc.arch : 'x64';
 }
 
+const SYNTHETIC_WHICH_TARGETS: Record<string, string> = {
+  bash: '/bin/bash',
+  node: '/usr/bin/node',
+  npm: '/usr/bin/npm',
+  npx: '/usr/bin/npx',
+  sh: '/bin/sh',
+  tar: '/usr/bin/tar',
+  zsh: '/bin/zsh',
+};
+
+function normalizeSpawnSyncOutput(
+  stdout: string,
+  encoding?: BufferEncoding | 'buffer' | null
+): SpawnSyncOutput {
+  if (encoding === 'buffer' || encoding == null) {
+    return Buffer.from(stdout);
+  }
+  return Buffer.from(stdout).toString(encoding);
+}
+
 function getSyntheticExecFileSyncOutput(file: string, args: string[]): string | null {
   const command = path.basename(file).toLowerCase();
   const arch = getCurrentProcessArch();
   const bitness = ['x64', 'arm64', 'ppc64', 'riscv64'].includes(arch) ? '64' : '32';
+
+  const shellVersion = getSyntheticShellVersion(file);
+  if (shellVersion && args.length > 0 && args[0] === '--version') {
+    return shellVersion;
+  }
 
   if (command === 'getconf' && args[0] === 'LONG_BIT') {
     return `${bitness}\n`;
@@ -1635,10 +1931,276 @@ function getSyntheticExecFileSyncOutput(file: string, args: string[]): string | 
   return null;
 }
 
-/**
- * Execute a command in a shell
- */
-export function exec(
+function resolveSyntheticWhichTarget(
+  controller: ChildProcessController | null,
+  target: string,
+  cwd: string,
+  env: Record<string, string>
+): string | null {
+  const trimmed = target.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.includes('/')) {
+    const resolved = resolveFromCwd(cwd, trimmed);
+    return controller?.vfs.existsSync(resolved) ? resolved : null;
+  }
+
+  const normalizedCwd = normalizeCommandCwd(cwd);
+  const resolvedBinTarget = controller
+    ? (
+      getPackageBinTarget(controller, trimmed, trimmed, normalizedCwd)
+      || getPackageBinTarget(controller, trimmed, trimmed, '/')
+    )
+    : null;
+  if (resolvedBinTarget) {
+    return resolvedBinTarget;
+  }
+
+  const syntheticTarget = SYNTHETIC_WHICH_TARGETS[trimmed];
+  if (syntheticTarget) {
+    return syntheticTarget;
+  }
+
+  const pathKey = Object.prototype.hasOwnProperty.call(env, 'PATH')
+    ? 'PATH'
+    : (Object.prototype.hasOwnProperty.call(env, 'Path') ? 'Path' : 'PATH');
+  const segments = (env[pathKey] || '').split(':').filter(Boolean);
+
+  for (const segment of segments) {
+    const candidate = path.normalize(path.join(segment, trimmed));
+    if (controller?.vfs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function getSyntheticSpawnSyncResult(
+  controller: ChildProcessController | null,
+  command: string,
+  args: string[],
+  options: SpawnOptions
+): SpawnSyncResult | null {
+  const commandName = path.basename(command).toLowerCase();
+  const encoding = options.encoding;
+
+  if (commandName === 'which' && args[0]) {
+    const resolvedTarget = resolveSyntheticWhichTarget(
+      controller,
+      args[0],
+      options.cwd ?? getDefaultProcessCwd(),
+      options.env || {}
+    );
+
+    if (resolvedTarget) {
+      return {
+        stdout: normalizeSpawnSyncOutput(`${resolvedTarget}\n`, encoding),
+        stderr: normalizeSpawnSyncOutput('', encoding),
+        status: 0,
+      };
+    }
+
+    return {
+      stdout: normalizeSpawnSyncOutput('', encoding),
+      stderr: normalizeSpawnSyncOutput('', encoding),
+      status: 1,
+    };
+  }
+
+  return null;
+}
+
+function resolveStdioTarget(
+  stdio: SpawnOptions['stdio'] | undefined,
+  index: number
+): StdioTarget {
+  const entry = Array.isArray(stdio) ? stdio[index] : stdio;
+
+  if (typeof entry === 'number' && Number.isInteger(entry)) {
+    return { fd: entry };
+  }
+
+  if (entry === 'inherit' || entry === 'ignore') {
+    return entry;
+  }
+
+  return 'pipe';
+}
+
+function getParentProcessWritable(stream: 'stdout' | 'stderr'): { write?: (data: string) => unknown } | null {
+  const proc = (globalThis as any).process as {
+    stdout?: { write?: (data: string) => unknown };
+    stderr?: { write?: (data: string) => unknown };
+  } | undefined;
+
+  return proc?.[stream] ?? null;
+}
+
+function applySpawnOutput(
+  target: StdioTarget,
+  stream: 'stdout' | 'stderr',
+  childStream: Readable | null,
+  data: string
+): void {
+  if (!data) return;
+
+  if (target === 'pipe') {
+    childStream?.push(Buffer.from(data));
+    return;
+  }
+
+  if (target === 'inherit') {
+    getParentProcessWritable(stream)?.write?.(data);
+    return;
+  }
+
+  if (target === 'ignore') {
+    return;
+  }
+
+  writeToFdSync(target.fd, data);
+}
+
+function closeSpawnOutput(target: StdioTarget, childStream: Readable | null): void {
+  if (target === 'pipe') {
+    childStream?.push(null);
+  }
+}
+
+function getSyntheticExecSyncOutput(
+  controller: ChildProcessController | null,
+  command: string,
+  options: ExecOptions
+): string | null {
+  const trimmed = command.trim();
+  if (!trimmed) return '';
+
+  const whichMatch = trimmed.match(/^which\s+([^\s]+)$/);
+  if (whichMatch) {
+    const resolvedTarget = resolveSyntheticWhichTarget(
+      controller,
+      whichMatch[1],
+      options.cwd ?? getDefaultProcessCwd(),
+      options.env || {}
+    );
+    if (resolvedTarget) {
+      return `${resolvedTarget}\n`;
+    }
+
+    const error = new Error(`Command failed: ${command}`);
+    (error as { code?: number }).code = 1;
+    throw error;
+  }
+
+  const versionMatch = trimmed.match(/^(\S+)\s+--version$/);
+  if (versionMatch) {
+    return getSyntheticShellVersion(versionMatch[1]);
+  }
+
+  return null;
+}
+
+function parseSyntheticShellExec(args: string[]): { script?: string; error?: string } {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '-l' || arg === '--login') {
+      continue;
+    }
+    if (arg === '-lc' || arg === '-cl') {
+      const script = args[i + 1];
+      return script
+        ? { script }
+        : { error: 'option requires an argument -- c\n' };
+    }
+    if (arg === '-c') {
+      const remainder = args.slice(i + 1);
+      const script = remainder.find((candidate) => candidate !== '-l' && candidate !== '--login');
+      return script
+        ? { script }
+        : { error: 'option requires an argument -- c\n' };
+    }
+  }
+
+  return {};
+}
+
+function splitCommandArgs(command: string): string[] {
+  const tokens: string[] = [];
+  const matcher = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s]+)/g;
+
+  let match: RegExpExecArray | null = null;
+  while ((match = matcher.exec(command)) !== null) {
+    if (match[1] !== undefined) {
+      tokens.push(match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'));
+      continue;
+    }
+    if (match[2] !== undefined) {
+      tokens.push(match[2].replace(/\\'/g, '\'').replace(/\\\\/g, '\\'));
+      continue;
+    }
+    if (match[3] !== undefined) {
+      tokens.push(match[3]);
+    }
+  }
+
+  return tokens;
+}
+
+function getBindingDefaultEnv(binding?: ChildProcessModuleBinding): Record<string, string> {
+  if (binding?.getDefaultEnv) {
+    return {
+      ...binding.getDefaultEnv(),
+    };
+  }
+  return getDefaultProcessEnv();
+}
+
+function getBindingDefaultCwd(binding?: ChildProcessModuleBinding): string {
+  return binding?.getDefaultCwd?.() ?? getDefaultProcessCwd();
+}
+
+function maybeRunSyntheticShellCommand(
+  controller: ChildProcessController,
+  command: string,
+  cwd: string,
+  env: Record<string, string>
+): Promise<JustBashExecResult> | null {
+  const tokens = splitCommandArgs(command);
+  if (tokens.length === 0) return null;
+
+  const shell = getSyntheticShellSpec(tokens[0]);
+  if (!shell) return null;
+
+  const shellName = shell.names[0] || path.basename(tokens[0]);
+  const args = tokens.slice(1);
+
+  if (args.includes('--version')) {
+    return Promise.resolve({
+      stdout: getSyntheticShellVersion(tokens[0]) || '',
+      stderr: '',
+      exitCode: 0,
+    });
+  }
+
+  const parsed = parseSyntheticShellExec(args);
+  if (parsed.error) {
+    return Promise.resolve({
+      stdout: '',
+      stderr: `${shellName}: ${parsed.error}`,
+      exitCode: 2,
+    });
+  }
+
+  if (!parsed.script) {
+    return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 });
+  }
+
+  return controller.bashInstance.exec(parsed.script, { cwd, env });
+}
+
+function execWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
   command: string,
   optionsOrCallback?: ExecOptions | ExecCallback,
   callback?: ExecCallback
@@ -1655,23 +2217,24 @@ export function exec(
 
   const child = new ChildProcess();
 
-  // Execute asynchronously
   (async () => {
-    if (!bashInstance) {
+    const baseEnv = getBindingDefaultEnv(binding);
+    const envHint = { ...baseEnv, ...(options.env || {}) };
+    const controller = getActiveController(binding, envHint);
+    if (!controller) {
       const error = new Error('child_process not initialized');
       child.emit('error', error);
       if (cb) cb(error, '', '');
       return;
     }
 
-    _activeShellChildren++;
+    const existingExecution = getActiveExecutionContext(controller, binding, envHint);
+    const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
+    const ownsExecution = !existingExecution;
     try {
-      const resolvedCwd = options.cwd ?? getDefaultProcessCwd();
-      const resolvedEnv = options.env ?? getDefaultProcessEnv();
-      const result = await bashInstance!.exec(command, {
-        cwd: resolvedCwd,
-        env: resolvedEnv,
-      });
+      const resolvedCwd = options.cwd ?? getBindingDefaultCwd(binding);
+      const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(options.env || {}) }, resolvedCwd);
+      const result = await controller.runCommand(command, { cwd: resolvedCwd, env: resolvedEnv }, execution.id);
 
       const stdout = result.stdout || '';
       const stderr = result.stderr || '';
@@ -1704,7 +2267,9 @@ export function exec(
       child.emit('error', error);
       if (cb) cb(error as Error, '', '');
     } finally {
-      _activeShellChildren = Math.max(0, _activeShellChildren - 1);
+      if (ownsExecution) {
+        controller.destroyExecution(execution.id);
+      }
     }
   })();
 
@@ -1712,35 +2277,69 @@ export function exec(
 }
 
 /**
+ * Execute a command in a shell
+ */
+export function exec(
+  command: string,
+  optionsOrCallback?: ExecOptions | ExecCallback,
+  callback?: ExecCallback
+): ChildProcess {
+  return execWithBinding(undefined, command, optionsOrCallback, callback);
+}
+
+/**
  * Execute a command synchronously
  */
+function execSyncWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
+  command: string,
+  options?: ExecOptions
+): string | Buffer {
+  const controller = getActiveController(binding, { ...getBindingDefaultEnv(binding), ...(options?.env || {}) });
+  if (!controller) {
+    throw new Error('child_process not initialized');
+  }
+
+  const syntheticOutput = getSyntheticExecSyncOutput(controller, command, options || {});
+  if (syntheticOutput !== null) {
+    return normalizeExecSyncResult(syntheticOutput, options?.encoding);
+  }
+
+  throw new Error(
+    'execSync is not supported in browser environment. Use exec() with async/await or callbacks instead.'
+  );
+}
+
 export function execSync(
   command: string,
   options?: ExecOptions
 ): string | Buffer {
-  if (!bashInstance) {
-    throw new Error('child_process not initialized');
-  }
-
-  // Note: just-bash exec is async, so we can't truly do sync execution
-  // This is a limitation of the browser environment
-  // For now, throw an error suggesting to use exec() instead
-  throw new Error(
-    'execSync is not supported in browser environment. Use exec() with async/await or callbacks instead.'
-  );
+  return execSyncWithBinding(undefined, command, options);
 }
 
 export interface SpawnOptions {
   cwd?: string;
   env?: Record<string, string>;
   shell?: boolean | string;
-  stdio?: 'pipe' | 'inherit' | 'ignore' | Array<'pipe' | 'inherit' | 'ignore'>;
+  stdio?: 'pipe' | 'inherit' | 'ignore' | Array<'pipe' | 'inherit' | 'ignore' | number>;
+  encoding?: BufferEncoding | 'buffer' | null;
+  timeout?: number;
+  detached?: boolean;
+  windowsHide?: boolean;
 }
 
-/**
- * Spawn a new process
- */
-export function spawn(
+type SpawnSyncOutput = string | Buffer;
+type StdioTarget = 'pipe' | 'inherit' | 'ignore' | { fd: number };
+
+type SpawnSyncResult = {
+  stdout: SpawnSyncOutput;
+  stderr: SpawnSyncOutput;
+  status: number;
+  error?: Error;
+};
+
+function spawnWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
   command: string,
   args?: string[] | SpawnOptions,
   options?: SpawnOptions
@@ -1756,6 +2355,21 @@ export function spawn(
   }
 
   const child = new ChildProcess();
+  const stdinTarget = resolveStdioTarget(spawnOptions.stdio, 0);
+  const stdoutTarget = resolveStdioTarget(spawnOptions.stdio, 1);
+  const stderrTarget = resolveStdioTarget(spawnOptions.stdio, 2);
+
+  if (stdinTarget !== 'pipe') {
+    child.stdin = null;
+  }
+  if (stdoutTarget !== 'pipe') {
+    child.stdout = null;
+  }
+  if (stderrTarget !== 'pipe') {
+    child.stderr = null;
+  }
+  child.spawnfile = command;
+  child.spawnargs = [command, ...spawnArgs];
 
   // Build the full command
   const fullCommand = spawnArgs.length > 0
@@ -1764,44 +2378,46 @@ export function spawn(
       ).join(' ')}`
     : command;
 
-  // Execute asynchronously
   (async () => {
-    if (!bashInstance) {
+    const baseEnv = getBindingDefaultEnv(binding);
+    const envHint = { ...baseEnv, ...(spawnOptions.env || {}) };
+    const controller = getActiveController(binding, envHint);
+    if (!controller) {
       const error = new Error('child_process not initialized');
       child.emit('error', error);
       return;
     }
 
-    _activeShellChildren++;
+    const existingExecution = getActiveExecutionContext(controller, binding, envHint);
+    const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
+    const ownsExecution = !existingExecution;
     try {
-      const resolvedCwd = spawnOptions.cwd ?? getDefaultProcessCwd();
-      const resolvedEnv = spawnOptions.env ?? getDefaultProcessEnv();
-      const result = await bashInstance!.exec(fullCommand, {
-        cwd: resolvedCwd,
-        env: resolvedEnv,
-      });
+      const resolvedCwd = spawnOptions.cwd ?? getBindingDefaultCwd(binding);
+      const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(spawnOptions.env || {}) }, resolvedCwd);
+      const result = await controller.runCommand(fullCommand, { cwd: resolvedCwd, env: resolvedEnv }, execution.id);
 
       const stdout = result.stdout || '';
       const stderr = result.stderr || '';
 
-      // Emit data events
-      if (stdout) {
-        child.stdout?.push(Buffer.from(stdout));
-      }
-      child.stdout?.push(null);
+      applySpawnOutput(stdoutTarget, 'stdout', child.stdout, stdout);
+      closeSpawnOutput(stdoutTarget, child.stdout);
 
-      if (stderr) {
-        child.stderr?.push(Buffer.from(stderr));
-      }
-      child.stderr?.push(null);
+      applySpawnOutput(stderrTarget, 'stderr', child.stderr, stderr);
+      closeSpawnOutput(stderrTarget, child.stderr);
 
-      // Emit close/exit
+      // Defer close/exit so Readable 'data' events flush before 'close' fires.
+      // push() queues data emission as a microtask; emitting close/exit
+      // synchronously here would fire before the data reaches listeners.
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      child.exitCode = result.exitCode;
       child.emit('close', result.exitCode, null);
       child.emit('exit', result.exitCode, null);
     } catch (error) {
       child.emit('error', error);
     } finally {
-      _activeShellChildren = Math.max(0, _activeShellChildren - 1);
+      if (ownsExecution) {
+        controller.destroyExecution(execution.id);
+      }
     }
   })();
 
@@ -1809,22 +2425,58 @@ export function spawn(
 }
 
 /**
+ * Spawn a new process
+ */
+export function spawn(
+  command: string,
+  args?: string[] | SpawnOptions,
+  options?: SpawnOptions
+): ChildProcess {
+  return spawnWithBinding(undefined, command, args, options);
+}
+
+/**
  * Spawn a new process synchronously
  */
-export function spawnSync(
+function spawnSyncWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
   command: string,
   args?: string[],
   options?: SpawnOptions
-): { stdout: Buffer; stderr: Buffer; status: number; error?: Error } {
+): SpawnSyncResult {
+  const spawnArgs = args || [];
+  const baseEnv = getBindingDefaultEnv(binding);
+  const controller = getActiveController(binding, { ...baseEnv, ...(options?.env || {}) });
+  const resolvedCwd = options?.cwd ?? getBindingDefaultCwd(binding);
+  const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(options?.env || {}) }, resolvedCwd);
+  const syntheticResult = getSyntheticSpawnSyncResult(controller, command, spawnArgs, {
+    ...options,
+    cwd: resolvedCwd,
+    env: resolvedEnv,
+  });
+
+  if (syntheticResult) {
+    return syntheticResult;
+  }
+
   throw new Error(
     'spawnSync is not supported in browser environment. Use spawn() instead.'
   );
 }
 
+export function spawnSync(
+  command: string,
+  args?: string[],
+  options?: SpawnOptions
+): SpawnSyncResult {
+  return spawnSyncWithBinding(undefined, command, args, options);
+}
+
 /**
  * Execute a file
  */
-export function execFile(
+function execFileWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
   file: string,
   args?: string[] | ExecOptions | ExecCallback,
   options?: ExecOptions | ExecCallback,
@@ -1849,8 +2501,19 @@ export function execFile(
     cb = options as ExecCallback;
   }
 
-  const command = execArgs.length > 0 ? `${file} ${execArgs.join(' ')}` : file;
-  return exec(command, execOptions, cb);
+  const command = execArgs.length > 0
+    ? [file, ...execArgs.map((value) => shellQuote(value))].join(' ')
+    : file;
+  return execWithBinding(binding, command, execOptions, cb);
+}
+
+export function execFile(
+  file: string,
+  args?: string[] | ExecOptions | ExecCallback,
+  options?: ExecOptions | ExecCallback,
+  callback?: ExecCallback
+): ChildProcess {
+  return execFileWithBinding(undefined, file, args, options, callback);
 }
 
 /**
@@ -1858,7 +2521,8 @@ export function execFile(
  * This browser runtime cannot execute shell commands synchronously, so we provide
  * deterministic results for common architecture probes used by npm packages.
  */
-export function execFileSync(
+function execFileSyncWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
   file: string,
   argsOrOptions?: string[] | ExecOptions,
   options?: ExecOptions
@@ -1883,6 +2547,14 @@ export function execFileSync(
   );
 }
 
+export function execFileSync(
+  file: string,
+  argsOrOptions?: string[] | ExecOptions,
+  options?: ExecOptions
+): string | Buffer {
+  return execFileSyncWithBinding(undefined, file, argsOrOptions, options);
+}
+
 /**
  * Fork — runs a Node.js module in a simulated child process using a new Runtime.
  * In the browser, there's no real process forking. Instead we:
@@ -1890,14 +2562,19 @@ export function execFileSync(
  * 2. Create a new Runtime to execute the module
  * 3. Wire up bidirectional IPC between parent and child
  */
-export function fork(
+function forkWithBinding(
+  binding: ChildProcessModuleBinding | undefined,
   modulePath: string,
   argsOrOptions?: string[] | Record<string, unknown>,
   options?: Record<string, unknown>
 ): ChildProcess {
-  if (!currentVfs) {
-    throw new Error('VFS not initialized');
-  }
+  const baseEnv = getBindingDefaultEnv(binding);
+  const controller = getActiveController(binding, {
+    ...baseEnv,
+    ...((!Array.isArray(argsOrOptions) && argsOrOptions?.env) ? argsOrOptions.env as Record<string, string> : {}),
+    ...((options?.env as Record<string, string> | undefined) || {}),
+  });
+  if (!controller) throw new Error('VFS not initialized');
 
   // Parse overloaded arguments
   let args: string[] = [];
@@ -1909,8 +2586,11 @@ export function fork(
     opts = argsOrOptions;
   }
 
-  const cwd = (opts.cwd as string) || getDefaultProcessCwd();
-  const env = (opts.env as Record<string, string>) || getDefaultProcessEnv();
+  const cwd = (opts.cwd as string) || getBindingDefaultCwd(binding);
+  const env = {
+    ...baseEnv,
+    ...(opts.env as Record<string, string> | undefined || {}),
+  };
   const execArgv = (opts.execArgv as string[]) || [];
 
   // Resolve the module path
@@ -1924,9 +2604,14 @@ export function fork(
   child.spawnfile = 'node';
 
   // Create a Runtime for the child process
-  const childRuntime = new Runtime(currentVfs!, {
+  const existingExecution = getActiveExecutionContext(controller, binding, env);
+  const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
+  const ownsExecution = !existingExecution;
+
+  const childRuntime = new Runtime(controller.vfs, {
     cwd,
-    env,
+    env: withExecutionEnv(controller, execution, env),
+    childProcessController: controller,
     onConsole: (method, consoleArgs) => {
       const msg = consoleArgs.map(a => String(a)).join(' ');
       if (method === 'error' || method === 'warn') {
@@ -1998,11 +2683,14 @@ export function fork(
   childProc.connected = true;
 
   // Track this fork in the active children count
-  _activeForkedChildren++;
+  execution.activeForkedChildren++;
 
   const notifyChildExit = () => {
-    _activeForkedChildren--;
-    _onForkedChildExit?.();
+    execution.activeForkedChildren = Math.max(0, execution.activeForkedChildren - 1);
+    execution.onForkedChildExit?.();
+    if (ownsExecution && !execution.activeForkedChildren) {
+      controller.destroyExecution(execution.id);
+    }
   };
 
   // Override child's process.exit
@@ -2055,6 +2743,14 @@ export function fork(
   return child;
 }
 
+export function fork(
+  modulePath: string,
+  argsOrOptions?: string[] | Record<string, unknown>,
+  options?: Record<string, unknown>
+): ChildProcess {
+  return forkWithBinding(undefined, modulePath, argsOrOptions, options);
+}
+
 /**
  * ChildProcess class
  */
@@ -2102,6 +2798,46 @@ export class ChildProcess extends EventEmitter {
   unref(): this {
     return this;
   }
+}
+
+export function getDefaultChildProcessController(): ChildProcessController | null {
+  return defaultChildProcessController;
+}
+
+export function createChildProcessModule(binding?: ChildProcessModuleBinding) {
+  return {
+    exec: (
+      command: string,
+      optionsOrCallback?: ExecOptions | ExecCallback,
+      callback?: ExecCallback
+    ) => execWithBinding(binding, command, optionsOrCallback, callback),
+    execSync: (command: string, options?: ExecOptions) => execSyncWithBinding(binding, command, options),
+    execFile: (
+      file: string,
+      args?: string[] | ExecOptions | ExecCallback,
+      options?: ExecOptions | ExecCallback,
+      callback?: ExecCallback
+    ) => execFileWithBinding(binding, file, args, options, callback),
+    execFileSync: (
+      file: string,
+      argsOrOptions?: string[] | ExecOptions,
+      options?: ExecOptions
+    ) => execFileSyncWithBinding(binding, file, argsOrOptions, options),
+    spawn: (command: string, args?: string[] | SpawnOptions, options?: SpawnOptions) => {
+      return spawnWithBinding(binding, command, args, options);
+    },
+    spawnSync: (command: string, args?: string[], options?: SpawnOptions) => {
+      return spawnSyncWithBinding(binding, command, args, options);
+    },
+    fork: (modulePath: string, argsOrOptions?: string[] | Record<string, unknown>, options?: Record<string, unknown>) => {
+      return forkWithBinding(binding, modulePath, argsOrOptions, options);
+    },
+    ChildProcess,
+    initChildProcess,
+    setStreamingCallbacks,
+    clearStreamingCallbacks,
+    sendStdin,
+  };
 }
 
 export default {

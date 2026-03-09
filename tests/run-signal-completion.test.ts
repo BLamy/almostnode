@@ -147,4 +147,73 @@ process.stdin.on('keypress', (_str, key) => {
     expect(combined).toContain('DATA:"next-app"');
     expect(combined).not.toContain('DATA:"\\u001b[A"');
   });
+
+  it('supports readable stdin flow and live TTY stream flags for interactive CLIs', async () => {
+    const container = createContainer();
+    container.vfs.writeFileSync('/stdin-readable.js', `
+process.stdin.setEncoding('utf8');
+process.stdin.setRawMode(true);
+process.stdin.ref();
+let seen = '';
+process.stdin.on('readable', () => {
+  let chunk = process.stdin.read();
+  while (chunk !== null) {
+    seen += String(chunk);
+    chunk = process.stdin.read();
+  }
+  if (seen.includes('x')) {
+    console.log('READABLE:' + seen);
+    if (!process.stdout.writable || !process.stdin.readable) process.exit(129);
+    process.exit(0);
+  }
+});
+setTimeout(() => {
+  if (!process.stdout.writable || !process.stdin.readable) process.exit(129);
+}, 50);
+`);
+
+    const controller = new AbortController();
+    const out: string[] = [];
+    const resultPromise = container.run('node /stdin-readable.js', {
+      signal: controller.signal,
+      onStdout: (chunk) => out.push(chunk),
+      onStderr: (chunk) => out.push(chunk),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    container.sendInput('x');
+
+    const result = await resultPromise;
+    const combined = out.join('');
+
+    expect(result.exitCode).toBe(0);
+    expect(combined).toContain('READABLE:x');
+  });
+
+  it('passes pasted auth-style tokens through stdin without bracketed paste markers', async () => {
+    const container = createContainer();
+    container.vfs.writeFileSync('/stdin-paste.js', `
+process.stdin.setRawMode(true);
+process.stdin.on('data', (chunk) => {
+  console.log('DATA:' + JSON.stringify(String(chunk)));
+  process.exit(0);
+});
+`);
+
+    const out: string[] = [];
+    const resultPromise = container.run('node /stdin-paste.js', {
+      onStdout: (chunk) => out.push(chunk),
+      onStderr: (chunk) => out.push(chunk),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    container.sendInput('\u001b[200~RNQar6ibVesWdWYkm2ZH5lkojbuYCzG2valccELWOf2ofWes#TDF-LhDbcRnyAHFzRau1Oq_fO4epJKYfuAalzRMpnIU\u001b[201~');
+
+    const result = await resultPromise;
+    const combined = out.join('');
+
+    expect(result.exitCode).toBe(0);
+    expect(combined).toContain('DATA:"RNQar6ibVesWdWYkm2ZH5lkojbuYCzG2valccELWOf2ofWes#TDF-LhDbcRnyAHFzRau1Oq_fO4epJKYfuAalzRMpnIU"');
+  });
+
 });

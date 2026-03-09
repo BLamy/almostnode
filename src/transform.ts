@@ -7,11 +7,131 @@
 
 import { VirtualFS } from './virtual-fs';
 import { ESBUILD_WASM_ESM_CDN, ESBUILD_WASM_BINARY_CDN } from './config/cdn';
+import * as acorn from 'acorn';
 
-// Check if we're in a browser environment
-const isBrowser = typeof window !== 'undefined';
+const CJS_REQUIRE_HELPER = '__almostnodeRequire';
+
+// Check if we're in a real browser environment (not Node.js or jsdom tests)
+const isNodeLike = typeof process !== 'undefined' && Boolean((process as { versions?: { node?: string } }).versions?.node);
+const isLikelyJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
+const isBrowser = typeof window !== 'undefined' &&
+  typeof document !== 'undefined' &&
+  !isNodeLike &&
+  !isLikelyJsdom;
 
 // Window.__esbuild type is declared in src/types/external.d.ts
+
+const NODE_BUILTINS = new Set([
+  'assert', 'buffer', 'child_process', 'cluster', 'crypto', 'dgram', 'dns',
+  'events', 'fs', 'http', 'http2', 'https', 'net', 'os', 'path', 'perf_hooks',
+  'querystring', 'readline', 'stream', 'string_decoder', 'timers', 'tls',
+  'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib', 'async_hooks', 'inspector', 'module',
+]);
+
+function walkAst(node: any, callback: (node: any, parent: any | null) => void, parent: any | null = null): void {
+  if (!node || typeof node !== 'object') return;
+  if (typeof node.type === 'string') {
+    callback(node, parent);
+  }
+
+  for (const key of Object.keys(node)) {
+    if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+    const child = node[key];
+    if (child && typeof child === 'object') {
+      if (Array.isArray(child)) {
+        for (const item of child) {
+          if (item && typeof item === 'object' && typeof item.type === 'string') {
+            walkAst(item, callback, node);
+          }
+        }
+      } else if (typeof child.type === 'string') {
+        walkAst(child, callback, node);
+      }
+    }
+  }
+}
+
+function parseDynamicImportAst(code: string): any | null {
+  const parse = (sourceType: 'module' | 'script') => (
+    acorn.parse(code, { ecmaVersion: 'latest', sourceType })
+  );
+
+  try {
+    return parse('module');
+  } catch {
+    try {
+      return parse('script');
+    } catch {
+      return null;
+    }
+  }
+}
+
+function applyReplacements(code: string, replacements: Array<[number, number, string]>): string {
+  if (replacements.length === 0) return code;
+
+  let patched = code;
+  replacements.sort((a, b) => b[0] - a[0]);
+  for (const [start, end, replacement] of replacements) {
+    patched = patched.slice(0, start) + replacement + patched.slice(end);
+  }
+
+  return patched;
+}
+
+function rewriteDynamicImportsForCjs(code: string): string {
+  const ast = parseDynamicImportAst(code);
+  if (!ast) {
+    return code;
+  }
+
+  const replacements: Array<[number, number, string]> = [];
+
+  walkAst(ast, (node, parent) => {
+    if (node.type === 'AwaitExpression') {
+      const awaited = node.argument;
+      if (awaited?.type === 'ImportExpression' && awaited.source) {
+        const sourceCode = code.slice(awaited.source.start, awaited.source.end);
+        replacements.push([node.start, node.end, `${CJS_REQUIRE_HELPER}(${sourceCode})`]);
+        return;
+      }
+
+      if (
+        awaited?.type === 'CallExpression'
+        && awaited.callee?.type === 'Identifier'
+        && awaited.callee.name === '__dynamicImport'
+        && awaited.arguments?.length === 1
+      ) {
+        const arg = awaited.arguments[0];
+        const sourceCode = code.slice(arg.start, arg.end);
+        replacements.push([node.start, node.end, `${CJS_REQUIRE_HELPER}(${sourceCode})`]);
+      }
+      return;
+    }
+
+    if (node.type !== 'ImportExpression') {
+      return;
+    }
+
+    if (parent?.type === 'AwaitExpression' && parent.argument === node) {
+      return;
+    }
+
+    if (node.source?.type !== 'Literal' || typeof node.source.value !== 'string') {
+      return;
+    }
+
+    const specifier = node.source.value;
+    if (!specifier.startsWith('node:') && !NODE_BUILTINS.has(specifier)) {
+      return;
+    }
+
+    const sourceCode = code.slice(node.source.start, node.source.end);
+    replacements.push([node.start, node.end, `Promise.resolve(${CJS_REQUIRE_HELPER}(${sourceCode}))`]);
+  });
+
+  return applyReplacements(code, replacements);
+}
 
 /**
  * Initialize esbuild-wasm (reuses existing instance if already initialized)
@@ -109,12 +229,7 @@ export async function transformFile(
   else if (filename.endsWith('.tsx')) loader = 'tsx';
   else if (filename.endsWith('.mjs')) loader = 'js';
 
-  const rewriteAwaitImportsForCjs = (input: string): string => {
-    let rewritten = input;
-    rewritten = rewritten.replace(/\bawait\s+import\s*\(/g, 'require(');
-    rewritten = rewritten.replace(/\bawait\s+__dynamicImport\s*\(/g, 'require(');
-    return rewritten;
-  };
+  const rewriteAwaitImportsForCjs = (input: string): string => rewriteDynamicImportsForCjs(input);
 
   const runTransform = async (inputCode: string): Promise<string> => {
     const result = await esbuild.transform(inputCode, {
@@ -133,27 +248,6 @@ export async function transformFile(
     });
 
     let transformed = result.code;
-
-    // Convert dynamic import() of node: modules to require()
-    // This is necessary because the browser tries to fetch 'node:http' as a URL
-    // Pattern: import("node:xxx") or import('node:xxx') -> Promise.resolve(require("node:xxx"))
-    transformed = transformed.replace(
-      /\bimport\s*\(\s*["']node:([^"']+)["']\s*\)/g,
-      'Promise.resolve(require("node:$1"))'
-    );
-
-    // Also handle dynamic imports of bare node built-in modules (without node: prefix)
-    const nodeBuiltins = [
-      'assert', 'buffer', 'child_process', 'cluster', 'crypto', 'dgram', 'dns',
-      'events', 'fs', 'http', 'http2', 'https', 'net', 'os', 'path', 'perf_hooks',
-      'querystring', 'readline', 'stream', 'string_decoder', 'timers', 'tls',
-      'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib', 'async_hooks', 'inspector', 'module'
-    ];
-    for (const builtin of nodeBuiltins) {
-      // Match import("fs") or import('fs') but not import("fs-extra") etc
-      const pattern = new RegExp(`\\bimport\\s*\\(\\s*["']${builtin}["']\\s*\\)`, 'g');
-      transformed = transformed.replace(pattern, `Promise.resolve(require("${builtin}"))`);
-    }
 
     return rewriteAwaitImportsForCjs(transformed);
   };
@@ -223,30 +317,8 @@ function hasDynamicNodeImports(code: string): boolean {
 /**
  * Patch dynamic imports in already-CJS code (e.g., pre-bundled packages)
  */
-function patchDynamicImports(code: string): string {
-  let patched = code;
-  patched = patched.replace(/\bawait\s+import\s*\(/g, 'require(');
-  patched = patched.replace(/\bawait\s+__dynamicImport\s*\(/g, 'require(');
-
-  // Convert dynamic import() of node: modules to require()
-  patched = patched.replace(
-    /\bimport\s*\(\s*["']node:([^"']+)["']\s*\)/g,
-    'Promise.resolve(require("node:$1"))'
-  );
-
-  // Also handle dynamic imports of bare node built-in modules
-  const nodeBuiltins = [
-    'assert', 'buffer', 'child_process', 'cluster', 'crypto', 'dgram', 'dns',
-    'events', 'fs', 'http', 'http2', 'https', 'net', 'os', 'path', 'perf_hooks',
-    'querystring', 'readline', 'stream', 'string_decoder', 'timers', 'tls',
-    'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib', 'async_hooks', 'inspector', 'module'
-  ];
-  for (const builtin of nodeBuiltins) {
-    const pattern = new RegExp(`\\bimport\\s*\\(\\s*["']${builtin}["']\\s*\\)`, 'g');
-    patched = patched.replace(pattern, `Promise.resolve(require("${builtin}"))`);
-  }
-
-  return patched;
+export function patchDynamicImports(code: string): string {
+  return rewriteDynamicImportsForCjs(code);
 }
 
 /**

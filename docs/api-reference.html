@@ -72,6 +72,7 @@
       <tbody>
         <tr><td><code>cwd</code></td><td><code>string</code></td><td>Working directory (default: <code>'/'</code>)</td></tr>
         <tr><td><code>env</code></td><td><code>Record&lt;string, string&gt;</code></td><td>Environment variables for <code>process.env</code></td></tr>
+        <tr><td><code>git</code></td><td><code>GitAuthOptions</code></td><td>Default git auth/proxy/author settings</td></tr>
         <tr><td><code>onConsole</code></td><td><code>(level, ...args) =&gt; void</code></td><td>Callback for console output</td></tr>
         <tr><td><code>baseUrl</code></td><td><code>string</code></td><td>Base URL for the server bridge</td></tr>
         <tr><td><code>onServerReady</code></td><td><code>(port) =&gt; void</code></td><td>Called when a server starts listening</td></tr>
@@ -88,6 +89,9 @@
         <tr><td><code>serverBridge</code></td><td><code>ServerBridge</code></td><td>Service worker bridge</td></tr>
         <tr><td><code>execute</code></td><td><code>(code) =&gt; result</code></td><td>Shorthand for <code>runtime.execute()</code></td></tr>
         <tr><td><code>runFile</code></td><td><code>(path) =&gt; result</code></td><td>Shorthand for <code>runtime.runFile()</code></td></tr>
+        <tr><td><code>run</code></td><td><code>(command, options?) =&gt; Promise&lt;RunResult&gt;</code></td><td>Execute shell commands with optional per-run <code>env</code></td></tr>
+        <tr><td><code>setGitAuth</code></td><td><code>(updates) =&gt; void</code></td><td>Update git token/proxy/author values at runtime</td></tr>
+        <tr><td><code>getGitAuth</code></td><td><code>() =&gt; GitAuthOptions</code></td><td>Read current git auth settings</td></tr>
         <tr><td><code>createREPL</code></td><td><code>() =&gt; { eval: (code) =&gt; unknown }</code></td><td>Create an interactive REPL context</td></tr>
         <tr><td><code>on</code></td><td><code>(event, listener) =&gt; void</code></td><td>Listen for events (e.g. <code>'server-ready'</code>)</td></tr>
       </tbody>

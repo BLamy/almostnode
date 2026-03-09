@@ -39,6 +39,28 @@ describe('Transform module', () => {
       // Only index.js has ESM syntax and needs transformation
       expect(count).toBe(1);
     });
+
+    it('should patch real dynamic imports without rewriting matching text inside strings', async () => {
+      const { patchDynamicImports } = await import('../src/transform');
+
+      const transformed = patchDynamicImports(
+        [
+          'const uploadHint = "`import(\'node:buffer\').File`";',
+          'async function loadFs() {',
+          '  return await import(\'node:fs\');',
+          '}',
+          'async function loadBuffer() {',
+          '  return import(\'node:buffer\');',
+          '}',
+          'module.exports = { uploadHint, loadFs, loadBuffer };',
+        ].join('\n')
+      );
+
+      expect(transformed).toContain("`import('node:buffer').File`");
+      expect(transformed).toContain("return __almostnodeRequire('node:fs');");
+      expect(transformed).toContain("return Promise.resolve(__almostnodeRequire('node:buffer'));");
+      expect(() => new Function(transformed)).not.toThrow();
+    });
   });
 });
 

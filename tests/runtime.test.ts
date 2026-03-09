@@ -41,6 +41,75 @@ describe('Runtime', () => {
       `);
       expect(exports).toEqual({ hello: 'world' });
     });
+
+    it('should expose a constructible global console.Console with bound methods', () => {
+      const { exports } = runtime.execute(`
+        const redirected = [];
+        const patched = new console.Console({
+          stdout: { write: (text) => redirected.push(['out', text]) },
+          stderr: { write: (text) => redirected.push(['err', text]) },
+        });
+
+        console.log = patched.log;
+        console.error = patched.error;
+        console.log('hello');
+        console.error('boom');
+
+        module.exports = {
+          hasCtor: typeof console.Console === 'function',
+          redirected,
+        };
+      `);
+
+      expect(exports).toEqual({
+        hasCtor: true,
+        redirected: [
+          ['out', 'hello\n'],
+          ['err', 'boom\n'],
+        ],
+      });
+    });
+
+    it('should proxy cross-origin XMLHttpRequest URLs and ignore forbidden headers', () => {
+      class MockXHR {
+        openArgs: unknown[] | null = null;
+        headers: Array<[string, string]> = [];
+
+        open(...args: unknown[]) {
+          this.openArgs = args;
+        }
+
+        setRequestHeader(name: string, value: string) {
+          this.headers.push([name, value]);
+        }
+      }
+
+      vi.stubGlobal('location', { host: 'localhost:5173' } as any);
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => key === '__corsProxyUrl' ? 'https://proxy.example/?url=' : null,
+      } as any);
+      vi.stubGlobal('XMLHttpRequest', MockXHR as any);
+
+      try {
+        new Runtime(vfs);
+
+        const xhr = new (globalThis as any).XMLHttpRequest() as MockXHR;
+        xhr.open('GET', 'https://api.anthropic.com/api/hello');
+        xhr.setRequestHeader('User-Agent', 'almostnode-test');
+        xhr.setRequestHeader('X-Test', '1');
+
+        expect(xhr.openArgs).toEqual([
+          'GET',
+          'https://proxy.example/?url=' + encodeURIComponent('https://api.anthropic.com/api/hello'),
+          true,
+          null,
+          null,
+        ]);
+        expect(xhr.headers).toEqual([['X-Test', '1']]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   describe('fs shim', () => {
@@ -511,6 +580,28 @@ module.exports = 'ok';
       `);
 
       expect(exports).toBe('ok');
+    });
+
+    it('should execute direct entry files with arbitrary top-level await via an async wrapper', async () => {
+      const stdout: string[] = [];
+      runtime = new Runtime(vfs, {
+        onStdout: (data) => {
+          stdout.push(data);
+        },
+      });
+
+      const result = runtime.execute(`
+import process from 'node:process';
+
+const value = await Promise.resolve('codex-ok');
+process.stdout.write(value);
+module.exports = value;
+`, '/entry.js');
+
+      await result.module.executionPromise;
+
+      expect(result.module.exports).toBe('codex-ok');
+      expect(stdout.join('')).toBe('codex-ok');
     });
 
     it('should resolve aliased package directories with exports field', () => {
