@@ -1,61 +1,47 @@
-/**
- * npm Package Manager
- * Orchestrates package installation into the virtual file system
- */
-
 import { VirtualFS } from '../virtual-fs';
-import { Registry, RegistryOptions } from './registry';
 import {
-  resolveDependencies,
-  resolveFromPackageJson,
-  ResolvedPackage,
-  ResolveOptions,
-} from './resolver';
-import { downloadAndExtract, extractTarball } from './tarball';
-import * as path from '../shims/path';
-
-/**
- * Normalize a package.json bin field into a consistent Record<string, string>.
- * Handles both string form ("bin": "cli.js") and object form ("bin": {"cmd": "cli.js"}).
- */
-export function normalizeBin(pkgName: string, bin?: Record<string, string> | string): Record<string, string> {
-  if (!bin) return {};
-  if (typeof bin === 'string') {
-    // String form uses the package name (without scope) as the command name
-    const cmdName = pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName;
-    return { [cmdName]: bin };
-  }
-  return bin;
-}
-
-export interface InstallOptions {
-  registry?: string;
-  save?: boolean;
-  saveDev?: boolean;
-  includeDev?: boolean;
-  includeOptional?: boolean;
-  onProgress?: (message: string) => void;
-  /** Deprecated no-op. Module transformation now happens at load time. */
-  transform?: boolean;
-}
-
-export interface InstallResult {
-  installed: Map<string, ResolvedPackage>;
-  added: string[];
-}
+  deserializeInstallResult,
+  executeInstallRequest,
+  listInstalledPackages,
+  toSerializableInstallOptions,
+} from './core';
+import { applyVfsPatch, createInstallSnapshot } from './vfs-patch';
+import { NpmInstallWorkerClient } from './worker-client';
+import { almostnodeDebugError, almostnodeDebugLog } from '../utils/debug';
+import type {
+  InstallMode,
+  InstallOptions,
+  InstallRequest,
+  InstallResult,
+  PackageManagerMutationSummary,
+  PackageManagerOptions,
+  PackageManagerSettings,
+  PackageManagerWorkerClient,
+} from './types';
+import type { RegistryOptions } from './registry';
 
 /**
  * npm Package Manager for VirtualFS
  */
 export class PackageManager {
   private vfs: VirtualFS;
-  private registry: Registry;
   private cwd: string;
+  private registryOptions: RegistryOptions;
+  private installMode: InstallMode;
+  private onMutation: ((summary: PackageManagerMutationSummary) => void | Promise<void>) | null;
+  private workerClientFactory: () => PackageManagerWorkerClient;
+  private workerClient: PackageManagerWorkerClient | null = null;
 
-  constructor(vfs: VirtualFS, options: { cwd?: string } & RegistryOptions = {}) {
+  constructor(vfs: VirtualFS, options: PackageManagerOptions = {}) {
     this.vfs = vfs;
-    this.registry = new Registry(options);
     this.cwd = options.cwd || '/';
+    this.registryOptions = {
+      registry: options.registry,
+      cache: options.cache || new Map(),
+    };
+    this.installMode = options.installMode || 'auto';
+    this.onMutation = options.onMutation || null;
+    this.workerClientFactory = options.workerClientFactory || (() => new NpmInstallWorkerClient());
   }
 
   /**
@@ -65,282 +51,143 @@ export class PackageManager {
     packageSpec: string,
     options: InstallOptions = {}
   ): Promise<InstallResult> {
-    const { onProgress } = options;
-
-    // Parse package spec (name@version)
-    const { name, version } = parsePackageSpec(packageSpec);
-
-    onProgress?.(`Resolving ${name}@${version || 'latest'}...`);
-
-    // Resolve dependencies
-    const resolved = await resolveDependencies(name, version || 'latest', {
-      registry: this.registry,
-      includeDev: options.includeDev,
-      includeOptional: options.includeOptional,
-      onProgress,
-    });
-
-    // Install all resolved packages
-    const added = await this.installResolved(resolved, options);
-
-    // Update package.json if save option is set
-    if (options.save || options.saveDev) {
-      const pkgToAdd = resolved.get(name);
-      if (pkgToAdd) {
-        await this.updatePackageJson(
-          name,
-          `^${pkgToAdd.version}`,
-          options.saveDev || false
-        );
-      }
-    }
-
-    onProgress?.(`Installed ${resolved.size} packages`);
-
-    return { installed: resolved, added };
+    return this.executeInstallRequest({ kind: 'package', packageSpec }, options);
   }
 
   /**
    * Install all dependencies from package.json
    */
   async installFromPackageJson(options: InstallOptions = {}): Promise<InstallResult> {
-    const { onProgress } = options;
-
-    const pkgJsonPath = path.join(this.cwd, 'package.json');
-
-    if (!this.vfs.existsSync(pkgJsonPath)) {
-      throw new Error('No package.json found');
-    }
-
-    const pkgJson = JSON.parse(this.vfs.readFileSync(pkgJsonPath, 'utf8'));
-
-    onProgress?.('Resolving dependencies...');
-
-    // Resolve all dependencies
-    const resolved = await resolveFromPackageJson(pkgJson, {
-      registry: this.registry,
-      includeDev: options.includeDev,
-      includeOptional: options.includeOptional,
-      onProgress,
-    });
-
-    // Install all resolved packages
-    const added = await this.installResolved(resolved, options);
-
-    onProgress?.(`Installed ${resolved.size} packages`);
-
-    return { installed: resolved, added };
-  }
-
-  /**
-   * Install resolved packages to node_modules
-   */
-  private async installResolved(
-    resolved: Map<string, ResolvedPackage>,
-    options: InstallOptions
-  ): Promise<string[]> {
-    const { onProgress } = options;
-    const added: string[] = [];
-
-    // Ensure node_modules exists
-    const nodeModulesPath = path.join(this.cwd, 'node_modules');
-    this.vfs.mkdirSync(nodeModulesPath, { recursive: true });
-
-    // Filter packages that need to be installed
-    const toInstall: Array<{ name: string; pkg: ResolvedPackage; pkgPath: string }> = [];
-
-    for (const [name, pkg] of resolved) {
-      const pkgPath = path.join(nodeModulesPath, name);
-
-      // Skip if already installed with same version
-      const existingPkgJson = path.join(pkgPath, 'package.json');
-      if (this.vfs.existsSync(existingPkgJson)) {
-        try {
-          const existing = JSON.parse(
-            this.vfs.readFileSync(existingPkgJson, 'utf8')
-          );
-          if (existing.version === pkg.version) {
-            onProgress?.(`Skipping ${name}@${pkg.version} (already installed)`);
-            continue;
-          }
-        } catch {
-          // Continue with installation if package.json is invalid
-        }
-      }
-
-      toInstall.push({ name, pkg, pkgPath });
-    }
-
-    // Install packages in parallel (limit concurrency to avoid overwhelming the browser)
-    const CONCURRENCY = 6;
-    onProgress?.(`Installing ${toInstall.length} packages...`);
-
-    for (let i = 0; i < toInstall.length; i += CONCURRENCY) {
-      const batch = toInstall.slice(i, i + CONCURRENCY);
-
-      await Promise.all(
-        batch.map(async ({ name, pkg, pkgPath }) => {
-          onProgress?.(`  Downloading ${name}@${pkg.version}...`);
-
-          // Download and extract tarball
-          await downloadAndExtract(pkg.tarballUrl, this.vfs, pkgPath, {
-            stripComponents: 1, // Strip "package/" prefix
-          });
-
-          // Create bin stubs in /node_modules/.bin/
-          try {
-            const pkgJsonPath = path.join(pkgPath, 'package.json');
-            if (this.vfs.existsSync(pkgJsonPath)) {
-              const pkgJson = JSON.parse(this.vfs.readFileSync(pkgJsonPath, 'utf8'));
-              const binEntries = normalizeBin(name, pkgJson.bin);
-              const binDir = path.join(nodeModulesPath, '.bin');
-              for (const [cmdName, entryPath] of Object.entries(binEntries)) {
-                this.vfs.mkdirSync(binDir, { recursive: true });
-                const targetPath = path.join(pkgPath, entryPath);
-                this.vfs.writeFileSync(
-                  path.join(binDir, cmdName),
-                  `node "${targetPath}" "$@"\n`
-                );
-              }
-            }
-          } catch {
-            // Non-critical — skip if bin stub creation fails
-          }
-
-          added.push(name);
-        })
-      );
-    }
-
-    // Create .package-lock.json for tracking
-    await this.writeLockfile(resolved);
-
-    return added;
-  }
-
-  /**
-   * Write lockfile with resolved versions
-   */
-  private async writeLockfile(
-    resolved: Map<string, ResolvedPackage>
-  ): Promise<void> {
-    const lockfile: Record<string, { version: string; resolved: string }> = {};
-
-    for (const [name, pkg] of resolved) {
-      lockfile[name] = {
-        version: pkg.version,
-        resolved: pkg.tarballUrl,
-      };
-    }
-
-    const lockfilePath = path.join(this.cwd, 'node_modules', '.package-lock.json');
-    this.vfs.writeFileSync(lockfilePath, JSON.stringify(lockfile, null, 2));
-  }
-
-  /**
-   * Update package.json with new dependency
-   */
-  private async updatePackageJson(
-    packageName: string,
-    version: string,
-    isDev: boolean
-  ): Promise<void> {
-    const pkgJsonPath = path.join(this.cwd, 'package.json');
-
-    let pkgJson: Record<string, unknown> = {};
-
-    if (this.vfs.existsSync(pkgJsonPath)) {
-      pkgJson = JSON.parse(this.vfs.readFileSync(pkgJsonPath, 'utf8'));
-    }
-
-    const field = isDev ? 'devDependencies' : 'dependencies';
-
-    if (!pkgJson[field]) {
-      pkgJson[field] = {};
-    }
-
-    (pkgJson[field] as Record<string, string>)[packageName] = version;
-
-    this.vfs.writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2));
+    return this.executeInstallRequest({ kind: 'packageJson' }, options);
   }
 
   /**
    * List installed packages
    */
   list(): Record<string, string> {
-    const nodeModulesPath = path.join(this.cwd, 'node_modules');
+    return listInstalledPackages(this.vfs, this.cwd);
+  }
 
-    if (!this.vfs.existsSync(nodeModulesPath)) {
-      return {};
-    }
+  private async executeInstallRequest(
+    request: InstallRequest,
+    options: InstallOptions,
+  ): Promise<InstallResult> {
+    if (this.shouldUseWorker()) {
+      almostnodeDebugLog('npm', `[almostnode DEBUG] npm worker start: ${formatInstallRequest(request)} cwd=${this.cwd}`);
+      try {
+        return await this.installInWorker(request, options);
+      } catch (error) {
+        const workerMessage = toErrorMessage(error);
+        almostnodeDebugError('npm', `[almostnode DEBUG] npm worker failed: ${formatInstallRequest(request)} -> ${workerMessage}`);
+        this.workerClient?.terminate?.();
+        this.workerClient = null;
+        options.onProgress?.('npm: worker install failed; retrying on main thread...');
 
-    const packages: Record<string, string> = {};
-    const entries = this.vfs.readdirSync(nodeModulesPath);
-
-    for (const entry of entries) {
-      // Skip hidden files and non-package entries
-      if (entry.startsWith('.')) continue;
-
-      // Handle scoped packages (@org/pkg)
-      if (entry.startsWith('@')) {
-        const scopePath = path.join(nodeModulesPath, entry);
-        const scopedPkgs = this.vfs.readdirSync(scopePath);
-
-        for (const scopedPkg of scopedPkgs) {
-          const pkgJsonPath = path.join(scopePath, scopedPkg, 'package.json');
-          if (this.vfs.existsSync(pkgJsonPath)) {
-            const pkgJson = JSON.parse(this.vfs.readFileSync(pkgJsonPath, 'utf8'));
-            packages[`${entry}/${scopedPkg}`] = pkgJson.version;
-          }
-        }
-      } else {
-        const pkgJsonPath = path.join(nodeModulesPath, entry, 'package.json');
-        if (this.vfs.existsSync(pkgJsonPath)) {
-          const pkgJson = JSON.parse(this.vfs.readFileSync(pkgJsonPath, 'utf8'));
-          packages[entry] = pkgJson.version;
+        try {
+          const result = await this.installInMainThread(request, options);
+          almostnodeDebugLog('npm', `[almostnode DEBUG] npm main-thread retry succeeded: ${formatInstallRequest(request)} cwd=${this.cwd}`);
+          return result;
+        } catch (mainThreadError) {
+          const mainThreadMessage = toErrorMessage(mainThreadError);
+          almostnodeDebugError(
+            'npm',
+            `[almostnode DEBUG] npm main-thread retry failed: ${formatInstallRequest(request)} -> ${mainThreadMessage}`,
+          );
+          options.onProgress?.('npm: install failed after worker retry and main-thread retry.');
+          throw new Error(`worker install failed: ${workerMessage}; main-thread retry failed: ${mainThreadMessage}`);
         }
       }
     }
 
-    return packages;
+    return this.installInMainThread(request, options);
   }
-}
 
-/**
- * Parse a package specifier into name and version
- * Examples: "express", "express@4.18.2", "@types/node@18"
- */
-function parsePackageSpec(spec: string): { name: string; version?: string } {
-  // Handle scoped packages
-  if (spec.startsWith('@')) {
-    const slashIndex = spec.indexOf('/');
-    if (slashIndex === -1) {
-      throw new Error(`Invalid package spec: ${spec}`);
+  private async installInMainThread(
+    request: InstallRequest,
+    options: InstallOptions,
+  ): Promise<InstallResult> {
+    const result = await executeInstallRequest(this.vfs, this.getSettings(), request, options);
+    await this.notifyMutation({
+      touchesNodeModules: result.added.length > 0,
+      touchesPackageJson: request.kind === 'package' && !!(options.save || options.saveDev),
+    });
+    return result;
+  }
+
+  private shouldUseWorker(): boolean {
+    if (this.installMode === 'main-thread') {
+      return false;
+    }
+    return typeof Worker !== 'undefined';
+  }
+
+  private async installInWorker(
+    request: InstallRequest,
+    options: InstallOptions,
+  ): Promise<InstallResult> {
+    const client = this.workerClient || this.workerClientFactory();
+    this.workerClient = client;
+    const snapshot = createInstallSnapshot(this.vfs, this.cwd);
+
+    const response = await client.runInstall(
+      {
+        snapshot,
+        settings: {
+          cwd: this.cwd,
+          registry: options.registry || this.registryOptions.registry,
+        },
+        request,
+        options: toSerializableInstallOptions(options),
+      },
+      options.onProgress || null,
+    );
+    almostnodeDebugLog(
+      'npm',
+      `[almostnode DEBUG] npm worker patch: ${formatInstallRequest(request)} operations=${response.patch.operations.length} changedPaths=${response.patch.changedPaths.length} snapshotEntries=${snapshot.files.length}`,
+    );
+
+    if (response.patch.operations.length > 0) {
+      options.onProgress?.(`Applying ${response.patch.operations.length} file changes...`);
+      await applyVfsPatch(this.vfs, response.patch);
+      options.onProgress?.('Install changes applied');
+      almostnodeDebugLog(
+        'npm',
+        `[almostnode DEBUG] npm worker patch applied: ${formatInstallRequest(request)} operations=${response.patch.operations.length}`,
+      );
+    } else {
+      almostnodeDebugLog('npm', `[almostnode DEBUG] npm worker patch applied: ${formatInstallRequest(request)} operations=0`);
     }
 
-    const afterSlash = spec.slice(slashIndex + 1);
-    const atIndex = afterSlash.indexOf('@');
+    await this.notifyMutation({
+      touchesNodeModules: response.patch.touchesNodeModules,
+      touchesPackageJson: response.patch.touchesPackageJson,
+    });
 
-    if (atIndex === -1) {
-      return { name: spec };
-    }
+    return deserializeInstallResult(response.result);
+  }
 
+  private getSettings(): PackageManagerSettings {
     return {
-      name: spec.slice(0, slashIndex + 1 + atIndex),
-      version: afterSlash.slice(atIndex + 1),
+      cwd: this.cwd,
+      registry: this.registryOptions.registry,
+      cache: this.registryOptions.cache,
     };
   }
 
-  // Regular packages
-  const atIndex = spec.indexOf('@');
-  if (atIndex === -1) {
-    return { name: spec };
+  private async notifyMutation(summary: PackageManagerMutationSummary): Promise<void> {
+    await this.onMutation?.(summary);
   }
+}
 
-  return {
-    name: spec.slice(0, atIndex),
-    version: spec.slice(atIndex + 1),
-  };
+function formatInstallRequest(request: InstallRequest): string {
+  if (request.kind === 'package') {
+    return `package:${request.packageSpec}`;
+  }
+  return 'packageJson';
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // Convenience function for quick installs
@@ -358,4 +205,11 @@ export { Registry } from './registry';
 export type { RegistryOptions, PackageVersion, PackageManifest } from './registry';
 export type { ResolvedPackage, ResolveOptions } from './resolver';
 export type { ExtractOptions } from './tarball';
-export { parsePackageSpec };
+export type {
+  InstallMode,
+  InstallOptions,
+  InstallResult,
+  PackageManagerMutationSummary,
+  PackageManagerOptions,
+} from './types';
+export { normalizeBin, parsePackageSpec, serializeInstallResult, deserializeInstallResult } from './core';

@@ -63,11 +63,7 @@
       .webide-header {
         display: flex;
         align-items: center;
-        gap: 0.9rem;
-        padding: 0.95rem 1.2rem;
-        border-bottom: 1px solid var(--panel-border);
-        background: var(--header-bg);
-        backdrop-filter: blur(18px);
+        height:0px;
       }
 
       .webide-mark {
@@ -107,7 +103,7 @@
 
       .webide-body {
         min-height: 0;
-        padding: 0.95rem;
+        padding: 0;
       }
 
       #webideWorkbench {
@@ -811,11 +807,6 @@
   <body>
     <div class="webide-shell">
       <header class="webide-header">
-        <div class="webide-mark">A</div>
-        <div>
-          <h1 class="webide-title">almostnode VS Code-compatible workbench</h1>
-          <p class="webide-subtitle">Files, search, extensions, command palette, real workbench panels, and a draggable preview editor on top of <code>file:///project</code>.</p>
-        </div>
       </header>
 
       <main class="webide-body">

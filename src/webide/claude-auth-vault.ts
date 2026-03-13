@@ -1,4 +1,5 @@
 import type { VirtualFS, FSWatcher } from '../virtual-fs';
+import { matchesClaudeLaunchCommand } from './terminal-command-routing';
 
 export const CLAUDE_AUTH_STORAGE_KEY = 'almostnode.webide.claudeAuth.v1';
 export const CLAUDE_AUTH_CREDENTIALS_PATH = '/home/user/.claude/.credentials.json';
@@ -517,56 +518,6 @@ function hasRestoredClaudeState(vfs: VirtualFS, vault: StoredClaudeAuthVault): b
       return false;
     }
   });
-}
-
-function normalizeClaudeLaunchSegment(segment: string): string {
-  let normalized = segment.trim();
-
-  while (normalized) {
-    const withoutEnvAssignments = normalized.replace(
-      /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*/,
-      '',
-    );
-    if (withoutEnvAssignments !== normalized) {
-      normalized = withoutEnvAssignments.trimStart();
-      continue;
-    }
-
-    const withoutPrefix = normalized.replace(/^(?:env|command|time)\s+/, '');
-    if (withoutPrefix !== normalized) {
-      normalized = withoutPrefix.trimStart();
-      continue;
-    }
-
-    break;
-  }
-
-  return normalized;
-}
-
-function matchesClaudeLaunchSegment(segment: string): boolean {
-  const trimmed = normalizeClaudeLaunchSegment(segment);
-  if (!trimmed) {
-    return false;
-  }
-
-  if (/^(?:\.\/)?(?:node_modules\/\.bin\/)?claude(?:\s|$)/.test(trimmed)) {
-    return true;
-  }
-  if (/^npx(?:\s+[-\w=]+)*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/.test(trimmed)) {
-    return true;
-  }
-  if (/^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/.test(trimmed)) {
-    return true;
-  }
-
-  return false;
-}
-
-function matchesClaudeLaunchCommand(command: string): boolean {
-  return command
-    .split(/\s*(?:&&|\|\||;)\s*/)
-    .some((segment) => matchesClaudeLaunchSegment(segment));
 }
 
 function ensureBannerStyles(): void {

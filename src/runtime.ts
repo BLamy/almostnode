@@ -58,6 +58,7 @@ import assertShim from './shims/assert';
 import { resolve as resolveExports, imports as resolveImports } from 'resolve.exports';
 import { transformEsmToCjsSimple } from './frameworks/code-transforms';
 import * as acorn from 'acorn';
+import { almostnodeDebugError, almostnodeDebugLog } from './utils/debug';
 
 const CJS_REQUIRE_HELPER = '__almostnodeRequire';
 
@@ -401,12 +402,23 @@ function createStringDecoderModule() {
  */
 function createTimersModule() {
   return {
-    setTimeout: globalThis.setTimeout,
-    setInterval: globalThis.setInterval,
-    setImmediate: (fn: () => void) => setTimeout(fn, 0),
-    clearTimeout: globalThis.clearTimeout,
-    clearInterval: globalThis.clearInterval,
-    clearImmediate: globalThis.clearTimeout,
+    setTimeout: (...args: any[]) => (globalThis.setTimeout as any)(...args),
+    setInterval: (...args: any[]) => (globalThis.setInterval as any)(...args),
+    setImmediate: (fn: (...args: unknown[]) => void, ...args: unknown[]) => (globalThis.setTimeout as any)(fn, 0, ...args),
+    clearTimeout: (handle: unknown) => (globalThis.clearTimeout as any)(handle),
+    clearInterval: (handle: unknown) => (globalThis.clearInterval as any)(handle),
+    clearImmediate: (handle: unknown) => (globalThis.clearTimeout as any)(handle),
+  };
+}
+
+function createTimersPromisesModule() {
+  return {
+    setTimeout: (ms: number, value?: unknown) => new Promise((resolve) => (globalThis.setTimeout as any)(() => resolve(value), ms)),
+    setInterval: (...args: any[]) => (globalThis.setInterval as any)(...args),
+    setImmediate: (value?: unknown) => new Promise((resolve) => (globalThis.setTimeout as any)(() => resolve(value), 0)),
+    scheduler: {
+      wait: (ms: number) => new Promise((resolve) => (globalThis.setTimeout as any)(resolve, ms)),
+    },
   };
 }
 
@@ -714,12 +726,7 @@ const builtinModules: Record<string, unknown> = {
   'path/posix': pathShim,
   'path/win32': pathShim.win32,
   // timers subpaths
-  'timers/promises': {
-    setTimeout: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)),
-    setInterval: globalThis.setInterval,
-    setImmediate: (value?: unknown) => new Promise(resolve => setTimeout(() => resolve(value), 0)),
-    scheduler: { wait: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)) },
-  },
+  'timers/promises': createTimersPromisesModule(),
 };
 
 let runtimeIdCounter = 0;
@@ -727,6 +734,53 @@ let runtimeIdCounter = 0;
 function createRuntimeId(): string {
   runtimeIdCounter += 1;
   return `almostnode-runtime-${runtimeIdCounter}`;
+}
+
+const ACTIVE_TIMER_OWNER_KEY = '__almostnodeActiveTimerOwner';
+
+type TimerTrackingOwner = {
+  registerPendingTimer: (handle: AlmostNodeTimerHandle) => void;
+  unregisterPendingTimer: (handle: AlmostNodeTimerHandle) => void;
+  setPendingTimerRef: (handle: AlmostNodeTimerHandle, refed: boolean) => void;
+};
+
+type AlmostNodeTimerHandle = {
+  _id: unknown;
+  __almostnodeRefed: boolean;
+  __almostnodeTimerOwner: TimerTrackingOwner | null;
+  ref: () => AlmostNodeTimerHandle;
+  unref: () => AlmostNodeTimerHandle;
+  hasRef: () => boolean;
+  refresh: () => AlmostNodeTimerHandle;
+  [Symbol.toPrimitive]: () => number;
+};
+
+function getActiveTimerOwner(): TimerTrackingOwner | null {
+  return ((globalThis as any)[ACTIVE_TIMER_OWNER_KEY] as TimerTrackingOwner | null | undefined) ?? null;
+}
+
+function withActiveTimerOwner<T>(owner: TimerTrackingOwner | null, fn: () => T): T {
+  const previousOwner = getActiveTimerOwner();
+  (globalThis as any)[ACTIVE_TIMER_OWNER_KEY] = owner;
+  try {
+    return fn();
+  } finally {
+    (globalThis as any)[ACTIVE_TIMER_OWNER_KEY] = previousOwner;
+  }
+}
+
+async function withActiveTimerOwnerAsync<T>(owner: TimerTrackingOwner | null, fn: () => Promise<T>): Promise<T> {
+  const previousOwner = getActiveTimerOwner();
+  (globalThis as any)[ACTIVE_TIMER_OWNER_KEY] = owner;
+  try {
+    return await fn();
+  } finally {
+    (globalThis as any)[ACTIVE_TIMER_OWNER_KEY] = previousOwner;
+  }
+}
+
+function isAlmostNodeTimerHandle(value: unknown): value is AlmostNodeTimerHandle {
+  return !!value && typeof value === 'object' && '__almostnodeTimerOwner' in (value as Record<string, unknown>);
 }
 
 /**
@@ -1388,6 +1442,7 @@ export class Runtime {
   private fsShim: FsShim;
   private process: Process;
   private runtimeId: string;
+  private pendingRefedTimers = new Set<AlmostNodeTimerHandle>();
   private moduleCache: Record<string, Module> = {};
   private builtinModules: Record<string, unknown>;
   private formatDetector: ModuleResolver;
@@ -1492,14 +1547,17 @@ export class Runtime {
           let currentBody = effectiveInit.body;
           for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
             const proxiedUrl = getProxiedBrowserUrl(currentUrl);
-            console.log(`[almostnode DEBUG] fetch proxy: ${currentUrl} -> ${proxiedUrl.slice(0, 120)}...`);
+            almostnodeDebugLog('fetch', `[almostnode DEBUG] fetch proxy: ${currentUrl} -> ${proxiedUrl.slice(0, 120)}...`);
             const resp = await origFetch(proxiedUrl, {
               ...effectiveInit,
               method: currentMethod,
               body: currentBody,
               redirect: 'manual',
             });
-            console.log(`[almostnode DEBUG] fetch response: status=${resp.status}, content-type=${resp.headers.get('content-type')}, content-length=${resp.headers.get('content-length')}`);
+            almostnodeDebugLog(
+              'fetch',
+              `[almostnode DEBUG] fetch response: status=${resp.status}, content-type=${resp.headers.get('content-type')}, content-length=${resp.headers.get('content-length')}`,
+            );
 
             // Handle redirects: 301, 302, 303, 307, 308
             if (resp.status >= 300 && resp.status < 400) {
@@ -1597,31 +1655,100 @@ export class Runtime {
         } catch (err) {
           if (err instanceof SyntaxError && err.message.includes('end of JSON')) {
             const preview = typeof text === 'string' ? text.slice(0, 500) : String(text);
-            console.error(`[almostnode DEBUG] JSON.parse failed: ${err.message}`);
-            console.error(`[almostnode DEBUG] Input length: ${typeof text === 'string' ? text.length : 'N/A'}, preview: ${JSON.stringify(preview)}`);
-            console.error(`[almostnode DEBUG] Stack:`, new Error().stack);
+            almostnodeDebugError('json', `[almostnode DEBUG] JSON.parse failed: ${err.message}`);
+            almostnodeDebugError(
+              'json',
+              `[almostnode DEBUG] Input length: ${typeof text === 'string' ? text.length : 'N/A'}, preview: ${JSON.stringify(preview)}`,
+            );
+            almostnodeDebugError('json', `[almostnode DEBUG] Stack:`, new Error().stack);
           }
           throw err;
         }
       }, { __almostnode_debug: true });
     }
 
-    // Patch setTimeout/setInterval to return Node.js-compatible Timeout objects
-    // Node.js timers return objects with .ref()/.unref()/.refresh()/.hasRef() methods
-    // Browser timers return plain numbers. Many npm packages (vitest, etc.) call .unref()
-    if (!(globalThis.setTimeout as any).__patched) {
+    // Patch timers to:
+    // 1. return Node.js-compatible Timeout objects
+    // 2. keep track of ref'ed timers so child_process can avoid completing early
+    if (!(globalThis.setTimeout as any).__almostnodeTracked) {
       const origSetTimeout = globalThis.setTimeout.bind(globalThis);
       const origSetInterval = globalThis.setInterval.bind(globalThis);
       const origClearTimeout = globalThis.clearTimeout.bind(globalThis);
       const origClearInterval = globalThis.clearInterval.bind(globalThis);
-      const wrapTimer = (id: ReturnType<typeof origSetTimeout>) => {
-        const t = { _id: id, ref() { return t; }, unref() { return t; }, hasRef() { return true; }, refresh() { return t; }, [Symbol.toPrimitive]() { return id; } };
-        return t;
+
+      const createTimerHandle = (
+        id: ReturnType<typeof origSetTimeout>,
+        owner: TimerTrackingOwner | null,
+      ): AlmostNodeTimerHandle => {
+        const handle: AlmostNodeTimerHandle = {
+          _id: id,
+          __almostnodeRefed: true,
+          __almostnodeTimerOwner: owner,
+          ref() {
+            if (!handle.__almostnodeRefed) {
+              handle.__almostnodeRefed = true;
+              owner?.setPendingTimerRef(handle, true);
+            }
+            return handle;
+          },
+          unref() {
+            if (handle.__almostnodeRefed) {
+              handle.__almostnodeRefed = false;
+              owner?.setPendingTimerRef(handle, false);
+            }
+            return handle;
+          },
+          hasRef() {
+            return handle.__almostnodeRefed;
+          },
+          refresh() {
+            return handle;
+          },
+          [Symbol.toPrimitive]() {
+            return typeof id === 'number' ? id : Number(id);
+          },
+        };
+
+        owner?.registerPendingTimer(handle);
+        return handle;
       };
-      (globalThis as any).setTimeout = Object.assign((...args: Parameters<typeof origSetTimeout>) => wrapTimer(origSetTimeout(...args)), { __patched: true });
-      (globalThis as any).setInterval = Object.assign((...args: Parameters<typeof origSetInterval>) => wrapTimer(origSetInterval(...args)), { __patched: true });
-      (globalThis as any).clearTimeout = (t: any) => origClearTimeout(t?._id ?? t);
-      (globalThis as any).clearInterval = (t: any) => origClearInterval(t?._id ?? t);
+
+      (globalThis as any).setTimeout = Object.assign((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+        const owner = getActiveTimerOwner();
+        let handle: AlmostNodeTimerHandle;
+        const wrappedCallback = typeof callback === 'function'
+          ? (...callbackArgs: unknown[]) => {
+            owner?.unregisterPendingTimer(handle);
+            return withActiveTimerOwner(owner, () => (callback as (...cbArgs: unknown[]) => unknown)(...callbackArgs));
+          }
+          : callback;
+        const id = origSetTimeout(wrappedCallback as TimerHandler, delay, ...args);
+        handle = createTimerHandle(id, owner);
+        return handle;
+      }, { __almostnodeTracked: true });
+
+      (globalThis as any).setInterval = Object.assign((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+        const owner = getActiveTimerOwner();
+        const wrappedCallback = typeof callback === 'function'
+          ? (...callbackArgs: unknown[]) => withActiveTimerOwner(owner, () => (callback as (...cbArgs: unknown[]) => unknown)(...callbackArgs))
+          : callback;
+        const id = origSetInterval(wrappedCallback as TimerHandler, delay, ...args);
+        return createTimerHandle(id, owner);
+      }, { __almostnodeTracked: true });
+
+      (globalThis as any).clearTimeout = (timer: unknown) => {
+        if (isAlmostNodeTimerHandle(timer)) {
+          timer.__almostnodeTimerOwner?.unregisterPendingTimer(timer);
+        }
+        origClearTimeout(isAlmostNodeTimerHandle(timer) ? timer._id as ReturnType<typeof origSetTimeout> : timer as ReturnType<typeof origSetTimeout>);
+      };
+
+      (globalThis as any).clearInterval = (timer: unknown) => {
+        if (isAlmostNodeTimerHandle(timer)) {
+          timer.__almostnodeTimerOwner?.unregisterPendingTimer(timer);
+        }
+        origClearInterval(isAlmostNodeTimerHandle(timer) ? timer._id as ReturnType<typeof origSetInterval> : timer as ReturnType<typeof origSetInterval>);
+      };
     }
 
     // Polyfill Error.captureStackTrace/prepareStackTrace for Safari/WebKit
@@ -1631,6 +1758,35 @@ export class Runtime {
     // Polyfill TextDecoder to handle base64/base64url/hex gracefully
     // (Some CLI tools incorrectly try to use TextDecoder for these)
     this.setupTextDecoderPolyfill();
+  }
+
+  registerPendingTimer = (handle: AlmostNodeTimerHandle): void => {
+    if (!handle.__almostnodeRefed) return;
+    this.pendingRefedTimers.add(handle);
+  };
+
+  unregisterPendingTimer = (handle: AlmostNodeTimerHandle): void => {
+    this.pendingRefedTimers.delete(handle);
+  };
+
+  setPendingTimerRef = (handle: AlmostNodeTimerHandle, refed: boolean): void => {
+    if (refed) {
+      this.pendingRefedTimers.add(handle);
+      return;
+    }
+    this.pendingRefedTimers.delete(handle);
+  };
+
+  hasPendingRefedTimers(): boolean {
+    return this.pendingRefedTimers.size > 0;
+  }
+
+  private withTimerOwner<T>(fn: () => T): T {
+    return withActiveTimerOwner(this, fn);
+  }
+
+  private withTimerOwnerAsync<T>(fn: () => Promise<T>): Promise<T> {
+    return withActiveTimerOwnerAsync(this, fn);
   }
 
   /**
@@ -1907,22 +2063,24 @@ export class Runtime {
   }
 
   async importModule(specifier: string, fromPath = '/'): Promise<IExecuteResult> {
-    const loaded = await this.moduleLoader.importModule(specifier, fromPath);
-    const namespace = loaded.namespace || {};
-    const module = this.moduleCache[loaded.id] || this.createModuleRecord(
-      loaded.id,
-      loaded.format,
-      namespace.default ?? namespace,
-      namespace,
-    );
-    module.url = loaded.url;
-    module.format = loaded.format;
-    module.exports = namespace.default ?? namespace;
-    module.namespace = namespace;
-    module.executionPromise = Promise.resolve(module.exports);
-    module.loaded = true;
-    this.moduleCache[loaded.id] = module;
-    return this.buildExecuteResult(module, namespace);
+    return this.withTimerOwnerAsync(async () => {
+      const loaded = await this.moduleLoader.importModule(specifier, fromPath);
+      const namespace = loaded.namespace || {};
+      const module = this.moduleCache[loaded.id] || this.createModuleRecord(
+        loaded.id,
+        loaded.format,
+        namespace.default ?? namespace,
+        namespace,
+      );
+      module.url = loaded.url;
+      module.format = loaded.format;
+      module.exports = namespace.default ?? namespace;
+      module.namespace = namespace;
+      module.executionPromise = Promise.resolve(module.exports);
+      module.loaded = true;
+      this.moduleCache[loaded.id] = module;
+      return this.buildExecuteResult(module, namespace);
+    });
   }
 
   /**
@@ -1996,14 +2154,16 @@ export class Runtime {
   }
 
   loadModule(filename: string): Module {
-    const require = this.createLegacyRequire(pathShim.dirname(filename));
-    const resolved = require.resolve(filename);
-    require(filename);
-    const loaded = this.moduleCache[resolved];
-    if (!loaded) {
-      throw new Error(`Failed to load module '${filename}'`);
-    }
-    return loaded;
+    return this.withTimerOwner(() => {
+      const require = this.createLegacyRequire(pathShim.dirname(filename));
+      const resolved = require.resolve(filename);
+      require(filename);
+      const loaded = this.moduleCache[resolved];
+      if (!loaded) {
+        throw new Error(`Failed to load module '${filename}'`);
+      }
+      return loaded;
+    });
   }
 
   registerBuiltinModule(name: string, moduleExports: unknown): void {

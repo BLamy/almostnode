@@ -21,27 +21,50 @@ export class WriteStream extends Writable {
   rows: number = 24;
 
   clearLine(dir: number, callback?: () => void): boolean {
+    if (this.isTTY) {
+      if (dir === -1) this.write('\x1b[1K');
+      else if (dir === 1) this.write('\x1b[0K');
+      else this.write('\x1b[2K');
+    }
     if (callback) callback();
     return true;
   }
 
   clearScreenDown(callback?: () => void): boolean {
+    if (this.isTTY) {
+      this.write('\x1b[0J');
+    }
     if (callback) callback();
     return true;
   }
 
   cursorTo(x: number, y?: number, callback?: () => void): boolean {
+    if (this.isTTY) {
+      if (y != null) {
+        this.write(`\x1b[${y + 1};${x + 1}H`);
+      } else {
+        this.write(`\x1b[${x + 1}G`);
+      }
+    }
     if (callback) callback();
     return true;
   }
 
   moveCursor(dx: number, dy: number, callback?: () => void): boolean {
+    if (this.isTTY) {
+      let seq = '';
+      if (dx > 0) seq += `\x1b[${dx}C`;
+      else if (dx < 0) seq += `\x1b[${-dx}D`;
+      if (dy > 0) seq += `\x1b[${dy}B`;
+      else if (dy < 0) seq += `\x1b[${-dy}A`;
+      if (seq) this.write(seq);
+    }
     if (callback) callback();
     return true;
   }
 
   getColorDepth(env?: object): number {
-    return this.isTTY ? 8 : 1;
+    return this.isTTY ? 24 : 1;
   }
 
   hasColors(count?: number | object, env?: object): boolean {

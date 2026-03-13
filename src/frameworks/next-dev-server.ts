@@ -257,6 +257,7 @@ export class NextDevServer extends DevServer {
 
   /** Base path for the app (e.g., '/docs') */
   private basePath: string = '';
+  private pendingInstalledPackagesCacheClear: ReturnType<typeof setTimeout> | null = null;
 
   /** Route resolver context (passes VFS access to standalone route functions) */
   private get routeCtx(): RouteResolverContext {
@@ -1400,7 +1401,7 @@ export class NextDevServer extends DevServer {
   private getInstalledPackages(): Set<string> {
     if (this._installedPackages) return this._installedPackages;
     const pkgs = new Set<string>();
-    const nmDir = '/node_modules';
+    const nmDir = this.root === '/' ? '/node_modules' : `${this.root}/node_modules`;
     try {
       if (!this.vfs.existsSync(nmDir)) {
         this._installedPackages = pkgs;
@@ -1434,6 +1435,17 @@ export class NextDevServer extends DevServer {
     clearNpmBundleCache();
   }
 
+  private scheduleInstalledPackagesCacheClear(): void {
+    if (this.pendingInstalledPackagesCacheClear) {
+      clearTimeout(this.pendingInstalledPackagesCacheClear);
+    }
+
+    this.pendingInstalledPackagesCacheClear = setTimeout(() => {
+      this.pendingInstalledPackagesCacheClear = null;
+      this.clearInstalledPackagesCache();
+    }, 48);
+  }
+
   /**
    * Serve a bundled npm module from VFS node_modules.
    * /_npm/@ai-sdk/react → esbuild bundles @ai-sdk/react as ESM
@@ -1445,7 +1457,7 @@ export class NextDevServer extends DevServer {
     }
 
     try {
-      const code = await bundleNpmModuleForBrowser(specifier);
+      const code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
       return {
         statusCode: 200,
         statusMessage: 'OK',
@@ -1582,6 +1594,27 @@ export class NextDevServer extends DevServer {
       // Ignore if public directory doesn't exist
     }
 
+    try {
+      const rootWatcher = this.vfs.watch(this.root, { recursive: false }, (_eventType, filename) => {
+        if (filename === 'package.json' || filename === 'node_modules') {
+          this.scheduleInstalledPackagesCacheClear();
+        }
+      });
+      watchers.push(rootWatcher);
+    } catch {
+      // Ignore if root watching fails.
+    }
+
+    try {
+      const nodeModulesPath = this.root === '/' ? '/node_modules' : `${this.root}/node_modules`;
+      const nodeModulesWatcher = this.vfs.watch(nodeModulesPath, { recursive: true }, () => {
+        this.scheduleInstalledPackagesCacheClear();
+      });
+      watchers.push(nodeModulesWatcher);
+    } catch {
+      // Ignore if node_modules doesn't exist yet.
+    }
+
     this.watcherCleanup = () => {
       watchers.forEach(w => w.close());
     };
@@ -1690,6 +1723,10 @@ export class NextDevServer extends DevServer {
     if (this.watcherCleanup) {
       this.watcherCleanup();
       this.watcherCleanup = null;
+    }
+    if (this.pendingInstalledPackagesCacheClear) {
+      clearTimeout(this.pendingInstalledPackagesCacheClear);
+      this.pendingInstalledPackagesCacheClear = null;
     }
 
     this.hmrTargetWindow = null;

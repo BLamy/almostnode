@@ -37,7 +37,9 @@ import { Readable, Writable, Buffer } from './stream';
 import type { VirtualFS } from '../virtual-fs';
 import { VirtualFSAdapter } from './vfs-adapter';
 import { Runtime } from '../runtime';
+import type { InstallMode, PackageManagerMutationSummary } from '../npm';
 import type { PackageJson } from '../types/package-json';
+import { almostnodeDebugError, almostnodeDebugLog } from '../utils/debug';
 import * as path from './path';
 import { extractTarball } from '../npm/tarball';
 import {
@@ -52,6 +54,7 @@ type ManagedFrameworkDevServer = {
   framework: 'next' | 'vite';
   port: number;
   stop: () => void;
+  clearInstalledPackagesCache?: () => void;
 };
 
 const CONTROLLER_ID_ENV_KEY = '__ALMOSTNODE_CONTROLLER_ID';
@@ -92,6 +95,8 @@ export interface ChildProcessController {
   vfs: VirtualFS;
   vfsAdapter: VirtualFSAdapter;
   bashInstance: Bash;
+  installMode: InstallMode;
+  onInstallMutation: ((summary: PackageManagerMutationSummary) => void | Promise<void>) | null;
   frameworkDevServers: Map<string, ManagedFrameworkDevServer>;
   executions: Map<string, ChildProcessExecutionContext>;
   createExecution: (opts?: {
@@ -624,7 +629,13 @@ function pushInputToExecutionStdin(target: ActiveProcessStdin, data: string): vo
  * Initialize the child_process shim with a VirtualFS instance
  * Creates or reuses a controller-scoped Bash instance with VirtualFSAdapter.
  */
-export function initChildProcess(vfs: VirtualFS): ChildProcessController {
+export function initChildProcess(
+  vfs: VirtualFS,
+  options: {
+    installMode?: InstallMode;
+    onInstallMutation?: (summary: PackageManagerMutationSummary) => void | Promise<void>;
+  } = {},
+): ChildProcessController {
   const existing = controllersByVfs.get(vfs);
   if (existing) {
     defaultChildProcessController = existing;
@@ -814,17 +825,21 @@ module.exports = (async () => {
     try {
       const MAX_TOTAL_MS = isLongIdleNodeModulesCli ? 5 * 60 * 1000 : 60_000;
       const IDLE_TIMEOUT_MS = isLongIdleNodeModulesCli
-        ? 60_000
+        ? 10_000
         : (isNodeModulesCli ? 300 : 200);
       const NO_OUTPUT_IDLE_MS = isLongIdleNodeModulesCli
-        ? 120_000
+        ? (isNpxExec ? 15_000 : 20_000)
         : (isNpxExec ? 30_000 : (isNodeModulesCli ? 2_000 : 1_000));
-      const POST_CHILD_EXIT_IDLE_MS = isLongIdleNodeModulesCli ? 2_000 : 100;
-      const ACTIVE_SUBPROCESS_STALE_MS = isLongIdleNodeModulesCli ? 20_000 : 2_000;
+      const STALE_PENDING_TIMER_IDLE_MS = isLongIdleNodeModulesCli
+        ? (isNpxExec ? 5_000 : 10_000)
+        : (isNodeModulesCli ? 2_000 : Number.POSITIVE_INFINITY);
+      const POST_CHILD_EXIT_IDLE_MS = isLongIdleNodeModulesCli ? 500 : 100;
+      const ACTIVE_SUBPROCESS_STALE_MS = isLongIdleNodeModulesCli ? 5_000 : 2_000;
       const CHECK_MS = 50;
       const startTime = Date.now();
       let lastOutputLen = stdout.length + stderr.length;
       let idleMs = 0;
+      let pendingTimerIdleMs = 0;
 
       while (!exitCalled) {
         if (execution.signal?.aborted) break;
@@ -841,18 +856,39 @@ module.exports = (async () => {
         if (currentLen > lastOutputLen) {
           lastOutputLen = currentLen;
           idleMs = 0;
+          pendingTimerIdleMs = 0;
         } else {
           idleMs += CHECK_MS;
+          pendingTimerIdleMs += CHECK_MS;
         }
 
         if (Date.now() - startTime >= MAX_TOTAL_MS) break;
 
-        const keepAliveForInteractiveInput = execution.interactive || (!!execution.signal && (
+        const keepAliveForInteractiveInput = execution.interactive && (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
-        ));
+        );
         if (keepAliveForInteractiveInput) {
           continue;
+        }
+
+        const hasPendingRefedTimers = runtime.hasPendingRefedTimers();
+        if (hasPendingRefedTimers) {
+          const allowStalePendingTimerExit =
+            isNodeModulesCli &&
+            execution.activeForkedChildren <= 0 &&
+            execution.activeShellChildren <= initialShellChildren;
+
+          if (!allowStalePendingTimerExit || pendingTimerIdleMs < STALE_PENDING_TIMER_IDLE_MS) {
+            continue;
+          }
+
+          almostnodeDebugLog(
+            'npx',
+            `[almostnode DEBUG] node exiting after stale pending timers: path=${resolvedPath} idleMs=${pendingTimerIdleMs} interactive=${execution.interactive ? '1' : '0'}`,
+          );
+        } else {
+          pendingTimerIdleMs = 0;
         }
 
         const hasActiveSubprocess = execution.activeForkedChildren > 0 || execution.activeShellChildren > initialShellChildren;
@@ -961,6 +997,12 @@ module.exports = (async () => {
     const forceLatestInstall = requestedVersion === 'latest';
     const binName = packageSpec ? commandName : (pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName);
     const quoteArg = (value: string) => JSON.stringify(value);
+    const installDecision = forceLatestInstall ? 'install-latest' : 'reuse-or-install';
+
+    almostnodeDebugLog(
+      'npx',
+      `[almostnode DEBUG] npx parsed: command=${commandName} installSpec=${installSpec} package=${pkgName} version=${requestedVersion || 'latest'} bin=${binName} cwd=${ctx.cwd} mode=${controller.installMode} decision=${installDecision}`,
+    );
 
     const emitInstallProgress = (message: string) => {
       emitStreamData(execution, `${message}\n`, 'stdout');
@@ -993,6 +1035,7 @@ module.exports = (async () => {
           diagnostic += `npx: stdout tail:\n${stdoutTail}\n`;
         }
       }
+      almostnodeDebugError('npx', `[almostnode DEBUG] ${diagnostic.trimEnd()}`);
 
       return {
         ...result,
@@ -1014,31 +1057,55 @@ module.exports = (async () => {
     };
 
     const installPackage = async (installCwd: string) => {
-      const { PackageManager } = await import('../npm/index');
-      const pm = new PackageManager(controller.vfs, { cwd: installCwd || '/' });
+      const pm = await createPackageManager(controller, installCwd || '/');
       await pm.install(installSpec, { onProgress: emitInstallProgress });
     };
 
     let { binPath, resolvedBinTarget } = resolveBin(ctx.cwd);
     let useExtendedNodeIdle = false;
+    almostnodeDebugLog(
+      'npx',
+      `[almostnode DEBUG] npx resolve before install: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} mode=${controller.installMode}`,
+    );
 
     if (forceLatestInstall || (!binPath && !resolvedBinTarget)) {
       useExtendedNodeIdle = true;
       try {
+        almostnodeDebugLog(
+          'npx',
+          `[almostnode DEBUG] npx install start: spec=${installSpec} cwd=${ctx.cwd} mode=${controller.installMode}`,
+        );
         await installPackage(ctx.cwd);
         ({ binPath, resolvedBinTarget } = resolveBin(ctx.cwd));
-        if ((forceLatestInstall || (!binPath && !resolvedBinTarget)) && ctx.cwd !== '/') {
+        almostnodeDebugLog(
+          'npx',
+          `[almostnode DEBUG] npx resolve after install: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} cwd=${ctx.cwd}`,
+        );
+        if (!binPath && !resolvedBinTarget && ctx.cwd !== '/') {
           emitInstallProgress('npx: retrying install in / to resolve command bin...');
+          almostnodeDebugLog(
+            'npx',
+            `[almostnode DEBUG] npx install retry in /: spec=${installSpec} originalCwd=${ctx.cwd} mode=${controller.installMode}`,
+          );
           await installPackage('/');
           ({ binPath, resolvedBinTarget } = resolveBin('/'));
+          almostnodeDebugLog(
+            'npx',
+            `[almostnode DEBUG] npx resolve after root retry: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} cwd=/`,
+          );
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
+        almostnodeDebugError('npx', `[almostnode DEBUG] npx install failed: spec=${installSpec} cwd=${ctx.cwd} -> ${msg}`);
         return { stdout: '', stderr: `npx: install failed: ${msg}\n`, exitCode: 1 };
       }
     }
 
     if (!binPath && !resolvedBinTarget) {
+      almostnodeDebugError(
+        'npx',
+        `[almostnode DEBUG] npx command not found after resolution: package=${pkgName} bin=${binName} cwd=${ctx.cwd}`,
+      );
       return { stdout: '', stderr: `npx: command not found: ${binName}\n`, exitCode: 1 };
     }
 
@@ -1058,6 +1125,10 @@ module.exports = (async () => {
 
     if (resolvedBinTarget) {
       const fullCommand = ['node', resolvedBinTarget, ...commandArgs].map((value) => quoteArg(value)).join(' ');
+      almostnodeDebugLog(
+        'npx',
+        `[almostnode DEBUG] npx exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
+      );
       const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
       return withNpxExecDiagnostics(result, `node ${resolvedBinTarget}`);
     }
@@ -1067,6 +1138,10 @@ module.exports = (async () => {
     }
 
     const fullCommand = [binPath, ...commandArgs].map((value) => quoteArg(value)).join(' ');
+    almostnodeDebugLog(
+      'npx',
+      `[almostnode DEBUG] npx exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
+    );
     const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
     return withNpxExecDiagnostics(result, binPath);
   });
@@ -1194,6 +1269,7 @@ module.exports = (async () => {
         key,
         framework: 'next',
         port,
+        clearInstalledPackagesCache: () => server.clearInstalledPackagesCache(),
         stop: () => {
           try {
             server.stop();
@@ -1321,6 +1397,9 @@ module.exports = (async () => {
         key,
         framework: 'vite',
         port,
+        clearInstalledPackagesCache: typeof (server as { clearInstalledPackagesCache?: () => void }).clearInstalledPackagesCache === 'function'
+          ? () => (server as { clearInstalledPackagesCache: () => void }).clearInstalledPackagesCache()
+          : undefined,
         stop: () => {
           try {
             server.stop();
@@ -1402,6 +1481,8 @@ module.exports = (async () => {
     vfs,
     vfsAdapter,
     bashInstance,
+    installMode: options.installMode || 'auto',
+    onInstallMutation: options.onInstallMutation || null,
     frameworkDevServers: new Map(),
     executions: new Map(),
     createExecution: (opts) => createExecutionContext(controller, opts),
@@ -1490,7 +1571,7 @@ function getPackageBinTarget(
       const binPath = bins[binName] || bins[Object.keys(bins)[0]];
       if (!binPath) continue;
 
-      const resolved = `${packageDir}/${binPath}`.replace(/\/+/g, '/');
+      const resolved = path.normalize(path.join(packageDir, binPath));
       if (controller.vfs.existsSync(resolved)) {
         return resolved;
       }
@@ -1809,8 +1890,7 @@ async function handleNpmInstall(
   args: string[],
   ctx: CommandContext
 ): Promise<JustBashExecResult> {
-  const { PackageManager } = await import('../npm/index');
-  const pm = new PackageManager(controller.vfs, { cwd: ctx.cwd });
+  const pm = await createPackageManager(controller, ctx.cwd);
 
   let stdout = '';
   const execution = getExecutionContextFromEnv(controller, ctx.env);
@@ -1852,8 +1932,7 @@ async function handleNpmList(
   controller: ChildProcessController,
   ctx: CommandContext
 ): Promise<JustBashExecResult> {
-  const { PackageManager } = await import('../npm/index');
-  const pm = new PackageManager(controller.vfs, { cwd: ctx.cwd });
+  const pm = await createPackageManager(controller, ctx.cwd);
   const packages = pm.list();
   const entries = Object.entries(packages);
 
@@ -1866,6 +1945,18 @@ async function handleNpmList(
     output += `+-- ${name}@${version}\n`;
   }
   return { stdout: output, stderr: '', exitCode: 0 };
+}
+
+async function createPackageManager(
+  controller: ChildProcessController,
+  cwd: string,
+) {
+  const { PackageManager } = await import('../npm/index');
+  return new PackageManager(controller.vfs, {
+    cwd,
+    installMode: controller.installMode,
+    onMutation: controller.onInstallMutation || undefined,
+  });
 }
 
 export interface ExecOptions {

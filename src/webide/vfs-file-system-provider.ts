@@ -17,6 +17,23 @@ import {
 import { Emitter } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event';
 import { DisposableStore, toDisposable } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
+import type { WatchEventType } from '../virtual-fs';
+
+const NODE_MODULES_EVENT_DELAY_MS = 48;
+
+function scheduleFileEventFlush(callback: () => void): { cancel: () => void } {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    const handle = window.requestAnimationFrame(() => callback());
+    return {
+      cancel: () => window.cancelAnimationFrame(handle),
+    };
+  }
+
+  const handle = setTimeout(callback, 0);
+  return {
+    cancel: () => clearTimeout(handle),
+  };
+}
 
 function toFsError(error: unknown): FileSystemProviderError {
   if (
@@ -49,6 +66,22 @@ function isWorkspaceUri(resource: URI, workspaceRoot: string): boolean {
     && (resource.path === workspaceRoot || resource.path.startsWith(`${workspaceRoot}/`));
 }
 
+function normalizeWorkspacePath(path: string): string {
+  if (!path) return '/';
+  return path.startsWith('/') ? path.replace(/\/+/g, '/') : `/${path}`.replace(/\/+/g, '/');
+}
+
+function getWorkspaceNodeModulesPath(workspaceRoot: string): string {
+  const normalizedRoot = normalizeWorkspacePath(workspaceRoot);
+  return normalizedRoot === '/' ? '/node_modules' : `${normalizedRoot}/node_modules`;
+}
+
+function isNodeModulesWorkspacePath(path: string, workspaceRoot: string): boolean {
+  const normalizedPath = normalizeWorkspacePath(path);
+  const nodeModulesPath = getWorkspaceNodeModulesPath(workspaceRoot);
+  return normalizedPath === nodeModulesPath || normalizedPath.startsWith(`${nodeModulesPath}/`);
+}
+
 export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
   readonly capabilities =
     FileSystemProviderCapabilities.FileReadWrite
@@ -59,6 +92,9 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   readonly onDidChangeFile = this.changeEmitter.event;
 
   private readonly disposables = new DisposableStore();
+  private pendingChanges = new Map<string, IFileChange>();
+  private pendingFlush: { cancel: () => void } | null = null;
+  private pendingNodeModulesFlush: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly vfs: VirtualFS,
@@ -66,6 +102,12 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   ) {
     this.disposables.add(
       toDisposable(() => {
+        this.pendingFlush?.cancel();
+        this.pendingFlush = null;
+        if (this.pendingNodeModulesFlush) {
+          clearTimeout(this.pendingNodeModulesFlush);
+          this.pendingNodeModulesFlush = null;
+        }
         this.changeEmitter.dispose();
       }),
     );
@@ -84,7 +126,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
         ? (exists ? FileChangeType.ADDED : FileChangeType.DELETED)
         : FileChangeType.UPDATED;
 
-      this.changeEmitter.fire([{ type, resource }]);
+      this.queueWatchedPathChange(fullPath, eventType, type, resource);
     });
 
     this.disposables.add(toDisposable(() => workspaceWatcher.close()));
@@ -146,14 +188,14 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
           ? `${this.workspaceRoot}/${relative}`.replace(/\/+/g, '/')
           : `${path}/${relative}`.replace(/\/+/g, '/');
         const exists = this.vfs.existsSync(fullPath);
-        this.changeEmitter.fire([
-          {
-            resource: URI.file(fullPath),
-            type: eventType === 'rename'
-              ? (exists ? FileChangeType.ADDED : FileChangeType.DELETED)
-              : FileChangeType.UPDATED,
-          },
-        ]);
+        this.queueWatchedPathChange(
+          fullPath,
+          eventType,
+          eventType === 'rename'
+            ? (exists ? FileChangeType.ADDED : FileChangeType.DELETED)
+            : FileChangeType.UPDATED,
+          URI.file(fullPath),
+        );
       });
 
       return toDisposable(() => watcher.close());
@@ -173,7 +215,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
         throw createNodeError('EEXIST', 'writeFile', path);
       }
       this.vfs.writeFileSync(path, content);
-      this.changeEmitter.fire([{ resource, type: exists ? FileChangeType.UPDATED : FileChangeType.ADDED }]);
+      this.queueFileChanges([{ resource, type: exists ? FileChangeType.UPDATED : FileChangeType.ADDED }]);
     } catch (error) {
       throw toFsError(error);
     }
@@ -182,7 +224,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   async mkdir(resource: URI): Promise<void> {
     try {
       this.vfs.mkdirSync(this.assertWorkspaceResource(resource), { recursive: true });
-      this.changeEmitter.fire([{ resource, type: FileChangeType.ADDED }]);
+      this.queueFileChanges([{ resource, type: FileChangeType.ADDED }]);
     } catch (error) {
       throw toFsError(error);
     }
@@ -201,6 +243,35 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
     this.vfs.rmdirSync(path);
   }
 
+  private queueWatchedPathChange(
+    fullPath: string,
+    _eventType: WatchEventType,
+    type: FileChangeType,
+    resource: URI,
+  ): void {
+    if (isNodeModulesWorkspacePath(fullPath, this.workspaceRoot)) {
+      this.queueNodeModulesChange();
+      return;
+    }
+
+    this.queueFileChanges([{ type, resource }]);
+  }
+
+  private queueNodeModulesChange(): void {
+    if (this.pendingNodeModulesFlush) {
+      clearTimeout(this.pendingNodeModulesFlush);
+    }
+
+    this.pendingNodeModulesFlush = setTimeout(() => {
+      this.pendingNodeModulesFlush = null;
+      const nodeModulesPath = getWorkspaceNodeModulesPath(this.workspaceRoot);
+      const type = this.vfs.existsSync(nodeModulesPath)
+        ? FileChangeType.UPDATED
+        : FileChangeType.DELETED;
+      this.queueFileChanges([{ resource: URI.file(nodeModulesPath), type }]);
+    }, NODE_MODULES_EVENT_DELAY_MS);
+  }
+
   async delete(resource: URI, options: IFileDeleteOptions): Promise<void> {
     try {
       const path = this.assertWorkspaceResource(resource);
@@ -214,7 +285,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
       } else {
         this.vfs.unlinkSync(path);
       }
-      this.changeEmitter.fire([{ resource, type: FileChangeType.DELETED }]);
+      this.queueFileChanges([{ resource, type: FileChangeType.DELETED }]);
     } catch (error) {
       throw toFsError(error);
     }
@@ -231,12 +302,32 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
         this.removeRecursive(toPath);
       }
       this.vfs.renameSync(fromPath, toPath);
-      this.changeEmitter.fire([
+      this.queueFileChanges([
         { resource: from, type: FileChangeType.DELETED },
         { resource: to, type: FileChangeType.ADDED },
       ]);
     } catch (error) {
       throw toFsError(error);
     }
+  }
+
+  private queueFileChanges(changes: readonly IFileChange[]): void {
+    for (const change of changes) {
+      this.pendingChanges.set(change.resource.toString(), change);
+    }
+
+    if (this.pendingFlush) {
+      return;
+    }
+
+    this.pendingFlush = scheduleFileEventFlush(() => {
+      this.pendingFlush = null;
+      if (this.pendingChanges.size === 0) {
+        return;
+      }
+      const next = Array.from(this.pendingChanges.values());
+      this.pendingChanges.clear();
+      this.changeEmitter.fire(next);
+    });
   }
 }

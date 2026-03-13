@@ -226,25 +226,49 @@ function createProcessStream(
       emitter.emit('close');
       return stream;
     },
-    cursorTo(_x: number, yOrCb?: number | (() => void), callback?: () => void) {
+    cursorTo(x: number, yOrCb?: number | (() => void), callback?: () => void) {
       const cb = typeof yOrCb === 'function' ? yOrCb : callback;
+      const y = typeof yOrCb === 'number' ? yOrCb : undefined;
+      if (stream.isTTY) {
+        if (y != null) {
+          stream.write(`\x1b[${y + 1};${x + 1}H`);
+        } else {
+          stream.write(`\x1b[${x + 1}G`);
+        }
+      }
       if (cb) queueMicrotask(cb);
       return true;
     },
-    moveCursor(_dx: number, _dy: number, callback?: () => void) {
+    moveCursor(dx: number, dy: number, callback?: () => void) {
+      if (stream.isTTY) {
+        let seq = '';
+        if (dx > 0) seq += `\x1b[${dx}C`;
+        else if (dx < 0) seq += `\x1b[${-dx}D`;
+        if (dy > 0) seq += `\x1b[${dy}B`;
+        else if (dy < 0) seq += `\x1b[${-dy}A`;
+        if (seq) stream.write(seq);
+      }
       if (callback) queueMicrotask(callback);
       return true;
     },
-    clearLine(_dir: number, callback?: () => void) {
+    clearLine(dir: number, callback?: () => void) {
+      if (stream.isTTY) {
+        if (dir === -1) stream.write('\x1b[1K');
+        else if (dir === 1) stream.write('\x1b[0K');
+        else stream.write('\x1b[2K');
+      }
       if (callback) queueMicrotask(callback);
       return true;
     },
     clearScreenDown(callback?: () => void) {
+      if (stream.isTTY) {
+        stream.write('\x1b[0J');
+      }
       if (callback) queueMicrotask(callback);
       return true;
     },
     getColorDepth() {
-      return stream.isTTY ? 8 : 1;
+      return stream.isTTY ? 24 : 1;
     },
     hasColors() {
       return stream.isTTY;
@@ -279,6 +303,7 @@ export function createProcess(options?: {
   ppid?: number;
   uid?: number;
   gid?: number;
+  tty?: boolean;
   onExit?: (code: number) => void;
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
@@ -292,6 +317,9 @@ export function createProcess(options?: {
     HOME: defaultHome,
     USER: defaultUser.username,
     SHELL: DEFAULT_POSIX_SHELL,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    FORCE_COLOR: '3',
     ...options?.env,
   };
 
@@ -490,6 +518,12 @@ export function createProcess(options?: {
       return emitter.getMaxListeners();
     },
   };
+
+  const enableTty = options?.tty ?? !!(options?.onStdout || options?.onStderr);
+  if (enableTty) {
+    proc.stdout.isTTY = true;
+    proc.stderr.isTTY = true;
+  }
 
   return proc;
 }

@@ -3,6 +3,7 @@ import { DEFAULT_FILE, DEFAULT_RUN_COMMAND, WORKSPACE_ROOT, seedWorkspace } from
 import { FixtureMarketplaceClient } from './fixture-extensions';
 import { OpenVSXClient } from './open-vsx';
 import { prunePersistedWorkbenchExtensions } from './persisted-extensions';
+import { shouldRunWorkbenchCommandInteractively } from './terminal-command-routing';
 import { VfsFileSystemProvider } from './vfs-file-system-provider';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from './extension-services';
 import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
@@ -82,6 +83,7 @@ export interface WebIDEHostElements {
 export interface WebIDEHostOptions {
   elements: WebIDEHostElements;
   marketplaceMode?: MarketplaceMode;
+  debugSections?: string[];
 }
 
 const PRELOADED_WORKBENCH_LANGUAGES: Array<Parameters<typeof monaco.languages.register>[0]> = [
@@ -155,8 +157,25 @@ const TERMINAL_THEME = {
   background: '#0e1218',
   foreground: '#dce5f3',
   cursor: '#ff7a59',
+  cursorAccent: '#0e1218',
   selectionBackground: 'rgba(255, 122, 89, 0.34)',
   selectionInactiveBackground: 'rgba(255, 122, 89, 0.24)',
+  black: '#1e2630',
+  red: '#f47067',
+  green: '#8ddb8c',
+  yellow: '#f69d50',
+  blue: '#6cb6ff',
+  magenta: '#dcbdfb',
+  cyan: '#76e3ea',
+  white: '#adbac7',
+  brightBlack: '#444c56',
+  brightRed: '#ff938a',
+  brightGreen: '#b4f1b4',
+  brightYellow: '#f5c67a',
+  brightBlue: '#96d0ff',
+  brightMagenta: '#eedcfe',
+  brightCyan: '#b3f0f5',
+  brightWhite: '#ffffff',
 };
 
 interface TerminalTabState {
@@ -176,6 +195,7 @@ interface TerminalTabState {
 export class WebIDEHost {
   readonly container = createContainer();
   private readonly marketplaceMode: MarketplaceMode;
+  private readonly debugSections: string[];
   private readonly filesSurface: FilesSidebarSurface;
   private readonly previewSurface: PreviewSurface;
   private readonly terminalSurface: TerminalPanelSurface;
@@ -197,9 +217,11 @@ export class WebIDEHost {
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly claudeAuthVault: ClaudeAuthVault;
   private claudeAuthStatusEntry: IStatusbarEntryAccessor | null = null;
+  private claudeCodeInstallPromise: Promise<void> | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
     this.marketplaceMode = options.marketplaceMode || 'open-vsx';
+    this.debugSections = Array.from(new Set((options.debugSections || []).map((section) => section.trim()).filter(Boolean)));
     this.filesSurface = new FilesSidebarSurface(this.container.vfs, WORKSPACE_ROOT, (path) => {
       void this.openWorkspaceFile(path);
     });
@@ -354,6 +376,9 @@ export class WebIDEHost {
       this.setActiveTerminalTab(id);
     }
     terminal.write(kind === 'preview' ? 'almostnode preview terminal' : 'almostnode webide terminal');
+    if (kind === 'user' && this.terminalCounter === 1 && this.debugSections.length > 0) {
+      terminal.write(`\r\n[almostnode debug] enabled: ${this.debugSections.join(', ')}`);
+    }
     this.printPrompt(tab);
     return tab;
   }
@@ -446,6 +471,21 @@ export class WebIDEHost {
       }
     }
 
+    terminal.write('Preparing Claude Code...\r\n');
+    this.updateTerminalStatus(tab, 'Preparing Claude Code...');
+    try {
+      await this.ensureClaudeCodeInstalled((message) => {
+        terminal.write(`${message}\r\n`);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to install Claude Code';
+      terminal.write(`Claude Code install failed: ${message}\r\n`);
+      this.updateTerminalStatus(tab, 'Claude Code install failed');
+      this.claudeSurface.hideLoading();
+      this.printPrompt(tab);
+      return tab;
+    }
+
     terminal.write('Starting Claude Code...\r\n');
     this.updateTerminalStatus(tab, 'Starting Claude Code...');
     void this.runCommand(tab, 'npx @anthropic-ai/claude-code').then(() => {
@@ -501,13 +541,23 @@ export class WebIDEHost {
     }
   }
 
-  private async runCommand(tab: TerminalTabState, command: string): Promise<void> {
-    if (!command.trim()) {
+  private async runCommand(
+    tab: TerminalTabState,
+    command: string,
+    options?: { echoCommand?: boolean },
+  ): Promise<void> {
+    const trimmed = command.trim();
+    if (!trimmed) {
       this.printPrompt(tab);
       return;
     }
 
-    if (!await this.claudeAuthVault.prepareForCommand(command)) {
+    if (options?.echoCommand) {
+      tab.terminal.write(trimmed);
+      tab.terminal.write('\r\n');
+    }
+
+    if (!await this.claudeAuthVault.prepareForCommand(trimmed)) {
       this.updateTerminalStatus(tab, 'Claude auth unlock required');
       this.writeTerminal(tab, 'Claude auth unlock is required before running this command.\n');
       this.printPrompt(tab);
@@ -519,14 +569,14 @@ export class WebIDEHost {
     }
 
     tab.runningAbortController = new AbortController();
-    this.updateTerminalStatus(tab, `Running: ${command}`);
+    this.updateTerminalStatus(tab, `Running: ${trimmed}`);
 
     try {
-      const result = await tab.session.run(command, {
+      const result = await tab.session.run(trimmed, {
         signal: tab.runningAbortController.signal,
         onStdout: (text) => this.writeTerminal(tab, text),
         onStderr: (text) => this.writeTerminal(tab, text),
-        interactive: tab.kind === 'claude',
+        interactive: shouldRunWorkbenchCommandInteractively(trimmed, tab.kind),
       });
       this.updateTerminalStatus(tab, `Exited ${result.exitCode}`);
     } finally {
@@ -537,7 +587,7 @@ export class WebIDEHost {
 
   async executeHostCommand(command?: string): Promise<void> {
     const resolved = command || window.prompt('Command to run', DEFAULT_RUN_COMMAND) || '';
-    await this.runCommand(this.requireActiveTerminalTab(), resolved);
+    await this.runCommand(this.requireActiveTerminalTab(), resolved, { echoCommand: true });
   }
 
   private async runPreviewCommand(command: string): Promise<void> {
@@ -573,8 +623,8 @@ export class WebIDEHost {
 
     const modelReference = await monaco.editor.createModelReference(URI.file(path));
     try {
-      const model = modelReference.object.textEditorModel;
-      if (model.getLanguageId() !== languageId) {
+      const model = monaco.editor.getModel(URI.file(path));
+      if (model && model.getLanguageId() !== languageId) {
         monaco.editor.setModelLanguage(model, languageId);
       }
     } finally {
@@ -1134,14 +1184,6 @@ export class WebIDEHost {
   private async init(): Promise<void> {
     seedWorkspace(this.container);
 
-    // Pre-install claude-code in the background so it's ready when needed
-    this.container.npm.install('@anthropic-ai/claude-code', {
-      save: true,
-      onProgress: (msg) => console.log(`[claude-code] ${msg}`),
-    }).catch((err) => {
-      console.warn('[claude-code] background install failed:', err);
-    });
-
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
     await this.claudeAuthVault.init();
@@ -1205,5 +1247,26 @@ export class WebIDEHost {
     await this.initWorkbench();
     this.ensurePreviewServerRunning();
     window.__almostnodeWebIDE = this;
+  }
+
+  private async ensureClaudeCodeInstalled(onProgress?: (message: string) => void): Promise<void> {
+    if (this.container.vfs.existsSync('/node_modules/@anthropic-ai/claude-code/package.json')) {
+      return;
+    }
+
+    if (!this.claudeCodeInstallPromise) {
+      this.claudeCodeInstallPromise = this.container.npm.install('@anthropic-ai/claude-code', {
+        save: true,
+        onProgress: (message) => {
+          console.log(`[claude-code] ${message}`);
+          onProgress?.(message);
+        },
+      }).then(() => undefined).catch((error) => {
+        this.claudeCodeInstallPromise = null;
+        throw error;
+      });
+    }
+
+    await this.claudeCodeInstallPromise;
   }
 }

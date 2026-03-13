@@ -94,6 +94,22 @@ setInterval(() => {}, 1000);
     expect(result.stdout).toContain('ready');
   });
 
+  it('lets interactive node commands exit once stdin is no longer active', async () => {
+    const container = createContainer();
+    container.vfs.writeFileSync('/one-shot-interactive.js', `
+console.log('done');
+`);
+
+    const session = container.createTerminalSession({ cwd: '/' });
+    const result = await session.run('node /one-shot-interactive.js', {
+      interactive: true,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('done');
+    expect(session.getState().running).toBe(false);
+  });
+
   it('keeps nested child_process exec calls bound to the launching session', async () => {
     const container = createContainer();
     container.vfs.mkdirSync('/project/a', { recursive: true });

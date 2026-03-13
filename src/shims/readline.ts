@@ -112,23 +112,48 @@ export function createInterface(options?: ReadLineOptions): Interface {
   return new Interface(options);
 }
 
-export function clearLine(_stream: unknown, _dir: number, _callback?: () => void): boolean {
-  _callback?.();
+export function clearLine(stream: any, dir: number, callback?: () => void): boolean {
+  if (stream && typeof stream.write === 'function') {
+    if (dir === -1) stream.write('\x1b[1K');
+    else if (dir === 1) stream.write('\x1b[0K');
+    else stream.write('\x1b[2K');
+  }
+  callback?.();
   return true;
 }
 
-export function clearScreenDown(_stream: unknown, _callback?: () => void): boolean {
-  _callback?.();
+export function clearScreenDown(stream: any, callback?: () => void): boolean {
+  if (stream && typeof stream.write === 'function') {
+    stream.write('\x1b[0J');
+  }
+  callback?.();
   return true;
 }
 
-export function cursorTo(_stream: unknown, _x: number, _y?: number, _callback?: () => void): boolean {
-  _callback?.();
+export function cursorTo(stream: any, x: number, y?: number | (() => void), callback?: () => void): boolean {
+  const cb = typeof y === 'function' ? y : callback;
+  const yVal = typeof y === 'number' ? y : undefined;
+  if (stream && typeof stream.write === 'function') {
+    if (yVal != null) {
+      stream.write(`\x1b[${yVal + 1};${x + 1}H`);
+    } else {
+      stream.write(`\x1b[${x + 1}G`);
+    }
+  }
+  cb?.();
   return true;
 }
 
-export function moveCursor(_stream: unknown, _dx: number, _dy: number, _callback?: () => void): boolean {
-  _callback?.();
+export function moveCursor(stream: any, dx: number, dy: number, callback?: () => void): boolean {
+  if (stream && typeof stream.write === 'function') {
+    let seq = '';
+    if (dx > 0) seq += `\x1b[${dx}C`;
+    else if (dx < 0) seq += `\x1b[${-dx}D`;
+    if (dy > 0) seq += `\x1b[${dy}B`;
+    else if (dy < 0) seq += `\x1b[${-dy}A`;
+    if (seq) stream.write(seq);
+  }
+  callback?.();
   return true;
 }
 

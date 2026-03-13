@@ -10,6 +10,7 @@ import * as pathShim from './shims/path';
 import { getServerBridge } from './server-bridge';
 
 const MODULE_ROUTE_PREFIX = '/__modules__/r';
+const MODULE_SOURCE_HASH_VERSION = 'module-source-v2';
 const VALID_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 type TransportMode = 'service-worker' | 'data';
@@ -165,7 +166,7 @@ export class ModuleGraphLoader {
       const registry = getInteropRegistry();
       if (this.transportMode === 'service-worker') {
         await this.ensureBridgeReady();
-        const hash = this.getContentHash(descriptor);
+        const hash = this.getModuleSourceHash(descriptor);
         const url = this.createServiceWorkerUrl(descriptor, hash);
         registry.moduleUrls.get(this.runtimeId)?.set(url, descriptor.resolvedPath);
         return url;
@@ -258,8 +259,10 @@ export class ModuleGraphLoader {
 
   private buildCjsModuleSource(descriptor: ResolvedModuleDescriptor): string {
     const code = this.vfs.readFileSync(descriptor.resolvedPath, 'utf8');
-    const names = extractLikelyNamedExportsFromCode(code)
-      .filter((name) => VALID_IDENTIFIER.test(name));
+    const names = Array.from(new Set([
+      ...extractLikelyNamedExportsFromCode(code),
+      ...this.getRuntimeNamedExports(descriptor.resolvedPath),
+    ])).filter((name) => VALID_IDENTIFIER.test(name));
 
     return [
       `const __mod = globalThis.__almostnodeModuleInterop.requireCjs(${JSON.stringify(this.runtimeId)}, ${JSON.stringify(descriptor.resolvedPath)});`,
@@ -267,6 +270,21 @@ export class ModuleGraphLoader {
       'export default __mod;',
       '',
     ].join('\n');
+  }
+
+  private getRuntimeNamedExports(resolvedPath: string): string[] {
+    try {
+      const runtimeExports = this.requireCjs(resolvedPath);
+      if (!runtimeExports || (typeof runtimeExports !== 'object' && typeof runtimeExports !== 'function')) {
+        return [];
+      }
+
+      return Object.keys(runtimeExports).filter((name) =>
+        VALID_IDENTIFIER.test(name) && name !== 'default' && name !== '__esModule'
+      );
+    } catch {
+      return [];
+    }
   }
 
   private async rewriteEsmSpecifiers(
@@ -381,6 +399,19 @@ export class ModuleGraphLoader {
 
     const source = this.vfs.readFileSync(descriptor.resolvedPath, 'utf8');
     return simpleHash(`${descriptor.format}:${descriptor.resolvedPath}:${source}`);
+  }
+
+  private getModuleSourceHash(descriptor: ResolvedModuleDescriptor): string {
+    if (descriptor.format === 'builtin') {
+      return simpleHash(
+        `${MODULE_SOURCE_HASH_VERSION}:builtin:${descriptor.builtinId || descriptor.resolvedPath}`,
+      );
+    }
+
+    const source = this.vfs.readFileSync(descriptor.resolvedPath, 'utf8');
+    return simpleHash(
+      `${MODULE_SOURCE_HASH_VERSION}:${descriptor.format}:${descriptor.resolvedPath}:${source}`,
+    );
   }
 
   private resolveDescriptorById(id: string): ResolvedModuleDescriptor {

@@ -9,12 +9,14 @@ const DIRECTORIES = [
   `${WORKSPACE_ROOT}/src`,
   `${WORKSPACE_ROOT}/src/components`,
   `${WORKSPACE_ROOT}/src/components/ui`,
+  `${WORKSPACE_ROOT}/src/hooks`,
+  `${WORKSPACE_ROOT}/src/lib`,
 ];
 
 const FILES: Record<string, string> = {
   [`${WORKSPACE_ROOT}/package.json`]: JSON.stringify(
     {
-      name: "almostnode-webide-vite-starter",
+      name: "almostnode-webide-tailwind-starter",
       private: true,
       version: "0.0.1",
       type: "module",
@@ -25,12 +27,12 @@ const FILES: Record<string, string> = {
         typecheck: "tsc --noEmit",
       },
       dependencies: {
-        react: "^19.2.0",
-        "react-dom": "^19.2.0",
+        react: "^18.2.0",
+        "react-dom": "^18.2.0",
       },
       devDependencies: {
-        "@types/react": "^19.2.0",
-        "@types/react-dom": "^19.2.0",
+        "@types/react": "^18.2.0",
+        "@types/react-dom": "^18.2.0",
         typescript: "^5.9.3",
         vite: "^5.4.0",
       },
@@ -52,6 +54,10 @@ const FILES: Record<string, string> = {
         forceConsistentCasingInFileNames: true,
         module: "ESNext",
         moduleResolution: "Bundler",
+        baseUrl: ".",
+        paths: {
+          "@/*": ["./src/*"],
+        },
         resolveJsonModule: true,
         isolatedModules: true,
         noEmit: true,
@@ -63,11 +69,22 @@ const FILES: Record<string, string> = {
     2,
   ),
   [`${WORKSPACE_ROOT}/index.html`]: `<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" class="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>almostnode webide starter</title>
+    <title>almostnode tailwind starter</title>
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0?dev",
+    "react/": "https://esm.sh/react@18.2.0&dev/",
+    "react-dom": "https://esm.sh/react-dom@18.2.0?dev",
+    "react-dom/": "https://esm.sh/react-dom@18.2.0&dev/",
+    "@/": "./src/"
+  }
+}
+    </script>
   </head>
   <body>
     <div id="root"></div>
@@ -92,13 +109,92 @@ const FILES: Record<string, string> = {
   ),
   [`${WORKSPACE_ROOT}/README.md`]: `# almostnode webide starter
 
-This seeded workspace uses a Vite + React shell inspired by the shadcn Vite starter.
+This seeded workspace is already wired for Tailwind-style utility classes and shadcn aliases.
 
 - edit \`src/App.tsx\`
 - run \`npm run dev\`
 - preview the app in the host pane
+- use \`npx shadcn@latest add dropdown-menu\` once you want more components
 
-The styling stays plain CSS so it can boot inside almostnode's browser Vite runtime without a Tailwind plugin pass.
+Tailwind is served through the Vite preview via the CDN plus \`tailwind.config.ts\`, so the app starts without a build-time Tailwind install step.
+`,
+  [`${WORKSPACE_ROOT}/components.json`]: JSON.stringify(
+    {
+      "$schema": "https://ui.shadcn.com/schema.json",
+      style: "new-york",
+      rsc: false,
+      tsx: true,
+      tailwind: {
+        config: "tailwind.config.ts",
+        css: "src/index.css",
+        baseColor: "zinc",
+        cssVariables: true,
+        prefix: "",
+      },
+      aliases: {
+        components: "@/components",
+        utils: "@/lib/utils",
+        ui: "@/components/ui",
+        lib: "@/lib",
+        hooks: "@/hooks",
+      },
+      iconLibrary: "lucide",
+    },
+    null,
+    2,
+  ),
+  [`${WORKSPACE_ROOT}/tailwind.config.ts`]: `export default {
+  darkMode: ['class'],
+  content: ['./index.html', './src/**/*.{ts,tsx}'],
+  theme: {
+    extend: {
+      colors: {
+        border: 'hsl(var(--border))',
+        input: 'hsl(var(--input))',
+        ring: 'hsl(var(--ring))',
+        background: 'hsl(var(--background))',
+        foreground: 'hsl(var(--foreground))',
+        primary: {
+          DEFAULT: 'hsl(var(--primary))',
+          foreground: 'hsl(var(--primary-foreground))',
+        },
+        secondary: {
+          DEFAULT: 'hsl(var(--secondary))',
+          foreground: 'hsl(var(--secondary-foreground))',
+        },
+        destructive: {
+          DEFAULT: 'hsl(var(--destructive))',
+          foreground: 'hsl(var(--destructive-foreground))',
+        },
+        muted: {
+          DEFAULT: 'hsl(var(--muted))',
+          foreground: 'hsl(var(--muted-foreground))',
+        },
+        accent: {
+          DEFAULT: 'hsl(var(--accent))',
+          foreground: 'hsl(var(--accent-foreground))',
+        },
+        popover: {
+          DEFAULT: 'hsl(var(--popover))',
+          foreground: 'hsl(var(--popover-foreground))',
+        },
+        card: {
+          DEFAULT: 'hsl(var(--card))',
+          foreground: 'hsl(var(--card-foreground))',
+        },
+      },
+      borderRadius: {
+        lg: 'var(--radius)',
+        md: 'calc(var(--radius) - 2px)',
+        sm: 'calc(var(--radius) - 4px)',
+      },
+      fontFamily: {
+        sans: ['"Avenir Next"', '"Segoe UI"', 'sans-serif'],
+        mono: ['"IBM Plex Mono"', '"SFMono-Regular"', 'monospace'],
+      },
+    },
+  },
+};
 `,
   [`${WORKSPACE_ROOT}/src/main.tsx`]: `import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -118,20 +214,35 @@ createRoot(root).render(
 );
 `,
   [`${WORKSPACE_ROOT}/src/App.tsx`]: `import { useEffect, useState } from 'react';
-import { Button } from './components/ui/button.tsx';
+import { Button } from '@/components/ui/button';
 
-const PANELS = [
+const PILLARS = [
   {
-    name: 'Starter shell',
-    detail: 'React + Vite with plain CSS and a tiny component layer that works inside almostnode today.',
+    title: 'Tailwind ready',
+    detail: 'Utility classes are live immediately through the preview. No bootstrap command is required to start styling.',
   },
   {
-    name: 'Terminal-first',
-    detail: 'The preview stays live while you run commands in the same virtual project from the terminal panel.',
+    title: 'shadcn aliases',
+    detail: 'The workspace already has components.json, @/ imports, CSS variables, and a local Button primitive wired up.',
   },
   {
-    name: 'Easy to replace',
-    detail: 'Swap this shell for your own app once you are ready to bring in extra packages or framework tooling.',
+    title: 'Terminal first',
+    detail: 'Keep the preview open while you add packages or components from the same project root in the terminal panel.',
+  },
+];
+
+const NOTES = [
+  {
+    title: 'Next useful command',
+    body: 'Run npx shadcn@latest add dropdown-menu after you want a real shadcn component. The project is already configured for it.',
+  },
+  {
+    title: 'Tailwind config',
+    body: 'Edit tailwind.config.ts to extend colors, spacing, and radii. The Vite preview injects that config automatically.',
+  },
+  {
+    title: 'Theme toggle',
+    body: 'This starter uses the standard .dark class so shadcn-style color variables and utility classes stay aligned.',
   },
 ];
 
@@ -139,118 +250,243 @@ function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    root.style.colorScheme = theme;
   }, [theme]);
 
   return (
-    <main className="starter-shell">
-      <section className="hero-card">
-        <div className="hero-copy">
-          <p className="eyebrow">Web IDE starter</p>
-          <h1>Project ready!</h1>
-          <p className="lede">
-            A Vite + React shell based on the shadcn starter, trimmed to run inside almostnode without extra plugin setup.
-          </p>
-          <p className="caption">
-            VS Code-style editing on top of almostnode, now with a faster default preview loop.
-          </p>
-          <div className="hero-actions">
-            <Button onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}>
-              Toggle theme
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                window.location.hash = '#starter-notes';
-              }}
-            >
-              Jump to notes
-            </Button>
+    <main className="min-h-screen bg-transparent text-foreground">
+      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+        <section className="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_22rem]">
+          <div className="relative overflow-hidden rounded-[2rem] border border-border/60 bg-background/82 p-6 shadow-[0_40px_120px_-40px_rgba(15,23,42,0.65)] backdrop-blur-xl sm:p-8">
+            <div className="absolute inset-x-0 top-0 h-40 bg-[radial-gradient(circle_at_top,rgba(249,115,22,0.22),transparent_62%)]" />
+            <div className="relative flex flex-col gap-6">
+              <div className="space-y-4">
+                <span className="inline-flex w-fit items-center rounded-full border border-border/60 bg-secondary/70 px-3 py-1 font-mono text-[0.72rem] uppercase tracking-[0.28em] text-muted-foreground">
+                  Tailwind + shadcn starter
+                </span>
+                <div className="space-y-4">
+                  <h1 className="max-w-4xl text-4xl font-semibold tracking-tight sm:text-5xl lg:text-6xl">
+                    Style the Web IDE app immediately instead of bootstrapping Tailwind by hand.
+                  </h1>
+                  <p className="max-w-3xl text-base leading-7 text-muted-foreground sm:text-lg">
+                    The preview is already configured for Tailwind utility classes, CSS variables, and shadcn-style aliases.
+                    Use this screen as a real starter instead of a plain CSS placeholder.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}>
+                  {theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    window.location.hash = '#starter-notes';
+                  }}
+                >
+                  Open starter notes
+                </Button>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                {PILLARS.map((pillar) => (
+                  <article
+                    key={pillar.title}
+                    className="rounded-3xl border border-border/60 bg-card/75 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]"
+                  >
+                    <p className="text-sm font-semibold tracking-tight">{pillar.title}</p>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">{pillar.detail}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
           </div>
-        </div>
-        <aside className="command-card">
-          <p className="command-label">Start here</p>
-          <code>npm run dev</code>
-          <ul>
-            <li>Edit <span>src/App.tsx</span> to reshape the shell.</li>
-            <li>Keep <span>src/components/ui/button.tsx</span> if you want a small UI primitive to build from.</li>
-            <li>Replace the whole project once your framework runtime is ready.</li>
-          </ul>
-        </aside>
-      </section>
 
-      <section className="panel-grid" aria-label="Starter capabilities">
-        {PANELS.map((panel) => (
-          <article key={panel.name} className="feature-card">
-            <p className="feature-kicker">{panel.name}</p>
-            <p>{panel.detail}</p>
-          </article>
-        ))}
-      </section>
+          <aside className="rounded-[2rem] border border-border/60 bg-card/82 p-5 shadow-[0_28px_90px_-45px_rgba(15,23,42,0.7)] backdrop-blur-xl">
+            <div className="space-y-5">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">Start here</p>
+                <code className="mt-3 block rounded-2xl border border-border/70 bg-secondary/70 px-4 py-3 font-mono text-sm text-foreground">
+                  npm run dev
+                </code>
+              </div>
 
-      <section id="starter-notes" className="notes-card">
-        <p className="notes-kicker">Compatibility notes</p>
-        <h2>Built for the current browser runtime</h2>
-        <p>
-          This starter intentionally avoids a Tailwind compile step so preview boot stays immediate. It gives the Web IDE a
-          Vite-shaped default app today while leaving room to swap in a fuller shadcn stack later.
-        </p>
-      </section>
+              <div className="rounded-3xl border border-border/60 bg-background/70 p-4">
+                <p className="text-sm font-semibold tracking-tight">Suggested next command</p>
+                <p className="mt-2 font-mono text-xs leading-6 text-muted-foreground">
+                  npx shadcn@latest add dropdown-menu
+                </p>
+              </div>
+
+              <div className="space-y-3 text-sm leading-6 text-muted-foreground">
+                <p>The app already includes components.json, tailwind.config.ts, and a working @/ import map.</p>
+                <p>Edit <span className="font-mono text-foreground">src/App.tsx</span> or drop new files into <span className="font-mono text-foreground">src/components</span>.</p>
+              </div>
+
+              <div className="rounded-3xl border border-border/60 bg-secondary/55 p-4">
+                <p className="text-sm font-semibold tracking-tight">Aliases</p>
+                <ul className="mt-3 space-y-2 font-mono text-xs text-muted-foreground">
+                  <li>@/components</li>
+                  <li>@/components/ui</li>
+                  <li>@/lib/utils</li>
+                </ul>
+              </div>
+            </div>
+          </aside>
+        </section>
+
+        <section id="starter-notes" className="grid gap-4 md:grid-cols-3">
+          {NOTES.map((note) => (
+            <article
+              key={note.title}
+              className="rounded-[1.75rem] border border-border/60 bg-card/75 p-5 shadow-[0_22px_70px_-42px_rgba(15,23,42,0.65)] backdrop-blur-xl"
+            >
+              <p className="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">Starter note</p>
+              <h2 className="mt-3 text-xl font-semibold tracking-tight">{note.title}</h2>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">{note.body}</p>
+            </article>
+          ))}
+        </section>
+
+        <section className="rounded-[2rem] border border-border/60 bg-background/80 p-5 shadow-[0_28px_90px_-48px_rgba(15,23,42,0.72)] backdrop-blur-xl">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">Preview stack</p>
+              <h2 className="text-2xl font-semibold tracking-tight">A Vite-flavored workspace with Tailwind semantics built in.</h2>
+            </div>
+            <div className="rounded-2xl border border-border/60 bg-secondary/60 px-4 py-3 text-sm text-muted-foreground">
+              Edit <span className="font-mono text-foreground">tailwind.config.ts</span> to extend the design tokens.
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <div className="rounded-3xl border border-border/60 bg-card/70 p-4">
+              <p className="text-sm font-semibold tracking-tight">What changed from the old seed</p>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
+                <li>Tailwind utility classes work without a manual init step.</li>
+                <li>shadcn aliases and CSS variables are already in place.</li>
+                <li>The starter now looks like a real app instead of a plain CSS scaffold.</li>
+              </ul>
+            </div>
+
+            <div className="rounded-3xl border border-border/60 bg-card/70 p-4">
+              <p className="text-sm font-semibold tracking-tight">Useful files</p>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
+                <li><span className="font-mono text-foreground">src/App.tsx</span> for the landing surface.</li>
+                <li><span className="font-mono text-foreground">src/components/ui/button.tsx</span> for a local shadcn-style primitive.</li>
+                <li><span className="font-mono text-foreground">src/lib/utils.ts</span> for the shared cn helper.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </div>
     </main>
   );
 }
 
 export default App;
 `,
+  [`${WORKSPACE_ROOT}/src/lib/utils.ts`]: `export function cn(...inputs: Array<string | false | null | undefined>) {
+  return inputs.filter(Boolean).join(' ');
+}
+`,
   [`${WORKSPACE_ROOT}/src/components/ui/button.tsx`]: `import type { ButtonHTMLAttributes } from 'react';
+import { cn } from '@/lib/utils';
 
-type ButtonVariant = 'default' | 'secondary';
+type ButtonVariant = 'default' | 'secondary' | 'outline';
+type ButtonSize = 'default' | 'sm' | 'lg';
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
+  size?: ButtonSize;
 }
 
-export function Button({ className = '', type = 'button', variant = 'default', ...props }: ButtonProps) {
-  const classes = ['ui-button', \`ui-button--\${variant}\`, className].filter(Boolean).join(' ');
+const baseStyles =
+  'inline-flex items-center justify-center rounded-full font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-60';
 
-  return <button type={type} className={classes} {...props} />;
+const variantStyles: Record<ButtonVariant, string> = {
+  default:
+    'bg-primary text-primary-foreground shadow-[0_20px_45px_-24px_rgba(249,115,22,0.85)] hover:-translate-y-0.5 hover:bg-primary/90',
+  secondary:
+    'bg-secondary text-secondary-foreground hover:-translate-y-0.5 hover:bg-secondary/80',
+  outline:
+    'border border-border bg-background/70 text-foreground hover:-translate-y-0.5 hover:bg-secondary/70',
+};
+
+const sizeStyles: Record<ButtonSize, string> = {
+  default: 'h-11 px-5 text-sm',
+  sm: 'h-9 px-4 text-sm',
+  lg: 'h-12 px-6 text-base',
+};
+
+export function Button({
+  className,
+  type = 'button',
+  variant = 'default',
+  size = 'default',
+  ...props
+}: ButtonProps) {
+  return (
+    <button
+      type={type}
+      className={cn(baseStyles, variantStyles[variant], sizeStyles[size], className)}
+      {...props}
+    />
+  );
 }
 `,
   [`${WORKSPACE_ROOT}/src/index.css`]: `:root {
-  --font-sans: "Avenir Next", "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", "SFMono-Regular", monospace;
-  --radius-lg: 28px;
-  --radius-md: 18px;
-  --radius-sm: 999px;
-  --surface: #131722;
-  --surface-strong: #191f2d;
-  --surface-soft: rgba(255, 255, 255, 0.04);
-  --border: rgba(255, 255, 255, 0.1);
-  --text: #f6f2eb;
-  --muted: #b5b8c7;
-  --accent: #ff8e5b;
-  --accent-strong: #ff6b2c;
-  --accent-soft: rgba(255, 142, 91, 0.18);
-  --shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
-  color-scheme: dark;
+  --background: 36 40% 96%;
+  --foreground: 222 39% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 39% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 39% 11%;
+  --primary: 23 92% 58%;
+  --primary-foreground: 24 28% 10%;
+  --secondary: 210 32% 92%;
+  --secondary-foreground: 222 39% 18%;
+  --muted: 210 22% 89%;
+  --muted-foreground: 222 15% 40%;
+  --accent: 198 69% 47%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 54%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 25% 84%;
+  --input: 215 25% 84%;
+  --ring: 23 92% 58%;
+  --radius: 1.4rem;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
 }
 
-[data-theme='light'] {
-  --surface: #f8f0e2;
-  --surface-strong: #fffaf2;
-  --surface-soft: rgba(48, 30, 12, 0.06);
-  --border: rgba(48, 30, 12, 0.12);
-  --text: #1d1c1a;
-  --muted: #5d5a54;
-  --accent: #e4692d;
-  --accent-strong: #bb4a11;
-  --accent-soft: rgba(228, 105, 45, 0.14);
-  --shadow: 0 24px 60px rgba(70, 45, 24, 0.12);
-  color-scheme: light;
+.dark {
+  --background: 224 36% 9%;
+  --foreground: 36 43% 96%;
+  --card: 223 33% 13%;
+  --card-foreground: 36 43% 96%;
+  --popover: 223 33% 13%;
+  --popover-foreground: 36 43% 96%;
+  --primary: 24 96% 63%;
+  --primary-foreground: 20 28% 10%;
+  --secondary: 222 24% 18%;
+  --secondary-foreground: 36 43% 96%;
+  --muted: 223 21% 17%;
+  --muted-foreground: 218 19% 72%;
+  --accent: 198 72% 54%;
+  --accent-foreground: 224 36% 9%;
+  --destructive: 0 74% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 222 17% 23%;
+  --input: 222 17% 23%;
+  --ring: 24 96% 63%;
 }
 
 * {
   box-sizing: border-box;
+  border-color: hsl(var(--border));
 }
 
 html,
@@ -261,19 +497,20 @@ body,
 
 body {
   margin: 0;
-  font-family: var(--font-sans);
-  color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(255, 142, 91, 0.24), transparent 28rem),
-    radial-gradient(circle at bottom right, rgba(110, 154, 255, 0.18), transparent 30rem),
-    linear-gradient(180deg, #0d1117 0%, #111522 45%, #171d2e 100%);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: hsl(var(--foreground));
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.22), transparent 28rem),
+    radial-gradient(circle at bottom right, rgba(56, 189, 248, 0.16), transparent 32rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0));
 }
 
-[data-theme='light'] body {
-  background:
-    radial-gradient(circle at top left, rgba(255, 164, 104, 0.26), transparent 28rem),
-    radial-gradient(circle at bottom right, rgba(255, 229, 198, 0.8), transparent 30rem),
-    linear-gradient(180deg, #fffaf3 0%, #f3eadc 100%);
+.dark body {
+  background-image:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.2), transparent 28rem),
+    radial-gradient(circle at bottom right, rgba(56, 189, 248, 0.14), transparent 32rem),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.45), rgba(15, 23, 42, 0));
 }
 
 button,
@@ -283,192 +520,12 @@ select {
   font: inherit;
 }
 
-.starter-shell {
-  width: min(1120px, calc(100vw - 2rem));
-  margin: 0 auto;
-  padding: 2rem 0 3rem;
+code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
 }
 
-.hero-card,
-.feature-card,
-.notes-card,
-.command-card {
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, var(--surface-soft), transparent), var(--surface);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(16px);
-}
-
-.hero-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 0.9fr);
-  gap: 1rem;
-  padding: 1rem;
-  border-radius: var(--radius-lg);
-}
-
-.hero-copy {
-  padding: 1.25rem;
-}
-
-.eyebrow,
-.command-label,
-.feature-kicker,
-.notes-kicker {
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 0.72rem;
-  color: var(--accent);
-}
-
-.hero-copy h1 {
-  margin: 0.75rem 0 0;
-  font-size: clamp(2.8rem, 7vw, 5.8rem);
-  line-height: 0.92;
-}
-
-.lede {
-  max-width: 44rem;
-  margin: 1rem 0 0;
-  font-size: 1.05rem;
-  line-height: 1.65;
-  color: var(--muted);
-}
-
-.caption {
-  margin: 1rem 0 0;
-  color: var(--text);
-  opacity: 0.82;
-}
-
-.hero-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
-}
-
-.command-card {
-  border-radius: calc(var(--radius-lg) - 4px);
-  padding: 1.25rem;
-  align-self: stretch;
-}
-
-.command-card code {
-  display: inline-block;
-  margin-top: 0.9rem;
-  padding: 0.7rem 0.9rem;
-  border-radius: 14px;
-  background: rgba(0, 0, 0, 0.22);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 0.92rem;
-}
-
-.command-card ul {
-  margin: 1rem 0 0;
-  padding-left: 1rem;
-  color: var(--muted);
-  line-height: 1.6;
-}
-
-.command-card span {
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 0.92rem;
-}
-
-.panel-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-  margin-top: 1rem;
-}
-
-.feature-card,
-.notes-card {
-  border-radius: var(--radius-md);
-  padding: 1.2rem;
-}
-
-.feature-card p:last-child,
-.notes-card p:last-child {
-  margin-bottom: 0;
-  color: var(--muted);
-  line-height: 1.65;
-}
-
-.notes-card {
-  margin-top: 1rem;
-}
-
-.notes-card h2 {
-  margin: 0.7rem 0 0;
-  font-size: clamp(1.7rem, 4vw, 2.4rem);
-}
-
-.ui-button {
-  appearance: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 0.8rem 1.15rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  cursor: pointer;
-  transition:
-    transform 140ms ease,
-    border-color 140ms ease,
-    background 140ms ease,
-    color 140ms ease,
-    box-shadow 140ms ease;
-}
-
-.ui-button:hover {
-  transform: translateY(-1px);
-}
-
-.ui-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-
-.ui-button--default {
-  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
-  color: #1d1c1a;
-  box-shadow: 0 16px 36px var(--accent-soft);
-}
-
-.ui-button--secondary {
-  border-color: var(--border);
-  background: rgba(255, 255, 255, 0.02);
-  color: var(--text);
-}
-
-.ui-button--secondary:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-@media (max-width: 860px) {
-  .hero-card {
-    grid-template-columns: 1fr;
-  }
-
-  .panel-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .starter-shell {
-    width: min(100vw - 1rem, 1120px);
-    padding-top: 0.5rem;
-  }
-
-  .hero-copy,
-  .command-card,
-  .feature-card,
-  .notes-card {
-    padding: 1rem;
-  }
+::selection {
+  background: rgba(249, 115, 22, 0.24);
 }
 `,
 };

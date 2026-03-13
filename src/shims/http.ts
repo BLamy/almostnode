@@ -7,6 +7,7 @@ import { EventEmitter, type EventListener } from './events';
 import { Readable, Writable, Buffer } from './stream';
 import { Socket, Server as NetServer, AddressInfo } from './net';
 import { createHash } from './crypto';
+import { almostnodeDebugLog } from '../utils/debug';
 
 // Save the browser's native WebSocket at module load time, BEFORE any CLI bundle
 // can overwrite it (e.g. Convex CLI does `globalThis.WebSocket = bundledWs`).
@@ -634,7 +635,7 @@ export class ClientRequest extends Writable {
       if (!hostname) hostname = 'localhost';
       const path = this._options.path || '/';
       const url = `${protocol}//${hostname}${port}${path}`;
-      console.log(`[almostnode DEBUG] http request: ${this.method} ${url}`);
+      almostnodeDebugLog('http', `[almostnode DEBUG] http request: ${this.method} ${url}`);
 
       // WebSocket upgrade requests can't use fetch() — browsers strip
       // Connection/Upgrade headers. Bridge to the browser's native WebSocket.
@@ -700,7 +701,7 @@ export class ClientRequest extends Writable {
           body: currentBody,
           redirect: corsProxy ? 'manual' : (fetchOptions.redirect || 'follow'),
         });
-        console.log(`[almostnode DEBUG] http fetch status: ${response.status} ${response.url.slice(0, 120)}`);
+        almostnodeDebugLog('http', `[almostnode DEBUG] http fetch status: ${response.status} ${response.url.slice(0, 120)}`);
 
         // Handle redirects when proxied
         if (corsProxy && response.status >= 300 && response.status < 400) {
@@ -780,7 +781,7 @@ export class ClientRequest extends Writable {
 
     // Read body and push to stream
     const body = await response.arrayBuffer();
-    console.log(`[almostnode DEBUG] http response body: ${body.byteLength} bytes for ${response.url.slice(0, 120)}`);
+    almostnodeDebugLog('http', `[almostnode DEBUG] http response body: ${body.byteLength} bytes for ${response.url.slice(0, 120)}`);
     msg._setBody(Buffer.from(body));
 
     return msg;

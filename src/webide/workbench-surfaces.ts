@@ -21,6 +21,43 @@ const PREVIEW_EDITOR_RESOURCE = URI.from({
 const FILES_VIEW_ID = 'almostnode.sidebar.files';
 const TERMINAL_VIEW_ID = 'almostnode.panel.terminal';
 const CLAUDE_VIEW_ID = 'almostnode.auxiliarybar.claude';
+const NODE_MODULES_REFRESH_DELAY_MS = 48;
+
+function scheduleUiFrame(callback: () => void): { cancel: () => void } {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    const handle = window.requestAnimationFrame(() => callback());
+    return {
+      cancel: () => window.cancelAnimationFrame(handle),
+    };
+  }
+
+  const handle = setTimeout(callback, 0);
+  return {
+    cancel: () => clearTimeout(handle),
+  };
+}
+
+function normalizeWorkbenchPath(path: string): string {
+  if (!path) return '/';
+  return path.startsWith('/') ? path.replace(/\/+/g, '/') : `/${path}`.replace(/\/+/g, '/');
+}
+
+function getWorkspaceNodeModulesPath(workspaceRoot: string): string {
+  const normalizedRoot = normalizeWorkbenchPath(workspaceRoot);
+  return normalizedRoot === '/' ? '/node_modules' : `${normalizedRoot}/node_modules`;
+}
+
+function isWorkspaceChangePath(path: string, workspaceRoot: string): boolean {
+  const normalizedPath = normalizeWorkbenchPath(path);
+  const normalizedRoot = normalizeWorkbenchPath(workspaceRoot);
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
+function isNodeModulesChangePath(path: string, workspaceRoot: string): boolean {
+  const normalizedPath = normalizeWorkbenchPath(path);
+  const nodeModulesPath = getWorkspaceNodeModulesPath(workspaceRoot);
+  return normalizedPath === nodeModulesPath || normalizedPath.startsWith(`${nodeModulesPath}/`);
+}
 
 interface PreviewSurfaceCommands {
   run(): void;
@@ -37,10 +74,15 @@ export interface RegisteredWorkbenchSurfaces {
 
 export class FilesSidebarSurface {
   private readonly root = document.createElement('div');
-  private readonly refresh = () => this.render();
+  private readonly directoryOpenState = new Map<string, boolean>();
   private selectedPath: string | null = null;
   private contextMenu: HTMLDivElement | null = null;
   private autoExpandTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingRefresh: { cancel: () => void } | null = null;
+  private pendingNodeModulesRefresh: ReturnType<typeof setTimeout> | null = null;
+  private renderedNodeModulesExists = false;
+  private readonly changeListener = (path: string) => this.handleWorkspaceMutation(path);
+  private readonly deleteListener = (path: string) => this.handleWorkspaceMutation(path);
 
   /* Lucide-compatible SVG paths (viewBox 0 0 24 24) */
   private static readonly P = {
@@ -119,9 +161,10 @@ export class FilesSidebarSurface {
   ) {
     this.root.id = 'webideFilesTree';
     this.root.className = 'almostnode-files-tree';
+    this.directoryOpenState.set(this.workspaceRoot, true);
 
-    this.vfs.on('change', this.refresh);
-    this.vfs.on('delete', this.refresh);
+    this.vfs.on('change', this.changeListener);
+    this.vfs.on('delete', this.deleteListener);
     this.render();
 
     // Right-click on empty space in tree root
@@ -155,7 +198,7 @@ export class FilesSidebarSurface {
       const newPath = this.joinPath(this.workspaceRoot, this.nameOf(sourcePath));
       this.vfs.renameSync(sourcePath, newPath);
       if (this.selectedPath === sourcePath) this.selectedPath = newPath;
-      this.render();
+      this.scheduleRefresh();
     });
 
     // Dismiss context menu on click outside or Escape
@@ -180,12 +223,62 @@ export class FilesSidebarSurface {
   private render(): void {
     try {
       this.root.replaceChildren(this.renderDirectory(this.workspaceRoot, 0));
+      this.renderedNodeModulesExists = this.vfs.existsSync(getWorkspaceNodeModulesPath(this.workspaceRoot));
     } catch {
       const empty = document.createElement('div');
       empty.className = 'almostnode-files-tree__empty';
       empty.textContent = 'Waiting for the workspace tree...';
       this.root.replaceChildren(empty);
+      this.renderedNodeModulesExists = false;
     }
+  }
+
+  private scheduleRefresh(): void {
+    if (this.pendingRefresh) {
+      return;
+    }
+
+    this.pendingRefresh = scheduleUiFrame(() => {
+      this.pendingRefresh = null;
+      this.render();
+    });
+  }
+
+  private handleWorkspaceMutation(path: string): void {
+    if (!isWorkspaceChangePath(path, this.workspaceRoot)) {
+      return;
+    }
+
+    if (isNodeModulesChangePath(path, this.workspaceRoot)) {
+      this.scheduleNodeModulesRefresh(path);
+      return;
+    }
+
+    this.scheduleRefresh();
+  }
+
+  private scheduleNodeModulesRefresh(path: string): void {
+    const nodeModulesPath = getWorkspaceNodeModulesPath(this.workspaceRoot);
+    const normalizedPath = normalizeWorkbenchPath(path);
+    const nodeModulesExists = this.vfs.existsSync(nodeModulesPath);
+    const isNodeModulesRootChange = normalizedPath === nodeModulesPath;
+    const isNodeModulesExpanded = this.isDirectoryOpen(nodeModulesPath, 1);
+    const shouldRefresh = isNodeModulesRootChange
+      || nodeModulesExists !== this.renderedNodeModulesExists
+      || isNodeModulesExpanded;
+
+    if (!shouldRefresh) {
+      return;
+    }
+
+    if (this.pendingNodeModulesRefresh) {
+      clearTimeout(this.pendingNodeModulesRefresh);
+    }
+
+    this.pendingNodeModulesRefresh = setTimeout(() => {
+      this.pendingNodeModulesRefresh = null;
+      this.scheduleRefresh();
+    }, NODE_MODULES_REFRESH_DELAY_MS);
   }
 
   private svg(pathKey: keyof typeof FilesSidebarSurface.P, color: string, sw: number, ...cls: string[]): SVGSVGElement {
@@ -217,11 +310,94 @@ export class FilesSidebarSurface {
     return this.svg(key, color, 1.5, 'almostnode-files-tree__icon');
   }
 
+  private getDefaultDirectoryOpen(path: string, depth: number): boolean {
+    if (path === this.workspaceRoot) {
+      return true;
+    }
+
+    if (path === getWorkspaceNodeModulesPath(this.workspaceRoot)) {
+      return false;
+    }
+
+    return depth < 2;
+  }
+
+  private isDirectoryOpen(path: string, depth: number): boolean {
+    return this.directoryOpenState.get(path) ?? this.getDefaultDirectoryOpen(path, depth);
+  }
+
+  private populateDirectoryChildren(children: HTMLElement, path: string, depth: number): void {
+    children.replaceChildren();
+
+    const entries = this.vfs.readdirSync(path).sort((left, right) => {
+      const leftPath = this.joinPath(path, left);
+      const rightPath = this.joinPath(path, right);
+      const leftIsDirectory = this.vfs.statSync(leftPath).isDirectory();
+      const rightIsDirectory = this.vfs.statSync(rightPath).isDirectory();
+
+      if (leftIsDirectory !== rightIsDirectory) {
+        return leftIsDirectory ? -1 : 1;
+      }
+
+      return left.localeCompare(right);
+    });
+
+    for (const entry of entries) {
+      const fullPath = this.joinPath(path, entry);
+      const stats = this.vfs.statSync(fullPath);
+      if (stats.isDirectory()) {
+        children.appendChild(this.renderDirectory(fullPath, depth + 1));
+        continue;
+      }
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'almostnode-files-tree__file';
+      button.dataset.path = fullPath;
+      if (fullPath === this.selectedPath) button.classList.add('is-selected');
+
+      const icon = this.fileIcon(entry);
+      const fileLabel = document.createElement('span');
+      fileLabel.className = 'almostnode-files-tree__label';
+      fileLabel.textContent = entry;
+
+      button.append(icon, fileLabel);
+      button.setAttribute('draggable', 'true');
+      button.addEventListener('dragstart', (e) => {
+        e.dataTransfer!.setData('text/plain', fullPath);
+        e.dataTransfer!.effectAllowed = 'move';
+        button.classList.add('is-dragging');
+      });
+      button.addEventListener('dragend', () => {
+        button.classList.remove('is-dragging');
+      });
+      button.addEventListener('click', () => {
+        this.selectedPath = fullPath;
+        this.root.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
+        button.classList.add('is-selected');
+        this.openFile(fullPath);
+      });
+
+      button.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.showContextMenu(e.clientX, e.clientY, [
+          { label: 'Rename', action: () => this.startInlineInput(path, 'file', fullPath) },
+          { label: 'Delete', action: () => {
+            try { this.vfs.unlinkSync(fullPath); } catch { /* ignore */ }
+          }},
+        ]);
+      });
+
+      children.appendChild(button);
+    }
+  }
+
   private renderDirectory(path: string, depth: number): HTMLElement {
     const details = document.createElement('details');
     details.className = 'almostnode-files-tree__directory';
     details.dataset.path = path;
-    details.open = depth < 2;
+    details.open = this.isDirectoryOpen(path, depth);
 
     const summary = document.createElement('summary');
     summary.className = 'almostnode-files-tree__summary';
@@ -279,7 +455,7 @@ export class FilesSidebarSurface {
       const newPath = this.joinPath(path, this.nameOf(sourcePath));
       this.vfs.renameSync(sourcePath, newPath);
       if (this.selectedPath === sourcePath) this.selectedPath = newPath;
-      this.render();
+      this.scheduleRefresh();
     });
 
     // Context menu on folder summary
@@ -307,70 +483,17 @@ export class FilesSidebarSurface {
 
     const children = document.createElement('div');
     children.className = 'almostnode-files-tree__children';
-
-    const entries = this.vfs.readdirSync(path).sort((left, right) => {
-      const leftPath = this.joinPath(path, left);
-      const rightPath = this.joinPath(path, right);
-      const leftIsDirectory = this.vfs.statSync(leftPath).isDirectory();
-      const rightIsDirectory = this.vfs.statSync(rightPath).isDirectory();
-
-      if (leftIsDirectory !== rightIsDirectory) {
-        return leftIsDirectory ? -1 : 1;
-      }
-
-      return left.localeCompare(right);
-    });
-
-    for (const entry of entries) {
-      const fullPath = this.joinPath(path, entry);
-      const stats = this.vfs.statSync(fullPath);
-      if (stats.isDirectory()) {
-        children.appendChild(this.renderDirectory(fullPath, depth + 1));
-        continue;
-      }
-
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'almostnode-files-tree__file';
-      button.dataset.path = fullPath;
-      if (fullPath === this.selectedPath) button.classList.add('is-selected');
-
-      const icon = this.fileIcon(entry);
-      const fileLabel = document.createElement('span');
-      fileLabel.className = 'almostnode-files-tree__label';
-      fileLabel.textContent = entry;
-
-      button.append(icon, fileLabel);
-      button.setAttribute('draggable', 'true');
-      button.addEventListener('dragstart', (e) => {
-        e.dataTransfer!.setData('text/plain', fullPath);
-        e.dataTransfer!.effectAllowed = 'move';
-        button.classList.add('is-dragging');
-      });
-      button.addEventListener('dragend', () => {
-        button.classList.remove('is-dragging');
-      });
-      button.addEventListener('click', () => {
-        this.selectedPath = fullPath;
-        this.root.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
-        button.classList.add('is-selected');
-        this.openFile(fullPath);
-      });
-
-      // Context menu on file
-      button.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.showContextMenu(e.clientX, e.clientY, [
-          { label: 'Rename', action: () => this.startInlineInput(path, 'file', fullPath) },
-          { label: 'Delete', action: () => {
-            try { this.vfs.unlinkSync(fullPath); } catch { /* ignore */ }
-          }},
-        ]);
-      });
-
-      children.appendChild(button);
+    const isLazyDirectory = path === getWorkspaceNodeModulesPath(this.workspaceRoot);
+    if (!isLazyDirectory || details.open) {
+      this.populateDirectoryChildren(children, path, depth);
     }
+
+    details.addEventListener('toggle', () => {
+      this.directoryOpenState.set(path, details.open);
+      if (details.open && isLazyDirectory && children.childElementCount === 0) {
+        this.populateDirectoryChildren(children, path, depth);
+      }
+    });
 
     details.appendChild(children);
     return details;
@@ -551,7 +674,7 @@ export class FilesSidebarSurface {
     const commit = () => {
       const newName = input.value.trim();
       if (!newName || newName === name) {
-        this.render();
+        this.scheduleRefresh();
         return;
       }
       const newPath = this.joinPath(parentDir, newName);
@@ -561,7 +684,7 @@ export class FilesSidebarSurface {
           this.selectedPath = newPath;
         }
       } catch {
-        this.render();
+        this.scheduleRefresh();
       }
     };
 
@@ -573,7 +696,7 @@ export class FilesSidebarSurface {
         commit();
       } else if (e.key === 'Escape') {
         committed = true;
-        this.render();
+        this.scheduleRefresh();
       }
     });
     input.addEventListener('blur', () => {

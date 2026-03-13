@@ -26,6 +26,7 @@ export * as querystring from './shims/querystring';
 export * as util from './shims/util';
 export * as npm from './npm';
 export { PackageManager, install } from './npm';
+export type { InstallMode } from './npm';
 export { ServerBridge, getServerBridge, resetServerBridge } from './server-bridge';
 export type { InitServiceWorkerOptions } from './server-bridge';
 // Dev servers
@@ -59,6 +60,7 @@ export {
 import { VirtualFS } from './virtual-fs';
 import { Runtime, RuntimeOptions } from './runtime';
 import { PackageManager } from './npm';
+import type { InstallMode, PackageManagerMutationSummary } from './npm';
 import { ServerBridge, getServerBridge } from './server-bridge';
 import { initChildProcess, stripInternalChildProcessEnv } from './shims/child_process';
 import type { IExecuteResult } from './runtime-interface';
@@ -130,6 +132,7 @@ export interface ContainerOptions extends RuntimeOptions {
   baseUrl?: string;
   onServerReady?: (port: number, url: string) => void;
   git?: GitAuthOptions;
+  installMode?: InstallMode;
 }
 
 const GIT_ENV_KEYS = [
@@ -189,7 +192,23 @@ export function createContainer(options?: ContainerOptions): {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
   let gitAuth = sanitizeGitAuth(options?.git);
   const vfs = new VirtualFS();
-  const childProcessController = initChildProcess(vfs);
+  const childProcessController = initChildProcess(vfs, {
+    installMode: options?.installMode,
+    onInstallMutation: async (summary: PackageManagerMutationSummary) => {
+      if (summary.touchesNodeModules) {
+        const { clearNpmBundleCache } = await import('./frameworks/npm-serve');
+        clearNpmBundleCache();
+      }
+
+      if (!(summary.touchesNodeModules || summary.touchesPackageJson)) {
+        return;
+      }
+
+      for (const server of childProcessController.frameworkDevServers.values()) {
+        server.clearInstalledPackagesCache?.();
+      }
+    },
+  });
 
   const resolveCommandEnv = (runEnv?: Record<string, string>): Record<string, string> => ({
     ...baseEnv,
@@ -203,7 +222,10 @@ export function createContainer(options?: ContainerOptions): {
     childProcessController,
   };
   const runtime = new Runtime(vfs, runtimeOptions);
-  const npmManager = new PackageManager(vfs);
+  const npmManager = new PackageManager(vfs, {
+    installMode: options?.installMode,
+    onMutation: childProcessController.onInstallMutation || undefined,
+  });
   const serverBridge = getServerBridge({
     baseUrl: options?.baseUrl,
     onServerReady: options?.onServerReady,

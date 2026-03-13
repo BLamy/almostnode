@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { VirtualFS } from '../src/virtual-fs';
+import { createContainer } from '../src';
 import {
   parseVersion,
   compareVersions,
@@ -8,6 +9,9 @@ import {
 } from '../src/npm/resolver';
 import { extractTarball, decompress } from '../src/npm/tarball';
 import { parsePackageSpec, PackageManager } from '../src/npm';
+import { executeInstallRequest, serializeInstallResult } from '../src/npm/core';
+import { applyVfsPatch, diffVfsSnapshots } from '../src/npm/vfs-patch';
+import type { InstallWorkerPayload, PackageManagerWorkerClient } from '../src/npm/types';
 import pako from 'pako';
 
 describe('npm', () => {
@@ -656,8 +660,393 @@ describe('npm', () => {
         )
       ).toBe(true);
     });
+
+    it('should apply worker-mode installs with the same filesystem results as main-thread installs', async () => {
+      const manifest = {
+        name: 'worker-cli',
+        'dist-tags': { latest: '1.0.0' },
+        versions: {
+          '1.0.0': {
+            name: 'worker-cli',
+            version: '1.0.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/worker-cli/-/worker-cli-1.0.0.tgz',
+              shasum: 'worker',
+            },
+            dependencies: {
+              helper: '^1.0.0',
+            },
+            bin: {
+              workercli: 'bin/cli.js',
+            },
+          },
+        },
+      };
+
+      const helperManifest = {
+        name: 'helper',
+        'dist-tags': { latest: '1.0.0' },
+        versions: {
+          '1.0.0': {
+            name: 'helper',
+            version: '1.0.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/helper/-/helper-1.0.0.tgz',
+              shasum: 'helper',
+            },
+            dependencies: {},
+          },
+        },
+      };
+
+      const workerCliTarball = pako.gzip(createMinimalTarball({
+        'package/package.json': JSON.stringify({
+          name: 'worker-cli',
+          version: '1.0.0',
+          bin: {
+            workercli: 'bin/cli.js',
+          },
+        }),
+        'package/bin/cli.js': 'console.log("worker cli");',
+      }));
+      const helperTarball = pako.gzip(createMinimalTarball({
+        'package/package.json': '{"name":"helper","version":"1.0.0"}',
+        'package/index.js': 'module.exports = "helper";',
+      }));
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+        if (urlStr.includes('/worker-cli') && !urlStr.includes('.tgz')) {
+          return new Response(JSON.stringify(manifest), { status: 200 });
+        }
+        if (urlStr.includes('/helper') && !urlStr.includes('.tgz')) {
+          return new Response(JSON.stringify(helperManifest), { status: 200 });
+        }
+        if (urlStr.includes('worker-cli-1.0.0.tgz')) {
+          return new Response(workerCliTarball, { status: 200 });
+        }
+        if (urlStr.includes('helper-1.0.0.tgz')) {
+          return new Response(helperTarball, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const workerVfs = new VirtualFS();
+      workerVfs.mkdirSync('/project', { recursive: true });
+      workerVfs.writeFileSync('/project/package.json', '{"name":"demo","version":"1.0.0"}');
+
+      const mainVfs = new VirtualFS();
+      mainVfs.mkdirSync('/project', { recursive: true });
+      mainVfs.writeFileSync('/project/package.json', '{"name":"demo","version":"1.0.0"}');
+
+      const workerPm = new PackageManager(workerVfs, {
+        cwd: '/project',
+        installMode: 'worker',
+        workerClientFactory: () => new FakeInstallWorkerClient(),
+      });
+      const mainPm = new PackageManager(mainVfs, {
+        cwd: '/project',
+        installMode: 'main-thread',
+      });
+
+      const workerResult = await workerPm.install('worker-cli', { save: true });
+      const mainResult = await mainPm.install('worker-cli', { save: true });
+
+      expect(workerResult.added.sort()).toEqual(mainResult.added.sort());
+      expect(workerPm.list()).toEqual(mainPm.list());
+      expect(workerVfs.readFileSync('/project/package.json', 'utf8')).toEqual(
+        mainVfs.readFileSync('/project/package.json', 'utf8'),
+      );
+      expect(workerVfs.readFileSync('/project/node_modules/.bin/workercli', 'utf8')).toEqual(
+        mainVfs.readFileSync('/project/node_modules/.bin/workercli', 'utf8'),
+      );
+      expect(workerVfs.readFileSync('/project/node_modules/.package-lock.json', 'utf8')).toEqual(
+        mainVfs.readFileSync('/project/node_modules/.package-lock.json', 'utf8'),
+      );
+      expect(workerVfs.readFileSync('/project/node_modules/helper/package.json', 'utf8')).toEqual(
+        mainVfs.readFileSync('/project/node_modules/helper/package.json', 'utf8'),
+      );
+    });
+
+    it('falls back to the main thread when Worker is unavailable', async () => {
+      const manifest = {
+        name: 'fallback-pkg',
+        'dist-tags': { latest: '1.0.0' },
+        versions: {
+          '1.0.0': {
+            name: 'fallback-pkg',
+            version: '1.0.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/fallback-pkg/-/fallback-pkg-1.0.0.tgz',
+              shasum: 'fallback',
+            },
+            dependencies: {},
+          },
+        },
+      };
+
+      const tarball = pako.gzip(createMinimalTarball({
+        'package/package.json': '{"name":"fallback-pkg","version":"1.0.0"}',
+      }));
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+        if (urlStr.includes('/fallback-pkg') && !urlStr.includes('.tgz')) {
+          return new Response(JSON.stringify(manifest), { status: 200 });
+        }
+        if (urlStr.includes('fallback-pkg-1.0.0.tgz')) {
+          return new Response(tarball, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const originalWorker = globalThis.Worker;
+      let workerFactoryCalled = false;
+      // @ts-expect-error - test intentionally removes Worker support.
+      delete globalThis.Worker;
+
+      try {
+        const fallbackPm = new PackageManager(vfs, {
+          installMode: 'worker',
+          workerClientFactory: () => {
+            workerFactoryCalled = true;
+            return new FakeInstallWorkerClient();
+          },
+        });
+
+        await fallbackPm.install('fallback-pkg');
+
+        expect(workerFactoryCalled).toBe(false);
+        expect(vfs.existsSync('/node_modules/fallback-pkg/package.json')).toBe(true);
+      } finally {
+        globalThis.Worker = originalWorker;
+      }
+    });
+
+    it('terminates a failed worker client, retries on the main thread, and recreates the worker for the next install', async () => {
+      const manifests = new Map([
+        ['recover-one', {
+          name: 'recover-one',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'recover-one',
+              version: '1.0.0',
+              dist: {
+                tarball: 'https://registry.npmjs.org/recover-one/-/recover-one-1.0.0.tgz',
+                shasum: 'recover-one',
+              },
+              dependencies: {},
+            },
+          },
+        }],
+        ['recover-two', {
+          name: 'recover-two',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'recover-two',
+              version: '1.0.0',
+              dist: {
+                tarball: 'https://registry.npmjs.org/recover-two/-/recover-two-1.0.0.tgz',
+                shasum: 'recover-two',
+              },
+              dependencies: {},
+            },
+          },
+        }],
+      ]);
+
+      const tarballs = new Map([
+        ['recover-one', pako.gzip(createMinimalTarball({
+          'package/package.json': '{"name":"recover-one","version":"1.0.0"}',
+          'package/index.js': 'module.exports = "recover-one";',
+        }))],
+        ['recover-two', pako.gzip(createMinimalTarball({
+          'package/package.json': '{"name":"recover-two","version":"1.0.0"}',
+          'package/index.js': 'module.exports = "recover-two";',
+        }))],
+      ]);
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+
+        for (const [pkgName, manifest] of manifests) {
+          if (urlStr.includes(`/${pkgName}`) && !urlStr.includes('.tgz')) {
+            return new Response(JSON.stringify(manifest), { status: 200 });
+          }
+          if (urlStr.includes(`${pkgName}-1.0.0.tgz`)) {
+            return new Response(tarballs.get(pkgName), { status: 200 });
+          }
+        }
+
+        return new Response('Not found', { status: 404 });
+      });
+
+      const createdClients: RecoveryInstallWorkerClient[] = [];
+      const progress: string[] = [];
+      let failNextWorkerRun = true;
+      const originalWorker = globalThis.Worker;
+      globalThis.Worker = class {} as typeof Worker;
+
+      try {
+        const pm = new PackageManager(vfs, {
+          installMode: 'worker',
+          workerClientFactory: () => {
+            const client = new RecoveryInstallWorkerClient(failNextWorkerRun);
+            failNextWorkerRun = false;
+            createdClients.push(client);
+            return client;
+          },
+        });
+
+        await pm.install('recover-one', {
+          onProgress: (message) => progress.push(message),
+        });
+
+        expect(progress.join('\n')).toContain('npm: worker install failed; retrying on main thread...');
+        expect(vfs.existsSync('/node_modules/recover-one/package.json')).toBe(true);
+        expect(createdClients).toHaveLength(1);
+        expect(createdClients[0]?.terminateCalls).toBe(1);
+
+        await pm.install('recover-two');
+
+        expect(vfs.existsSync('/node_modules/recover-two/package.json')).toBe(true);
+        expect(createdClients).toHaveLength(2);
+        expect(createdClients[1]?.runCalls).toBe(1);
+      } finally {
+        globalThis.Worker = originalWorker;
+      }
+    });
+
+    it('streams progress through container.run for npm install', async () => {
+      const manifest = {
+        name: 'stream-pkg',
+        'dist-tags': { latest: '1.0.0' },
+        versions: {
+          '1.0.0': {
+            name: 'stream-pkg',
+            version: '1.0.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/stream-pkg/-/stream-pkg-1.0.0.tgz',
+              shasum: 'stream',
+            },
+            dependencies: {},
+          },
+        },
+      };
+
+      const tarball = pako.gzip(createMinimalTarball({
+        'package/package.json': '{"name":"stream-pkg","version":"1.0.0"}',
+      }));
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+        if ((urlStr.includes('/stream-pkg') || urlStr.includes(encodeURIComponent('https://registry.npmjs.org/stream-pkg'))) && !urlStr.includes('.tgz')) {
+          return new Response(JSON.stringify(manifest), { status: 200 });
+        }
+        if (urlStr.includes('stream-pkg-1.0.0.tgz') || urlStr.includes(encodeURIComponent('https://registry.npmjs.org/stream-pkg/-/stream-pkg-1.0.0.tgz'))) {
+          return new Response(tarball, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const container = createContainer({ installMode: 'main-thread' });
+      const streamed: string[] = [];
+
+      const result = await container.run('npm install stream-pkg', {
+        onStdout: (chunk) => streamed.push(chunk),
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(streamed.join('')).toContain('Resolving stream-pkg@latest');
+      expect(streamed.join('')).toContain('Installed 1 packages');
+      expect(result.stdout).toContain('added 1 packages');
+      expect(container.vfs.existsSync('/node_modules/stream-pkg/package.json')).toBe(true);
+    });
   });
 });
+
+describe('VFS patch helpers', () => {
+  it('applies large patches in chunks and yields between slices', async () => {
+    const vfs = new VirtualFS();
+    const encoder = new TextEncoder();
+    const patch = {
+      operations: Array.from({ length: 5 }, (_, index) => ({
+        type: 'writeFile' as const,
+        path: `/files/file-${index}.txt`,
+        content: Buffer.from(`payload-${index}`).toString('base64'),
+      })),
+      changedPaths: [],
+      touchesNodeModules: false,
+      touchesPackageJson: false,
+    };
+    let yields = 0;
+
+    await applyVfsPatch(vfs, patch, {
+      chunkSize: 2,
+      yieldControl: async () => {
+        yields += 1;
+      },
+    });
+
+    expect(yields).toBe(2);
+    expect(vfs.readFileSync('/files/file-4.txt')).toEqual(encoder.encode('payload-4'));
+  });
+});
+
+class FakeInstallWorkerClient implements PackageManagerWorkerClient {
+  async runInstall(payload: InstallWorkerPayload, onProgress?: ((message: string) => void) | null) {
+    const workerVfs = VirtualFS.fromSnapshot(payload.snapshot);
+    const result = await executeInstallRequest(
+      workerVfs,
+      payload.settings,
+      payload.request,
+      {
+        ...payload.options,
+        onProgress: onProgress || undefined,
+      },
+    );
+    return {
+      patch: diffVfsSnapshots(payload.snapshot, workerVfs.toSnapshot()),
+      result: serializeInstallResult(result),
+    };
+  }
+}
+
+class RecoveryInstallWorkerClient implements PackageManagerWorkerClient {
+  runCalls = 0;
+  terminateCalls = 0;
+
+  constructor(private readonly shouldFail: boolean) {}
+
+  async runInstall(payload: InstallWorkerPayload, onProgress?: ((message: string) => void) | null) {
+    this.runCalls += 1;
+    if (this.shouldFail) {
+      throw new Error('worker exploded');
+    }
+
+    const workerVfs = VirtualFS.fromSnapshot(payload.snapshot);
+    const result = await executeInstallRequest(
+      workerVfs,
+      payload.settings,
+      payload.request,
+      {
+        ...payload.options,
+        onProgress: onProgress || undefined,
+      },
+    );
+
+    return {
+      patch: diffVfsSnapshots(payload.snapshot, workerVfs.toSnapshot()),
+      result: serializeInstallResult(result),
+    };
+  }
+
+  terminate(): void {
+    this.terminateCalls += 1;
+  }
+}
 
 /**
  * Create a minimal tar archive for testing

@@ -18,6 +18,11 @@ export interface ModuleResolverOptions {
   builtinModules?: Record<string, unknown>;
 }
 
+type AstNode = {
+  type?: string;
+  [key: string]: unknown;
+};
+
 interface ResolverCaches {
   resolutionCache: Map<string, ResolvedModuleDescriptor | null>;
   packageJsonCache: Map<string, PackageJson | null>;
@@ -143,16 +148,12 @@ export class ModuleResolver {
       return 'cjs';
     }
 
-    if (/\bimport\.meta\b/.test(code)) {
-      return 'esm';
-    }
-
     try {
       const ast = acorn.parse(code, {
         ecmaVersion: 'latest',
         sourceType: 'module',
-      }) as { body?: Array<{ type?: string }> };
-      if (ast.body?.some((node) => node.type === 'ImportDeclaration' || String(node.type).startsWith('Export'))) {
+      }) as unknown as AstNode;
+      if (hasEsmSyntax(ast)) {
         return 'esm';
       }
     } catch {
@@ -362,6 +363,78 @@ export class ModuleResolver {
       return '';
     }
   }
+}
+
+function hasEsmSyntax(ast: AstNode): boolean {
+  const body = Array.isArray(ast.body) ? ast.body as AstNode[] : [];
+
+  if (body.some((node) => node.type === 'ImportDeclaration' || String(node.type).startsWith('Export'))) {
+    return true;
+  }
+
+  let found = false;
+
+  const walk = (node: unknown, functionDepth: number) => {
+    if (found || !node || typeof node !== 'object') {
+      return;
+    }
+
+    const current = node as AstNode;
+
+    if (
+      current.type === 'MetaProperty'
+      && (current.meta as AstNode | undefined)?.name === 'import'
+      && (current.property as AstNode | undefined)?.name === 'meta'
+    ) {
+      found = true;
+      return;
+    }
+
+    if (functionDepth === 0 && (current.type === 'AwaitExpression' || (current.type === 'ForOfStatement' && current.await === true))) {
+      found = true;
+      return;
+    }
+
+    const nextFunctionDepth = functionDepth + (isFunctionNode(current) ? 1 : 0);
+
+    for (const [key, value] of Object.entries(current)) {
+      if (
+        key === 'start'
+        || key === 'end'
+        || key === 'loc'
+        || key === 'range'
+        || key === 'parent'
+        || key === 'type'
+      ) {
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          walk(child, nextFunctionDepth);
+          if (found) return;
+        }
+      } else {
+        walk(value, nextFunctionDepth);
+        if (found) return;
+      }
+    }
+  };
+
+  for (const node of body) {
+    walk(node, 0);
+    if (found) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isFunctionNode(node: AstNode): boolean {
+  return node.type === 'FunctionDeclaration'
+    || node.type === 'FunctionExpression'
+    || node.type === 'ArrowFunctionExpression';
 }
 
 export function extractLikelyNamedExportsFromCode(code: string): string[] {

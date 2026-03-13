@@ -560,6 +560,49 @@ h1 {
       // Should NOT contain React CDN URLs
       expect(body).not.toContain('esm.sh/react@');
     });
+
+    it('should inject Tailwind CDN and config when project markers are present', async () => {
+      vfs.writeFileSync(
+        '/components.json',
+        JSON.stringify({
+          aliases: {
+            components: '@/components',
+          },
+        }),
+      );
+      vfs.writeFileSync(
+        '/tailwind.config.ts',
+        `export default {
+  theme: {
+    extend: {
+      colors: {
+        brand: '#f97316',
+      },
+    },
+  },
+};`,
+      );
+
+      const response = await server.handleRequest('GET', '/', {});
+      const body = response.body.toString();
+
+      expect(body).toContain('cdn.tailwindcss.com');
+      expect(body).toContain('tailwind.config =');
+      expect(body).toContain('brand');
+
+      const cdnIndex = body.indexOf('cdn.tailwindcss.com');
+      const configIndex = body.indexOf('tailwind.config =');
+      expect(cdnIndex).toBeGreaterThan(-1);
+      expect(configIndex).toBeGreaterThan(cdnIndex);
+    });
+
+    it('should not inject Tailwind CDN without project markers', async () => {
+      const response = await server.handleRequest('GET', '/', {});
+      const body = response.body.toString();
+
+      expect(body).not.toContain('cdn.tailwindcss.com');
+      expect(body).not.toContain('tailwind.config =');
+    });
   });
 
   describe('JSX/TS transformation', () => {
@@ -599,6 +642,31 @@ export default Button;`
       );
 
       const response = await server.handleRequest('GET', '/src/Button.tsx', {});
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Content-Type']).toBe('application/javascript; charset=utf-8');
+    });
+
+    it('should resolve extensionless TSX module requests', async () => {
+      vfs.mkdirSync('/src/components/ui', { recursive: true });
+      vfs.writeFileSync(
+        '/src/components/ui/button.tsx',
+        `export function Button() {
+  return <button className="rounded-md">ok</button>;
+}`,
+      );
+
+      const response = await server.handleRequest('GET', '/src/components/ui/button', {});
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Content-Type']).toBe('application/javascript; charset=utf-8');
+    });
+
+    it('should resolve extensionless index modules', async () => {
+      vfs.mkdirSync('/src/lib', { recursive: true });
+      vfs.writeFileSync('/src/lib/index.ts', 'export const cn = (...parts: string[]) => parts.join(" ");');
+
+      const response = await server.handleRequest('GET', '/src/lib', {});
 
       expect(response.statusCode).toBe(200);
       expect(response.headers['Content-Type']).toBe('application/javascript; charset=utf-8');

@@ -6,6 +6,7 @@
 import { VirtualFS, createNodeError } from '../virtual-fs';
 import type { Stats, FSWatcher, WatchListener, WatchEventType } from '../virtual-fs';
 import { uint8ToBase64, uint8ToHex } from '../utils/binary-encoding';
+import { almostnodeDebugLog } from '../utils/debug';
 
 export type { Stats, FSWatcher, WatchListener, WatchEventType };
 
@@ -950,12 +951,12 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     access(path: string, mode?: number): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
-          console.log(`[almostnode DEBUG] fs.promises.access start: ${path}`);
+          almostnodeDebugLog('fs', `[almostnode DEBUG] fs.promises.access start: ${path}`);
           shim.accessSync(path, mode);
-          console.log(`[almostnode DEBUG] fs.promises.access ok: ${path}`);
+          almostnodeDebugLog('fs', `[almostnode DEBUG] fs.promises.access ok: ${path}`);
           resolve();
         } catch (err) {
-          console.log(`[almostnode DEBUG] fs.promises.access error: ${path} -> ${(err as Error).message}`);
+          almostnodeDebugLog('fs', `[almostnode DEBUG] fs.promises.access error: ${path} -> ${(err as Error).message}`);
           reject(err);
         }
       });
@@ -1387,7 +1388,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
     accessSync(pathLike: unknown, _mode?: number): void {
       const path = resolvePath(pathLike);
-      console.log(`[almostnode DEBUG] fs.accessSync: ${path}`);
+      almostnodeDebugLog('fs', `[almostnode DEBUG] fs.accessSync: ${path}`);
       vfs.accessSync(path);
     },
 
@@ -1688,7 +1689,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       callback?: (err: Error | null) => void
     ): void {
       const path = resolvePath(pathLike);
-      console.log(`[almostnode DEBUG] fs.access: ${path}`);
+      almostnodeDebugLog('fs', `[almostnode DEBUG] fs.access: ${path}`);
       vfs.access(path, modeOrCallback, callback);
     },
 

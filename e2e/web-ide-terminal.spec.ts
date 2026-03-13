@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
-async function loadWebIDE(page: Page) {
-  await page.goto('/examples/web-ide-demo.html?marketplace=mock', {
+async function loadWebIDE(page: Page, query = '?marketplace=mock') {
+  await page.goto(`/examples/web-ide-demo.html${query}`, {
     waitUntil: 'domcontentloaded',
   });
   await page.waitForFunction(() => Boolean((window as any).__almostnodeWebIDE), {
@@ -25,6 +25,84 @@ async function getHostTerminalText(page: Page): Promise<string> {
 
     return text;
   });
+}
+
+async function focusHostTerminal(page: Page): Promise<void> {
+  await page.locator('#webideTerminal').click();
+  await page.evaluate(() => {
+    (window as any).__almostnodeWebIDE?.terminal?.focus?.();
+  });
+}
+
+async function waitForHostPrompt(page: Page, statusPrefix = 'Exited', timeout = 45000): Promise<void> {
+  await page.waitForFunction((expectedStatusPrefix: string) => {
+    const status = document.getElementById('webideTerminalStatus')?.textContent?.trim() || '';
+    const term = (window as any).__almostnodeWebIDE?.terminal;
+    if (!term) return false;
+
+    const buffer = term.buffer.active;
+    const lastLine = buffer.baseY + buffer.cursorY;
+    let text = '';
+
+    for (let i = 0; i <= lastLine; i++) {
+      const line = buffer.getLine(i);
+      if (line) text += line.translateToString(true) + '\n';
+    }
+
+    return status.startsWith(expectedStatusPrefix) && text.trimEnd().endsWith('$');
+  }, statusPrefix, { timeout });
+}
+
+async function driveInteractiveHostCommand(
+  page: Page,
+  command: string,
+  options: {
+    timeout?: number;
+    answerOverwriteWithNo?: boolean;
+  } = {},
+): Promise<void> {
+  const timeout = options.timeout ?? 6 * 60 * 1000;
+  const deadline = Date.now() + timeout;
+  let overwriteAnswered = false;
+
+  await page.evaluate((cmd) => {
+    void (window as any).__almostnodeWebIDE.executeHostCommand(cmd);
+  }, command);
+  await expect(page.locator('#webideTerminalStatus')).toHaveText(`Running: ${command}`, { timeout: 20000 });
+
+  while (Date.now() < deadline) {
+    const [status, output] = await Promise.all([
+      page.locator('#webideTerminalStatus').textContent(),
+      getHostTerminalText(page),
+    ]);
+    const normalizedStatus = (status || '').trim();
+
+    if (normalizedStatus.startsWith('Exited')) {
+      await waitForHostPrompt(page, 'Exited', 30000);
+      return;
+    }
+
+    const tail = output.slice(-5000);
+    const needsDefaultEnter = /what style|which color|use css variables|tailwind\.config|would you like|react server components|alias prefix|select a style|pick a color/i.test(tail);
+    const needsOverwriteAnswer = options.answerOverwriteWithNo
+      && !overwriteAnswered
+      && /overwrite|already exists/i.test(tail);
+
+    if (needsDefaultEnter || needsOverwriteAnswer) {
+      await focusHostTerminal(page);
+      if (needsOverwriteAnswer) {
+        await page.keyboard.type('n');
+        overwriteAnswered = true;
+      }
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(500);
+      continue;
+    }
+
+    await page.waitForTimeout(1000);
+  }
+
+  throw new Error(`Timed out waiting for "${command}" to finish in the host terminal.`);
 }
 
 test.describe('web-ide host terminal', () => {
@@ -156,5 +234,63 @@ test.describe('web-ide host terminal', () => {
     expect(consoleMessages.join('\n')).not.toContain(`Cannot find module 'node:stream/consumers'`);
     expect(consoleMessages.join('\n')).not.toContain('does not provide an export named');
     expect(moduleFailures).toEqual([]);
+  });
+
+  test('runs shadcn from the seeded Web IDE workspace with debug output and survives a second run', async ({ page }) => {
+    test.setTimeout(10 * 60 * 1000);
+    await loadWebIDE(page, '?marketplace=mock&debug=all');
+
+    const consoleMessages: string[] = [];
+    const pageErrors: string[] = [];
+    let crashed = false;
+
+    page.on('console', (msg) => {
+      consoleMessages.push(msg.text());
+    });
+    page.on('pageerror', (error) => {
+      pageErrors.push(String(error));
+    });
+    page.on('crash', () => {
+      crashed = true;
+    });
+
+    const command = 'npx shadcn@latest add dropdown-menu';
+
+    await driveInteractiveHostCommand(page, command, { timeout: 7 * 60 * 1000 });
+
+    await expect(page.locator('#webideTerminalStatus')).toHaveText('Exited 0');
+    const firstRunOutput = await getHostTerminalText(page);
+    expect(firstRunOutput).toContain('[almostnode debug] enabled: all');
+    expect(firstRunOutput).toContain(`$ ${command}`);
+    expect(firstRunOutput).toMatch(/Resolving shadcn@latest|Installing \d+ packages|Applying \d+ file changes|Install changes applied/);
+
+    await expect.poll(() => {
+      return page.evaluate(() => {
+        return (window as any).__almostnodeWebIDE.container.vfs.existsSync('/project/src/components/ui/dropdown-menu.tsx');
+      });
+    }, { timeout: 60000 }).toBe(true);
+
+    expect(
+      consoleMessages.some((message) => {
+        return message.includes('[almostnode DEBUG]')
+          && (
+            message.includes('npx parsed')
+            || message.includes('npm worker start')
+            || message.includes('fetch proxy')
+          );
+      }),
+    ).toBe(true);
+
+    await driveInteractiveHostCommand(page, command, {
+      timeout: 5 * 60 * 1000,
+      answerOverwriteWithNo: true,
+    });
+
+    await expect(page.locator('#webideTerminalStatus')).toContainText('Exited');
+    const secondRunOutput = await getHostTerminalText(page);
+    expect(secondRunOutput).toContain(`$ ${command}`);
+    expect(secondRunOutput).toMatch(/dropdown-menu|overwrite|already exists/i);
+    expect(crashed).toBe(false);
+    expect(pageErrors.join('\n')).not.toContain('Error code: 5');
   });
 });

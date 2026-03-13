@@ -13,6 +13,15 @@ import { createServer } from 'node:http';
 const PORT = parseInt(process.env.CORS_PROXY_PORT || '8787', 10);
 
 const server = createServer(async (req, res) => {
+  if (req.url === '/' || req.url === '/healthz') {
+    res.writeHead(200, {
+      'Content-Type': 'text/plain',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end('ok');
+    return;
+  }
+
   // CORS preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(200, {

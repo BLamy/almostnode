@@ -8,7 +8,16 @@ import { VirtualFS } from '../virtual-fs';
 import { Buffer } from '../shims/stream';
 import { simpleHash } from '../utils/hash';
 import { addReactRefresh as _addReactRefresh } from './code-transforms';
-import { ESBUILD_WASM_ESM_CDN, ESBUILD_WASM_BINARY_CDN, REACT_REFRESH_CDN, REACT_CDN, REACT_DOM_CDN } from '../config/cdn';
+import { clearNpmBundleCache } from './npm-serve';
+import {
+  ESBUILD_WASM_ESM_CDN,
+  ESBUILD_WASM_BINARY_CDN,
+  REACT_REFRESH_CDN,
+  REACT_CDN,
+  REACT_DOM_CDN,
+  TAILWIND_CDN_URL,
+} from '../config/cdn';
+import { loadTailwindConfig } from './tailwind-config-loader';
 
 // Check if we're in a real browser environment (not jsdom or Node.js)
 // jsdom has window but doesn't have ServiceWorker or SharedArrayBuffer
@@ -283,6 +292,9 @@ export class ViteDevServer extends DevServer {
   private options: ViteDevServerOptions;
   private hmrTargetWindow: Window | null = null;
   private transformCache: Map<string, { code: string; hash: string }> = new Map();
+  private pendingInstalledPackagesCacheClear: ReturnType<typeof setTimeout> | null = null;
+  private tailwindConfigScript: string = '';
+  private tailwindConfigLoaded: boolean = false;
 
   constructor(vfs: VirtualFS, options: ViteDevServerOptions) {
     super(vfs, options);
@@ -301,6 +313,22 @@ export class ViteDevServer extends DevServer {
    */
   setHMRTarget(targetWindow: Window): void {
     this.hmrTargetWindow = targetWindow;
+  }
+
+  clearInstalledPackagesCache(): void {
+    this.transformCache.clear();
+    clearNpmBundleCache();
+  }
+
+  private scheduleInstalledPackagesCacheClear(): void {
+    if (this.pendingInstalledPackagesCacheClear) {
+      clearTimeout(this.pendingInstalledPackagesCacheClear);
+    }
+
+    this.pendingInstalledPackagesCacheClear = setTimeout(() => {
+      this.pendingInstalledPackagesCacheClear = null;
+      this.clearInstalledPackagesCache();
+    }, 48);
   }
 
   /**
@@ -322,7 +350,7 @@ export class ViteDevServer extends DevServer {
     }
 
     // Resolve the full path
-    const filePath = this.resolvePath(pathname);
+    const filePath = this.resolveModulePath(pathname);
 
     // Check if file exists
     if (!this.exists(filePath)) {
@@ -346,7 +374,7 @@ export class ViteDevServer extends DevServer {
     }
 
     // Check if file needs transformation (JSX/TS)
-    if (this.needsTransform(pathname)) {
+    if (this.needsTransform(filePath)) {
       return this.transformAndServe(filePath, pathname);
     }
 
@@ -410,8 +438,18 @@ export class ViteDevServer extends DevServer {
     // Also watch for CSS files in root
     try {
       const rootWatcher = this.vfs.watch(this.root, { recursive: false }, (eventType, filename) => {
-        if (eventType === 'change' && filename && filename.endsWith('.css')) {
-          this.handleFileChange(`${this.root}/${filename}`);
+        const watchedPath = filename
+          ? (this.root === '/' ? `/${filename}` : `${this.root}/${filename}`)
+          : '';
+        if (eventType === 'change' && filename && (
+          filename.endsWith('.css')
+          || /^tailwind\.config\.(ts|js|mjs)$/.test(filename)
+          || filename === 'components.json'
+        )) {
+          this.handleFileChange(watchedPath);
+        }
+        if (filename === 'package.json' || filename === 'node_modules') {
+          this.scheduleInstalledPackagesCacheClear();
         }
       });
 
@@ -423,12 +461,32 @@ export class ViteDevServer extends DevServer {
     } catch {
       // Ignore if root watching fails
     }
+
+    try {
+      const nodeModulesPath = this.root === '/' ? '/node_modules' : `${this.root}/node_modules`;
+      const nodeModulesWatcher = this.vfs.watch(nodeModulesPath, { recursive: true }, () => {
+        this.scheduleInstalledPackagesCacheClear();
+      });
+
+      const originalCleanup = this.watcherCleanup;
+      this.watcherCleanup = () => {
+        originalCleanup?.();
+        nodeModulesWatcher.close();
+      };
+    } catch {
+      // Ignore if node_modules doesn't exist yet.
+    }
   }
 
   /**
    * Handle file change event
    */
   private handleFileChange(path: string): void {
+    if (/\/tailwind\.config\.(ts|js|mjs)$/.test(path)) {
+      this.tailwindConfigLoaded = false;
+      this.tailwindConfigScript = '';
+    }
+
     // Determine update type:
     // - CSS and JS/JSX/TSX files: 'update' (handled by HMR client)
     // - Other files: 'full-reload'
@@ -463,6 +521,10 @@ export class ViteDevServer extends DevServer {
       this.watcherCleanup();
       this.watcherCleanup = null;
     }
+    if (this.pendingInstalledPackagesCacheClear) {
+      clearTimeout(this.pendingInstalledPackagesCacheClear);
+      this.pendingInstalledPackagesCacheClear = null;
+    }
 
     this.hmrTargetWindow = null;
 
@@ -474,6 +536,29 @@ export class ViteDevServer extends DevServer {
    */
   private needsTransform(path: string): boolean {
     return /\.(jsx|tsx|ts)$/.test(path);
+  }
+
+  private resolveModulePath(urlPath: string): string {
+    const filePath = this.resolvePath(urlPath);
+    if (this.exists(filePath) && !this.isDirectory(filePath)) {
+      return filePath;
+    }
+
+    const extensionCandidates = ['.tsx', '.ts', '.jsx', '.js', '.mjs', '.css', '.json'];
+    for (const extension of extensionCandidates) {
+      if (this.exists(filePath + extension)) {
+        return filePath + extension;
+      }
+    }
+
+    const indexCandidates = extensionCandidates.map((extension) => `${filePath}/index${extension}`);
+    for (const candidate of indexCandidates) {
+      if (this.exists(candidate)) {
+        return candidate;
+      }
+    }
+
+    return filePath;
   }
 
   /**
@@ -502,7 +587,7 @@ export class ViteDevServer extends DevServer {
         };
       }
 
-      const transformed = await this.transformCode(content, urlPath);
+      const transformed = await this.transformCode(content, filePath);
 
       // Cache the transform result
       this.transformCache.set(filePath, { code: transformed, hash });
@@ -623,9 +708,10 @@ export default css;
    * and injectIntoGlobalHook is called. This ensures React Refresh hooks into
    * React BEFORE React is imported by any module.
    */
-  private serveHtmlWithHMR(filePath: string): ResponseData {
+  private async serveHtmlWithHMR(filePath: string): Promise<ResponseData> {
     try {
       let content = this.vfs.readFileSync(filePath, 'utf8');
+      const tailwindInjection = await this.getTailwindInjection(content);
 
       // Inject a React import map if the HTML doesn't already have one.
       // This lets seed HTML omit the esm.sh boilerplate — the platform provides it.
@@ -655,6 +741,18 @@ export default css;
       let match;
       while ((match = importMapRegex.exec(content)) !== null) {
         lastImportMapEnd = match.index + match[0].length;
+      }
+
+      if (tailwindInjection) {
+        if (lastImportMapEnd !== -1) {
+          content = content.slice(0, lastImportMapEnd) + tailwindInjection + content.slice(lastImportMapEnd);
+        } else if (content.includes('<head>')) {
+          content = content.replace('<head>', `<head>\n${tailwindInjection}`);
+        } else if (content.includes('<html')) {
+          content = content.replace(/<html[^>]*>/, `$&${tailwindInjection}`);
+        } else {
+          content = tailwindInjection + content;
+        }
       }
 
       if (lastImportMapEnd !== -1) {
@@ -694,6 +792,51 @@ export default css;
     } catch (error) {
       return this.serverError(error);
     }
+  }
+
+  private async loadTailwindConfigIfNeeded(): Promise<string> {
+    if (this.tailwindConfigLoaded) {
+      return this.tailwindConfigScript;
+    }
+
+    try {
+      const result = await loadTailwindConfig(this.vfs, this.root);
+
+      if (result.success) {
+        this.tailwindConfigScript = result.configScript;
+      } else if (result.error) {
+        console.warn('[ViteDevServer] Tailwind config warning:', result.error);
+        this.tailwindConfigScript = '';
+      }
+    } catch (error) {
+      console.warn('[ViteDevServer] Failed to load tailwind.config:', error);
+      this.tailwindConfigScript = '';
+    }
+
+    this.tailwindConfigLoaded = true;
+    return this.tailwindConfigScript;
+  }
+
+  private hasTailwindProjectMarker(): boolean {
+    const root = this.root === '/' ? '' : this.root;
+    return (
+      this.vfs.existsSync(`${root}/components.json`)
+      || this.vfs.existsSync(`${root}/tailwind.config.ts`)
+      || this.vfs.existsSync(`${root}/tailwind.config.js`)
+      || this.vfs.existsSync(`${root}/tailwind.config.mjs`)
+    );
+  }
+
+  private async getTailwindInjection(html: string): Promise<string> {
+    if (html.includes('cdn.tailwindcss.com')) {
+      return '';
+    }
+    if (!this.hasTailwindProjectMarker()) {
+      return '';
+    }
+
+    const configScript = await this.loadTailwindConfigIfNeeded();
+    return `<script src="${TAILWIND_CDN_URL}"></script>\n${configScript}`;
   }
 }
 

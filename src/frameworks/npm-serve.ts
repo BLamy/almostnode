@@ -79,7 +79,7 @@ function isFile(path: string): boolean {
   try { return !moduleVFS.statSync(path).isDirectory(); } catch { return false; }
 }
 
-function resolvePackageEntry(specifier: string): string | null {
+function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): string | null {
   if (!moduleVFS) return null;
 
   const parts = specifier.split('/');
@@ -87,44 +87,47 @@ function resolvePackageEntry(specifier: string): string | null {
   const pkgName = isScoped ? parts.slice(0, 2).join('/') : parts[0];
   const subPath = isScoped ? parts.slice(2).join('/') : parts.slice(1).join('/');
 
-  const pkgDir = '/node_modules/' + pkgName;
-  const pkgJsonPath = pkgDir + '/package.json';
-  if (!moduleVFS.existsSync(pkgJsonPath)) return null;
+  for (const root of searchRoots) {
+    const normalizedRoot = root === '/' ? '' : root.replace(/\/$/, '');
+    const pkgDir = `${normalizedRoot}/node_modules/${pkgName}`.replace(/\/+/g, '/');
+    const pkgJsonPath = pkgDir + '/package.json';
+    if (!moduleVFS.existsSync(pkgJsonPath)) {
+      continue;
+    }
 
-  try {
-    const pkgJson = JSON.parse(moduleVFS.readFileSync(pkgJsonPath, 'utf8'));
-    const exports = pkgJson.exports;
+    try {
+      const pkgJson = JSON.parse(moduleVFS.readFileSync(pkgJsonPath, 'utf8'));
+      const exports = pkgJson.exports;
 
-    if (exports && typeof exports === 'object') {
-      const key = subPath ? './' + subPath : '.';
-      const entry = (exports as Record<string, unknown>)[key];
-      if (entry) {
-        const resolved = resolveExportEntry(entry);
-        if (resolved) {
-          const fullPath = pkgDir + '/' + resolved.replace(/^\.\//, '');
-          if (isFile(fullPath)) return fullPath;
+      if (exports && typeof exports === 'object') {
+        const key = subPath ? './' + subPath : '.';
+        const entry = (exports as Record<string, unknown>)[key];
+        if (entry) {
+          const resolved = resolveExportEntry(entry);
+          if (resolved) {
+            const fullPath = pkgDir + '/' + resolved.replace(/^\.\//, '');
+            if (isFile(fullPath)) return fullPath;
+          }
         }
       }
-    }
 
-    // Fallback to module/main fields
-    if (!subPath) {
-      const mainEntry = pkgJson.module || pkgJson.main;
-      if (mainEntry) {
-        const fullPath = pkgDir + '/' + mainEntry.replace(/^\.\//, '');
-        if (isFile(fullPath)) return fullPath;
+      if (!subPath) {
+        const mainEntry = pkgJson.module || pkgJson.main;
+        if (mainEntry) {
+          const fullPath = pkgDir + '/' + mainEntry.replace(/^\.\//, '');
+          if (isFile(fullPath)) return fullPath;
+        }
+        const defaultPath = pkgDir + '/index.js';
+        if (isFile(defaultPath)) return defaultPath;
+      } else {
+        const directPath = pkgDir + '/' + subPath;
+        for (const ext of ['', '.js', '.cjs', '.mjs', '.json']) {
+          if (isFile(directPath + ext)) return directPath + ext;
+        }
       }
-      // Default: index.js
-      const defaultPath = pkgDir + '/index.js';
-      if (isFile(defaultPath)) return defaultPath;
-    } else {
-      // Direct path for subpath imports
-      const directPath = pkgDir + '/' + subPath;
-      for (const ext of ['', '.js', '.cjs', '.mjs', '.json']) {
-        if (isFile(directPath + ext)) return directPath + ext;
-      }
-    }
-  } catch { /* ignore parse errors */ }
+    } catch { /* ignore parse errors */ }
+  }
+
   return null;
 }
 
@@ -209,13 +212,14 @@ function patchExternalRequires(code: string): string {
  * @param specifier - The bare npm specifier (e.g., "@ai-sdk/react", "zod/v4")
  * @returns The bundled ESM code string
  */
-export async function bundleNpmModuleForBrowser(specifier: string): Promise<string> {
+export async function bundleNpmModuleForBrowser(specifier: string, searchRoots: string[] = ['/']): Promise<string> {
+  const cacheKey = `${searchRoots.join('|')}::${specifier}`;
   // Check cache first
-  const cached = bundleCache.get(specifier);
+  const cached = bundleCache.get(cacheKey);
   if (cached) return cached;
 
   // Resolve the package entry directly from VFS.
-  const entryPath = resolvePackageEntry(specifier);
+  const entryPath = resolvePackageEntry(specifier, searchRoots);
 
   // Extract likely named exports from CJS entries before bundling.
   let exportNames: string[] = [];
@@ -244,7 +248,7 @@ export async function bundleNpmModuleForBrowser(specifier: string): Promise<stri
     result = await build({
       stdin: {
         contents: virtualEntry,
-        resolveDir: '/node_modules',
+        resolveDir: `${(searchRoots[0] === '/' ? '' : searchRoots[0]).replace(/\/$/, '')}/node_modules`.replace(/\/+/g, '/'),
         loader: 'js',
       },
       bundle: true,
@@ -279,6 +283,6 @@ export async function bundleNpmModuleForBrowser(specifier: string): Promise<stri
     code = addNamedExports(code, exportNames);
   }
 
-  bundleCache.set(specifier, code);
+  bundleCache.set(cacheKey, code);
   return code;
 }

@@ -242,6 +242,34 @@ exec('node /node_modules/cli/cli.js --version', {
       expect(consoleOutput.some(o => o.includes('STDOUT:cli-version'))).toBe(true);
       expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
     });
+
+    it('should let node_modules CLIs finish after stale timers stop doing work', async () => {
+      vfs.mkdirSync('/node_modules/cli', { recursive: true });
+      vfs.writeFileSync(
+        '/node_modules/cli/cli.js',
+        'setInterval(() => {}, 1000); console.log("cli-done");'
+      );
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('node /node_modules/cli/cli.js', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout.trim());
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('STDOUT:cli-done')), 4000);
+
+      expect(consoleOutput.some(o => o.includes('STDOUT:cli-done'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
   });
 
   describe('execFileSync', () => {
@@ -1244,6 +1272,52 @@ exec('npx @openai/codex', (error, stdout, stderr) => {
       expect(output).not.toContain('await is only valid in async functions');
       expect(output).not.toContain('SyntaxError');
       expect(output).not.toContain('ERROR_CODE:1');
+    });
+
+    it('should not complete npx before an installed CLI finishes deferred file writes', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      vfs.mkdirSync('/node_modules/slowwriter', { recursive: true });
+      vfs.writeFileSync('/node_modules/slowwriter/package.json', JSON.stringify({
+        name: 'slowwriter',
+        bin: './cli.js',
+      }));
+      vfs.writeFileSync(
+        '/node_modules/slowwriter/cli.js',
+        `
+console.log('slowwriter starting');
+setTimeout(() => {
+  require('fs').writeFileSync('/workspace/slowwriter.txt', 'done');
+  console.log('slowwriter wrote file');
+}, 800);
+`
+      );
+
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const fs = require('fs');
+const { exec } = require('child_process');
+
+exec('npx slowwriter', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  console.log('STDERR:' + stderr);
+  console.log('FILE_EXISTS_ON_CALLBACK:' + fs.existsSync('/workspace/slowwriter.txt'));
+  if (error) console.log('ERROR_CODE:' + error.code);
+});
+      `;
+
+      await runtime.execute(code, '/workspace/test-slowwriter.js');
+      await new Promise(resolve => setTimeout(resolve, 1600));
+
+      const output = consoleOutput.join('\n');
+      expect(output).toContain('slowwriter wrote file');
+      expect(output).toContain('FILE_EXISTS_ON_CALLBACK:true');
+      expect(vfs.readFileSync('/workspace/slowwriter.txt', 'utf8')).toBe('done');
     });
   });
 
