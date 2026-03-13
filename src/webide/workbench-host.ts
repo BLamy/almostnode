@@ -5,7 +5,7 @@ import { OpenVSXClient } from './open-vsx';
 import { prunePersistedWorkbenchExtensions } from './persisted-extensions';
 import { VfsFileSystemProvider } from './vfs-file-system-provider';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from './extension-services';
-import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
+import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
 import { ClaudeAuthVault, type ClaudeAuthVaultState } from './claude-auth-vault';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
 import { IEditorService, IPaneCompositePartService, IStatusbarService } from '@codingame/monaco-vscode-api/services';
@@ -170,7 +170,7 @@ interface TerminalTabState {
   historyIndex: number;
   runningAbortController: AbortController | null;
   closable: boolean;
-  kind: 'user' | 'preview';
+  kind: 'user' | 'preview' | 'claude';
 }
 
 export class WebIDEHost {
@@ -179,14 +179,21 @@ export class WebIDEHost {
   private readonly filesSurface: FilesSidebarSurface;
   private readonly previewSurface: PreviewSurface;
   private readonly terminalSurface: TerminalPanelSurface;
+  private readonly claudeSurface: ClaudeTerminalSurface;
   private readonly workbenchSurfaces: RegisteredWorkbenchSurfaces;
   private readonly terminalTabs = new Map<string, TerminalTabState>();
   private activeTerminalTabId: string | null = null;
   private previewTerminalTabId: string | null = null;
   private terminalCounter = 0;
+  private readonly claudeTerminalTabs = new Map<string, TerminalTabState>();
+  private activeClaudeTabId: string | null = null;
+  private claudeTerminalCounter = 0;
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
+  private readonly consolePanel = new ConsolePanelElement();
+  private readonly consoleTabId = 'console-panel';
+  private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly claudeAuthVault: ClaudeAuthVault;
   private claudeAuthStatusEntry: IStatusbarEntryAccessor | null = null;
@@ -213,10 +220,22 @@ export class WebIDEHost {
         this.setActiveTerminalTab(id);
       },
     });
+    this.claudeSurface = new ClaudeTerminalSurface({
+      onCreateTab: () => {
+        void this.createClaudeTerminalTab(true);
+      },
+      onCloseTab: (id) => {
+        this.closeClaudeTerminalTab(id);
+      },
+      onSelectTab: (id) => {
+        this.setActiveClaudeTab(id);
+      },
+    });
     this.workbenchSurfaces = registerWorkbenchSurfaces({
       filesSurface: this.filesSurface,
       previewSurface: this.previewSurface,
       terminalSurface: this.terminalSurface,
+      claudeSurface: this.claudeSurface,
     });
     this.claudeAuthVault = new ClaudeAuthVault({
       vfs: this.container.vfs,
@@ -272,7 +291,11 @@ export class WebIDEHost {
   }
 
   private updateTerminalStatus(tab: TerminalTabState, text: string): void {
-    this.terminalSurface.updateTabStatus(tab.id, text);
+    if (tab.kind === 'claude') {
+      this.claudeSurface.updateTabStatus(tab.id, text);
+    } else {
+      this.terminalSurface.updateTabStatus(tab.id, text);
+    }
   }
 
   private updatePreviewStatus(text: string): void {
@@ -378,6 +401,106 @@ export class WebIDEHost {
     }
   }
 
+  private async createClaudeTerminalTab(focus: boolean): Promise<TerminalTabState> {
+    this.claudeTerminalCounter += 1;
+    const id = `claude-${crypto.randomUUID()}`;
+    const { terminal, fitAddon } = this.createTerminalInstance();
+    const tab: TerminalTabState = {
+      id,
+      title: `Claude ${this.claudeTerminalCounter}`,
+      terminal,
+      fitAddon,
+      session: this.container.createTerminalSession({
+        cwd: WORKSPACE_ROOT,
+      }),
+      currentLine: '',
+      history: [],
+      historyIndex: -1,
+      runningAbortController: null,
+      closable: true,
+      kind: 'claude',
+    };
+    this.claudeTerminalTabs.set(id, tab);
+    this.claudeSurface.addTab({
+      id,
+      title: tab.title,
+      terminal,
+      fitAddon,
+      closable: true,
+    });
+    this.bindTerminal(tab);
+    if (focus || !this.activeClaudeTabId) {
+      this.setActiveClaudeTab(id);
+    }
+
+    this.claudeSurface.showLoading();
+    const state = this.claudeAuthVault.getState();
+    if (state.hasStoredVault && !state.hasLiveCredentials) {
+      try {
+        await this.claudeAuthVault.handlePrimaryAction();
+      } catch {
+        terminal.write('Claude auth unlock failed. You can retry from the status bar.\r\n');
+        this.claudeSurface.hideLoading();
+        this.printPrompt(tab);
+        return tab;
+      }
+    }
+
+    terminal.write('Starting Claude Code...\r\n');
+    this.updateTerminalStatus(tab, 'Starting Claude Code...');
+    void this.runCommand(tab, 'npx @anthropic-ai/claude-code').then(() => {
+      this.claudeSurface.hideLoading();
+    });
+
+    // Hide loading after a short delay once output starts flowing
+    await delay(2000);
+    this.claudeSurface.hideLoading();
+
+    return tab;
+  }
+
+  private setActiveClaudeTab(id: string): void {
+    if (!this.claudeTerminalTabs.has(id)) {
+      return;
+    }
+    this.activeClaudeTabId = id;
+    this.claudeSurface.setActiveTab(id);
+  }
+
+  private closeClaudeTerminalTab(id: string): void {
+    const tab = this.claudeTerminalTabs.get(id);
+    if (!tab) {
+      return;
+    }
+
+    tab.runningAbortController?.abort();
+    this.claudeTerminalTabs.delete(id);
+    this.claudeSurface.removeTab(id);
+    tab.terminal.dispose();
+    tab.session.dispose();
+
+    if (this.activeClaudeTabId === id) {
+      const nextTab = this.claudeTerminalTabs.values().next().value as TerminalTabState | undefined;
+      if (nextTab) {
+        this.setActiveClaudeTab(nextTab.id);
+      } else {
+        this.activeClaudeTabId = null;
+      }
+    }
+  }
+
+  async revealClaudePanel(focus: boolean): Promise<void> {
+    const paneCompositeService = await getService(IPaneCompositePartService);
+    setPartVisibility(Parts.AUXILIARYBAR_PART, true);
+    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.claudeViewId, ViewContainerLocation.AuxiliaryBar, focus);
+    if (this.claudeTerminalTabs.size === 0) {
+      await this.createClaudeTerminalTab(focus);
+    }
+    if (focus) {
+      this.claudeSurface.focus();
+    }
+  }
+
   private async runCommand(tab: TerminalTabState, command: string): Promise<void> {
     if (!command.trim()) {
       this.printPrompt(tab);
@@ -403,6 +526,7 @@ export class WebIDEHost {
         signal: tab.runningAbortController.signal,
         onStdout: (text) => this.writeTerminal(tab, text),
         onStderr: (text) => this.writeTerminal(tab, text),
+        interactive: tab.kind === 'claude',
       });
       this.updateTerminalStatus(tab, `Exited ${result.exitCode}`);
     } finally {
@@ -509,6 +633,9 @@ export class WebIDEHost {
       return;
     }
 
+    this.consolePanel.clear();
+    this.consoleMessageCount = 0;
+    this.terminalSurface.updateTabStatus(this.consoleTabId, '');
     this.previewSurface.reload();
   }
 
@@ -835,11 +962,24 @@ export class WebIDEHost {
       { primary: 998, secondary: 998 },
     );
 
+    statusbarService.addEntry(
+      {
+        name: 'Claude Code',
+        text: '$(sparkle) Claude Code',
+        ariaLabel: 'Open Claude Code',
+        tooltip: 'Open the Claude Code panel',
+        command: 'almostnode.claude.open',
+      },
+      'almostnode.status.claude',
+      StatusbarAlignment.LEFT,
+      { primary: 997, secondary: 997 },
+    );
+
     this.claudeAuthStatusEntry = statusbarService.addEntry(
       this.buildClaudeAuthStatusEntry(),
       'almostnode.status.claudeAuth',
       StatusbarAlignment.LEFT,
-      { primary: 997, secondary: 997 },
+      { primary: 996, secondary: 996 },
     );
   }
 
@@ -944,6 +1084,12 @@ export class WebIDEHost {
             handler: () => this.focusTerminal(),
           },
           {
+            id: 'almostnode.claude.open',
+            label: 'Almostnode: Open Claude Code',
+            menu: Menu.CommandPalette,
+            handler: () => this.revealClaudePanel(true),
+          },
+          {
             id: 'almostnode.claudeAuth.primary',
             label: 'Almostnode: Unlock Claude Auth',
             handler: () => this.unlockClaudeAuth(),
@@ -987,11 +1133,38 @@ export class WebIDEHost {
 
   private async init(): Promise<void> {
     seedWorkspace(this.container);
+
+    // Pre-install claude-code in the background so it's ready when needed
+    this.container.npm.install('@anthropic-ai/claude-code', {
+      save: true,
+      onProgress: (msg) => console.log(`[claude-code] ${msg}`),
+    }).catch((err) => {
+      console.warn('[claude-code] background install failed:', err);
+    });
+
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
     await this.claudeAuthVault.init();
     this.updatePreviewStatus('Waiting for a preview server');
     this.updateTerminalStatus(initialTab, 'Idle');
+
+    // Add Console tab as a custom (non-terminal) tab in the terminal panel
+    this.terminalSurface.addCustomTab({
+      id: this.consoleTabId,
+      title: 'Console',
+      element: this.consolePanel.root,
+      closable: false,
+    });
+
+    // Listen for console messages from the preview iframe
+    window.addEventListener('message', (event) => {
+      if (!event.data || event.data.type !== 'almostnode-console') return;
+      const { level, args, timestamp } = event.data;
+      if (!level || !Array.isArray(args)) return;
+      this.consolePanel.addEntry(level, args, timestamp || Date.now());
+      this.consoleMessageCount++;
+      this.terminalSurface.updateTabStatus(this.consoleTabId, `${this.consoleMessageCount} messages`);
+    });
 
     this.container.on('server-ready', (_port: unknown, url: unknown) => {
       if (typeof _port !== 'number' || typeof url !== 'string') {

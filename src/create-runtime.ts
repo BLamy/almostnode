@@ -37,40 +37,6 @@ function isWorkerAvailable(): boolean {
 }
 
 /**
- * Wrapper that makes the synchronous Runtime conform to the async IRuntime interface
- */
-class AsyncRuntimeWrapper implements IRuntime {
-  private runtime: Runtime;
-
-  constructor(vfs: VirtualFS, options: IRuntimeOptions = {}) {
-    this.runtime = new Runtime(vfs, options);
-  }
-
-  async execute(code: string, filename?: string): Promise<IExecuteResult> {
-    return Promise.resolve(this.runtime.execute(code, filename));
-  }
-
-  async runFile(filename: string): Promise<IExecuteResult> {
-    return Promise.resolve(this.runtime.runFile(filename));
-  }
-
-  clearCache(): void {
-    this.runtime.clearCache();
-  }
-
-  getVFS(): VirtualFS {
-    return this.runtime.getVFS();
-  }
-
-  /**
-   * Get the underlying sync Runtime for direct access to sync methods
-   */
-  getSyncRuntime(): Runtime {
-    return this.runtime;
-  }
-}
-
-/**
  * Create a runtime instance based on configuration
  *
  * SECURITY: Requires either sandbox URL or explicit dangerouslyAllowSameOrigin.
@@ -131,7 +97,7 @@ export async function createRuntime(
   }
 
   console.log('[createRuntime] Creating main-thread Runtime (same-origin, least secure)');
-  return new AsyncRuntimeWrapper(vfs, runtimeOptions);
+  return new Runtime(vfs, runtimeOptions);
 }
 
 // Re-export types and classes for convenience

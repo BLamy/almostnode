@@ -1,11 +1,29 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
-async function loadWebIDE(page: import('@playwright/test').Page) {
+async function loadWebIDE(page: Page) {
   await page.goto('/examples/web-ide-demo.html?marketplace=mock', {
     waitUntil: 'domcontentloaded',
   });
   await page.waitForFunction(() => Boolean((window as any).__almostnodeWebIDE), {
     timeout: 20000,
+  });
+}
+
+async function getHostTerminalText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const term = (window as any).__almostnodeWebIDE?.terminal;
+    if (!term) return '';
+
+    const buffer = term.buffer.active;
+    const lastLine = buffer.baseY + buffer.cursorY;
+    let text = '';
+
+    for (let i = 0; i <= lastLine; i++) {
+      const line = buffer.getLine(i);
+      if (line) text += line.translateToString(true) + '\n';
+    }
+
+    return text;
   });
 }
 
@@ -106,5 +124,37 @@ test.describe('web-ide host terminal', () => {
     const firstTabText = await page.locator('#webideTerminal .xterm-rows').textContent();
     expect(firstTabText || '').toContain('tab-one');
     expect(firstTabText || '').not.toContain('tab-two');
+  });
+
+  test('runs Claude Code from the regular terminal without builtin module failures', async ({ page }) => {
+    test.setTimeout(6 * 60 * 1000);
+    await loadWebIDE(page);
+
+    const consoleMessages: string[] = [];
+    const moduleFailures: string[] = [];
+
+    page.on('console', (msg) => {
+      consoleMessages.push(msg.text());
+    });
+    page.on('response', (response) => {
+      if (response.status() >= 500 && response.url().includes('/__modules__/r/') && response.url().includes('claude-code')) {
+        moduleFailures.push(`${response.status()} ${response.url()}`);
+      }
+    });
+
+    await page.evaluate(async () => {
+      await (window as any).__almostnodeWebIDE.executeHostCommand('npx @anthropic-ai/claude-code --version');
+    });
+
+    await expect(page.locator('#webideTerminalStatus')).toHaveText('Exited 0');
+
+    const output = await getHostTerminalText(page);
+    expect(output).toMatch(/(?:^|\n)v?\d+\.\d+\.\d+(?: \(Claude Code\))?(?:\n|$)/);
+    expect(output).not.toContain(`npx: command "claude-code" exited with code`);
+    expect(output).not.toContain(`Cannot find module 'node:stream/consumers'`);
+    expect(output).not.toContain('does not provide an export named');
+    expect(consoleMessages.join('\n')).not.toContain(`Cannot find module 'node:stream/consumers'`);
+    expect(consoleMessages.join('\n')).not.toContain('does not provide an export named');
+    expect(moduleFailures).toEqual([]);
   });
 });

@@ -39,6 +39,7 @@ export const builtinModules = [
   'readline',
   'repl',
   'stream',
+  'stream/consumers',
   'stream/promises',
   'string_decoder',
   'sys',

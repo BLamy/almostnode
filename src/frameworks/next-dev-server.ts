@@ -5,6 +5,7 @@
 
 import { DevServer, DevServerOptions, ResponseData, HMRUpdate } from '../dev-server';
 import { VirtualFS } from '../virtual-fs';
+import { Runtime } from '../runtime';
 import { Buffer } from '../shims/stream';
 import { simpleHash } from '../utils/hash';
 import { loadTailwindConfig } from './tailwind-config-loader';
@@ -13,7 +14,6 @@ import {
   redirectNpmImports as _redirectNpmImports,
   stripCssImports as _stripCssImports,
   addReactRefresh as _addReactRefresh,
-  transformEsmToCjsSimple,
   type CssModuleContext,
 } from './code-transforms';
 import {
@@ -48,7 +48,6 @@ import {
   createMockResponse,
   createStreamingMockResponse,
   createBuiltinModules,
-  executeApiHandler,
 } from './next-api-handler';
 import { createVfsRequire, type VfsModule } from './vfs-require';
 import { bundleNpmModuleForBrowser, clearNpmBundleCache, initNpmServe } from './npm-serve';
@@ -214,6 +213,37 @@ export class NextDevServer extends DevServer {
       moduleCache: this.vfsModuleCache,
     });
     return vfsRequire;
+  }
+
+  private createApiRuntime(builtinModules: Record<string, unknown>): Runtime {
+    const env: Record<string, string> = { ...this.options.env };
+    if (this.options.corsProxy) {
+      env.CORS_PROXY_URL = this.options.corsProxy;
+    }
+
+    return new Runtime(this.vfs, {
+      cwd: '/',
+      env,
+      builtinModules,
+    });
+  }
+
+  private getCompiledApiModulePath(sourceFile: string): string {
+    this.vfs.mkdirSync('/.almostnode-next', { recursive: true });
+    const suffix = sourceFile.endsWith('.mjs') ? '' : '.mjs';
+    return `/.almostnode-next/${simpleHash(sourceFile)}${suffix}`;
+  }
+
+  private async loadApiNamespace(
+    sourceFile: string,
+    transformedCode: string,
+    builtinModules: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const compiledPath = this.getCompiledApiModulePath(sourceFile);
+    this.vfs.writeFileSync(compiledPath, transformedCode);
+    const runtime = this.createApiRuntime(builtinModules);
+    const result = await runtime.importModule(compiledPath, compiledPath);
+    return result.namespace;
   }
 
   /** Cached Tailwind config script (injected before CDN) */
@@ -752,15 +782,21 @@ export class NextDevServer extends DevServer {
       const req = createMockRequest(method, pathname, headers, body);
       const res = createMockResponse();
 
-      // Execute the handler
       const builtins = await createBuiltinModules(
         () => import('../shims/fs').then(m => m.createFsShim(this.vfs))
       );
       if (this.options.apiModules) {
         Object.assign(builtins, this.options.apiModules);
       }
-      const vfsRequire = this.createApiVfsRequire(builtins);
-      const result = await executeApiHandler(transformed, req, res, this.options.env, builtins, vfsRequire);
+      const namespace = await this.loadApiNamespace(apiFile, transformed, builtins);
+      let handler: unknown = namespace.default ?? namespace;
+      if (typeof handler === 'object' && handler !== null && 'default' in handler) {
+        handler = (handler as { default: unknown }).default;
+      }
+      if (typeof handler !== 'function') {
+        throw new Error('No default export handler found');
+      }
+      const result = await (handler as (req: unknown, res: unknown) => unknown)(req, res);
 
       // If the handler returned a Response object, convert it to ResponseData
       if (result instanceof Response) {
@@ -818,37 +854,14 @@ export class NextDevServer extends DevServer {
       const code = this.vfs.readFileSync(routeFile, 'utf8');
       const transformed = await this.transformApiHandler(code, routeFile);
 
-      // Create module context and execute the route handler
       const builtinModules = await createBuiltinModules();
       if (this.options.apiModules) {
         Object.assign(builtinModules, this.options.apiModules);
       }
-      const vfsRequire = this.createApiVfsRequire(builtinModules);
+      const namespace = await this.loadApiNamespace(routeFile, transformed, builtinModules);
 
-      const require = (id: string): unknown => {
-        const modId = id.startsWith('node:') ? id.slice(5) : id;
-        if (builtinModules[modId]) return builtinModules[modId];
-        return vfsRequire(modId);
-      };
-
-      const moduleObj = { exports: {} as Record<string, unknown> };
-      const exports = moduleObj.exports;
-      const env: Record<string, string> = { ...this.options.env };
-      if (this.options.corsProxy) env.CORS_PROXY_URL = this.options.corsProxy;
-      const process = {
-        env,
-        cwd: () => '/',
-        platform: 'browser',
-        version: 'v18.0.0',
-        versions: { node: '18.0.0' },
-      };
-
-      const fn = new Function('exports', 'require', 'module', 'process', transformed);
-      fn(exports, require, moduleObj, process);
-
-      // Get the handler for the HTTP method
       const methodUpper = method.toUpperCase();
-      const handler = moduleObj.exports[methodUpper] || moduleObj.exports[methodUpper.toLowerCase()];
+      const handler = namespace[methodUpper] || namespace[methodUpper.toLowerCase()];
 
       if (typeof handler !== 'function') {
         return {
@@ -985,8 +998,15 @@ export class NextDevServer extends DevServer {
       if (this.options.apiModules) {
         Object.assign(builtins, this.options.apiModules);
       }
-      const vfsRequire = this.createApiVfsRequire(builtins);
-      const result = await executeApiHandler(transformed, req, res, this.options.env, builtins, vfsRequire);
+      const namespace = await this.loadApiNamespace(apiFile, transformed, builtins);
+      let handler: unknown = namespace.default ?? namespace;
+      if (typeof handler === 'object' && handler !== null && 'default' in handler) {
+        handler = (handler as { default: unknown }).default;
+      }
+      if (typeof handler !== 'function') {
+        throw new Error('No default export handler found');
+      }
+      const result = await (handler as (req: unknown, res: unknown) => unknown)(req, res);
 
       // If the handler returned a Response object (Web API style), stream it
       // directly. This lets Pages Router handlers use `return new Response()`
@@ -1050,32 +1070,10 @@ export class NextDevServer extends DevServer {
       if (this.options.apiModules) {
         Object.assign(builtinModules, this.options.apiModules);
       }
-      const vfsRequire = this.createApiVfsRequire(builtinModules);
+      const namespace = await this.loadApiNamespace(routeFile, transformed, builtinModules);
 
-      const require = (id: string): unknown => {
-        const modId = id.startsWith('node:') ? id.slice(5) : id;
-        if (builtinModules[modId]) return builtinModules[modId];
-        return vfsRequire(modId);
-      };
-
-      const moduleObj = { exports: {} as Record<string, unknown> };
-      const exports = moduleObj.exports;
-      const env: Record<string, string> = { ...this.options.env };
-      if (this.options.corsProxy) env.CORS_PROXY_URL = this.options.corsProxy;
-      const process = {
-        env,
-        cwd: () => '/',
-        platform: 'browser',
-        version: 'v18.0.0',
-        versions: { node: '18.0.0' },
-      };
-
-      const fn = new Function('exports', 'require', 'module', 'process', transformed);
-      fn(exports, require, moduleObj, process);
-
-      // Get the handler for the HTTP method
       const methodUpper = method.toUpperCase();
-      const handler = moduleObj.exports[methodUpper] || moduleObj.exports[methodUpper.toLowerCase()];
+      const handler = namespace[methodUpper] || namespace[methodUpper.toLowerCase()];
 
       if (typeof handler !== 'function') {
         onStart(405, 'Method Not Allowed', { 'Content-Type': 'application/json' });
@@ -1507,7 +1505,7 @@ export class NextDevServer extends DevServer {
 
       const result = await esbuild.transform(codeWithResolvedAliases, {
         loader,
-        format: 'cjs',  // CommonJS for eval execution
+        format: 'esm',
         target: 'esnext',
         platform: 'neutral',
         sourcefile: filename,
@@ -1516,7 +1514,22 @@ export class NextDevServer extends DevServer {
       return result.code;
     }
 
-    return transformEsmToCjsSimple(codeWithResolvedAliases);
+    const { transform } = await import('esbuild');
+    const result = await transform(codeWithResolvedAliases, {
+      loader: filename.endsWith('.tsx')
+        ? 'tsx'
+        : filename.endsWith('.ts')
+          ? 'ts'
+          : filename.endsWith('.jsx')
+            ? 'jsx'
+            : 'js',
+      format: 'esm',
+      target: 'esnext',
+      platform: 'neutral',
+      sourcefile: filename,
+    });
+
+    return result.code;
   }
 
   private addReactRefresh(code: string, filename: string): string {

@@ -48,6 +48,42 @@ export interface Stats {
   blocks: number;
 }
 
+const NULL_DEVICE_DIRECTORY = '/dev';
+const NULL_DEVICE_PATH = '/dev/null';
+
+function createSyntheticStats(kind: 'file' | 'directory'): Stats {
+  const isDirectory = kind === 'directory';
+  const mtime = 0;
+
+  return {
+    isFile: () => !isDirectory,
+    isDirectory: () => isDirectory,
+    isSymbolicLink: () => false,
+    isBlockDevice: () => false,
+    isCharacterDevice: () => false,
+    isFIFO: () => false,
+    isSocket: () => false,
+    size: 0,
+    mode: isDirectory ? 0o755 : 0o666,
+    mtime: new Date(mtime),
+    atime: new Date(mtime),
+    ctime: new Date(mtime),
+    birthtime: new Date(mtime),
+    mtimeMs: mtime,
+    atimeMs: mtime,
+    ctimeMs: mtime,
+    birthtimeMs: mtime,
+    nlink: 1,
+    uid: 1000,
+    gid: 1000,
+    dev: 0,
+    ino: isDirectory ? 2 : 3,
+    rdev: 0,
+    blksize: 4096,
+    blocks: 0,
+  };
+}
+
 export type WatchEventType = 'change' | 'rename';
 export type WatchListener = (eventType: WatchEventType, filename: string | null) => void;
 
@@ -155,6 +191,14 @@ export class VirtualFS {
 
   private allocateInode(): number {
     return this.nextInode++;
+  }
+
+  private isNullDevicePath(path: string): boolean {
+    return this.normalizePath(path) === NULL_DEVICE_PATH;
+  }
+
+  private isSyntheticDevDirectoryPath(path: string): boolean {
+    return this.normalizePath(path) === NULL_DEVICE_DIRECTORY;
   }
 
   /**
@@ -271,6 +315,9 @@ export class VirtualFS {
    */
   private writeFileSyncInternal(path: string, data: string | Uint8Array, emitEvent: boolean): void {
     const normalized = this.normalizePath(path);
+    if (this.isNullDevicePath(normalized)) {
+      return;
+    }
     const parentPath = this.getParentPath(normalized);
     const basename = this.getBasename(normalized);
 
@@ -398,7 +445,9 @@ export class VirtualFS {
    * Check if path exists
    */
   existsSync(path: string): boolean {
-    return this.getNode(path) !== undefined;
+    return this.isSyntheticDevDirectoryPath(path)
+      || this.isNullDevicePath(path)
+      || this.getNode(path) !== undefined;
   }
 
   /**
@@ -406,6 +455,12 @@ export class VirtualFS {
    */
   statSync(path: string): Stats {
     const node = this.getNode(path);
+    if (!node && this.isSyntheticDevDirectoryPath(path)) {
+      return createSyntheticStats('directory');
+    }
+    if (!node && this.isNullDevicePath(path)) {
+      return createSyntheticStats('file');
+    }
     if (!node) {
       throw createNodeError('ENOENT', 'stat', path);
     }
@@ -455,6 +510,10 @@ export class VirtualFS {
   readFileSync(path: string): Uint8Array;
   readFileSync(path: string, encoding: 'utf8' | 'utf-8'): string;
   readFileSync(path: string, encoding?: 'utf8' | 'utf-8'): Uint8Array | string {
+    if (this.isNullDevicePath(path)) {
+      return encoding === 'utf8' || encoding === 'utf-8' ? '' : new Uint8Array(0);
+    }
+
     const node = this.getNode(path);
 
     if (!node) {
@@ -486,6 +545,9 @@ export class VirtualFS {
    */
   mkdirSync(path: string, options?: { recursive?: boolean }): void {
     const normalized = this.normalizePath(path);
+    if (normalized === NULL_DEVICE_DIRECTORY && options?.recursive) {
+      return;
+    }
 
     if (options?.recursive) {
       this.ensureDirectory(normalized);
@@ -525,6 +587,21 @@ export class VirtualFS {
    * Read directory contents
    */
   readdirSync(path: string): string[] {
+    if (this.isSyntheticDevDirectoryPath(path)) {
+      const node = this.getNode(path);
+      if (!node) {
+        return ['null'];
+      }
+
+      if (node.type !== 'directory') {
+        throw createNodeError('ENOTDIR', 'scandir', path);
+      }
+
+      const entries = new Set(Array.from(node.children!.keys()));
+      entries.add('null');
+      return Array.from(entries);
+    }
+
     const node = this.getNode(path);
 
     if (!node) {
@@ -722,6 +799,9 @@ export class VirtualFS {
    */
   realpathSync(path: string): string {
     const normalized = this.normalizePath(path);
+    if (normalized === NULL_DEVICE_DIRECTORY || normalized === NULL_DEVICE_PATH) {
+      return normalized;
+    }
     if (!this.existsSync(normalized)) {
       throw createNodeError('ENOENT', 'realpath', path);
     }

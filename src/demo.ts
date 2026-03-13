@@ -269,7 +269,7 @@ async function runServer() {
 
     // Execute the code
     log('Executing code...', 'info');
-    runtime.execute(code, '/server.js');
+    await runtime.execute(code, '/server.js');
     log('Code executed successfully', 'success');
 
     // If no server started after a short delay, mark as completed

@@ -63,6 +63,11 @@ describe('fs module (Node.js compat)', () => {
       const data = fs.readFileSync('/binary.bin');
       expect(Array.from(data)).toEqual([0x00, 0x01, 0x02, 0xff]);
     });
+
+    it('should treat /dev/null as an empty readable file', () => {
+      assert.strictEqual(fs.readFileSync('/dev/null', 'utf8'), '');
+      expect(Array.from(fs.readFileSync('/dev/null'))).toEqual([]);
+    });
   });
 
   describe('fs.writeFileSync()', () => {
@@ -89,6 +94,27 @@ describe('fs module (Node.js compat)', () => {
       assert.strictEqual(fs.existsSync('/deep'), true);
       assert.strictEqual(fs.existsSync('/deep/nested'), true);
     });
+
+    it('should discard writes to /dev/null', () => {
+      fs.writeFileSync('/dev/null', 'ignored');
+      assert.strictEqual(fs.readFileSync('/dev/null', 'utf8'), '');
+    });
+  });
+
+  describe('fs.appendFileSync()', () => {
+    it('should append to an existing file', () => {
+      vfs.writeFileSync('/append.txt', 'hello');
+
+      fs.appendFileSync('/append.txt', ' world');
+
+      assert.strictEqual(vfs.readFileSync('/append.txt', 'utf8'), 'hello world');
+    });
+
+    it('should create a file when it does not exist', () => {
+      fs.appendFileSync('/new-append.txt', 'hello');
+
+      assert.strictEqual(vfs.readFileSync('/new-append.txt', 'utf8'), 'hello');
+    });
   });
 
   describe('fs.existsSync()', () => {
@@ -108,6 +134,11 @@ describe('fs module (Node.js compat)', () => {
 
     it('should return true for root', () => {
       assert.strictEqual(fs.existsSync('/'), true);
+    });
+
+    it('should return true for /dev/null and /dev', () => {
+      assert.strictEqual(fs.existsSync('/dev/null'), true);
+      assert.strictEqual(fs.existsSync('/dev'), true);
     });
   });
 
@@ -179,6 +210,10 @@ describe('fs module (Node.js compat)', () => {
         /ENOTDIR/
       );
     });
+
+    it('should expose /dev/null in the synthetic /dev directory', () => {
+      expect(fs.readdirSync('/dev')).toContain('null');
+    });
   });
 
   describe('fs.statSync()', () => {
@@ -204,6 +239,13 @@ describe('fs module (Node.js compat)', () => {
         () => fs.statSync('/nonexistent'),
         /ENOENT/
       );
+    });
+
+    it('should return file stats for /dev/null', () => {
+      const stats = fs.statSync('/dev/null');
+      assert.strictEqual(stats.isFile(), true);
+      assert.strictEqual(stats.isDirectory(), false);
+      assert.strictEqual(stats.size, 0);
     });
 
     it('should have time properties', () => {
@@ -348,6 +390,40 @@ describe('fs module (Node.js compat)', () => {
     it('should throw ENOENT for non-existent file', () => {
       assert.throws(
         () => fs.utimesSync('/nonexistent', new Date(), new Date()),
+        /ENOENT/
+      );
+    });
+  });
+
+  describe('fs.chmodSync()', () => {
+    it('should no-op for existing files', () => {
+      vfs.writeFileSync('/file.txt', 'content');
+
+      fs.chmodSync('/file.txt', 0o644);
+
+      assert.strictEqual(fs.existsSync('/file.txt'), true);
+    });
+
+    it('should throw ENOENT for missing files', () => {
+      assert.throws(
+        () => fs.chmodSync('/nonexistent', 0o644),
+        /ENOENT/
+      );
+    });
+  });
+
+  describe('fs.chownSync()', () => {
+    it('should no-op for existing files', () => {
+      vfs.writeFileSync('/file.txt', 'content');
+
+      fs.chownSync('/file.txt', 1000, 1000);
+
+      assert.strictEqual(fs.existsSync('/file.txt'), true);
+    });
+
+    it('should throw ENOENT for missing files', () => {
+      assert.throws(
+        () => fs.chownSync('/nonexistent', 1000, 1000),
         /ENOENT/
       );
     });
@@ -521,6 +597,61 @@ describe('fs module (Node.js compat)', () => {
         assert.strictEqual(new TextDecoder().decode(buffer), 'hello');
       });
 
+      it('should support async disposal helpers on file handles', async () => {
+        vfs.writeFileSync('/handle.txt', 'hello world');
+
+        const addDisposableResource = (env: Array<{ value: unknown; dispose: () => unknown; async: boolean }>, value: unknown, async: boolean) => {
+          if (value == null) return value;
+          if ((typeof value !== 'object' && typeof value !== 'function')) {
+            throw new TypeError('Object expected.');
+          }
+
+          const asyncDispose = (value as Record<PropertyKey, unknown>)[Symbol.asyncDispose];
+          const dispose = (value as Record<PropertyKey, unknown>)[Symbol.dispose];
+          const disposeFn = async && typeof asyncDispose === 'function'
+            ? asyncDispose
+            : (!async && typeof dispose === 'function' ? dispose : (typeof dispose === 'function' ? dispose : null));
+
+          if (!disposeFn) {
+            throw new TypeError('Object not disposable.');
+          }
+
+          env.push({
+            value,
+            async,
+            dispose: () => (disposeFn as (this: unknown) => unknown).call(value),
+          });
+          return value;
+        };
+
+        const disposeResources = async (env: Array<{ value: unknown; dispose: () => unknown; async: boolean }>) => {
+          while (env.length > 0) {
+            const resource = env.pop();
+            if (!resource) continue;
+            const result = resource.dispose();
+            if (resource.async) {
+              await result;
+            }
+          }
+        };
+
+        const env: Array<{ value: unknown; dispose: () => unknown; async: boolean }> = [];
+        try {
+          const handle = addDisposableResource(env, await fs.promises.open('/handle.txt', 'r'), true) as Awaited<ReturnType<typeof fs.promises.open>>;
+          const stats = await handle.stat();
+          const buffer = new Uint8Array(5);
+          const { bytesRead } = await handle.read(buffer, 0, 5, 0);
+
+          assert.strictEqual(stats.size, 11);
+          assert.strictEqual(bytesRead, 5);
+          assert.strictEqual(new TextDecoder().decode(buffer), 'hello');
+          expect(typeof handle[Symbol.asyncDispose]).toBe('function');
+          expect(typeof handle[Symbol.dispose]).toBe('function');
+        } finally {
+          await disposeResources(env);
+        }
+      });
+
       it('should reject for missing files', async () => {
         await expect(fs.promises.open('/missing.txt', 'r')).rejects.toThrow(/ENOENT/);
       });
@@ -563,6 +694,34 @@ describe('fs module (Node.js compat)', () => {
         await fs.promises.appendFile('/new-append.txt', 'hello');
 
         assert.strictEqual(vfs.readFileSync('/new-append.txt', 'utf8'), 'hello');
+      });
+    });
+
+    describe('chmod', () => {
+      it('should resolve for existing files', async () => {
+        vfs.writeFileSync('/file.txt', 'content');
+
+        await fs.promises.chmod('/file.txt', 0o644);
+
+        assert.strictEqual(fs.existsSync('/file.txt'), true);
+      });
+
+      it('should reject for missing files', async () => {
+        await expect(fs.promises.chmod('/nonexistent', 0o644)).rejects.toThrow(/ENOENT/);
+      });
+    });
+
+    describe('chown', () => {
+      it('should resolve for existing files', async () => {
+        vfs.writeFileSync('/file.txt', 'content');
+
+        await fs.promises.chown('/file.txt', 1000, 1000);
+
+        assert.strictEqual(fs.existsSync('/file.txt'), true);
+      });
+
+      it('should reject for missing files', async () => {
+        await expect(fs.promises.chown('/nonexistent', 1000, 1000)).rejects.toThrow(/ENOENT/);
       });
     });
 
@@ -631,6 +790,40 @@ describe('fs module (Node.js compat)', () => {
         vfs.writeFileSync('/src.txt', 'content');
         await fs.promises.copyFile('/src.txt', '/dest.txt');
         assert.strictEqual(vfs.readFileSync('/dest.txt', 'utf8'), 'content');
+      });
+    });
+
+    describe('link and symlink', () => {
+      it('should create a linked file copy', async () => {
+        vfs.writeFileSync('/src.txt', 'content');
+
+        await fs.promises.link('/src.txt', '/linked.txt');
+
+        assert.strictEqual(vfs.readFileSync('/linked.txt', 'utf8'), 'content');
+      });
+
+      it('should create a symlink record and expose readlink/lstat', async () => {
+        vfs.writeFileSync('/target.txt', 'content');
+
+        await fs.promises.symlink('/target.txt', '/alias.txt');
+
+        await expect(fs.promises.readlink('/alias.txt')).resolves.toBe('/target.txt');
+        await expect(fs.promises.lstat('/alias.txt')).resolves.toMatchObject({
+          isSymbolicLink: expect.any(Function),
+        });
+        const aliasStats = await fs.promises.lstat('/alias.txt');
+        expect(aliasStats.isSymbolicLink()).toBe(true);
+        assert.strictEqual(fs.readFileSync('/alias.txt', 'utf8'), 'content');
+      });
+    });
+
+    describe('truncate', () => {
+      it('should truncate an existing file', async () => {
+        vfs.writeFileSync('/truncate.txt', 'hello world');
+
+        await fs.promises.truncate('/truncate.txt', 5);
+
+        assert.strictEqual(vfs.readFileSync('/truncate.txt', 'utf8'), 'hello');
       });
     });
 
@@ -719,6 +912,43 @@ describe('fs module (Node.js compat)', () => {
         vfs.writeFileSync('/test.txt', 'content');
         await new Promise<void>((resolve) => {
           fs.access('/test.txt', (err) => {
+            expect(err).toBeNull();
+            resolve();
+          });
+        });
+      });
+    });
+
+    describe('fs.appendFile()', () => {
+      it('should append via callback', async () => {
+        vfs.writeFileSync('/append.txt', 'hello');
+        await new Promise<void>((resolve) => {
+          fs.appendFile('/append.txt', ' world', (err) => {
+            expect(err).toBeNull();
+            expect(vfs.readFileSync('/append.txt', 'utf8')).toBe('hello world');
+            resolve();
+          });
+        });
+      });
+    });
+
+    describe('fs.chmod()', () => {
+      it('should chmod via callback', async () => {
+        vfs.writeFileSync('/test.txt', 'content');
+        await new Promise<void>((resolve) => {
+          fs.chmod('/test.txt', 0o644, (err) => {
+            expect(err).toBeNull();
+            resolve();
+          });
+        });
+      });
+    });
+
+    describe('fs.chown()', () => {
+      it('should chown via callback', async () => {
+        vfs.writeFileSync('/test.txt', 'content');
+        await new Promise<void>((resolve) => {
+          fs.chown('/test.txt', 1000, 1000, (err) => {
             expect(err).toBeNull();
             resolve();
           });

@@ -13,7 +13,6 @@ import {
 } from './resolver';
 import { downloadAndExtract, extractTarball } from './tarball';
 import * as path from '../shims/path';
-import { initTransformer, transformPackage, isTransformerReady } from '../transform';
 
 /**
  * Normalize a package.json bin field into a consistent Record<string, string>.
@@ -36,7 +35,7 @@ export interface InstallOptions {
   includeDev?: boolean;
   includeOptional?: boolean;
   onProgress?: (message: string) => void;
-  /** Transform ESM packages to CJS after install (default: true) */
+  /** Deprecated no-op. Module transformation now happens at load time. */
   transform?: boolean;
 }
 
@@ -172,13 +171,6 @@ export class PackageManager {
       toInstall.push({ name, pkg, pkgPath });
     }
 
-    // Initialize transformer if transform option is enabled (default: true)
-    const shouldTransform = options.transform !== false;
-    if (shouldTransform && !isTransformerReady()) {
-      onProgress?.('Initializing ESM transformer...');
-      await initTransformer();
-    }
-
     // Install packages in parallel (limit concurrency to avoid overwhelming the browser)
     const CONCURRENCY = 6;
     onProgress?.(`Installing ${toInstall.length} packages...`);
@@ -194,18 +186,6 @@ export class PackageManager {
           await downloadAndExtract(pkg.tarballUrl, this.vfs, pkgPath, {
             stripComponents: 1, // Strip "package/" prefix
           });
-
-          // Transform ESM to CJS
-          if (shouldTransform) {
-            try {
-              const count = await transformPackage(this.vfs, pkgPath, onProgress);
-              if (count > 0) {
-                onProgress?.(`  Transformed ${count} files in ${name}`);
-              }
-            } catch (transformError) {
-              onProgress?.(`  Warning: Transform failed for ${name}: ${transformError}`);
-            }
-          }
 
           // Create bin stubs in /node_modules/.bin/
           try {

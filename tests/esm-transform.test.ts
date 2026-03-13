@@ -56,7 +56,7 @@ describe('ESM to CJS transformation', () => {
       const cjs = await transformCode(esm);
 
       vfs.writeFileSync('/test.js', cjs);
-      const { exports } = runtime.runFile('/test.js');
+      const { exports } = await runtime.runFile('/test.js');
       const result = exports as { url: string };
 
       expect(result.url).toBe('file:///test.js');
@@ -69,7 +69,7 @@ describe('ESM to CJS transformation', () => {
       const cjs = await transformCode(esm);
 
       vfs.writeFileSync('/test.js', cjs);
-      const { exports } = runtime.runFile('/test.js');
+      const { exports } = await runtime.runFile('/test.js');
       const result = exports as { foo: number };
 
       expect(result.foo).toBe(42);
@@ -80,10 +80,10 @@ describe('ESM to CJS transformation', () => {
       const cjs = await transformCode(esm);
 
       vfs.writeFileSync('/test.js', cjs);
-      const { exports } = runtime.runFile('/test.js');
-      const result = exports as { default: () => string };
+      const { exports } = await runtime.runFile('/test.js');
+      const result = exports as () => string;
 
-      expect(result.default()).toBe('world');
+      expect(result()).toBe('world');
     });
   });
 
@@ -98,7 +98,7 @@ describe('ESM to CJS transformation', () => {
       vfs.writeFileSync('/dep.js', depCjs);
       vfs.writeFileSync('/main.js', mainCjs);
 
-      const { exports } = runtime.runFile('/main.js');
+      const { exports } = await runtime.runFile('/main.js');
       const result = exports as { result: number };
       expect(result.result).toBe(246);
     });
@@ -113,7 +113,7 @@ describe('ESM to CJS transformation', () => {
       `;
 
       vfs.writeFileSync('/test.js', code);
-      const { exports } = runtime.runFile('/test.js');
+      const { exports } = await runtime.runFile('/test.js');
       const result = exports as { filename: string };
 
       // The code's own declaration should work
@@ -124,7 +124,7 @@ describe('ESM to CJS transformation', () => {
       const code = `exports.filename = __filename;`;
 
       vfs.writeFileSync('/mymodule.js', code);
-      const { exports } = runtime.runFile('/mymodule.js');
+      const { exports } = await runtime.runFile('/mymodule.js');
       const result = exports as { filename: string };
 
       expect(result.filename).toBe('/mymodule.js');
@@ -140,7 +140,7 @@ describe('ESM to CJS transformation', () => {
       const cjs = await transformCode(esm);
 
       vfs.writeFileSync('/test.js', cjs);
-      const { exports } = runtime.runFile('/test.js');
+      const { exports } = await runtime.runFile('/test.js');
       const result = exports as { path: string };
 
       expect(result.path).toBe('/test.js');
@@ -158,7 +158,7 @@ describe('ESM to CJS transformation', () => {
 
       vfs.mkdirSync('/src', { recursive: true });
       vfs.writeFileSync('/src/module.js', cjs);
-      const { exports } = runtime.runFile('/src/module.js');
+      const { exports } = await runtime.runFile('/src/module.js');
       const result = exports as { __filename: string; __dirname: string };
 
       expect(result.__filename).toBe('/src/module.js');

@@ -61,6 +61,7 @@ import { Runtime, RuntimeOptions } from './runtime';
 import { PackageManager } from './npm';
 import { ServerBridge, getServerBridge } from './server-bridge';
 import { initChildProcess, stripInternalChildProcessEnv } from './shims/child_process';
+import type { IExecuteResult } from './runtime-interface';
 
 export interface RunResult {
   stdout: string;
@@ -89,6 +90,8 @@ export interface TerminalSessionRunOptions {
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
   signal?: AbortSignal;
+  /** Keep the command attached to the session until it explicitly exits or is aborted. */
+  interactive?: boolean;
 }
 
 export interface TerminalSessionState {
@@ -173,14 +176,14 @@ export function createContainer(options?: ContainerOptions): {
   runtime: Runtime;
   npm: PackageManager;
   serverBridge: ServerBridge;
-  execute: (code: string, filename?: string) => { exports: unknown };
-  runFile: (filename: string) => { exports: unknown };
+  execute: (code: string, filename?: string) => Promise<IExecuteResult>;
+  runFile: (filename: string) => Promise<IExecuteResult>;
   run: (command: string, options?: RunOptions) => Promise<RunResult>;
   createTerminalSession: (options?: TerminalSessionOptions) => TerminalSession;
   setGitAuth: (updates: Partial<MutableGitAuth>) => void;
   getGitAuth: () => GitAuthOptions;
   sendInput: (data: string) => void;
-  createREPL: () => { eval: (code: string) => unknown };
+  createREPL: () => { eval: (code: string) => Promise<unknown> };
   on: (event: string, listener: (...args: unknown[]) => void) => void;
 } {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
@@ -313,6 +316,7 @@ export function createContainer(options?: ContainerOptions): {
           onStdout: sessionRunOptions?.onStdout,
           onStderr: sessionRunOptions?.onStderr,
           signal: controller.signal,
+          interactive: sessionRunOptions?.interactive,
         });
 
         state.running = true;

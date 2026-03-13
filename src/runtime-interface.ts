@@ -13,14 +13,19 @@ export interface IRuntimeOptions {
 export interface IModule {
   id: string;
   filename: string;
+  url: string;
+  format: 'esm' | 'cjs' | 'json' | 'builtin';
   exports: unknown;
+  namespace?: Record<string, unknown>;
   loaded: boolean;
   children: IModule[];
   paths: string[];
+  executionPromise?: Promise<unknown>;
 }
 
 export interface IExecuteResult {
   exports: unknown;
+  namespace: Record<string, unknown>;
   module: IModule;
 }
 

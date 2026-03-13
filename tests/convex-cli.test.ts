@@ -72,7 +72,7 @@ export const add = mutation({
     `;
 
     try {
-      const { exports } = runtime.execute(code, '/project/test.js');
+      const { exports } = await runtime.execute(code, '/project/test.js');
       const execResult = exports as { hasConvex: boolean; keys: string[] };
       expect(execResult.hasConvex).toBe(true);
       console.log('Convex exports:', execResult.keys);
@@ -95,7 +95,7 @@ export const add = mutation({
     `;
 
     try {
-      const { exports } = runtime.execute(code, '/project/test.js');
+      const { exports } = await runtime.execute(code, '/project/test.js');
       const execResult = exports as { hasServer: boolean; keys: string[] };
       expect(execResult.hasServer).toBe(true);
       console.log('convex/server exports:', execResult.keys);
@@ -119,7 +119,7 @@ export const add = mutation({
     `;
 
     try {
-      const { exports } = runtime.execute(code, '/project/test.js');
+      const { exports } = await runtime.execute(code, '/project/test.js');
       const execResult = exports as { hasValues: boolean; hasV: boolean; keys: string[] };
       expect(execResult.hasValues).toBe(true);
       console.log('convex/values exports:', execResult.keys);
@@ -206,7 +206,7 @@ export const add = mutation({
     `;
 
     try {
-      runtime.execute(code, '/project/cli-test.js');
+      await runtime.execute(code, '/project/cli-test.js');
       console.log('CLI executed successfully');
     } catch (error: unknown) {
       const err = error as Error;
@@ -308,7 +308,7 @@ export const add = mutation({
     `;
 
     try {
-      runtime.execute(code, '/project/cli-test.js');
+      await runtime.execute(code, '/project/cli-test.js');
       console.log('CLI started, waiting for async operations...');
 
       // Wait for any pending promises/timers

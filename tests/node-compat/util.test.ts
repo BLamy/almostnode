@@ -16,6 +16,7 @@ import util, {
   promisify,
   callbackify,
   debuglog,
+  isDeepStrictEqual,
   isArray,
   isBoolean,
   isNull,
@@ -330,6 +331,37 @@ describe('util module (Node.js compat)', () => {
     });
   });
 
+  describe('util.isDeepStrictEqual()', () => {
+    it('should compare nested objects deeply', () => {
+      expect(isDeepStrictEqual(
+        { a: 1, nested: { list: [1, 2, { ok: true }] } },
+        { a: 1, nested: { list: [1, 2, { ok: true }] } }
+      )).toBe(true);
+    });
+
+    it('should distinguish different nested values', () => {
+      expect(isDeepStrictEqual(
+        { a: 1, nested: { list: [1, 2, { ok: true }] } },
+        { a: 1, nested: { list: [1, 2, { ok: false }] } }
+      )).toBe(false);
+    });
+
+    it('should compare maps, sets, and typed arrays', () => {
+      const left = {
+        map: new Map([[{ id: 1 }, 'one']]),
+        set: new Set([{ id: 2 }]),
+        bytes: new Uint8Array([1, 2, 3]),
+      };
+      const right = {
+        map: new Map([[{ id: 1 }, 'one']]),
+        set: new Set([{ id: 2 }]),
+        bytes: new Uint8Array([1, 2, 3]),
+      };
+
+      expect(isDeepStrictEqual(left, right)).toBe(true);
+    });
+  });
+
   describe('util.callbackify()', () => {
     it('should convert promise function to callback', async () => {
       const asyncFn = async (value: string): Promise<string> => {
@@ -595,6 +627,7 @@ describe('util module (Node.js compat)', () => {
       expect(util.promisify).toBe(promisify);
       expect(util.callbackify).toBe(callbackify);
       expect(util.debuglog).toBe(debuglog);
+      expect(util.isDeepStrictEqual).toBe(isDeepStrictEqual);
       expect(util.types).toBe(types);
       expect(util.TextEncoder).toBe(TextEncoder);
       expect(util.TextDecoder).toBe(TextDecoder);

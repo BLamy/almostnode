@@ -752,10 +752,17 @@ class AlmostnodeExtensionGalleryService {
     const query = (options.text || '').trim().replace(/^@web\s*/i, '');
     const result = await this.client.search(query, options.pageSize || 20);
 
-    const firstPage = await Promise.all(result.extensions.map(async (entry) => {
+    const entries = await Promise.all(result.extensions.map(async (entry) => {
       const detail = await this.client.getLatest(entry.namespace, entry.name);
-      return (await this.cacheExtension(detail)).gallery;
+      return this.cacheExtension(detail);
     }));
+
+    const firstPage = entries
+      .filter(({ manifest }) => {
+        if (!manifest) return false;
+        return assessExtensionManifest(manifest).compatible;
+      })
+      .map(({ gallery }) => gallery);
 
     return makeSinglePagePager(firstPage);
   }

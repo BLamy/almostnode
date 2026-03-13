@@ -83,6 +83,9 @@ const FILES: Record<string, string> = {
       "search.exclude": {
         "**/.git": true,
       },
+      "claudeCode.useTerminal": false,
+      "claudeCode.preferredLocation": "sidebar",
+      "claudeCode.claudeProcessWrapper": "/usr/local/bin/claude-wrapper",
     },
     null,
     2,
@@ -470,6 +473,10 @@ select {
 `,
 };
 
+const CLAUDE_WRAPPER_PATH = '/usr/local/bin/claude-wrapper';
+const CLAUDE_WRAPPER_SCRIPT = '#!/bin/sh\nexec claude "$@"\n';
+const SETTINGS_PATH = `${WORKSPACE_ROOT}/.vscode/settings.json`;
+
 function ensureDirectory(
   container: ReturnTypeOfCreateContainer,
   path: string,
@@ -485,6 +492,14 @@ export function seedWorkspace(container: ReturnTypeOfCreateContainer): void {
   }
 
   for (const [path, content] of Object.entries(FILES)) {
+    // Guard settings file: only seed if it doesn't already exist (preserve user changes on IDB-backed sessions)
+    if (path === SETTINGS_PATH && container.vfs.existsSync(path)) {
+      continue;
+    }
     container.vfs.writeFileSync(path, content);
   }
+
+  // Write Claude wrapper executable
+  ensureDirectory(container, '/usr/local/bin');
+  container.vfs.writeFileSync(CLAUDE_WRAPPER_PATH, CLAUDE_WRAPPER_SCRIPT);
 }

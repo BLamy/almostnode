@@ -27,10 +27,10 @@ function createContainer(options?: RuntimeOptions) {
 
 describe('API Examples (Integration Tests)', () => {
   describe('Basic Usage - Running Code', () => {
-    it('should execute JavaScript code directly', () => {
+    it('should execute JavaScript code directly', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const path = require('path');
         module.exports = path.join('/home', 'user', 'file.txt');
       `);
@@ -38,10 +38,10 @@ describe('API Examples (Integration Tests)', () => {
       expect(result.exports).toBe('/home/user/file.txt');
     });
 
-    it('should write and read files from virtual filesystem', () => {
+    it('should write and read files from virtual filesystem', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const fs = require('fs');
 
         fs.writeFileSync('/hello.txt', 'Hello from the browser!');
@@ -51,10 +51,10 @@ describe('API Examples (Integration Tests)', () => {
       expect(result.exports).toBe('Hello from the browser!');
     });
 
-    it('should use Node.js APIs in the browser', () => {
+    it('should use Node.js APIs in the browser', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const path = require('path');
         const fs = require('fs');
         const os = require('os');
@@ -75,7 +75,7 @@ describe('API Examples (Integration Tests)', () => {
   });
 
   describe('Working with Virtual File System', () => {
-    it('should pre-populate and read from the virtual filesystem', () => {
+    it('should pre-populate and read from the virtual filesystem', async () => {
       const container = createContainer();
       const { vfs, execute } = container;
 
@@ -96,7 +96,7 @@ describe('API Examples (Integration Tests)', () => {
       );
 
       // Run from the virtual filesystem
-      const result = container.runFile('/src/index.js');
+      const result = await container.runFile('/src/index.js');
 
       expect(result.exports).toEqual({
         count: 2,
@@ -104,7 +104,7 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should support mkdir, readdir, stat operations', () => {
+    it('should support mkdir, readdir, stat operations', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -131,7 +131,7 @@ describe('API Examples (Integration Tests)', () => {
       expect(dirStat.isDirectory()).toBe(true);
     });
 
-    it('should support existsSync and unlinkSync', () => {
+    it('should support existsSync and unlinkSync', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -144,7 +144,7 @@ describe('API Examples (Integration Tests)', () => {
   });
 
   describe('Container Options', () => {
-    it('should accept custom environment variables', () => {
+    it('should accept custom environment variables', async () => {
       const container = createContainer({
         env: {
           NODE_ENV: 'production',
@@ -153,7 +153,7 @@ describe('API Examples (Integration Tests)', () => {
         },
       });
 
-      const result = container.execute(`
+      const result = await container.execute(`
         module.exports = {
           nodeEnv: process.env.NODE_ENV,
           apiKey: process.env.API_KEY,
@@ -168,26 +168,26 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should accept custom working directory', () => {
+    it('should accept custom working directory', async () => {
       const container = createContainer({
         cwd: '/app',
       });
 
-      const result = container.execute(`
+      const result = await container.execute(`
         module.exports = process.cwd();
       `);
 
       expect(result.exports).toBe('/app');
     });
 
-    it('should capture console output with onConsole callback', () => {
+    it('should capture console output with onConsole callback', async () => {
       const logs: Array<{ method: string; args: unknown[] }> = [];
 
       const container = createContainer({
         onConsole: (method, args) => logs.push({ method, args }),
       });
 
-      container.execute(`
+      await container.execute(`
         console.log('Hello', 'World');
         console.error('Error occurred');
         console.warn('Warning!');
@@ -202,7 +202,7 @@ describe('API Examples (Integration Tests)', () => {
   });
 
   describe('Module Resolution', () => {
-    it('should resolve relative modules', () => {
+    it('should resolve relative modules', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -213,7 +213,7 @@ describe('API Examples (Integration Tests)', () => {
         };
       `);
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const math = require('./lib/math');
         module.exports = {
           sum: math.add(2, 3),
@@ -224,7 +224,7 @@ describe('API Examples (Integration Tests)', () => {
       expect(result.exports).toEqual({ sum: 5, product: 20 });
     });
 
-    it('should resolve JSON modules', () => {
+    it('should resolve JSON modules', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -237,7 +237,7 @@ describe('API Examples (Integration Tests)', () => {
         })
       );
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const config = require('./config.json');
         module.exports = config;
       `);
@@ -249,7 +249,7 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should resolve directory with index.js', () => {
+    it('should resolve directory with index.js', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -261,7 +261,7 @@ describe('API Examples (Integration Tests)', () => {
         };
       `);
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const utils = require('./utils');
         module.exports = utils;
       `);
@@ -269,7 +269,7 @@ describe('API Examples (Integration Tests)', () => {
       expect(result.exports).toEqual({ version: '1.0.0', name: 'utils' });
     });
 
-    it('should resolve node_modules packages', () => {
+    it('should resolve node_modules packages', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -285,7 +285,7 @@ describe('API Examples (Integration Tests)', () => {
         };
       `);
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const pkg = require('my-package');
         module.exports = pkg.greet('World');
       `);
@@ -293,7 +293,7 @@ describe('API Examples (Integration Tests)', () => {
       expect(result.exports).toBe('Hello, World!');
     });
 
-    it('should cache modules', () => {
+    it('should cache modules', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -305,7 +305,7 @@ describe('API Examples (Integration Tests)', () => {
         };
       `);
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const counter1 = require('./counter');
         const counter2 = require('./counter');
         counter1.increment();
@@ -322,10 +322,10 @@ describe('API Examples (Integration Tests)', () => {
   });
 
   describe('Node.js Built-in Modules', () => {
-    it('should provide path module', () => {
+    it('should provide path module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const path = require('path');
         module.exports = {
           join: path.join('foo', 'bar', 'baz'),
@@ -353,10 +353,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide fs module', () => {
+    it('should provide fs module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const fs = require('fs');
 
         // Write
@@ -388,13 +388,13 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide process module', () => {
+    it('should provide process module', async () => {
       const container = createContainer({
         cwd: '/app',
         env: { NODE_ENV: 'test' },
       });
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const process = require('process');
         module.exports = {
           cwd: process.cwd(),
@@ -414,10 +414,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide events module', () => {
+    it('should provide events module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const EventEmitter = require('events');
         const emitter = new EventEmitter();
 
@@ -438,10 +438,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide url module', () => {
+    it('should provide url module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const url = require('url');
 
         const parsed = new url.URL('https://example.com:8080/path?foo=bar#hash');
@@ -466,10 +466,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide querystring module', () => {
+    it('should provide querystring module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const qs = require('querystring');
 
         const parsed = qs.parse('foo=bar&baz=qux&num=123');
@@ -484,10 +484,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide util module', () => {
+    it('should provide util module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const util = require('util');
 
         module.exports = {
@@ -504,10 +504,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide os module', () => {
+    it('should provide os module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const os = require('os');
 
         module.exports = {
@@ -530,10 +530,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide crypto module', () => {
+    it('should provide crypto module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const crypto = require('crypto');
 
         const hash = crypto.createHash('sha256').update('hello').digest('hex');
@@ -554,10 +554,10 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should provide buffer module', () => {
+    it('should provide buffer module', async () => {
       const container = createContainer();
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const { Buffer } = require('buffer');
 
         const buf1 = Buffer.from('Hello');
@@ -582,44 +582,42 @@ describe('API Examples (Integration Tests)', () => {
   });
 
   describe('Error Handling', () => {
-    it('should throw on missing module', () => {
+    it('should throw on missing module', async () => {
       const container = createContainer();
 
-      expect(() => container.execute('require("nonexistent-package")')).toThrow(
-        /Cannot find module/
-      );
+      await expect(container.execute('require("nonexistent-package")')).rejects.toThrow(/Cannot find module/);
     });
 
-    it('should throw on syntax error', () => {
+    it('should throw on syntax error', async () => {
       const container = createContainer();
 
-      expect(() => container.execute('const x = {')).toThrow();
+      await expect(container.execute('const x = {')).rejects.toThrow();
     });
 
-    it('should propagate runtime errors', () => {
+    it('should propagate runtime errors', async () => {
       const container = createContainer();
 
-      expect(() =>
+      await expect(
         container.execute(`
         throw new Error('Runtime error');
       `)
-      ).toThrow('Runtime error');
+      ).rejects.toThrow('Runtime error');
     });
 
-    it('should throw on reading non-existent file', () => {
+    it('should throw on reading non-existent file', async () => {
       const container = createContainer();
 
-      expect(() =>
+      await expect(
         container.execute(`
         const fs = require('fs');
         fs.readFileSync('/nonexistent.txt');
       `)
-      ).toThrow(/ENOENT/);
+      ).rejects.toThrow(/ENOENT/);
     });
   });
 
   describe('Playground Use Case', () => {
-    it('should work as an isolated code playground', () => {
+    it('should work as an isolated code playground', async () => {
       function createPlayground() {
         const container = createContainer();
         const logs: string[] = [];
@@ -627,8 +625,9 @@ describe('API Examples (Integration Tests)', () => {
         // Note: We can't easily capture console in this test setup,
         // so we'll use a different approach
         return {
-          run: (code: string) => {
+          async run(code: string) {
             try {
+              container.runtime.clearCache();
               // Wrap code to capture output
               const wrappedCode = `
                 const _logs = [];
@@ -642,7 +641,7 @@ describe('API Examples (Integration Tests)', () => {
                 })(_console);
                 module.exports = { _logs, _result: typeof result !== 'undefined' ? result : undefined };
               `;
-              const { exports } = container.execute(wrappedCode);
+              const { exports } = await container.execute(wrappedCode);
               const exp = exports as { _logs: string[]; _result?: unknown };
               return { success: true, logs: exp._logs, result: exp._result };
             } catch (error) {
@@ -662,7 +661,7 @@ describe('API Examples (Integration Tests)', () => {
       const playground = createPlayground();
 
       // Test successful execution
-      const result1 = playground.run(`
+      const result1 = await playground.run(`
         console.log('Hello');
         console.log('World');
         const result = 42;
@@ -672,7 +671,7 @@ describe('API Examples (Integration Tests)', () => {
       expect(result1.logs).toContain('[log] World');
 
       // Test error handling
-      const result2 = playground.run(`
+      const result2 = await playground.run(`
         throw new Error('Oops!');
       `);
       expect(result2.success).toBe(false);
@@ -681,7 +680,7 @@ describe('API Examples (Integration Tests)', () => {
   });
 
   describe('Complex Scenarios', () => {
-    it('should handle a multi-file application', () => {
+    it('should handle a multi-file application', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -727,7 +726,7 @@ describe('API Examples (Integration Tests)', () => {
         };
       `);
 
-      const result = container.runFile('/app/src/index.js');
+      const result = await container.runFile('/app/src/index.js');
 
       expect(result.exports).toEqual({
         name: 'my-app',
@@ -745,7 +744,7 @@ describe('API Examples (Integration Tests)', () => {
       });
     });
 
-    it('should handle circular dependencies gracefully', () => {
+    it('should handle circular dependencies gracefully', async () => {
       const container = createContainer();
       const { vfs } = container;
 
@@ -761,7 +760,7 @@ describe('API Examples (Integration Tests)', () => {
         exports.a = a.name;
       `);
 
-      const result = container.execute(`
+      const result = await container.execute(`
         const a = require('./a');
         const b = require('./b');
         module.exports = {

@@ -164,6 +164,12 @@ describe('process module (Node.js compat)', () => {
       expect(typeof proc.pid).toBe('number');
       expect(proc.pid).toBeGreaterThan(0);
     });
+
+    it('should allocate distinct pids per process instance', () => {
+      const first = createProcess();
+      const second = createProcess();
+      expect(first.pid).not.toBe(second.pid);
+    });
   });
 
   describe('process.ppid', () => {
@@ -171,6 +177,20 @@ describe('process module (Node.js compat)', () => {
       const proc = createProcess();
       expect(typeof proc.ppid).toBe('number');
       expect(proc.ppid).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('process uid/gid helpers', () => {
+    it('should expose getuid/geteuid', () => {
+      const proc = createProcess();
+      expect(proc.getuid()).toBe(1000);
+      expect(proc.geteuid()).toBe(1000);
+    });
+
+    it('should expose getgid/getegid', () => {
+      const proc = createProcess();
+      expect(proc.getgid()).toBe(1000);
+      expect(proc.getegid()).toBe(1000);
     });
   });
 

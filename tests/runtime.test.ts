@@ -12,13 +12,13 @@ describe('Runtime', () => {
   });
 
   describe('basic execution', () => {
-    it('should execute simple code', () => {
-      const { exports } = runtime.execute('module.exports = 42;');
+    it('should execute simple code', async () => {
+      const { exports } = await runtime.execute('module.exports = 42;');
       expect(exports).toBe(42);
     });
 
-    it('should provide __filename and __dirname', () => {
-      const { exports } = runtime.execute(`
+    it('should provide __filename and __dirname', async () => {
+      const { exports } = await runtime.execute(`
         module.exports = { filename: __filename, dirname: __dirname };
       `, '/test/file.js');
       expect(exports).toEqual({
@@ -27,23 +27,23 @@ describe('Runtime', () => {
       });
     });
 
-    it('should handle exports object', () => {
-      const { exports } = runtime.execute(`
+    it('should handle exports object', async () => {
+      const { exports } = await runtime.execute(`
         exports.foo = 'bar';
         exports.num = 123;
       `);
       expect(exports).toEqual({ foo: 'bar', num: 123 });
     });
 
-    it('should handle module.exports object', () => {
-      const { exports } = runtime.execute(`
+    it('should handle module.exports object', async () => {
+      const { exports } = await runtime.execute(`
         module.exports = { hello: 'world' };
       `);
       expect(exports).toEqual({ hello: 'world' });
     });
 
-    it('should expose a constructible global console.Console with bound methods', () => {
-      const { exports } = runtime.execute(`
+    it('should expose a constructible global console.Console with bound methods', async () => {
+      const { exports } = await runtime.execute(`
         const redirected = [];
         const patched = new console.Console({
           stdout: { write: (text) => redirected.push(['out', text]) },
@@ -70,7 +70,7 @@ describe('Runtime', () => {
       });
     });
 
-    it('should proxy cross-origin XMLHttpRequest URLs and ignore forbidden headers', () => {
+    it('should proxy cross-origin XMLHttpRequest URLs and ignore forbidden headers', async () => {
       class MockXHR {
         openArgs: unknown[] | null = null;
         headers: Array<[string, string]> = [];
@@ -113,16 +113,16 @@ describe('Runtime', () => {
   });
 
   describe('fs shim', () => {
-    it('should provide fs module', () => {
-      const { exports } = runtime.execute(`
+    it('should provide fs module', async () => {
+      const { exports } = await runtime.execute(`
         const fs = require('fs');
         module.exports = typeof fs.readFileSync;
       `);
       expect(exports).toBe('function');
     });
 
-    it('should read and write files', () => {
-      runtime.execute(`
+    it('should read and write files', async () => {
+      await runtime.execute(`
         const fs = require('fs');
         fs.writeFileSync('/output.txt', 'hello from script');
       `);
@@ -130,10 +130,10 @@ describe('Runtime', () => {
       expect(vfs.readFileSync('/output.txt', 'utf8')).toBe('hello from script');
     });
 
-    it('should check file existence', () => {
+    it('should check file existence', async () => {
       vfs.writeFileSync('/exists.txt', 'content');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const fs = require('fs');
         module.exports = {
           exists: fs.existsSync('/exists.txt'),
@@ -144,8 +144,8 @@ describe('Runtime', () => {
       expect(exports).toEqual({ exists: true, notExists: false });
     });
 
-    it('should create directories', () => {
-      runtime.execute(`
+    it('should create directories', async () => {
+      await runtime.execute(`
         const fs = require('fs');
         fs.mkdirSync('/mydir');
         fs.mkdirSync('/deep/nested/dir', { recursive: true });
@@ -155,11 +155,71 @@ describe('Runtime', () => {
       expect(vfs.existsSync('/deep/nested/dir')).toBe(true);
     });
 
-    it('should list directory contents', () => {
+    it('should expose disposable fs.promises file handles for transpiled await using helpers', async () => {
+      vfs.writeFileSync('/handle.txt', 'hello world');
+
+      const { exports } = await runtime.execute(`
+        const fs = require('fs');
+
+        function addDisposableResource(env, value, async) {
+          if (value == null) return value;
+          const asyncDispose = value[Symbol.asyncDispose];
+          const dispose = value[Symbol.dispose];
+          const disposeFn = async && typeof asyncDispose === 'function'
+            ? asyncDispose
+            : (typeof dispose === 'function' ? dispose : null);
+          if (typeof disposeFn !== 'function') {
+            throw new TypeError('Object not disposable.');
+          }
+          env.push({ value, async, dispose: () => disposeFn.call(value) });
+          return value;
+        }
+
+        async function disposeResources(env) {
+          while (env.length) {
+            const resource = env.pop();
+            if (!resource) continue;
+            const result = resource.dispose();
+            if (resource.async) {
+              await result;
+            }
+          }
+        }
+
+        module.exports = (async () => {
+          const env = [];
+          try {
+            const handle = addDisposableResource(env, await fs.promises.open('/handle.txt', 'r'), true);
+            const stats = await handle.stat();
+            const buffer = new Uint8Array(5);
+            const { bytesRead } = await handle.read(buffer, 0, 5, 0);
+            return {
+              size: stats.size,
+              bytesRead,
+              text: new TextDecoder().decode(buffer),
+              asyncDispose: typeof handle[Symbol.asyncDispose],
+              dispose: typeof handle[Symbol.dispose],
+            };
+          } finally {
+            await disposeResources(env);
+          }
+        })();
+      `, '/test-dispose.js');
+
+      expect(await exports).toEqual({
+        size: 11,
+        bytesRead: 5,
+        text: 'hello',
+        asyncDispose: 'function',
+        dispose: 'function',
+      });
+    });
+
+    it('should list directory contents', async () => {
       vfs.writeFileSync('/dir/a.txt', '');
       vfs.writeFileSync('/dir/b.txt', '');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const fs = require('fs');
         module.exports = fs.readdirSync('/dir').sort();
       `);
@@ -169,8 +229,8 @@ describe('Runtime', () => {
   });
 
   describe('path shim', () => {
-    it('should provide path module', () => {
-      const { exports } = runtime.execute(`
+    it('should provide path module', async () => {
+      const { exports } = await runtime.execute(`
         const path = require('path');
         module.exports = {
           join: path.join('/foo', 'bar', 'baz'),
@@ -188,8 +248,8 @@ describe('Runtime', () => {
       });
     });
 
-    it('should resolve paths', () => {
-      const { exports } = runtime.execute(`
+    it('should resolve paths', async () => {
+      const { exports } = await runtime.execute(`
         const path = require('path');
         module.exports = path.resolve('/foo/bar', '../baz', 'file.js');
       `);
@@ -199,8 +259,8 @@ describe('Runtime', () => {
   });
 
   describe('process shim', () => {
-    it('should provide process object', () => {
-      const { exports } = runtime.execute(`
+    it('should provide process object', async () => {
+      const { exports } = await runtime.execute(`
         module.exports = {
           cwd: process.cwd(),
           platform: process.platform,
@@ -215,8 +275,8 @@ describe('Runtime', () => {
       });
     });
 
-    it('should provide process via require', () => {
-      const { exports } = runtime.execute(`
+    it('should provide process via require', async () => {
+      const { exports } = await runtime.execute(`
         const proc = require('process');
         module.exports = proc.cwd();
       `);
@@ -224,8 +284,8 @@ describe('Runtime', () => {
       expect(exports).toBe('/');
     });
 
-    it('should have EventEmitter methods on process', () => {
-      const { exports } = runtime.execute(`
+    it('should have EventEmitter methods on process', async () => {
+      const { exports } = await runtime.execute(`
         let called = false;
         process.once('test-event', (arg) => {
           called = arg;
@@ -249,12 +309,12 @@ describe('Runtime', () => {
       });
     });
 
-    it('should allow custom environment variables', () => {
+    it('should allow custom environment variables', async () => {
       const customRuntime = new Runtime(vfs, {
         env: { MY_VAR: 'my_value', NODE_ENV: 'test' },
       });
 
-      const { exports } = customRuntime.execute(`
+      const { exports } = await customRuntime.execute(`
         module.exports = {
           myVar: process.env.MY_VAR,
           nodeEnv: process.env.NODE_ENV,
@@ -269,8 +329,8 @@ describe('Runtime', () => {
   });
 
   describe('module resolution', () => {
-    it('should resolve stream/promises builtin module', () => {
-      const { exports } = runtime.execute(`
+    it('should resolve stream/promises builtin module', async () => {
+      const { exports } = await runtime.execute(`
         const streamPromises = require('stream/promises');
         const nodeStreamPromises = require('node:stream/promises');
         module.exports = {
@@ -287,7 +347,170 @@ describe('Runtime', () => {
       });
     });
 
-    it('should normalize signal-exit object exports to callable function', () => {
+    it('should resolve stream/consumers builtin module', async () => {
+      const { exports } = await runtime.execute(`
+        const { Readable } = require('stream');
+        const consumers = require('stream/consumers');
+        const nodeConsumers = require('node:stream/consumers');
+
+        module.exports = (async () => {
+          const textStream = new Readable();
+          textStream.push('hello ');
+          textStream.push(Buffer.from('world'));
+          textStream.push(null);
+
+          const binaryStream = new Readable();
+          binaryStream.push(Buffer.from([0xde, 0xad, 0xbe, 0xef]));
+          binaryStream.push(null);
+
+          const arrayBufferStream = new Readable();
+          arrayBufferStream.push(Buffer.from([1, 2, 3]));
+          arrayBufferStream.push(null);
+
+          const textValue = await consumers.text(textStream);
+          const binaryValue = await nodeConsumers.buffer(binaryStream);
+          const arrayBufferValue = await consumers.arrayBuffer(arrayBufferStream);
+
+          return {
+            textValue,
+            binaryHex: binaryValue.toString('hex'),
+            arrayBufferLength: arrayBufferValue.byteLength,
+            hasJson: typeof consumers.json,
+            hasBlob: typeof nodeConsumers.blob,
+          };
+        })();
+      `);
+
+      await expect(exports).resolves.toEqual({
+        textValue: 'hello world',
+        binaryHex: 'deadbeef',
+        arrayBufferLength: 3,
+        hasJson: 'function',
+        hasBlob: 'function',
+      });
+    });
+
+    it('should expose fs named exports to native ESM imports', async () => {
+      vfs.writeFileSync('/existing.txt', 'hello');
+
+      const { exports } = await runtime.execute(`
+        import { appendFileSync, chmodSync, chownSync, existsSync, readFileSync } from 'node:fs';
+
+        appendFileSync('/existing.txt', ' world');
+        chmodSync('/existing.txt', 0o644);
+        chownSync('/existing.txt', 1000, 1000);
+
+        export default {
+          exists: existsSync('/existing.txt'),
+          content: readFileSync('/existing.txt', 'utf8'),
+          appendFileSyncType: typeof appendFileSync,
+          chmodSyncType: typeof chmodSync,
+          chownSyncType: typeof chownSync,
+        };
+      `, '/entry.mjs');
+
+      expect(exports).toEqual({
+        exists: true,
+        content: 'hello world',
+        appendFileSyncType: 'function',
+        chmodSyncType: 'function',
+        chownSyncType: 'function',
+      });
+    });
+
+    it('should expose fs/promises and fs watcher exports to native ESM imports', async () => {
+      const { exports } = await runtime.execute(`
+        import {
+          constants,
+          closeSync,
+          fstat,
+          openSync,
+          readFileSync,
+          watchFile,
+          unwatchFile,
+          writeFileSync,
+        } from 'node:fs';
+        import { link, readlink, symlink, truncate } from 'node:fs/promises';
+
+        writeFileSync('/source.txt', 'hello world');
+        await link('/source.txt', '/linked.txt');
+        await symlink('/source.txt', '/alias.txt');
+        await truncate('/linked.txt', 5);
+
+        const fd = openSync('/linked.txt', 'r');
+        const stats = await new Promise((resolve, reject) => {
+          fstat(fd, (err, value) => {
+            if (err) reject(err);
+            else resolve(value);
+          });
+        });
+        closeSync(fd);
+
+        export default {
+          linkedContent: readFileSync('/linked.txt', 'utf8'),
+          aliasContent: readFileSync('/alias.txt', 'utf8'),
+          aliasTarget: await readlink('/alias.txt'),
+          constantsType: typeof constants,
+          appendFlag: constants.O_APPEND,
+          statsIsFile: stats.isFile(),
+          watchFileType: typeof watchFile,
+          unwatchFileType: typeof unwatchFile,
+          truncateType: typeof truncate,
+        };
+      `, '/entry-fs-promises.mjs');
+
+      expect(exports).toEqual({
+        linkedContent: 'hello',
+        aliasContent: 'hello world',
+        aliasTarget: '/source.txt',
+        constantsType: 'object',
+        appendFlag: 1024,
+        statsIsFile: true,
+        watchFileType: 'function',
+        unwatchFileType: 'function',
+        truncateType: 'function',
+      });
+    });
+
+    it('should expose util named exports to native ESM imports', async () => {
+      const { exports } = await runtime.execute(`
+        import { inspect, isDeepStrictEqual } from 'node:util';
+
+        export default {
+          inspectType: typeof inspect,
+          equalObjects: isDeepStrictEqual({ a: 1, nested: [1, 2] }, { a: 1, nested: [1, 2] }),
+          unequalObjects: isDeepStrictEqual({ a: 1 }, { a: 2 }),
+        };
+      `, '/entry-util.mjs');
+
+      expect(exports).toEqual({
+        inspectType: 'function',
+        equalObjects: true,
+        unequalObjects: false,
+      });
+    });
+
+    it('should expose stream named exports to native ESM imports', async () => {
+      const { exports } = await runtime.execute(`
+        import Stream, { PassThrough, Readable } from 'node:stream';
+
+        export default {
+          defaultType: typeof Stream,
+          passThroughType: typeof PassThrough,
+          readableType: typeof Readable,
+          streamHasPassThrough: Stream.PassThrough === PassThrough,
+        };
+      `, '/entry.mjs');
+
+      expect(exports).toEqual({
+        defaultType: 'function',
+        passThroughType: 'function',
+        readableType: 'function',
+        streamHasPassThrough: true,
+      });
+    });
+
+    it('should normalize signal-exit object exports to callable function', async () => {
       vfs.writeFileSync(
         '/node_modules/signal-exit/package.json',
         JSON.stringify({
@@ -306,7 +529,7 @@ module.exports = {
 `
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const onExit = require('signal-exit');
         const cleanup = onExit(() => {});
         module.exports = {
@@ -325,7 +548,7 @@ module.exports = {
       });
     });
 
-    it('should provide a default export for __esModule CJS packages missing default', () => {
+    it('should provide a default export for __esModule CJS packages missing default', async () => {
       vfs.writeFileSync(
         '/node_modules/@xterm/headless/package.json',
         JSON.stringify({
@@ -341,7 +564,7 @@ exports.Terminal = class Terminal {};
 `
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         var __create = Object.create;
         var __defProp = Object.defineProperty;
         var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -374,10 +597,10 @@ exports.Terminal = class Terminal {};
       expect(exports).toBe('function');
     });
 
-    it('should resolve relative modules', () => {
+    it('should resolve relative modules', async () => {
       vfs.writeFileSync('/lib/helper.js', 'module.exports = { value: 42 };');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const helper = require('./lib/helper');
         module.exports = helper.value;
       `);
@@ -385,7 +608,7 @@ exports.Terminal = class Terminal {};
       expect(exports).toBe(42);
     });
 
-    it('should resolve legacy build/src deep imports to build/cjs/src fallback', () => {
+    it('should resolve legacy build/src deep imports to build/cjs/src fallback', async () => {
       vfs.writeFileSync(
         '/node_modules/gaxios/package.json',
         JSON.stringify({
@@ -406,14 +629,14 @@ exports.Terminal = class Terminal {};
         'module.exports = require("gaxios/build/src/common");'
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('googleapis-common/build/src/http2');
       `);
 
       expect(exports).toEqual({ ok: true });
     });
 
-    it('should resolve package directories with index.json when main is absent', () => {
+    it('should resolve package directories with index.json when main is absent', async () => {
       vfs.writeFileSync(
         '/node_modules/spdx-license-ids/package.json',
         JSON.stringify({
@@ -426,37 +649,37 @@ exports.Terminal = class Terminal {};
         JSON.stringify(['MIT', 'Apache-2.0'])
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('spdx-license-ids');
       `);
 
       expect(exports).toEqual(['MIT', 'Apache-2.0']);
     });
 
-    it('should resolve modules with .js extension', () => {
+    it('should resolve modules with .js extension', async () => {
       vfs.writeFileSync('/lib/mod.js', 'module.exports = "found";');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('./lib/mod.js');
       `);
 
       expect(exports).toBe('found');
     });
 
-    it('should resolve modules without extension', () => {
+    it('should resolve modules without extension', async () => {
       vfs.writeFileSync('/lib/noext.js', 'module.exports = "no ext";');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('./lib/noext');
       `);
 
       expect(exports).toBe('no ext');
     });
 
-    it('should resolve JSON modules', () => {
+    it('should resolve JSON modules', async () => {
       vfs.writeFileSync('/data.json', '{"key": "value", "num": 123}');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const data = require('./data.json');
         module.exports = data;
       `);
@@ -464,17 +687,17 @@ exports.Terminal = class Terminal {};
       expect(exports).toEqual({ key: 'value', num: 123 });
     });
 
-    it('should resolve directory with index.js', () => {
+    it('should resolve directory with index.js', async () => {
       vfs.writeFileSync('/lib/index.js', 'module.exports = "from index";');
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('./lib');
       `);
 
       expect(exports).toBe('from index');
     });
 
-    it('should resolve node_modules packages', () => {
+    it('should resolve node_modules packages', async () => {
       vfs.writeFileSync(
         '/node_modules/my-pkg/package.json',
         '{"name": "my-pkg", "main": "main.js"}'
@@ -484,27 +707,27 @@ exports.Terminal = class Terminal {};
         'module.exports = "from package";'
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('my-pkg');
       `);
 
       expect(exports).toBe('from package');
     });
 
-    it('should resolve node_modules with index.js fallback', () => {
+    it('should resolve node_modules with index.js fallback', async () => {
       vfs.writeFileSync(
         '/node_modules/simple-pkg/index.js',
         'module.exports = "simple";'
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('simple-pkg');
       `);
 
       expect(exports).toBe('simple');
     });
 
-    it('should load http2-wrapper js-stream-socket probe without crashing', () => {
+    it('should load http2-wrapper js-stream-socket probe without crashing', async () => {
       vfs.writeFileSync(
         '/node_modules/http2-wrapper/package.json',
         JSON.stringify({
@@ -522,7 +745,7 @@ module.exports = JSStreamSocket;
 `
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const JSStreamSocket = require('http2-wrapper');
         const stream = require('stream');
         const socket = new JSStreamSocket(new stream.PassThrough());
@@ -538,7 +761,7 @@ module.exports = JSStreamSocket;
       });
     });
 
-    it('should handle top-level await import syntax in transformed modules', () => {
+    it('should handle top-level await import syntax in transformed modules', async () => {
       vfs.writeFileSync(
         '/node_modules/tla-pkg/index.js',
         `
@@ -553,14 +776,14 @@ module.exports = 'ok';
         'module.exports = { enabled: true };'
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('tla-pkg');
       `);
 
       expect(exports).toBe('ok');
     });
 
-    it('should handle awaited __dynamicImport syntax from partially transformed modules', () => {
+    it('should handle awaited __dynamicImport syntax from partially transformed modules', async () => {
       vfs.writeFileSync(
         '/node_modules/tla-dyn/index.js',
         `
@@ -575,7 +798,7 @@ module.exports = 'ok';
         'module.exports = { enabled: true };'
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('tla-dyn');
       `);
 
@@ -590,21 +813,21 @@ module.exports = 'ok';
         },
       });
 
-      const result = runtime.execute(`
+      const result = await runtime.execute(`
 import process from 'node:process';
 
 const value = await Promise.resolve('codex-ok');
 process.stdout.write(value);
-module.exports = value;
+export default value;
 `, '/entry.js');
 
       await result.module.executionPromise;
 
-      expect(result.module.exports).toBe('codex-ok');
+      expect(result.exports).toBe('codex-ok');
       expect(stdout.join('')).toBe('codex-ok');
     });
 
-    it('should resolve aliased package directories with exports field', () => {
+    it('should resolve aliased package directories with exports field', async () => {
       vfs.writeFileSync(
         '/node_modules/ink/package.json',
         JSON.stringify({
@@ -619,14 +842,14 @@ module.exports = value;
         'module.exports = "ink via alias";'
       );
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         module.exports = require('ink');
       `);
 
       expect(exports).toBe('ink via alias');
     });
 
-    it('should use preloaded yoga-layout shim when available', () => {
+    it('should use preloaded yoga-layout shim when available', async () => {
       const g = globalThis as any;
       const prevYoga = g.__almostnodeYogaLayout;
       const prevYogaError = g.__almostnodeYogaLayoutError;
@@ -639,7 +862,7 @@ module.exports = value;
       g.__almostnodeYogaLayoutError = undefined;
 
       try {
-        const { exports } = runtime.execute(`
+        const { exports } = await runtime.execute(`
           const yoga = require('yoga-layout');
           module.exports = {
             edge: yoga.EDGE_LEFT,
@@ -654,13 +877,13 @@ module.exports = value;
       }
     });
 
-    it('should cache modules', () => {
+    it('should cache modules', async () => {
       vfs.writeFileSync('/counter.js', `
         let count = 0;
         module.exports = { increment: () => ++count, getCount: () => count };
       `);
 
-      const { exports } = runtime.execute(`
+      const { exports } = await runtime.execute(`
         const counter1 = require('./counter');
         const counter2 = require('./counter');
         counter1.increment();
@@ -674,22 +897,20 @@ module.exports = value;
       expect(exports).toEqual({ sameInstance: true, count: 2 });
     });
 
-    it('should throw on missing module', () => {
-      expect(() =>
-        runtime.execute('require("nonexistent-module");')
-      ).toThrow(/Cannot find module/);
+    it('should throw on missing module', async () => {
+      await expect(runtime.execute('require("nonexistent-module");')).rejects.toThrow(/Cannot find module/);
     });
   });
 
   describe('console capture', () => {
-    it('should capture console output', () => {
+    it('should capture console output', async () => {
       const logs: Array<{ method: string; args: unknown[] }> = [];
 
       const captureRuntime = new Runtime(vfs, {
         onConsole: (method, args) => logs.push({ method, args }),
       });
 
-      captureRuntime.execute(`
+      await captureRuntime.execute(`
         console.log('hello', 'world');
         console.error('error message');
         console.warn('warning');
@@ -702,50 +923,50 @@ module.exports = value;
   });
 
   describe('runFile', () => {
-    it('should run a file from the virtual file system', () => {
+    it('should run a file from the virtual file system', async () => {
       vfs.writeFileSync('/app.js', 'module.exports = "app output";');
 
-      const { exports } = runtime.runFile('/app.js');
+      const { exports } = await runtime.runFile('/app.js');
 
       expect(exports).toBe('app output');
     });
   });
 
   describe('execute helper function', () => {
-    it('should execute code with a new runtime', () => {
+    it('should execute code with a new runtime', async () => {
       const testVfs = new VirtualFS();
-      const { exports } = execute('module.exports = "executed";', testVfs);
+      const { exports } = await execute('module.exports = "executed";', testVfs);
       expect(exports).toBe('executed');
     });
   });
 
   describe('clearCache', () => {
-    it('should allow reloading modules after cache clear', () => {
+    it('should allow reloading modules after cache clear', async () => {
       vfs.writeFileSync('/module.js', 'module.exports = 1;');
 
-      const result1 = runtime.execute('module.exports = require("./module");');
+      const result1 = await runtime.execute('module.exports = require("./module");');
       expect(result1.exports).toBe(1);
 
       // Modify the file
       vfs.writeFileSync('/module.js', 'module.exports = 2;');
 
       // Without clearing cache, still returns old value
-      const result2 = runtime.execute('module.exports = require("./module");');
+      const result2 = await runtime.execute('module.exports = require("./module");');
       expect(result2.exports).toBe(1);
 
       // After clearing cache, returns new value
       runtime.clearCache();
-      const result3 = runtime.execute('module.exports = require("./module");');
+      const result3 = await runtime.execute('module.exports = require("./module");');
       expect(result3.exports).toBe(2);
     });
   });
 
   describe('module resolution caching', () => {
-    it('should resolve the same module path consistently', () => {
+    it('should resolve the same module path consistently', async () => {
       vfs.writeFileSync('/lib/util.js', 'module.exports = { name: "util" };');
 
       // First require should resolve and cache the path
-      const result1 = runtime.execute(`
+      const result1 = await runtime.execute(`
         const util1 = require('./lib/util');
         const util2 = require('./lib/util');
         module.exports = util1 === util2;
@@ -755,7 +976,7 @@ module.exports = value;
       expect(result1.exports).toBe(true);
     });
 
-    it('should cache module resolution across multiple files', () => {
+    it('should cache module resolution across multiple files', async () => {
       vfs.writeFileSync('/shared.js', 'module.exports = { count: 0 };');
       vfs.writeFileSync('/a.js', `
         const shared = require('./shared');
@@ -768,7 +989,7 @@ module.exports = value;
         module.exports = shared;
       `);
 
-      const result = runtime.execute(`
+      const result = await runtime.execute(`
         const a = require('./a');
         const b = require('./b');
         module.exports = { aCount: a.count, bCount: b.count, same: a === b };
@@ -779,34 +1000,30 @@ module.exports = value;
       expect((result.exports as any).bCount).toBe(2); // Incremented twice
     });
 
-    it('should handle resolution cache for non-existent modules', () => {
+    it('should handle resolution cache for non-existent modules', async () => {
       // First attempt should fail
-      expect(() => {
-        runtime.execute('require("./nonexistent")');
-      }).toThrow(/Cannot find module/);
+      await expect(runtime.execute('require("./nonexistent")')).rejects.toThrow(/Cannot find module/);
 
       // Second attempt should also fail (cached negative result)
-      expect(() => {
-        runtime.execute('require("./nonexistent")');
-      }).toThrow(/Cannot find module/);
+      await expect(runtime.execute('require("./nonexistent")')).rejects.toThrow(/Cannot find module/);
 
       // Now create the module
       vfs.writeFileSync('/nonexistent.js', 'module.exports = "found";');
 
       // After cache clear, should find the module
       runtime.clearCache();
-      const result = runtime.execute('module.exports = require("./nonexistent");');
+      const result = await runtime.execute('module.exports = require("./nonexistent");');
       expect(result.exports).toBe('found');
     });
   });
 
   describe('processed code caching', () => {
-    it('should reuse processed code when module cache is cleared but content unchanged', () => {
+    it('should reuse processed code when module cache is cleared but content unchanged', async () => {
       // Create a simple CJS module
       vfs.writeFileSync('/cached-module.js', 'module.exports = { value: 42 };');
 
       // First execution
-      const result1 = runtime.execute(`
+      const result1 = await runtime.execute(`
         const mod = require('./cached-module.js');
         module.exports = mod.value;
       `);
@@ -816,17 +1033,17 @@ module.exports = value;
       runtime.clearCache();
 
       // Second execution - module needs to be re-required but code processing is cached
-      const result2 = runtime.execute(`
+      const result2 = await runtime.execute(`
         const mod = require('./cached-module.js');
         module.exports = mod.value;
       `);
       expect(result2.exports).toBe(42);
     });
 
-    it('should reprocess code when content changes', () => {
+    it('should reprocess code when content changes', async () => {
       vfs.writeFileSync('/changeable.js', 'module.exports = { num: 1 };');
 
-      const result1 = runtime.execute(`
+      const result1 = await runtime.execute(`
         const mod = require('./changeable.js');
         module.exports = mod.num;
       `);
@@ -839,118 +1056,115 @@ module.exports = value;
       runtime.clearCache();
 
       // Should get new value (code was reprocessed due to content change)
-      const result2 = runtime.execute(`
+      const result2 = await runtime.execute(`
         const mod = require('./changeable.js');
         module.exports = mod.num;
       `);
       expect(result2.exports).toBe(2);
     });
 
-    it('should handle ESM to CJS transformation caching', () => {
-      // Create a file with ESM syntax in /esm/ directory (triggers transformation)
+    it('should invalidate native ESM module URLs after cache clear', async () => {
       vfs.mkdirSync('/esm', { recursive: true });
       vfs.writeFileSync('/esm/helper.js', `
         export const multiply = (a, b) => a * b;
         export const add = (a, b) => a + b;
       `);
 
-      const result1 = runtime.execute(`
-        const helper = require('./esm/helper.js');
-        module.exports = helper.multiply(3, 4);
-      `);
+      const result1 = await runtime.execute(`
+        import { multiply } from './esm/helper.js';
+        export default multiply(3, 4);
+      `, '/entry.mjs');
       expect(result1.exports).toBe(12);
 
-      // Clear module cache
       runtime.clearCache();
 
-      // The transformed code should still work after cache clear
-      const result2 = runtime.execute(`
-        const helper = require('./esm/helper.js');
-        module.exports = helper.add(10, 5);
-      `);
+      const result2 = await runtime.execute(`
+        import { add } from './esm/helper.js';
+        export default add(10, 5);
+      `, '/entry.mjs');
       expect(result2.exports).toBe(15);
     });
   });
 
   describe('createREPL', () => {
-    it('should return expression values', () => {
+    it('should return expression values', async () => {
       const repl = runtime.createREPL();
-      expect(repl.eval('1 + 2')).toBe(3);
-      expect(repl.eval('"hello".toUpperCase()')).toBe('HELLO');
+      expect(await repl.eval('1 + 2')).toBe(3);
+      expect(await repl.eval('"hello".toUpperCase()')).toBe('HELLO');
     });
 
-    it('should persist variables across calls', () => {
+    it('should persist variables across calls', async () => {
       const repl = runtime.createREPL();
-      repl.eval('var x = 42');
-      expect(repl.eval('x')).toBe(42);
+      await repl.eval('var x = 42');
+      expect(await repl.eval('x')).toBe(42);
     });
 
-    it('should persist const/let as var', () => {
+    it('should persist const/let as var', async () => {
       const repl = runtime.createREPL();
-      repl.eval('const a = 1');
-      expect(repl.eval('a')).toBe(1);
-      repl.eval('let b = 2');
-      expect(repl.eval('b')).toBe(2);
+      await repl.eval('const a = 1');
+      expect(await repl.eval('a')).toBe(1);
+      await repl.eval('let b = 2');
+      expect(await repl.eval('b')).toBe(2);
     });
 
-    it('should have access to require', () => {
+    it('should have access to require', async () => {
       const repl = runtime.createREPL();
-      expect(repl.eval("require('path').join('/foo', 'bar')")).toBe('/foo/bar');
+      expect(await repl.eval("require('path').join('/foo', 'bar')")).toBe('/foo/bar');
     });
 
-    it('should have access to Buffer', () => {
+    it('should have access to Buffer', async () => {
       const repl = runtime.createREPL();
-      const result = repl.eval("Buffer.from('hello').toString('base64')");
+      const result = await repl.eval("Buffer.from('hello').toString('base64')");
       expect(result).toBe('aGVsbG8=');
     });
 
-    it('should have access to process', () => {
+    it('should have access to process', async () => {
       const repl = runtime.createREPL();
-      expect(repl.eval('typeof process')).toBe('object');
-      expect(repl.eval('typeof process.env')).toBe('object');
+      expect(await repl.eval('typeof process')).toBe('object');
+      expect(await repl.eval('typeof process.env')).toBe('object');
     });
 
-    it('should handle require("fs") read/write', () => {
+    it('should handle require("fs") read/write', async () => {
       vfs.mkdirSync('/repl-test', { recursive: true });
       const repl = runtime.createREPL();
-      repl.eval("var fs = require('fs')");
-      repl.eval("fs.writeFileSync('/repl-test/hello.txt', 'Hello REPL!')");
-      expect(repl.eval("fs.readFileSync('/repl-test/hello.txt', 'utf8')")).toBe('Hello REPL!');
+      await repl.eval("var fs = require('fs')");
+      await repl.eval("fs.writeFileSync('/repl-test/hello.txt', 'Hello REPL!')");
+      expect(await repl.eval("fs.readFileSync('/repl-test/hello.txt', 'utf8')")).toBe('Hello REPL!');
     });
 
-    it('should throw on invalid code', () => {
+    it('should throw on invalid code', async () => {
       const repl = runtime.createREPL();
-      expect(() => repl.eval('undefined_var')).toThrow();
+      await expect(repl.eval('undefined_var')).rejects.toThrow();
     });
 
-    it('should handle multi-statement code', () => {
+    it('should handle multi-statement code', async () => {
       const repl = runtime.createREPL();
-      const result = repl.eval("var a = 1; var b = 2; a + b");
+      const result = await repl.eval("var a = 1; var b = 2; a + b");
       expect(result).toBe(3);
     });
 
-    it('should capture console.log via onConsole', () => {
+    it('should capture console.log via onConsole', async () => {
       const logs: string[][] = [];
       const rt = new Runtime(vfs, {
         onConsole: (method, args) => { logs.push(args.map(String)); },
       });
       const repl = rt.createREPL();
-      repl.eval("console.log('hello from repl')");
+      await repl.eval("console.log('hello from repl')");
       expect(logs).toHaveLength(1);
       expect(logs[0]).toContain('hello from repl');
     });
 
-    it('should isolate separate REPL instances', () => {
+    it('should isolate separate REPL instances', async () => {
       const repl1 = runtime.createREPL();
       const repl2 = runtime.createREPL();
-      repl1.eval('var x = 100');
-      expect(repl1.eval('x')).toBe(100);
-      expect(() => repl2.eval('x')).toThrow();
+      await repl1.eval('var x = 100');
+      expect(await repl1.eval('x')).toBe(100);
+      await expect(repl2.eval('x')).rejects.toThrow();
     });
   });
 
   describe('browser field in package.json', () => {
-    it('should prefer browser field (string) over main for package entry', () => {
+    it('should prefer browser field (string) over main for package entry', async () => {
       // Simulate depd's package.json: "browser": "lib/browser/index.js"
       vfs.writeFileSync('/node_modules/testpkg/package.json', JSON.stringify({
         name: 'testpkg',
@@ -960,34 +1174,34 @@ module.exports = value;
       vfs.writeFileSync('/node_modules/testpkg/index.js', 'module.exports = "node";');
       vfs.writeFileSync('/node_modules/testpkg/lib/browser/index.js', 'module.exports = "browser";');
 
-      const { exports } = runtime.execute('module.exports = require("testpkg");');
+      const { exports } = await runtime.execute('module.exports = require("testpkg");');
       expect(exports).toBe('browser');
     });
 
-    it('should fall back to main when browser field is not set', () => {
+    it('should fall back to main when browser field is not set', async () => {
       vfs.writeFileSync('/node_modules/nopkg/package.json', JSON.stringify({
         name: 'nopkg',
         main: 'lib/main.js',
       }));
       vfs.writeFileSync('/node_modules/nopkg/lib/main.js', 'module.exports = "main";');
 
-      const { exports } = runtime.execute('module.exports = require("nopkg");');
+      const { exports } = await runtime.execute('module.exports = require("nopkg");');
       expect(exports).toBe('main');
     });
 
-    it('should fall back to index.js when neither browser nor main is set', () => {
+    it('should fall back to index.js when neither browser nor main is set', async () => {
       vfs.writeFileSync('/node_modules/defpkg/package.json', JSON.stringify({
         name: 'defpkg',
       }));
       vfs.writeFileSync('/node_modules/defpkg/index.js', 'module.exports = "default";');
 
-      const { exports } = runtime.execute('module.exports = require("defpkg");');
+      const { exports } = await runtime.execute('module.exports = require("defpkg");');
       expect(exports).toBe('default');
     });
   });
 
   describe('Error.captureStackTrace polyfill', () => {
-    it('should provide CallSite objects when prepareStackTrace is set', () => {
+    it('should provide CallSite objects when prepareStackTrace is set', async () => {
       // Save and remove native captureStackTrace to test polyfill
       const origCapture = (Error as any).captureStackTrace;
       const origPrepare = (Error as any).prepareStackTrace;
@@ -1026,7 +1240,7 @@ module.exports = value;
       }
     });
 
-    it('should set stackTraceLimit when polyfilling', () => {
+    it('should set stackTraceLimit when polyfilling', async () => {
       const origCapture = (Error as any).captureStackTrace;
       const origLimit = (Error as any).stackTraceLimit;
       delete (Error as any).captureStackTrace;

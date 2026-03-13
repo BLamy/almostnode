@@ -42,10 +42,9 @@ export function initNpmServe(vfs: VirtualFS): void {
 }
 
 /**
- * Resolve a package specifier to its CJS entry point in VFS.
- * Prefers `require` condition over `import` to avoid .mjs files
- * (which were ESM→CJS transformed but keep the .mjs extension,
- * confusing esbuild's module format detection).
+ * Resolve a package specifier to its browser-bundle entry point in VFS.
+ * Prefers native ESM/server-like entries first now that install-time
+ * ESM-to-CJS transformation is no longer the default.
  */
 /**
  * Recursively resolve nested export conditions to a file path string.
@@ -53,10 +52,10 @@ export function initNpmServe(vfs: VirtualFS): void {
  *   { "import": { "types": "...", "import": "./dist/esm/server/index.js" },
  *     "require": { "types": "...", "require": "./dist/cjs/server/index.js" } }
  *
- * Prefers require > import > module > default (CJS-first to avoid .mjs issues).
+ * Prefers import > module > default > require.
  * Skips 'types' condition (resolves to .d.ts files).
  */
-const CJS_CONDITION_PRIORITY = ['require', 'import', 'module', 'default'] as const;
+const CJS_CONDITION_PRIORITY = ['import', 'module', 'default', 'require'] as const;
 
 function resolveExportEntry(entry: unknown): string | undefined {
   if (typeof entry === 'string') return entry;
@@ -108,9 +107,9 @@ function resolvePackageEntry(specifier: string): string | null {
       }
     }
 
-    // Fallback to main/module fields
+    // Fallback to module/main fields
     if (!subPath) {
-      const mainEntry = pkgJson.main || pkgJson.module;
+      const mainEntry = pkgJson.module || pkgJson.main;
       if (mainEntry) {
         const fullPath = pkgDir + '/' + mainEntry.replace(/^\.\//, '');
         if (isFile(fullPath)) return fullPath;
@@ -215,15 +214,10 @@ export async function bundleNpmModuleForBrowser(specifier: string): Promise<stri
   const cached = bundleCache.get(specifier);
   if (cached) return cached;
 
-  // Resolve the CJS entry point directly to avoid .mjs module format issues.
-  // All packages in VFS have been ESM→CJS transformed during install,
-  // so we prefer the `require` condition to get a native .js/.cjs file
-  // that esbuild can correctly detect as CJS and extract named exports.
+  // Resolve the package entry directly from VFS.
   const entryPath = resolvePackageEntry(specifier);
 
-  // Extract named exports from the CJS entry before bundling.
-  // esbuild can't statically extract named exports from CJS, so we
-  // parse the entry file for __export() patterns and post-process.
+  // Extract likely named exports from CJS entries before bundling.
   let exportNames: string[] = [];
   if (entryPath && moduleVFS) {
     try {

@@ -67,6 +67,33 @@ process.stdin.on('data', (chunk) => {
     expect(secondOutput.join('')).not.toContain('first:alpha');
   });
 
+  it('keeps explicitly interactive sessions alive until they are aborted', async () => {
+    const container = createContainer();
+    container.vfs.writeFileSync('/quiet-interactive.js', `
+console.log('ready');
+setInterval(() => {}, 1000);
+`);
+
+    const session = container.createTerminalSession({ cwd: '/' });
+    const runPromise = session.run('node /quiet-interactive.js', {
+      interactive: true,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const settled = await Promise.race([
+      runPromise.then(() => 'done'),
+      new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 100)),
+    ]);
+
+    expect(session.getState().running).toBe(true);
+    expect(settled).toBe('waiting');
+
+    session.abort();
+    const result = await runPromise;
+    expect(result.exitCode).toBe(130);
+    expect(result.stdout).toContain('ready');
+  });
+
   it('keeps nested child_process exec calls bound to the launching session', async () => {
     const container = createContainer();
     container.vfs.mkdirSync('/project/a', { recursive: true });

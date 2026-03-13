@@ -828,7 +828,7 @@ export default app;
   globalThis.addEventListener('unhandledrejection', rejectionHandler);
 
   try {
-    cliRuntime.execute(cliCode, '/project/cli-runner.js');
+    await cliRuntime.execute(cliCode, '/project/cli-runner.js');
     log('CLI synchronous execution completed (async work continues in background)');
   } catch (cliError) {
     // Some errors are expected (like process.exit or stack overflow in watcher)

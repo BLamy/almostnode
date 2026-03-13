@@ -46,6 +46,7 @@ export const SYNTHETIC_EXECUTABLE_PATHS = new Set<string>([
   '/usr/local/bin/npx',
   '/usr/bin/tar',
   '/usr/local/bin/tar',
+  '/usr/local/bin/claude-wrapper',
 ]);
 
 export function getSyntheticShellSpec(command: string): SyntheticShellSpec | null {

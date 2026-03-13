@@ -688,6 +688,12 @@ class BufferPolyfill extends Uint8Array {
       return new BufferPolyfill(bytes);
     }
     if (data instanceof ArrayBuffer) {
+      if (typeof encodingOrMapfn === 'number') {
+        // Buffer.from(arrayBuffer, byteOffset, length)
+        const byteOffset = encodingOrMapfn;
+        const length = typeof thisArg === 'number' ? thisArg : data.byteLength - byteOffset;
+        return new BufferPolyfill(new Uint8Array(data, byteOffset, length));
+      }
       return new BufferPolyfill(data);
     }
     return new BufferPolyfill(data);
@@ -721,7 +727,7 @@ class BufferPolyfill extends Uint8Array {
   }
 
   static isBuffer(obj: unknown): obj is BufferPolyfill {
-    return obj instanceof BufferPolyfill || obj instanceof Uint8Array;
+    return obj instanceof BufferPolyfill;
   }
 
   static isEncoding(encoding: string): boolean {

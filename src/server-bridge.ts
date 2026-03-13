@@ -41,6 +41,8 @@ export interface BridgeOptions {
   onServerReady?: (port: number, url: string) => void;
 }
 
+type ModuleRequestHandler = (url: string) => Promise<ResponseData>;
+
 export interface InitServiceWorkerOptions {
   /**
    * The URL path to the service worker file
@@ -55,11 +57,13 @@ export interface InitServiceWorkerOptions {
 export class ServerBridge extends EventEmitter {
   static DEBUG = false;
   private servers: Map<number, VirtualServer> = new Map();
+  private moduleProviders: Map<string, ModuleRequestHandler> = new Map();
   private baseUrl: string;
   private options: BridgeOptions;
   private messageChannel: MessageChannel | null = null;
   private serviceWorkerReady: boolean = false;
   private keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+  private swInitPromise: Promise<void> | null = null;
 
   constructor(options: BridgeOptions = {}) {
     super();
@@ -163,6 +167,14 @@ export class ServerBridge extends EventEmitter {
    * @param options.swUrl - Custom URL path to the service worker file (default: '/__sw__.js')
    */
   async initServiceWorker(options?: InitServiceWorkerOptions): Promise<void> {
+    if (this.serviceWorkerReady) {
+      return;
+    }
+    if (this.swInitPromise) {
+      return this.swInitPromise;
+    }
+
+    this.swInitPromise = (async () => {
     if (!('serviceWorker' in navigator)) {
       throw new Error('Service Workers not supported');
     }
@@ -245,6 +257,31 @@ export class ServerBridge extends EventEmitter {
 
     this.serviceWorkerReady = true;
     this.emit('sw-ready');
+    })().catch((error) => {
+      this.swInitPromise = null;
+      throw error;
+    });
+
+    return this.swInitPromise;
+  }
+
+  async ensureServiceWorkerReady(options?: InitServiceWorkerOptions): Promise<void> {
+    if (this.serviceWorkerReady) {
+      return;
+    }
+    await this.initServiceWorker(options);
+  }
+
+  isServiceWorkerReady(): boolean {
+    return this.serviceWorkerReady;
+  }
+
+  registerModuleProvider(runtimeId: string, handler: ModuleRequestHandler): void {
+    this.moduleProviders.set(runtimeId, handler);
+  }
+
+  unregisterModuleProvider(runtimeId: string): void {
+    this.moduleProviders.delete(runtimeId);
   }
 
   /**
@@ -299,7 +336,61 @@ export class ServerBridge extends EventEmitter {
           error: error instanceof Error ? error.message : 'Unknown error',
         });
       }
+      return;
     }
+
+    if (type === 'module-request') {
+      try {
+        const response = await this.handleModuleRequest(data.url);
+        let bodyBase64 = '';
+        if (response.body && response.body.length > 0) {
+          bodyBase64 = uint8ToBase64(response.body);
+        }
+
+        this.messageChannel?.port1.postMessage({
+          type: 'response',
+          id,
+          data: {
+            statusCode: response.statusCode,
+            statusMessage: response.statusMessage,
+            headers: response.headers,
+            bodyBase64,
+          },
+        });
+      } catch (error) {
+        this.messageChannel?.port1.postMessage({
+          type: 'response',
+          id,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+  }
+
+  private async handleModuleRequest(url: string): Promise<ResponseData> {
+    const parsed = new URL(url, this.baseUrl);
+    const match = parsed.pathname.match(/^\/__modules__\/r\/([^/]+)/);
+    if (!match) {
+      return {
+        statusCode: 404,
+        statusMessage: 'Not Found',
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: Buffer.from(`Unknown module request: ${url}`),
+      };
+    }
+
+    const runtimeId = decodeURIComponent(match[1]);
+    const provider = this.moduleProviders.get(runtimeId);
+    if (!provider) {
+      return {
+        statusCode: 404,
+        statusMessage: 'Not Found',
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: Buffer.from(`No module provider registered for runtime ${runtimeId}`),
+      };
+    }
+
+    return provider(parsed.pathname + parsed.search);
   }
 
   /**
@@ -407,6 +498,15 @@ export class ServerBridge extends EventEmitter {
   createFetchHandler(): (request: Request) => Promise<Response> {
     return async (request: Request): Promise<Response> => {
       const url = new URL(request.url);
+
+      if (url.pathname.startsWith('/__modules__/r/')) {
+        const response = await this.handleModuleRequest(url.pathname + url.search);
+        return new Response(response.body, {
+          status: response.statusCode,
+          statusText: response.statusMessage,
+          headers: response.headers,
+        });
+      }
 
       // Check if this is a virtual server request
       const match = url.pathname.match(/^\/__virtual__\/(\d+)(\/.*)?$/);

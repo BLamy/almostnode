@@ -18,6 +18,12 @@ if (typeof globalThis.process === 'undefined') {
     platform: 'linux',
     version: 'v18.0.0',
     versions: { node: '18.0.0' },
+    pid: Math.floor(Math.random() * 10000) + 1000,
+    ppid: 0,
+    getuid: () => 1000,
+    getgid: () => 1000,
+    geteuid: () => 1000,
+    getegid: () => 1000,
     stdout: { write: () => {} },
     stderr: { write: () => {} },
   };
@@ -26,7 +32,7 @@ if (typeof globalThis.process === 'undefined') {
 import { Bash, defineCommand } from 'just-bash';
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import { EventEmitter } from './events';
-import { writeToFdSync } from './fs';
+import { closeFdSync, dupFdSync, writeToFdSync } from './fs';
 import { Readable, Writable, Buffer } from './stream';
 import type { VirtualFS } from '../virtual-fs';
 import { VirtualFSAdapter } from './vfs-adapter';
@@ -71,6 +77,8 @@ export interface ChildProcessExecutionContext {
   onStdout: ((data: string) => void) | null;
   onStderr: ((data: string) => void) | null;
   signal: AbortSignal | null;
+  /** Keep the execution alive until it explicitly exits or is aborted. */
+  interactive: boolean;
   activeProcessStdin: ActiveProcessStdin | null;
   activeForkedChildren: number;
   onForkedChildExit: (() => void) | null;
@@ -90,6 +98,7 @@ export interface ChildProcessController {
     onStdout?: (data: string) => void;
     onStderr?: (data: string) => void;
     signal?: AbortSignal;
+    interactive?: boolean;
   }) => ChildProcessExecutionContext;
   destroyExecution: (executionId: string | null | undefined) => void;
   runCommand: (
@@ -168,6 +177,7 @@ function createExecutionContext(
     onStdout?: (data: string) => void;
     onStderr?: (data: string) => void;
     signal?: AbortSignal;
+    interactive?: boolean;
   }
 ): ChildProcessExecutionContext {
   const execution: ChildProcessExecutionContext = {
@@ -176,6 +186,7 @@ function createExecutionContext(
     onStdout: opts?.onStdout || null,
     onStderr: opts?.onStderr || null,
     signal: opts?.signal || null,
+    interactive: !!opts?.interactive,
     activeProcessStdin: null,
     activeForkedChildren: 0,
     onForkedChildExit: null,
@@ -639,6 +650,7 @@ export function initChildProcess(vfs: VirtualFS): ChildProcessController {
       : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, '/');
     const isNodeModulesCli = resolvedPath.includes('/node_modules/');
     const isOneShotNodeModulesCli = isNodeModulesCli && isLikelyOneShotCliInvocation(args.slice(1));
+    const isNpxExec = ctx.env?.ALMOSTNODE_NPX_EXEC === '1';
     const isLongIdleNodeModulesCli =
       isNodeModulesCli &&
       !isOneShotNodeModulesCli &&
@@ -741,7 +753,7 @@ module.exports = (async () => {
 })();
       `;
 
-      const preloadResult = runtime.execute(preloadCode, '/__almostnode_preload_yoga__.js').exports;
+      const preloadResult = (await runtime.execute(preloadCode, '/__almostnode_preload_yoga__.js')).exports;
       if (preloadResult && typeof (preloadResult as Promise<unknown>).then === 'function') {
         await (preloadResult as Promise<unknown>);
       }
@@ -749,7 +761,7 @@ module.exports = (async () => {
 
     try {
       await preloadYogaLayout();
-      runtime.runFile(resolvedPath);
+      await runtime.runFile(resolvedPath);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('Process exited with code')) {
         return { stdout, stderr, exitCode };
@@ -806,7 +818,7 @@ module.exports = (async () => {
         : (isNodeModulesCli ? 300 : 200);
       const NO_OUTPUT_IDLE_MS = isLongIdleNodeModulesCli
         ? 120_000
-        : (isNodeModulesCli ? 2_000 : 1_000);
+        : (isNpxExec ? 30_000 : (isNodeModulesCli ? 2_000 : 1_000));
       const POST_CHILD_EXIT_IDLE_MS = isLongIdleNodeModulesCli ? 2_000 : 100;
       const ACTIVE_SUBPROCESS_STALE_MS = isLongIdleNodeModulesCli ? 20_000 : 2_000;
       const CHECK_MS = 50;
@@ -835,10 +847,10 @@ module.exports = (async () => {
 
         if (Date.now() - startTime >= MAX_TOTAL_MS) break;
 
-        const keepAliveForInteractiveInput = !!execution.signal && (
+        const keepAliveForInteractiveInput = execution.interactive || (!!execution.signal && (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
-        );
+        ));
         if (keepAliveForInteractiveInput) {
           continue;
         }
@@ -858,7 +870,8 @@ module.exports = (async () => {
         if (lastOutputLen === 0 && idleMs >= NO_OUTPUT_IDLE_MS) break;
       }
 
-      return { stdout, stderr, exitCode: exitCalled ? exitCode : 0 };
+      const aborted = execution.signal?.aborted;
+      return { stdout, stderr, exitCode: exitCalled ? exitCode : (aborted ? 130 : 0) };
     } finally {
       execution.activeProcessStdin = null;
       execution.onForkedChildExit = prevChildExitHandler;
@@ -1037,9 +1050,11 @@ module.exports = (async () => {
       };
     }
 
-    const execEnv = useExtendedNodeIdle
-      ? { ...ctx.env, ALMOSTNODE_LONG_NODE_IDLE: '1' }
-      : ctx.env;
+    const execEnv = {
+      ...ctx.env,
+      ...(useExtendedNodeIdle ? { ALMOSTNODE_LONG_NODE_IDLE: '1' } : {}),
+      ALMOSTNODE_NPX_EXEC: '1',
+    };
 
     if (resolvedBinTarget) {
       const fullCommand = ['node', resolvedBinTarget, ...commandArgs].map((value) => quoteArg(value)).join(' ');
@@ -1908,6 +1923,94 @@ function normalizeSpawnSyncOutput(
   return Buffer.from(stdout).toString(encoding);
 }
 
+function runSyntheticSyncCommand(
+  controller: ChildProcessController | null,
+  command: string,
+  args: string[],
+  options: { cwd?: string; env?: Record<string, string> }
+): { stdout: string; stderr: string; status: number } | null {
+  const normalizedCwd = normalizeCommandCwd(options.cwd ?? getDefaultProcessCwd());
+  const env = options.env || {};
+
+  const shell = getSyntheticShellSpec(command);
+  if (shell) {
+    const parsed = parseSyntheticShellExec(args);
+    if (parsed.error) {
+      const shellName = shell.names[0] || path.basename(command);
+      return {
+        stdout: '',
+        stderr: `${shellName}: ${parsed.error}`,
+        status: 2,
+      };
+    }
+    if (!parsed.script) {
+      return { stdout: '', stderr: '', status: 0 };
+    }
+    const shellTokens = splitCommandArgs(parsed.script);
+    if (shellTokens.length === 0) {
+      return { stdout: '', stderr: '', status: 0 };
+    }
+    return runSyntheticSyncCommand(controller, shellTokens[0], shellTokens.slice(1), {
+      cwd: normalizedCwd,
+      env,
+    });
+  }
+
+  const commandName = path.basename(command).toLowerCase();
+  switch (commandName) {
+    case 'pwd':
+      return { stdout: `${normalizedCwd}\n`, stderr: '', status: 0 };
+    case 'echo':
+      return { stdout: `${args.join(' ')}\n`, stderr: '', status: 0 };
+    case 'uname':
+      return { stdout: 'Linux\n', stderr: '', status: 0 };
+    case 'whoami':
+      return { stdout: `${env.USER || 'user'}\n`, stderr: '', status: 0 };
+    case 'true':
+      return { stdout: '', stderr: '', status: 0 };
+    case 'cat': {
+      if (!controller) return null;
+      const outputs: string[] = [];
+      for (const arg of args) {
+        const target = resolveFromCwd(normalizedCwd, arg);
+        if (!controller.vfs.existsSync(target)) {
+          return { stdout: '', stderr: `cat: ${arg}: No such file or directory\n`, status: 1 };
+        }
+        outputs.push(String(controller.vfs.readFileSync(target, 'utf8')));
+      }
+      return {
+        stdout: outputs.join(outputs.length > 1 ? '\n' : ''),
+        stderr: '',
+        status: 0,
+      };
+    }
+    case 'ls': {
+      if (!controller) return null;
+      const targetArg = args[0] || normalizedCwd;
+      const target = resolveFromCwd(normalizedCwd, targetArg);
+      if (!controller.vfs.existsSync(target)) {
+        return { stdout: '', stderr: `ls: cannot access '${targetArg}': No such file or directory\n`, status: 1 };
+      }
+      const stats = controller.vfs.statSync(target);
+      if (stats.isDirectory()) {
+        const entries = controller.vfs.readdirSync(target).slice().sort();
+        return {
+          stdout: entries.length > 0 ? `${entries.join('\n')}\n` : '',
+          stderr: '',
+          status: 0,
+        };
+      }
+      return {
+        stdout: `${path.basename(target)}\n`,
+        stderr: '',
+        status: 0,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 function getSyntheticExecFileSyncOutput(file: string, args: string[]): string | null {
   const command = path.basename(file).toLowerCase();
   const arch = getCurrentProcessArch();
@@ -2008,6 +2111,22 @@ function getSyntheticSpawnSyncResult(
     };
   }
 
+  const syntheticResult = runSyntheticSyncCommand(controller, command, args, {
+    cwd: options.cwd,
+    env: options.env,
+  });
+  if (syntheticResult) {
+    return {
+      stdout: normalizeSpawnSyncOutput(syntheticResult.stdout, encoding),
+      stderr: normalizeSpawnSyncOutput(syntheticResult.stderr, encoding),
+      status: syntheticResult.status,
+      error: syntheticResult.status === 0 ? undefined : Object.assign(
+        new Error(`Command failed: ${command}`),
+        { code: syntheticResult.status }
+      ),
+    };
+  }
+
   return null;
 }
 
@@ -2068,6 +2187,30 @@ function closeSpawnOutput(target: StdioTarget, childStream: Readable | null): vo
   }
 }
 
+function duplicateNumericStdioTarget(
+  target: StdioTarget,
+  duplicatedByOriginalFd: Map<number, number>
+): StdioTarget {
+  if (target === 'pipe' || target === 'inherit' || target === 'ignore') {
+    return target;
+  }
+
+  let duplicatedFd = duplicatedByOriginalFd.get(target.fd);
+  if (duplicatedFd === undefined) {
+    duplicatedFd = dupFdSync(target.fd);
+    duplicatedByOriginalFd.set(target.fd, duplicatedFd);
+  }
+
+  return { fd: duplicatedFd };
+}
+
+function releaseDuplicatedStdioTargets(duplicatedByOriginalFd: Map<number, number>): void {
+  for (const duplicatedFd of duplicatedByOriginalFd.values()) {
+    closeFdSync(duplicatedFd);
+  }
+  duplicatedByOriginalFd.clear();
+}
+
 function getSyntheticExecSyncOutput(
   controller: ChildProcessController | null,
   command: string,
@@ -2096,6 +2239,22 @@ function getSyntheticExecSyncOutput(
   const versionMatch = trimmed.match(/^(\S+)\s+--version$/);
   if (versionMatch) {
     return getSyntheticShellVersion(versionMatch[1]);
+  }
+
+  const tokens = splitCommandArgs(trimmed);
+  if (tokens.length > 0) {
+    const syntheticResult = runSyntheticSyncCommand(controller, tokens[0], tokens.slice(1), {
+      cwd: options.cwd,
+      env: options.env,
+    });
+    if (syntheticResult) {
+      if (syntheticResult.status !== 0) {
+        const error = new Error(`Command failed: ${command}`);
+        (error as { code?: number }).code = syntheticResult.status;
+        throw error;
+      }
+      return syntheticResult.stdout;
+    }
   }
 
   return null;
@@ -2358,6 +2517,9 @@ function spawnWithBinding(
   const stdinTarget = resolveStdioTarget(spawnOptions.stdio, 0);
   const stdoutTarget = resolveStdioTarget(spawnOptions.stdio, 1);
   const stderrTarget = resolveStdioTarget(spawnOptions.stdio, 2);
+  const duplicatedStdioFds = new Map<number, number>();
+  const ownedStdoutTarget = duplicateNumericStdioTarget(stdoutTarget, duplicatedStdioFds);
+  const ownedStderrTarget = duplicateNumericStdioTarget(stderrTarget, duplicatedStdioFds);
 
   if (stdinTarget !== 'pipe') {
     child.stdin = null;
@@ -2399,11 +2561,12 @@ function spawnWithBinding(
       const stdout = result.stdout || '';
       const stderr = result.stderr || '';
 
-      applySpawnOutput(stdoutTarget, 'stdout', child.stdout, stdout);
-      closeSpawnOutput(stdoutTarget, child.stdout);
+      applySpawnOutput(ownedStdoutTarget, 'stdout', child.stdout, stdout);
+      closeSpawnOutput(ownedStdoutTarget, child.stdout);
 
-      applySpawnOutput(stderrTarget, 'stderr', child.stderr, stderr);
-      closeSpawnOutput(stderrTarget, child.stderr);
+      applySpawnOutput(ownedStderrTarget, 'stderr', child.stderr, stderr);
+      closeSpawnOutput(ownedStderrTarget, child.stderr);
+      releaseDuplicatedStdioTargets(duplicatedStdioFds);
 
       // Defer close/exit so Readable 'data' events flush before 'close' fires.
       // push() queues data emission as a microtask; emitting close/exit
@@ -2413,6 +2576,7 @@ function spawnWithBinding(
       child.emit('close', result.exitCode, null);
       child.emit('exit', result.exitCode, null);
     } catch (error) {
+      releaseDuplicatedStdioTargets(duplicatedStdioFds);
       child.emit('error', error);
     } finally {
       if (ownsExecution) {
@@ -2724,9 +2888,7 @@ function forkWithBinding(
 
   // Run the module asynchronously
   setTimeout(() => {
-    try {
-      childRuntime.runFile(resolvedPath);
-    } catch (error) {
+    childRuntime.runFile(resolvedPath).catch((error) => {
       // process.exit throws in sync mode — that's normal
       if (error instanceof Error && error.message.startsWith('Process exited with code')) {
         return;
@@ -2737,7 +2899,7 @@ function forkWithBinding(
       child.emit('error', error);
       child.emit('exit', 1, null);
       child.emit('close', 1, null);
-    }
+    });
   }, 0);
 
   return child;

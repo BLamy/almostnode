@@ -11,9 +11,12 @@ export type { Stats, FSWatcher, WatchListener, WatchEventType };
 
 const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
+const asyncDisposeSymbol = (Symbol as typeof Symbol & { asyncDispose?: symbol }).asyncDispose ?? Symbol.for('Symbol.asyncDispose');
+const disposeSymbol = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
 export type PathLike = string | URL;
 export type TimeLike = string | number | Date;
+type StatWatcherListener = (curr: Stats, prev: Stats) => void;
 
 export interface FsShim {
   readFileSync(path: PathLike): Buffer;
@@ -21,6 +24,8 @@ export interface FsShim {
   readFileSync(path: PathLike, options: { encoding: 'utf8' | 'utf-8' }): string;
   readFileSync(path: PathLike, options: { encoding?: null }): Buffer;
   writeFileSync(path: PathLike, data: string | Uint8Array): void;
+  appendFileSync(path: PathLike, data: string | Uint8Array): void;
+  truncateSync(path: PathLike, len?: number): void;
   existsSync(path: PathLike): boolean;
   mkdirSync(path: PathLike, options?: { recursive?: boolean }): void;
   readdirSync(path: PathLike): string[];
@@ -35,7 +40,12 @@ export interface FsShim {
   realpathSync(path: PathLike): string;
   accessSync(path: PathLike, mode?: number): void;
   copyFileSync(src: PathLike, dest: PathLike): void;
+  linkSync(existingPath: PathLike, newPath: PathLike): void;
+  symlinkSync(target: PathLike, path: PathLike, type?: string): void;
+  readlinkSync(path: PathLike): string;
   utimesSync(path: PathLike, atime: TimeLike, mtime: TimeLike): void;
+  chmodSync(path: PathLike, mode: number): void;
+  chownSync(path: PathLike, uid: number, gid: number): void;
   openSync(path: string, flags: string | number, mode?: number): number;
   closeSync(fd: number): void;
   readSync(fd: number, buffer: Buffer | Uint8Array, offset: number, length: number, position: number | null): number;
@@ -53,10 +63,13 @@ export interface FsShim {
   readFile(path: string, options: { encoding: string }, callback: (err: Error | null, data?: string) => void): void;
   writeFile(path: string, data: string | Uint8Array, callback: (err: Error | null) => void): void;
   writeFile(path: string, data: string | Uint8Array, options: { encoding?: string; mode?: number; flag?: string }, callback: (err: Error | null) => void): void;
+  appendFile(path: string, data: string | Uint8Array, callback: (err: Error | null) => void): void;
+  appendFile(path: string, data: string | Uint8Array, options: { encoding?: string; mode?: number; flag?: string }, callback: (err: Error | null) => void): void;
   stat(path: string, callback: (err: Error | null, stats?: Stats) => void): void;
   stat(path: string, options: unknown, callback: (err: Error | null, stats?: Stats) => void): void;
   lstat(path: string, callback: (err: Error | null, stats?: Stats) => void): void;
   lstat(path: string, options: unknown, callback: (err: Error | null, stats?: Stats) => void): void;
+  fstat(fd: number, callback: (err: Error | null, stats?: Stats) => void): void;
   readdir(path: string, callback: (err: Error | null, files?: string[]) => void): void;
   mkdir(path: string, callback: (err: Error | null) => void): void;
   mkdir(path: string, options: { recursive?: boolean; mode?: number }, callback: (err: Error | null) => void): void;
@@ -64,13 +77,24 @@ export interface FsShim {
   rmdir(path: string, callback: (err: Error | null) => void): void;
   rename(oldPath: string, newPath: string, callback: (err: Error | null) => void): void;
   copyFile(src: string, dest: string, callback: (err: Error | null) => void): void;
+  link(existingPath: string, newPath: string, callback: (err: Error | null) => void): void;
+  symlink(target: string, path: string, callback: (err: Error | null) => void): void;
+  symlink(target: string, path: string, type: string, callback: (err: Error | null) => void): void;
+  readlink(path: string, callback: (err: Error | null, linkString?: string) => void): void;
   rm(path: string, callback: (err: Error | null) => void): void;
   rm(path: string, options: { recursive?: boolean; force?: boolean }, callback: (err: Error | null) => void): void;
   realpath(path: string, callback: (err: Error | null, resolvedPath?: string) => void): void;
   realpath(path: string, options: unknown, callback: (err: Error | null, resolvedPath?: string) => void): void;
   access(path: string, callback: (err: Error | null) => void): void;
   access(path: string, mode: number, callback: (err: Error | null) => void): void;
+  truncate(path: string, callback: (err: Error | null) => void): void;
+  truncate(path: string, len: number, callback: (err: Error | null) => void): void;
   utimes(path: string, atime: TimeLike, mtime: TimeLike, callback: (err: Error | null) => void): void;
+  chmod(path: string, mode: number, callback: (err: Error | null) => void): void;
+  chown(path: string, uid: number, gid: number, callback: (err: Error | null) => void): void;
+  watchFile(filename: string, listener: StatWatcherListener): void;
+  watchFile(filename: string, options: unknown, listener: StatWatcherListener): void;
+  unwatchFile(filename: string, listener?: StatWatcherListener): void;
   createReadStream(path: string): unknown;
   createWriteStream(path: string): unknown;
   promises: FsPromises;
@@ -78,6 +102,7 @@ export interface FsShim {
 }
 
 export interface FsPromises {
+  constants: FsConstants;
   readFile(path: PathLike): Promise<Buffer>;
   readFile(path: PathLike, encoding: 'utf8' | 'utf-8'): Promise<string>;
   readFile(path: PathLike, options: { encoding: 'utf8' | 'utf-8' }): Promise<string>;
@@ -94,9 +119,15 @@ export interface FsPromises {
   rm(path: PathLike, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   mkdtemp(prefix: string): Promise<string>;
   access(path: PathLike, mode?: number): Promise<void>;
+  truncate(path: PathLike, len?: number): Promise<void>;
   realpath(path: PathLike): Promise<string>;
   copyFile(src: PathLike, dest: PathLike): Promise<void>;
+  link(existingPath: PathLike, newPath: PathLike): Promise<void>;
+  symlink(target: PathLike, path: PathLike, type?: string): Promise<void>;
+  readlink(path: PathLike): Promise<string>;
   utimes(path: PathLike, atime: TimeLike, mtime: TimeLike): Promise<void>;
+  chmod(path: PathLike, mode: number): Promise<void>;
+  chown(path: PathLike, uid: number, gid: number): Promise<void>;
 }
 
 export interface FileHandle {
@@ -111,6 +142,8 @@ export interface FileHandle {
   appendFile(data: string | Uint8Array): Promise<void>;
   writeFile(data: string | Uint8Array): Promise<void>;
   close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+  [Symbol.dispose](): void;
 }
 
 export interface FsConstants {
@@ -235,18 +268,49 @@ function toPath(pathLike: unknown, getCwd?: () => string): string {
 }
 
 // File descriptor tracking
-interface FileDescriptor {
+interface FileDescriptorState {
   path: string;
-  position: number;
-  flags: string;
   writable: boolean;
   append: boolean;
   content: Uint8Array;
   vfs: VirtualFS;
 }
 
+interface FileDescriptor {
+  state: FileDescriptorState;
+  position: number;
+  flags: string;
+}
+
 const fdMap = new Map<number, FileDescriptor>();
 let nextFd = 3; // Start at 3 (0, 1, 2 are stdin, stdout, stderr)
+
+function normalizeAbsolutePath(path: string): string {
+  const segments = path.split('/');
+  const normalized: string[] = [];
+
+  for (const segment of segments) {
+    if (!segment || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      normalized.pop();
+      continue;
+    }
+    normalized.push(segment);
+  }
+
+  return '/' + normalized.join('/');
+}
+
+function getParentPath(path: string): string {
+  const index = path.lastIndexOf('/');
+  return index <= 0 ? '/' : path.slice(0, index);
+}
+
+function joinPath(base: string, next: string): string {
+  return normalizeAbsolutePath(`${base.endsWith('/') ? base.slice(0, -1) : base}/${next}`);
+}
 
 function getOpenFileDescriptor(fd: number): FileDescriptor {
   const entry = fdMap.get(fd);
@@ -260,9 +324,27 @@ function getOpenFileDescriptor(fd: number): FileDescriptor {
 }
 
 function persistFileDescriptor(entry: FileDescriptor): void {
-  if (entry.writable) {
-    entry.vfs.writeFileSync(entry.path, entry.content);
+  if (entry.state.writable) {
+    entry.state.vfs.writeFileSync(entry.state.path, entry.state.content);
   }
+}
+
+export function dupFdSync(fd: number): number {
+  const entry = getOpenFileDescriptor(fd);
+  const dupFd = nextFd++;
+  fdMap.set(dupFd, {
+    ...entry,
+  });
+  return dupFd;
+}
+
+export function closeFdSync(fd: number): void {
+  const entry = fdMap.get(fd);
+  if (!entry) {
+    return;
+  }
+  persistFileDescriptor(entry);
+  fdMap.delete(fd);
 }
 
 export function writeToFdSync(
@@ -288,19 +370,19 @@ export function writeToFdSync(
   const writePos =
     position !== null && position !== undefined
       ? position
-      : entry.append
-        ? entry.content.length
+      : entry.state.append
+        ? entry.state.content.length
         : entry.position;
   const endPos = writePos + length;
 
-  if (endPos > entry.content.length) {
+  if (endPos > entry.state.content.length) {
     const newContent = new Uint8Array(endPos);
-    newContent.set(entry.content);
-    entry.content = newContent;
+    newContent.set(entry.state.content);
+    entry.state.content = newContent;
   }
 
   for (let i = 0; i < length; i++) {
-    entry.content[writePos + i] = data[offset + i];
+    entry.state.content[writePos + i] = data[offset + i];
   }
 
   if (position === null || position === undefined) {
@@ -314,7 +396,7 @@ export function writeToFdSync(
 export function writeFileDescriptorSync(fd: number, data: string | Uint8Array): void {
   const entry = getOpenFileDescriptor(fd);
   const bytes = typeof data === 'string' ? _encoder.encode(data) : data;
-  entry.content = new Uint8Array(bytes);
+  entry.state.content = new Uint8Array(bytes);
   entry.position = bytes.length;
   persistFileDescriptor(entry);
 }
@@ -322,12 +404,12 @@ export function writeFileDescriptorSync(fd: number, data: string | Uint8Array): 
 export function truncateFdSync(fd: number, len: number = 0): void {
   const entry = getOpenFileDescriptor(fd);
 
-  if (len < entry.content.length) {
-    entry.content = entry.content.slice(0, len);
-  } else if (len > entry.content.length) {
+  if (len < entry.state.content.length) {
+    entry.state.content = entry.state.content.slice(0, len);
+  } else if (len > entry.state.content.length) {
     const newContent = new Uint8Array(len);
-    newContent.set(entry.content);
-    entry.content = newContent;
+    newContent.set(entry.state.content);
+    entry.state.content = newContent;
   }
 
   if (entry.position > len) {
@@ -455,7 +537,192 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     O_NOFOLLOW: 131072,
   };
 
+  const ensureExistingPath = (pathLike: unknown, syscall: string): string => {
+    const path = resolvePath(pathLike);
+    if (!vfs.existsSync(path)) {
+      throw createNodeError('ENOENT', syscall, path);
+    }
+    return path;
+  };
+
+  const symlinkTargets = new Map<string, string>();
+  const statWatchers = new Map<string, Map<StatWatcherListener, FSWatcher>>();
+
+  const createMissingStats = (): Stats => {
+    const now = new Date(0);
+    return {
+      isFile: () => false,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+      isBlockDevice: () => false,
+      isCharacterDevice: () => false,
+      isFIFO: () => false,
+      isSocket: () => false,
+      size: 0,
+      mode: 0,
+      mtime: now,
+      atime: now,
+      ctime: now,
+      birthtime: now,
+      mtimeMs: 0,
+      atimeMs: 0,
+      ctimeMs: 0,
+      birthtimeMs: 0,
+      nlink: 0,
+      uid: 0,
+      gid: 0,
+      dev: 0,
+      ino: 0,
+      rdev: 0,
+      blksize: 0,
+      blocks: 0,
+    };
+  };
+
+  const resolveStoredTargetPath = (rawTarget: string, linkPath: string): string => {
+    if (rawTarget.startsWith('/')) {
+      return normalizeAbsolutePath(rawTarget);
+    }
+    return joinPath(getParentPath(linkPath), rawTarget);
+  };
+
+  const findSymlinkEntry = (path: string): [string, string] | null => {
+    let bestMatch: [string, string] | null = null;
+    for (const entry of symlinkTargets.entries()) {
+      const [linkPath] = entry;
+      if (path !== linkPath && !path.startsWith(`${linkPath}/`)) {
+        continue;
+      }
+      if (!bestMatch || linkPath.length > bestMatch[0].length) {
+        bestMatch = entry;
+      }
+    }
+    return bestMatch;
+  };
+
+  const createSymlinkStats = (path: string): Stats => {
+    const rawTarget = symlinkTargets.get(path);
+    const resolvedTarget = rawTarget ? resolveStoredTargetPath(rawTarget, path) : null;
+    const targetStats = resolvedTarget && vfs.existsSync(resolvedTarget) ? vfs.statSync(resolvedTarget) : createMissingStats();
+    return {
+      ...targetStats,
+      isFile: () => false,
+      isDirectory: () => false,
+      isSymbolicLink: () => true,
+      size: rawTarget?.length ?? 0,
+      nlink: 1,
+    };
+  };
+
+  const statsForWatch = (path: string): Stats => {
+    if (symlinkTargets.has(path)) {
+      return createSymlinkStats(path);
+    }
+    try {
+      return vfs.statSync(path);
+    } catch {
+      return createMissingStats();
+    }
+  };
+
+  const ensureDestinationAvailable = (path: string, syscall: string): void => {
+    const parentPath = getParentPath(path);
+    if (!vfs.existsSync(parentPath)) {
+      throw createNodeError('ENOENT', syscall, path);
+    }
+    if (vfs.existsSync(path) || symlinkTargets.has(path)) {
+      throw createNodeError('EEXIST', syscall, path);
+    }
+  };
+
+  const copyPathRecursive = (sourcePath: string, destinationPath: string): void => {
+    const sourceStats = vfs.statSync(sourcePath);
+    if (sourceStats.isDirectory()) {
+      vfs.mkdirSync(destinationPath, { recursive: true });
+      for (const entry of vfs.readdirSync(sourcePath)) {
+        copyPathRecursive(joinPath(sourcePath, entry), joinPath(destinationPath, entry));
+      }
+      return;
+    }
+    vfs.writeFileSync(destinationPath, vfs.readFileSync(sourcePath));
+  };
+
+  const deletePathRecursive = (path: string): void => {
+    const stats = vfs.statSync(path);
+    if (!stats.isDirectory()) {
+      vfs.unlinkSync(path);
+      return;
+    }
+    for (const entry of vfs.readdirSync(path)) {
+      deletePathRecursive(joinPath(path, entry));
+    }
+    vfs.rmdirSync(path);
+  };
+
+  const deleteSymlinkEntriesAtOrBelow = (path: string): void => {
+    for (const linkPath of Array.from(symlinkTargets.keys())) {
+      if (linkPath === path || linkPath.startsWith(`${path}/`)) {
+        symlinkTargets.delete(linkPath);
+      }
+    }
+  };
+
+  const moveSymlinkEntries = (oldPath: string, newPath: string): void => {
+    for (const [linkPath, rawTarget] of Array.from(symlinkTargets.entries())) {
+      if (linkPath !== oldPath && !linkPath.startsWith(`${oldPath}/`)) {
+        continue;
+      }
+      const suffix = linkPath.slice(oldPath.length);
+      symlinkTargets.delete(linkPath);
+      symlinkTargets.set(`${newPath}${suffix}`, rawTarget);
+    }
+  };
+
+  const createLinkCopy = (existingPathLike: unknown, newPathLike: unknown, syscall: 'link' | 'symlink'): void => {
+    const newPath = resolvePath(newPathLike);
+    ensureDestinationAvailable(newPath, syscall);
+
+    if (syscall === 'symlink') {
+      const rawTarget = toPath(existingPathLike);
+      symlinkTargets.set(newPath, rawTarget);
+      const resolvedTarget = resolveStoredTargetPath(rawTarget, newPath);
+      if (vfs.existsSync(resolvedTarget)) {
+        copyPathRecursive(resolvedTarget, newPath);
+      } else {
+        vfs.writeFileSync(newPath, new Uint8Array(0));
+      }
+      return;
+    }
+
+    const existingPath = ensureExistingPath(existingPathLike, syscall);
+    const existingStats = vfs.statSync(existingPath);
+    if (existingStats.isDirectory()) {
+      throw createNodeError('EISDIR', syscall, existingPath);
+    }
+    vfs.writeFileSync(newPath, vfs.readFileSync(existingPath));
+  };
+
+  const appendFileSyncImpl = (pathLike: unknown, data: string | Uint8Array): void => {
+    if (typeof pathLike === 'number') {
+      const entry = getOpenFileDescriptor(pathLike);
+      const position = entry.state.append ? null : entry.state.content.length;
+      shim.writeSync(pathLike, data, undefined, undefined, position);
+      return;
+    }
+
+    let fd: number | undefined;
+    try {
+      fd = shim.openSync(resolvePath(pathLike), 'a');
+      shim.writeSync(fd, data);
+    } finally {
+      if (fd !== undefined) {
+        shim.closeSync(fd);
+      }
+    }
+  };
+
   const promises: FsPromises = {
+    constants,
     readFile(pathLike: unknown, encodingOrOptions?: string | { encoding?: string | null }): Promise<Buffer | string> {
       return new Promise((resolve, reject) => {
         try {
@@ -481,7 +748,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       return new Promise((resolve, reject) => {
         try {
           const fd = shim.openSync(resolvePath(pathLike), flags, mode);
-          resolve({
+          const handle: FileHandle = {
             get fd() {
               return fd;
             },
@@ -499,7 +766,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
             },
             async appendFile(data: string | Uint8Array): Promise<void> {
               const entry = fdMap.get(fd);
-              const position = entry?.append ? null : entry?.content.length ?? null;
+              const position = entry?.state.append ? null : entry?.state.content.length ?? null;
               shim.writeSync(fd, data, undefined, undefined, position);
             },
             async writeFile(data: string | Uint8Array): Promise<void> {
@@ -509,7 +776,14 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
             async close(): Promise<void> {
               shim.closeSync(fd);
             },
-          });
+            async [asyncDisposeSymbol](): Promise<void> {
+              await handle.close();
+            },
+            [disposeSymbol](): void {
+              shim.closeSync(fd);
+            },
+          };
+          resolve(handle);
         } catch (err) {
           reject(err);
         }
@@ -538,7 +812,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     writeFile(pathLike: unknown, data: string | Uint8Array): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
-          vfs.writeFileSync(resolvePath(pathLike), data);
+          shim.writeFileSync(resolvePath(pathLike), data);
           resolve();
         } catch (err) {
           reject(err);
@@ -549,39 +823,25 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       return new Promise((resolve, reject) => {
         try {
           const path = typeof pathLike === 'string' ? pathLike : resolvePath(pathLike);
-          resolve(vfs.statSync(path));
+          resolve(shim.statSync(path));
         } catch (err) {
           reject(err);
         }
       });
     },
     lstat(pathLike: unknown): Promise<Stats> {
-      return this.stat(resolvePath(pathLike));
+      return new Promise((resolve, reject) => {
+        try {
+          resolve(shim.lstatSync(resolvePath(pathLike)));
+        } catch (err) {
+          reject(err);
+        }
+      });
     },
     readdir(pathLike: unknown, options?: { withFileTypes?: boolean } | string): Promise<string[] | Dirent[]> {
       return new Promise((resolve, reject) => {
         try {
-          const path = resolvePath(pathLike);
-          const entries = vfs.readdirSync(path);
-          const opts = typeof options === 'string' ? {} : options;
-          if (opts?.withFileTypes) {
-            const dirents = entries.map(name => {
-              const entryPath = path.endsWith('/') ? path + name : path + '/' + name;
-              let isDir = false;
-              let isFile = false;
-              try {
-                const stat = vfs.statSync(entryPath);
-                isDir = stat.isDirectory();
-                isFile = stat.isFile();
-              } catch {
-                isFile = true;
-              }
-              return new Dirent(name, isDir, isFile);
-            });
-            resolve(dirents);
-          } else {
-            resolve(entries);
-          }
+          resolve(shim.readdirSync(resolvePath(pathLike), options as { withFileTypes?: boolean; encoding?: string } | string));
         } catch (err) {
           reject(err);
         }
@@ -600,7 +860,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     unlink(pathLike: unknown): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
-          vfs.unlinkSync(resolvePath(pathLike));
+          shim.unlinkSync(resolvePath(pathLike));
           resolve();
         } catch (err) {
           reject(err);
@@ -610,7 +870,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     rmdir(path: string): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
-          vfs.rmdirSync(path);
+          shim.rmdirSync(path);
           resolve();
         } catch (err) {
           reject(err);
@@ -620,7 +880,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     rename(oldPath: string, newPath: string): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
-          vfs.renameSync(oldPath, newPath);
+          shim.renameSync(oldPath, newPath);
           resolve();
         } catch (err) {
           reject(err);
@@ -691,7 +951,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       return new Promise((resolve, reject) => {
         try {
           console.log(`[almostnode DEBUG] fs.promises.access start: ${path}`);
-          vfs.accessSync(path, mode);
+          shim.accessSync(path, mode);
           console.log(`[almostnode DEBUG] fs.promises.access ok: ${path}`);
           resolve();
         } catch (err) {
@@ -700,10 +960,20 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         }
       });
     },
+    truncate(pathLike: unknown, len: number = 0): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          shim.truncateSync(resolvePath(pathLike), len);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
     realpath(path: string): Promise<string> {
       return new Promise((resolve, reject) => {
         try {
-          resolve(vfs.realpathSync(path));
+          resolve(shim.realpathSync(path));
         } catch (err) {
           reject(err);
         }
@@ -712,8 +982,37 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     copyFile(src: string, dest: string): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
-          vfs.copyFileSync(src, dest);
+          shim.copyFileSync(src, dest);
           resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    link(existingPathLike: unknown, newPathLike: unknown): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          shim.linkSync(existingPathLike as PathLike, newPathLike as PathLike);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    symlink(targetLike: unknown, pathLike: unknown, _type?: string): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          shim.symlinkSync(targetLike as PathLike, pathLike as PathLike);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    readlink(pathLike: unknown): Promise<string> {
+      return new Promise((resolve, reject) => {
+        try {
+          resolve(shim.readlinkSync(pathLike as PathLike));
         } catch (err) {
           reject(err);
         }
@@ -728,6 +1027,26 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
             return;
           }
           // No-op: VirtualFS does not currently persist explicit atime/mtime updates.
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    chmod(pathLike: unknown, _mode: number): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          shim.chmodSync(pathLike as PathLike, _mode);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
+    chown(pathLike: unknown, _uid: number, _gid: number): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          shim.chownSync(pathLike as PathLike, _uid, _gid);
           resolve();
         } catch (err) {
           reject(err);
@@ -776,8 +1095,25 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       vfs.writeFileSync(path, data);
     },
 
+    appendFileSync(pathLike: unknown, data: string | Uint8Array): void {
+      appendFileSyncImpl(pathLike, data);
+    },
+
+    truncateSync(pathLike: unknown, len: number = 0): void {
+      let fd: number | undefined;
+      try {
+        fd = shim.openSync(resolvePath(pathLike), 'r+');
+        shim.ftruncateSync(fd, len);
+      } finally {
+        if (fd !== undefined) {
+          shim.closeSync(fd);
+        }
+      }
+    },
+
     existsSync(pathLike: unknown): boolean {
-      return vfs.existsSync(resolvePath(pathLike));
+      const path = resolvePath(pathLike);
+      return symlinkTargets.has(path) || vfs.existsSync(path);
     },
 
     mkdirSync(pathLike: unknown, options?: { recursive?: boolean }): void {
@@ -824,7 +1160,10 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       const origPath = typeof pathLike === 'string' ? pathLike : String(pathLike);
       const path = resolvePath(pathLike);
       trackCall('statSync', path);
-      const result = vfs.statSync(path);
+      const symlinkTarget = symlinkTargets.get(path);
+      const result = symlinkTarget
+        ? vfs.statSync(resolveStoredTargetPath(symlinkTarget, path))
+        : vfs.statSync(path);
       // Debug: Log all statSync calls on _generated paths (show if path was modified)
       if (path.includes('_generated')) {
         const wasRemapped = origPath !== path;
@@ -834,7 +1173,11 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     },
 
     lstatSync(pathLike: unknown): Stats {
-      return vfs.lstatSync(resolvePath(pathLike));
+      const path = resolvePath(pathLike);
+      if (symlinkTargets.has(path)) {
+        return createSymlinkStats(path);
+      }
+      return vfs.lstatSync(path);
     },
 
     fstatSync(fd: number): Stats {
@@ -845,7 +1188,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         err.errno = -9;
         throw err;
       }
-      return vfs.statSync(entry.path);
+      return vfs.statSync(entry.state.path);
     },
 
     openSync(pathLike: unknown, flags: string | number, _mode?: number): number {
@@ -886,25 +1229,21 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
       const fd = nextFd++;
       fdMap.set(fd, {
-        path,
+        state: {
+          path,
+          writable: normalizedFlags.writable,
+          append: normalizedFlags.append,
+          content: new Uint8Array(content),
+          vfs,
+        },
         position: normalizedFlags.append ? content.length : 0,
         flags: normalizedFlags.flagStr,
-        writable: normalizedFlags.writable,
-        append: normalizedFlags.append,
-        content: new Uint8Array(content),
-        vfs,
       });
       return fd;
     },
 
     closeSync(fd: number): void {
-      const entry = fdMap.get(fd);
-      if (!entry) {
-        return; // Silently ignore
-      }
-      // Write back content if it was opened for writing
-      persistFileDescriptor(entry);
-      fdMap.delete(fd);
+      closeFdSync(fd);
     },
 
     readSync(fd: number, buffer: Buffer | Uint8Array, offset: number, length: number, position: number | null): number {
@@ -917,14 +1256,14 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       }
 
       const readPos = position !== null ? position : entry.position;
-      const bytesToRead = Math.min(length, entry.content.length - readPos);
+      const bytesToRead = Math.min(length, entry.state.content.length - readPos);
 
       if (bytesToRead <= 0) {
         return 0;
       }
 
       for (let i = 0; i < bytesToRead; i++) {
-        buffer[offset + i] = entry.content[readPos + i];
+        buffer[offset + i] = entry.state.content[readPos + i];
       }
 
       if (position === null) {
@@ -962,8 +1301,17 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     rmSync(pathLike: unknown, options?: { recursive?: boolean; force?: boolean }): void {
       const path = resolvePath(pathLike);
       if (!vfs.existsSync(path)) {
+        if (symlinkTargets.has(path)) {
+          deleteSymlinkEntriesAtOrBelow(path);
+          return;
+        }
         if (options?.force) return;
         throw createNodeError('ENOENT', 'rm', path);
+      }
+      if (symlinkTargets.has(path)) {
+        deleteSymlinkEntriesAtOrBelow(path);
+        deletePathRecursive(path);
+        return;
       }
       const stats = vfs.statSync(path);
       if (stats.isDirectory()) {
@@ -974,11 +1322,13 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
             const entryPath = path.endsWith('/') ? path + entry : path + '/' + entry;
             this.rmSync(entryPath, options);
           }
+          deleteSymlinkEntriesAtOrBelow(path);
           vfs.rmdirSync(path);
         } else {
           throw createNodeError('EISDIR', 'rm', path);
         }
       } else {
+        deleteSymlinkEntriesAtOrBelow(path);
         vfs.unlinkSync(path);
       }
     },
@@ -989,24 +1339,48 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       if (path.includes('_generated')) {
         console.log(`[fs] unlinkSync(${path})`);
       }
+      if (symlinkTargets.has(path)) {
+        deleteSymlinkEntriesAtOrBelow(path);
+        if (vfs.existsSync(path)) {
+          deletePathRecursive(path);
+        }
+        return;
+      }
       vfs.unlinkSync(path);
     },
 
     rmdirSync(pathLike: unknown): void {
-      vfs.rmdirSync(resolvePath(pathLike));
+      const path = resolvePath(pathLike);
+      deleteSymlinkEntriesAtOrBelow(path);
+      vfs.rmdirSync(path);
     },
 
     renameSync(oldPathLike: unknown, newPathLike: unknown): void {
-      vfs.renameSync(resolvePath(oldPathLike), resolvePath(newPathLike));
+      const oldPath = resolvePath(oldPathLike);
+      const newPath = resolvePath(newPathLike);
+      vfs.renameSync(oldPath, newPath);
+      moveSymlinkEntries(oldPath, newPath);
     },
 
     realpathSync: Object.assign(
       function realpathSync(pathLike: unknown): string {
-        return vfs.realpathSync(resolvePath(pathLike));
+        const path = resolvePath(pathLike);
+        const mapped = findSymlinkEntry(path);
+        if (mapped) {
+          const [linkPath, rawTarget] = mapped;
+          const suffix = path.slice(linkPath.length);
+          const resolvedTarget = resolveStoredTargetPath(rawTarget, linkPath);
+          const resolvedPath = normalizeAbsolutePath(`${resolvedTarget}${suffix}`);
+          if (!vfs.existsSync(resolvedPath)) {
+            throw createNodeError('ENOENT', 'realpath', path);
+          }
+          return resolvedPath;
+        }
+        return vfs.realpathSync(path);
       },
       {
         native(pathLike: unknown): string {
-          return vfs.realpathSync(resolvePath(pathLike));
+          return shim.realpathSync(pathLike as PathLike);
         },
       }
     ),
@@ -1024,12 +1398,37 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       vfs.writeFileSync(dest, data);
     },
 
+    linkSync(existingPathLike: unknown, newPathLike: unknown): void {
+      createLinkCopy(existingPathLike, newPathLike, 'link');
+    },
+
+    symlinkSync(targetLike: unknown, pathLike: unknown, _type?: string): void {
+      createLinkCopy(targetLike, pathLike, 'symlink');
+    },
+
+    readlinkSync(pathLike: unknown): string {
+      const path = resolvePath(pathLike);
+      const rawTarget = symlinkTargets.get(path);
+      if (rawTarget === undefined) {
+        throw createNodeError('ENOENT', 'readlink', path);
+      }
+      return rawTarget;
+    },
+
     utimesSync(pathLike: unknown, _atime: TimeLike, _mtime: TimeLike): void {
       const path = resolvePath(pathLike);
       if (!vfs.existsSync(path)) {
         throw createNodeError('ENOENT', 'utimes', path);
       }
       // No-op: VirtualFS does not currently persist explicit atime/mtime updates.
+    },
+
+    chmodSync(pathLike: unknown, _mode: number): void {
+      ensureExistingPath(pathLike, 'chmod');
+    },
+
+    chownSync(pathLike: unknown, _uid: number, _gid: number): void {
+      ensureExistingPath(pathLike, 'chown');
     },
 
     watch(
@@ -1074,6 +1473,21 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       }
     },
 
+    appendFile(
+      pathLike: unknown,
+      data: string | Uint8Array,
+      optionsOrCallback?: { encoding?: string; mode?: number; flag?: string } | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+      try {
+        appendFileSyncImpl(pathLike, data);
+        if (cb) queueMicrotask(() => cb(null));
+      } catch (err) {
+        if (cb) queueMicrotask(() => cb(err as Error));
+      }
+    },
+
     mkdir(
       pathLike: unknown,
       optionsOrCallback?: { recursive?: boolean; mode?: number } | ((err: Error | null) => void),
@@ -1105,7 +1519,11 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         ? optionsOrCallback as (err: Error | null, stats?: Stats) => void
         : callback;
       if (!cb) return;
-      vfs.stat(resolvePath(pathLike), cb);
+      try {
+        queueMicrotask(() => cb(null, shim.statSync(pathLike as PathLike)));
+      } catch (err) {
+        queueMicrotask(() => cb(err as Error));
+      }
     },
 
     lstat(
@@ -1117,7 +1535,19 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         ? optionsOrCallback as (err: Error | null, stats?: Stats) => void
         : callback;
       if (!cb) return;
-      vfs.lstat(resolvePath(pathLike), cb);
+      try {
+        queueMicrotask(() => cb(null, shim.lstatSync(pathLike as PathLike)));
+      } catch (err) {
+        queueMicrotask(() => cb(err as Error));
+      }
+    },
+
+    fstat(fd: number, callback: (err: Error | null, stats?: Stats) => void): void {
+      try {
+        queueMicrotask(() => callback(null, shim.fstatSync(fd)));
+      } catch (err) {
+        queueMicrotask(() => callback(err as Error));
+      }
     },
 
     readdir(
@@ -1127,26 +1557,12 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     ): void {
       const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
       const opts = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
-      const path = resolvePath(pathLike);
       try {
-        const entries = vfs.readdirSync(path);
+        const entries = shim.readdirSync(pathLike as PathLike, opts as { withFileTypes?: boolean; encoding?: string } | undefined);
         if (opts?.withFileTypes) {
-          const dirents: Dirent[] = entries.map(name => {
-            const entryPath = path.endsWith('/') ? path + name : path + '/' + name;
-            let isDir = false;
-            let isFile = false;
-            try {
-              const stat = vfs.statSync(entryPath);
-              isDir = stat.isDirectory();
-              isFile = stat.isFile();
-            } catch {
-              isFile = true;
-            }
-            return new Dirent(name, isDir, isFile);
-          });
-          cb?.(null, dirents);
+          cb?.(null, entries as Dirent[]);
         } else {
-          cb?.(null, entries);
+          cb?.(null, entries as string[]);
         }
       } catch (err) {
         cb?.(err as Error);
@@ -1163,7 +1579,10 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
           ? optionsOrCallback as (err: Error | null, resolvedPath?: string) => void
           : callback;
         if (!cb) return;
-        vfs.realpath(resolvePath(pathLike), cb);
+        promises.realpath(pathLike as PathLike).then(
+          (resolvedPath) => queueMicrotask(() => cb(null, resolvedPath)),
+          (err) => queueMicrotask(() => cb(err as Error))
+        );
       },
       {
         native(
@@ -1175,14 +1594,17 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
             ? optionsOrCallback as (err: Error | null, resolvedPath?: string) => void
             : callback;
           if (!cb) return;
-          vfs.realpath(resolvePath(pathLike), cb);
+          promises.realpath(pathLike as PathLike).then(
+            (resolvedPath) => queueMicrotask(() => cb(null, resolvedPath)),
+            (err) => queueMicrotask(() => cb(err as Error))
+          );
         },
       }
     ),
 
     unlink(pathLike: unknown, callback: (err: Error | null) => void): void {
       try {
-        vfs.unlinkSync(resolvePath(pathLike));
+        shim.unlinkSync(pathLike as PathLike);
         queueMicrotask(() => callback(null));
       } catch (err) {
         queueMicrotask(() => callback(err as Error));
@@ -1191,7 +1613,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
     rmdir(pathLike: unknown, callback: (err: Error | null) => void): void {
       try {
-        vfs.rmdirSync(resolvePath(pathLike));
+        shim.rmdirSync(pathLike as PathLike);
         queueMicrotask(() => callback(null));
       } catch (err) {
         queueMicrotask(() => callback(err as Error));
@@ -1200,7 +1622,7 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
     rename(oldPathLike: unknown, newPathLike: unknown, callback: (err: Error | null) => void): void {
       try {
-        vfs.renameSync(resolvePath(oldPathLike), resolvePath(newPathLike));
+        shim.renameSync(oldPathLike as PathLike, newPathLike as PathLike);
         queueMicrotask(() => callback(null));
       } catch (err) {
         queueMicrotask(() => callback(err as Error));
@@ -1209,14 +1631,40 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
 
     copyFile(srcLike: unknown, destLike: unknown, callback: (err: Error | null) => void): void {
       try {
-        const src = resolvePath(srcLike);
-        const dest = resolvePath(destLike);
-        const data = vfs.readFileSync(src);
-        vfs.writeFileSync(dest, data);
+        shim.copyFileSync(srcLike as PathLike, destLike as PathLike);
         queueMicrotask(() => callback(null));
       } catch (err) {
         queueMicrotask(() => callback(err as Error));
       }
+    },
+
+    link(existingPathLike: unknown, newPathLike: unknown, callback: (err: Error | null) => void): void {
+      promises.link(existingPathLike as PathLike, newPathLike as PathLike).then(
+        () => queueMicrotask(() => callback(null)),
+        (err) => queueMicrotask(() => callback(err as Error))
+      );
+    },
+
+    symlink(
+      targetLike: unknown,
+      pathLike: unknown,
+      typeOrCallback: string | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const cb = typeof typeOrCallback === 'function' ? typeOrCallback : callback;
+      if (!cb) return;
+      const type = typeof typeOrCallback === 'string' ? typeOrCallback : undefined;
+      promises.symlink(targetLike as PathLike, pathLike as PathLike, type).then(
+        () => queueMicrotask(() => cb(null)),
+        (err) => queueMicrotask(() => cb(err as Error))
+      );
+    },
+
+    readlink(pathLike: unknown, callback: (err: Error | null, linkString?: string) => void): void {
+      promises.readlink(pathLike as PathLike).then(
+        (linkString) => queueMicrotask(() => callback(null, linkString)),
+        (err) => queueMicrotask(() => callback(err as Error))
+      );
     },
 
     rm(
@@ -1244,6 +1692,20 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       vfs.access(path, modeOrCallback, callback);
     },
 
+    truncate(
+      pathLike: unknown,
+      lenOrCallback?: number | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const len = typeof lenOrCallback === 'number' ? lenOrCallback : 0;
+      const cb = typeof lenOrCallback === 'function' ? lenOrCallback : callback;
+      if (!cb) return;
+      promises.truncate(pathLike as PathLike, len).then(
+        () => queueMicrotask(() => cb(null)),
+        (err) => queueMicrotask(() => cb(err as Error))
+      );
+    },
+
     utimes(pathLike: unknown, _atime: TimeLike, _mtime: TimeLike, callback: (err: Error | null) => void): void {
       try {
         const path = resolvePath(pathLike);
@@ -1255,6 +1717,69 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         queueMicrotask(() => callback(null));
       } catch (err) {
         queueMicrotask(() => callback(err as Error));
+      }
+    },
+
+    chmod(pathLike: unknown, mode: number, callback: (err: Error | null) => void): void {
+      promises.chmod(pathLike as PathLike, mode).then(
+        () => queueMicrotask(() => callback(null)),
+        (err) => queueMicrotask(() => callback(err as Error))
+      );
+    },
+
+    chown(pathLike: unknown, uid: number, gid: number, callback: (err: Error | null) => void): void {
+      promises.chown(pathLike as PathLike, uid, gid).then(
+        () => queueMicrotask(() => callback(null)),
+        (err) => queueMicrotask(() => callback(err as Error))
+      );
+    },
+
+    watchFile(
+      filenameLike: unknown,
+      optionsOrListener?: unknown,
+      listener?: StatWatcherListener
+    ): void {
+      const path = resolvePath(filenameLike);
+      const actualListener = typeof optionsOrListener === 'function'
+        ? optionsOrListener as StatWatcherListener
+        : listener;
+      if (!actualListener) return;
+
+      const existingWatcher = statWatchers.get(path)?.get(actualListener);
+      if (existingWatcher) {
+        return;
+      }
+
+      let previous = statsForWatch(path);
+      const watcher = vfs.watch(path, () => {
+        const current = statsForWatch(path);
+        queueMicrotask(() => actualListener(current, previous));
+        previous = current;
+      });
+
+      const pathWatchers = statWatchers.get(path) ?? new Map<StatWatcherListener, FSWatcher>();
+      pathWatchers.set(actualListener, watcher);
+      statWatchers.set(path, pathWatchers);
+    },
+
+    unwatchFile(filenameLike: unknown, listener?: StatWatcherListener): void {
+      const path = resolvePath(filenameLike);
+      const pathWatchers = statWatchers.get(path);
+      if (!pathWatchers) return;
+
+      if (listener) {
+        const watcher = pathWatchers.get(listener);
+        watcher?.close();
+        pathWatchers.delete(listener);
+      } else {
+        for (const watcher of pathWatchers.values()) {
+          watcher.close();
+        }
+        pathWatchers.clear();
+      }
+
+      if (pathWatchers.size === 0) {
+        statWatchers.delete(path);
       }
     },
 

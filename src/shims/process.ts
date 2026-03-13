@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter, EventListener } from './events';
-import { homedir } from './os';
+import { homedir, userInfo } from './os';
 import { DEFAULT_POSIX_SHELL } from './synthetic-shells';
 
 export interface ProcessEnv {
@@ -59,6 +59,13 @@ interface ProcessReadableStream extends ProcessStream {
   setRawMode?: (mode: boolean) => ProcessReadableStream;
 }
 
+let nextProcessId = 1000;
+
+function allocateProcessId(): number {
+  nextProcessId += 1;
+  return nextProcessId;
+}
+
 export interface Process {
   env: ProcessEnv;
   cwd: () => string;
@@ -73,6 +80,10 @@ export interface Process {
   execArgv: string[];
   pid: number;
   ppid: number;
+  getuid: () => number;
+  getgid: () => number;
+  geteuid: () => number;
+  getegid: () => number;
   exit: (code?: number) => never;
   nextTick: (callback: (...args: unknown[]) => void, ...args: unknown[]) => void;
   stdout: ProcessWritableStream;
@@ -233,10 +244,10 @@ function createProcessStream(
       return true;
     },
     getColorDepth() {
-      return 1;
+      return stream.isTTY ? 8 : 1;
     },
     hasColors() {
-      return false;
+      return stream.isTTY;
     },
   };
 
@@ -264,19 +275,30 @@ function createProcessStream(
 export function createProcess(options?: {
   cwd?: string;
   env?: ProcessEnv;
+  pid?: number;
+  ppid?: number;
+  uid?: number;
+  gid?: number;
   onExit?: (code: number) => void;
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
 }): Process {
   let currentDir = options?.cwd || '/';
   const defaultHome = homedir();
+  const defaultUser = userInfo();
   const env: ProcessEnv = {
     NODE_ENV: 'development',
     PATH: '/usr/local/bin:/usr/bin:/bin',
     HOME: defaultHome,
+    USER: defaultUser.username,
     SHELL: DEFAULT_POSIX_SHELL,
     ...options?.env,
   };
+
+  const pid = options?.pid ?? allocateProcessId();
+  const ppid = options?.ppid ?? 0;
+  const uid = options?.uid ?? defaultUser.uid;
+  const gid = options?.gid ?? defaultUser.gid;
 
   // Create an EventEmitter for process events
   const emitter = new EventEmitter();
@@ -306,8 +328,24 @@ export function createProcess(options?: {
     execPath: '/usr/local/bin/node',
     execArgv: [],
 
-    pid: 1,
-    ppid: 0,
+    pid,
+    ppid,
+
+    getuid() {
+      return uid;
+    },
+
+    getgid() {
+      return gid;
+    },
+
+    geteuid() {
+      return uid;
+    },
+
+    getegid() {
+      return gid;
+    },
 
     exit(code = 0) {
       emitter.emit('exit', code);

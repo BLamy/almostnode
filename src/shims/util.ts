@@ -184,6 +184,139 @@ export function callbackify<T>(fn: (...args: any[]) => Promise<T>): (...args: an
   };
 }
 
+function mapEntriesEqual(
+  left: Map<unknown, unknown>,
+  right: Map<unknown, unknown>,
+  seen: WeakMap<object, object>
+): boolean {
+  if (left.size !== right.size) return false;
+  const unmatched = [...right.entries()];
+
+  for (const [leftKey, leftValue] of left.entries()) {
+    const matchIndex = unmatched.findIndex(([rightKey, rightValue]) => {
+      return deepStrictEqual(leftKey, rightKey, seen) && deepStrictEqual(leftValue, rightValue, seen);
+    });
+    if (matchIndex === -1) {
+      return false;
+    }
+    unmatched.splice(matchIndex, 1);
+  }
+
+  return unmatched.length === 0;
+}
+
+function setEntriesEqual(
+  left: Set<unknown>,
+  right: Set<unknown>,
+  seen: WeakMap<object, object>
+): boolean {
+  if (left.size !== right.size) return false;
+  const unmatched = [...right.values()];
+
+  for (const leftValue of left.values()) {
+    const matchIndex = unmatched.findIndex((rightValue) => deepStrictEqual(leftValue, rightValue, seen));
+    if (matchIndex === -1) {
+      return false;
+    }
+    unmatched.splice(matchIndex, 1);
+  }
+
+  return unmatched.length === 0;
+}
+
+function deepStrictEqual(left: unknown, right: unknown, seen: WeakMap<object, object>): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+
+  if (typeof left !== typeof right) {
+    return false;
+  }
+
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
+    return false;
+  }
+
+  if (seen.get(left as object) === right) {
+    return true;
+  }
+  seen.set(left as object, right as object);
+
+  if (Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) {
+    return false;
+  }
+
+  if (left instanceof Date && right instanceof Date) {
+    return Object.is(left.getTime(), right.getTime());
+  }
+
+  if (left instanceof RegExp && right instanceof RegExp) {
+    return left.source === right.source && left.flags === right.flags;
+  }
+
+  if (left instanceof Error && right instanceof Error) {
+    return left.name === right.name && left.message === right.message;
+  }
+
+  if (ArrayBuffer.isView(left) && ArrayBuffer.isView(right)) {
+    if (left.constructor !== right.constructor || left.byteLength !== right.byteLength) {
+      return false;
+    }
+    const leftBytes = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
+    const rightBytes = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
+    for (let index = 0; index < leftBytes.length; index += 1) {
+      if (leftBytes[index] !== rightBytes[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (left instanceof ArrayBuffer && right instanceof ArrayBuffer) {
+    return deepStrictEqual(new Uint8Array(left), new Uint8Array(right), seen);
+  }
+
+  if (left instanceof Map && right instanceof Map) {
+    return mapEntriesEqual(left, right, seen);
+  }
+
+  if (left instanceof Set && right instanceof Set) {
+    return setEntriesEqual(left, right, seen);
+  }
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    return left.every((value, index) => deepStrictEqual(value, right[index], seen));
+  }
+
+  const leftKeys = Reflect.ownKeys(left as object);
+  const rightKeys = Reflect.ownKeys(right as object);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  for (const key of leftKeys) {
+    if (!rightKeys.includes(key)) {
+      return false;
+    }
+    if (!deepStrictEqual(
+      (left as Record<PropertyKey, unknown>)[key],
+      (right as Record<PropertyKey, unknown>)[key],
+      seen
+    )) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export function isDeepStrictEqual(left: unknown, right: unknown): boolean {
+  return deepStrictEqual(left, right, new WeakMap<object, object>());
+}
+
 export function isArray(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
@@ -399,6 +532,7 @@ export default {
   debuglog,
   debug,
   stripVTControlCharacters,
+  isDeepStrictEqual,
   isArray,
   isBoolean,
   isNull,

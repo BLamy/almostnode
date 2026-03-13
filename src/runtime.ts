@@ -17,7 +17,8 @@ import * as httpShim from './shims/http';
 import * as httpsShim from './shims/https';
 import * as netShim from './shims/net';
 import eventsShim from './shims/events';
-import streamShim from './shims/stream';
+import streamShim, { promises as streamPromisesShim } from './shims/stream';
+import streamConsumersShim from './shims/stream-consumers';
 import * as urlShim from './shims/url';
 import * as querystringShim from './shims/querystring';
 import * as utilShim from './shims/util';
@@ -50,6 +51,8 @@ import * as inspectorShim from './shims/inspector';
 import * as asyncHooksShim from './shims/async_hooks';
 import * as domainShim from './shims/domain';
 import * as diagnosticsChannelShim from './shims/diagnostics_channel';
+import { ModuleGraphLoader } from './module-graph-loader';
+import { ModuleResolver, type ModuleFormat } from './module-resolution';
 
 import assertShim from './shims/assert';
 import { resolve as resolveExports, imports as resolveImports } from 'resolve.exports';
@@ -342,7 +345,10 @@ function normalizeMissingEsmDefault(moduleExports: unknown): unknown {
 export interface Module {
   id: string;
   filename: string;
+  url: string;
+  format: ModuleFormat;
   exports: unknown;
+  namespace?: Record<string, unknown>;
   loaded: boolean;
   children: Module[];
   paths: string[];
@@ -356,6 +362,7 @@ export interface RuntimeOptions {
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
   childProcessController?: childProcessShim.ChildProcessController;
+  builtinModules?: Record<string, unknown>;
 }
 
 export interface RequireFunction {
@@ -430,7 +437,7 @@ function createExecaModule() {
 
     childProcessShim.exec(command, execOptions, (error, stdout, stderr) => {
       const exitCode = error && typeof (error as { code?: unknown }).code === 'number'
-        ? ((error as { code: number }).code)
+        ? ((error as unknown as { code: number }).code)
         : 0;
       const result = {
         command,
@@ -520,6 +527,7 @@ const CONSOLE_METHOD_NAMES = [
   'time', 'timeEnd', 'timeLog', 'assert', 'clear', 'count', 'countReset',
   'group', 'groupCollapsed', 'groupEnd', 'table',
 ] as const;
+const HOST_CONSOLE = globalThis.console;
 
 type ConsoleMethodName = typeof CONSOLE_METHOD_NAMES[number];
 
@@ -578,7 +586,8 @@ const builtinModules: Record<string, unknown> = {
   net: netShim,
   events: eventsShim,
   stream: streamShim,
-  'stream/promises': streamShim.promises,
+  'stream/promises': streamPromisesShim,
+  'stream/consumers': streamConsumersShim,
   buffer: bufferShim,
   url: urlShim,
   querystring: querystringShim,
@@ -713,6 +722,13 @@ const builtinModules: Record<string, unknown> = {
   },
 };
 
+let runtimeIdCounter = 0;
+
+function createRuntimeId(): string {
+  runtimeIdCounter += 1;
+  return `almostnode-runtime-${runtimeIdCounter}`;
+}
+
 /**
  * Create a require function for a specific module context
  */
@@ -722,10 +738,13 @@ function createRequire(
   process: Process,
   currentDir: string,
   moduleCache: Record<string, Module>,
+  builtinModuleMap: Record<string, unknown>,
   options: RuntimeOptions,
   processedCodeCache?: Map<string, string>,
   resolverCaches?: ResolverCaches
 ): RequireFunction {
+  const builtinModules = builtinModuleMap;
+  const moduleFormatResolver = new ModuleResolver(vfs, { builtinModules });
   // Module resolution cache for faster repeated imports
   const resolutionCache: Map<string, string | null> =
     resolverCaches?.resolutionCache ?? new Map();
@@ -1040,6 +1059,8 @@ function createRequire(
     const module: Module = {
       id: resolvedPath,
       filename: resolvedPath,
+      url: `file://${resolvedPath}`,
+      format: moduleFormatResolver.detectFormat(resolvedPath),
       exports: {},
       loaded: false,
       children: [],
@@ -1082,13 +1103,6 @@ function createRequire(
         code = code.slice(code.indexOf('\n') + 1);
       }
 
-      // Transform ESM to CJS if needed (for .mjs files or ESM that wasn't pre-transformed)
-      // transformEsmToCjs uses AST to handle import/export, import.meta, and dynamic imports
-      // It also handles already-CJS files safely (AST finds no ESM nodes → no-op)
-      if (!resolvedPath.endsWith('.cjs')) {
-        code = transformEsmToCjs(code, resolvedPath);
-      }
-
       // Cache the processed code
       processedCodeCache?.set(codeCacheKey, code);
     }
@@ -1100,6 +1114,7 @@ function createRequire(
       process,
       dirname,
       moduleCache,
+      builtinModules,
       options,
       processedCodeCache,
       resolverCaches
@@ -1228,6 +1243,7 @@ function createRequire(
             process,
             fromDir,
             moduleCache,
+            builtinModules,
             options,
             processedCodeCache,
             resolverCaches
@@ -1256,6 +1272,14 @@ function createRequire(
       return builtinModules['prettier'];
     }
     const resolved = resolveModule(id, currentDir);
+    const resolvedFormat = moduleFormatResolver.detectFormat(resolved);
+    if (resolvedFormat === 'esm') {
+      const err = new Error(
+        `ERR_REQUIRE_ESM: require() of ES Module '${id}' is not supported. Use import() instead.`
+      );
+      (err as Error & { code?: string }).code = 'ERR_REQUIRE_ESM';
+      throw err;
+    }
 
     // If resolved to a built-in name (shouldn't happen but safety check)
     if (builtinModules[resolved]) {
@@ -1306,48 +1330,48 @@ function createConsoleWrapper(
   const ConsoleCtor = (builtinModules.console as { Console?: unknown }).Console;
   const wrapper = {
     log: (...args: unknown[]) => {
-      console.log(...args);
+      HOST_CONSOLE.log(...args);
       onConsole?.('log', args);
     },
     error: (...args: unknown[]) => {
-      console.error(...args);
+      HOST_CONSOLE.error(...args);
       onConsole?.('error', args);
     },
     warn: (...args: unknown[]) => {
-      console.warn(...args);
+      HOST_CONSOLE.warn(...args);
       onConsole?.('warn', args);
     },
     info: (...args: unknown[]) => {
-      console.info(...args);
+      HOST_CONSOLE.info(...args);
       onConsole?.('info', args);
     },
     debug: (...args: unknown[]) => {
-      console.debug(...args);
+      HOST_CONSOLE.debug(...args);
       onConsole?.('debug', args);
     },
     trace: (...args: unknown[]) => {
-      console.trace(...args);
+      HOST_CONSOLE.trace(...args);
       onConsole?.('trace', args);
     },
     dir: (obj: unknown) => {
-      console.dir(obj);
+      HOST_CONSOLE.dir(obj);
       onConsole?.('dir', [obj]);
     },
     dirxml: (...args: unknown[]) => {
-      console.dirxml?.(...args);
+      HOST_CONSOLE.dirxml?.(...args);
       onConsole?.('dirxml', args);
     },
-    time: console.time.bind(console),
-    timeEnd: console.timeEnd.bind(console),
-    timeLog: console.timeLog.bind(console),
-    assert: console.assert.bind(console),
-    clear: console.clear.bind(console),
-    count: console.count.bind(console),
-    countReset: console.countReset.bind(console),
-    group: console.group.bind(console),
-    groupCollapsed: console.groupCollapsed.bind(console),
-    groupEnd: console.groupEnd.bind(console),
-    table: console.table.bind(console),
+    time: HOST_CONSOLE.time.bind(HOST_CONSOLE),
+    timeEnd: HOST_CONSOLE.timeEnd.bind(HOST_CONSOLE),
+    timeLog: HOST_CONSOLE.timeLog.bind(HOST_CONSOLE),
+    assert: HOST_CONSOLE.assert.bind(HOST_CONSOLE),
+    clear: HOST_CONSOLE.clear.bind(HOST_CONSOLE),
+    count: HOST_CONSOLE.count.bind(HOST_CONSOLE),
+    countReset: HOST_CONSOLE.countReset.bind(HOST_CONSOLE),
+    group: HOST_CONSOLE.group.bind(HOST_CONSOLE),
+    groupCollapsed: HOST_CONSOLE.groupCollapsed.bind(HOST_CONSOLE),
+    groupEnd: HOST_CONSOLE.groupEnd.bind(HOST_CONSOLE),
+    table: HOST_CONSOLE.table.bind(HOST_CONSOLE),
     Console: ConsoleCtor,
   };
 
@@ -1363,7 +1387,11 @@ export class Runtime {
   private vfs: VirtualFS;
   private fsShim: FsShim;
   private process: Process;
+  private runtimeId: string;
   private moduleCache: Record<string, Module> = {};
+  private builtinModules: Record<string, unknown>;
+  private formatDetector: ModuleResolver;
+  private moduleLoader: ModuleGraphLoader;
   private options: RuntimeOptions;
   /** Cache for pre-processed code (after ESM transform) before eval */
   private processedCodeCache: Map<string, string> = new Map();
@@ -1375,6 +1403,7 @@ export class Runtime {
 
   constructor(vfs: VirtualFS, options: RuntimeOptions = {}) {
     this.vfs = vfs;
+    this.runtimeId = createRuntimeId();
     const childProcessController = options.childProcessController ?? initChildProcess(vfs);
     // Create process first so we can get cwd for fs shim
     this.process = createProcess({
@@ -1385,10 +1414,30 @@ export class Runtime {
     });
     // Create fs shim with cwd getter for relative path resolution
     this.fsShim = createFsShim(vfs, () => this.process.cwd());
+    this.builtinModules = {
+      ...builtinModules,
+      fs: this.fsShim,
+      'fs/promises': this.fsShim.promises,
+      process: this.process,
+      child_process: childProcessShim,
+      ...(options.builtinModules || {}),
+    };
     this.options = {
       ...options,
       childProcessController,
     };
+    this.formatDetector = new ModuleResolver(this.vfs, {
+      builtinModules: this.builtinModules,
+    });
+    this.moduleLoader = new ModuleGraphLoader({
+      vfs: this.vfs,
+      runtimeId: this.runtimeId,
+      builtinModules: this.builtinModules,
+      console: createConsoleWrapper(this.options.onConsole) as unknown as Record<string, unknown>,
+      process: this.process as unknown as Record<string, unknown>,
+      requireCjs: (resolvedPath: string) => this.requireCommonJsModule(resolvedPath),
+      createRequire: (fromPath: string) => this.createLegacyRequire(pathShim.dirname(fromPath)),
+    });
 
     // Initialize file watcher shims with VFS
     chokidarShim.setVFS(vfs);
@@ -1487,9 +1536,11 @@ export class Runtime {
     // Patch XMLHttpRequest to use the same CORS proxy path as fetch().
     // Some CLIs bundle axios/XHR adapters and bypass global fetch entirely.
     if (typeof globalThis.XMLHttpRequest === 'function' && !(globalThis.XMLHttpRequest as any).__almostnode) {
-      const xhrProto = globalThis.XMLHttpRequest.prototype as XMLHttpRequest['prototype'] & {
-        __almostnodeOriginalOpen?: typeof XMLHttpRequest.prototype.open;
-        __almostnodeOriginalSetRequestHeader?: typeof XMLHttpRequest.prototype.setRequestHeader;
+      const xhrProto = (globalThis.XMLHttpRequest as typeof XMLHttpRequest & {
+        prototype: XMLHttpRequest;
+      }).prototype as XMLHttpRequest & {
+        __almostnodeOriginalOpen?: XMLHttpRequest['open'];
+        __almostnodeOriginalSetRequestHeader?: XMLHttpRequest['setRequestHeader'];
       };
       const origOpen = xhrProto.open;
       const origSetRequestHeader = xhrProto.setRequestHeader;
@@ -1792,130 +1843,121 @@ export class Runtime {
     };
   }
 
-  /**
-   * Execute code as a module (synchronous - backward compatible)
-   */
-  execute(
-    code: string,
-    filename: string = '/index.js'
-  ): { exports: unknown; module: Module } {
-    const dirname = pathShim.dirname(filename);
-
-    // Write code to virtual file system
-    this.vfs.writeFileSync(filename, code);
-
-    // Create require function
-    const require = createRequire(
-      this.vfs,
-      this.fsShim,
-      this.process,
-      dirname,
-      this.moduleCache,
-      this.options,
-      this.processedCodeCache,
-      this.resolverCaches
-    );
-
-    // Create module object
-    const module: Module = {
-      id: filename,
-      filename,
-      exports: {},
+  private createModuleRecord(
+    id: string,
+    format: ModuleFormat,
+    exportsValue: unknown = {},
+    namespace?: Record<string, unknown>,
+  ): Module {
+    return {
+      id,
+      filename: id,
+      url: format === 'builtin' ? `builtin:${id}` : `file://${id}`,
+      format,
+      exports: exportsValue,
+      namespace,
       loaded: false,
       children: [],
       paths: [],
     };
+  }
 
-    // Cache the module
-    this.moduleCache[filename] = module;
+  private createLegacyRequire(currentDir: string): RequireFunction {
+    return createRequire(
+      this.vfs,
+      this.fsShim,
+      this.process,
+      currentDir,
+      this.moduleCache,
+      this.builtinModules,
+      this.options,
+      this.processedCodeCache,
+      this.resolverCaches,
+    );
+  }
 
-    // Create console wrapper
-    const consoleWrapper = createConsoleWrapper(this.options.onConsole);
+  private buildExecuteResult(module: Module, namespace?: Record<string, unknown>): IExecuteResult {
+    const normalizedNamespace = namespace || (
+      module.exports && typeof module.exports === 'object'
+        ? module.exports as Record<string, unknown>
+        : { default: module.exports }
+    );
 
-    // Transform code the same way loadModule does
-    // Strip shebang line if present (e.g. #!/usr/bin/env node)
-    if (code.startsWith('#!')) {
-      code = code.slice(code.indexOf('\n') + 1);
+    module.namespace = normalizedNamespace;
+    module.loaded = true;
+
+    return {
+      exports: normalizedNamespace.default ?? module.exports,
+      namespace: normalizedNamespace,
+      module,
+    };
+  }
+
+  private requireCommonJsModule(resolvedPath: string): unknown {
+    const module = this.loadModule(resolvedPath);
+    let loadedExports = module.exports;
+    if (resolvedPath.includes('/node_modules/')) {
+      loadedExports = normalizeMissingEsmDefault(loadedExports);
+    }
+    if (resolvedPath.includes('/node_modules/signal-exit/') || resolvedPath === 'signal-exit') {
+      loadedExports = normalizeSignalExitExport(loadedExports);
+    }
+    module.exports = loadedExports;
+    return loadedExports;
+  }
+
+  async importModule(specifier: string, fromPath = '/'): Promise<IExecuteResult> {
+    const loaded = await this.moduleLoader.importModule(specifier, fromPath);
+    const namespace = loaded.namespace || {};
+    const module = this.moduleCache[loaded.id] || this.createModuleRecord(
+      loaded.id,
+      loaded.format,
+      namespace.default ?? namespace,
+      namespace,
+    );
+    module.url = loaded.url;
+    module.format = loaded.format;
+    module.exports = namespace.default ?? namespace;
+    module.namespace = namespace;
+    module.executionPromise = Promise.resolve(module.exports);
+    module.loaded = true;
+    this.moduleCache[loaded.id] = module;
+    return this.buildExecuteResult(module, namespace);
+  }
+
+  /**
+   * Execute code as a module.
+   */
+  async execute(
+    code: string,
+    filename: string = '/index.js'
+  ): Promise<IExecuteResult> {
+    // Write code to virtual file system
+    this.vfs.writeFileSync(filename, code);
+    const format = this.formatDetector.detectFormat(filename, code);
+    if (format === 'esm') {
+      return this.importModule(filename, filename);
     }
 
-    // Transform ESM to CJS if needed (AST-based, handles import.meta and dynamic imports too)
-    if (!filename.endsWith('.cjs')) {
-      code = transformEsmToCjs(code, filename);
-    }
-
-    // Execute code
-    // Use the same wrapper pattern as loadModule for consistency
-    try {
-      const importMetaUrl = 'file://' + filename;
-      // Create dynamic import function for this module context
-      const dynamicImport = createDynamicImport(require);
-      let fn;
-      let wrappedAsync = false;
-
-      try {
-        fn = eval(createWrappedModuleCode(code));
-      } catch (evalError) {
-        const msg = evalError instanceof Error ? evalError.message : String(evalError);
-        if (isLikelyTopLevelAwaitSyntaxError(msg)) {
-          const rewrittenCode = rewriteAwaitedDynamicImports(code);
-          const candidateCode = rewrittenCode !== code ? rewrittenCode : code;
-
-          if (rewrittenCode !== code) {
-            try {
-              fn = eval(createWrappedModuleCode(rewrittenCode));
-              code = rewrittenCode;
-            } catch {
-              // Fall through to async entrypoint execution below.
-            }
-          }
-
-          if (!fn && findFirstAwaitLine(candidateCode)) {
-            try {
-              fn = eval(createWrappedModuleCode(candidateCode, true));
-              code = candidateCode;
-              wrappedAsync = true;
-            } catch {
-              // Fall through to a clearer syntax error below.
-            }
-          }
-        }
-
-        if (!fn) {
-          const awaitLine = findFirstAwaitLine(code);
-          const awaitDetail = awaitLine ? `\n[almostnode] first await line: ${awaitLine}` : '';
-          throw new SyntaxError(`${msg} (in ${filename})${awaitDetail}`);
-        }
-      }
-
-      const executionResult = fn(
-        module.exports,
-        require,
-        module,
-        filename,
-        dirname,
-        this.process,
-        consoleWrapper,
-        { url: importMetaUrl, dirname, filename },
-        dynamicImport
-      );
-      if (wrappedAsync && executionResult && typeof (executionResult as Promise<unknown>).then === 'function') {
-        module.executionPromise = executionResult as Promise<unknown>;
-      }
-
-      module.loaded = true;
-    } catch (error) {
-      delete this.moduleCache[filename];
-      throw error;
-    }
-
-    return { exports: module.exports, module };
+    const module = this.loadModule(filename);
+    return this.buildExecuteResult(module);
   }
 
   /**
    * Execute code as a module (async version for IRuntime interface)
    * Alias: executeSync() is the same as execute() for backward compatibility
    */
-  executeSync = this.execute;
+  executeSync = (
+    code: string,
+    filename: string = '/index.js',
+  ): { exports: unknown; module: Module } => {
+    this.vfs.writeFileSync(filename, code);
+    const module = this.loadModule(filename);
+    return {
+      exports: module.exports,
+      module,
+    };
+  };
 
   /**
    * Execute code as a module (async - for IRuntime interface)
@@ -1924,13 +1966,13 @@ export class Runtime {
     code: string,
     filename: string = '/index.js'
   ): Promise<IExecuteResult> {
-    return Promise.resolve(this.execute(code, filename));
+    return this.execute(code, filename);
   }
 
   /**
-   * Run a file from the virtual file system (synchronous - backward compatible)
+   * Run a file from the virtual file system.
    */
-  runFile(filename: string): { exports: unknown; module: Module } {
+  async runFile(filename: string): Promise<IExecuteResult> {
     const code = this.vfs.readFileSync(filename, 'utf8');
     return this.execute(code, filename);
   }
@@ -1938,13 +1980,35 @@ export class Runtime {
   /**
    * Alias for runFile (backward compatibility)
    */
-  runFileSync = this.runFile;
+  runFileSync = (filename: string): { exports: unknown; module: Module } => {
+    const module = this.loadModule(filename);
+    return {
+      exports: module.exports,
+      module,
+    };
+  };
 
   /**
    * Run a file from the virtual file system (async - for IRuntime interface)
    */
   async runFileAsync(filename: string): Promise<IExecuteResult> {
-    return Promise.resolve(this.runFile(filename));
+    return this.runFile(filename);
+  }
+
+  loadModule(filename: string): Module {
+    const require = this.createLegacyRequire(pathShim.dirname(filename));
+    const resolved = require.resolve(filename);
+    require(filename);
+    const loaded = this.moduleCache[resolved];
+    if (!loaded) {
+      throw new Error(`Failed to load module '${filename}'`);
+    }
+    return loaded;
+  }
+
+  registerBuiltinModule(name: string, moduleExports: unknown): void {
+    this.builtinModules[name] = moduleExports;
+    this.clearCache();
   }
 
   /**
@@ -1958,6 +2022,8 @@ export class Runtime {
     this.processedCodeCache.clear();
     this.resolverCaches.resolutionCache.clear();
     this.resolverCaches.packageJsonCache.clear();
+    this.formatDetector.clearCache();
+    this.moduleLoader.clearCache();
   }
 
   /**
@@ -1991,17 +2057,8 @@ export class Runtime {
    * (var hoists to the generator's function scope, const/let are block-scoped
    * to each eval call and would be lost).
    */
-  createREPL(): { eval: (code: string) => unknown } {
-    const require = createRequire(
-      this.vfs,
-      this.fsShim,
-      this.process,
-      '/',
-      this.moduleCache,
-      this.options,
-      this.processedCodeCache,
-      this.resolverCaches
-    );
+  createREPL(): { eval: (code: string) => Promise<unknown> } {
+    const require = this.createLegacyRequire('/');
     const consoleWrapper = createConsoleWrapper(this.options.onConsole);
     const process = this.process;
     const buffer = bufferShim.Buffer;
@@ -2030,7 +2087,7 @@ while (true) {
     replGen.next(); // prime the generator
 
     return {
-      eval(code: string): unknown {
+      async eval(code: string): Promise<unknown> {
         // Transform const/let to var for persistence across REPL calls.
         // var declarations in direct eval are added to the enclosing function
         // scope (the generator), so they survive across yields.
@@ -2061,13 +2118,13 @@ while (true) {
 }
 
 /**
- * Create and execute code in a new runtime (synchronous - backward compatible)
+ * Create and execute code in a new runtime.
  */
-export function execute(
+export async function execute(
   code: string,
   vfs: VirtualFS,
   options?: RuntimeOptions
-): { exports: unknown; module: Module } {
+): Promise<IExecuteResult> {
   const runtime = new Runtime(vfs, options);
   return runtime.execute(code);
 }

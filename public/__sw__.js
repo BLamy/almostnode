@@ -16,6 +16,9 @@ let requestId = 0;
 // Registered virtual server ports
 const registeredPorts = new Set();
 
+// Whether Eruda devtools injection is enabled
+let erudaEnabled = true;
+
 /**
  * Decode base64 string to Uint8Array
  */
@@ -55,6 +58,11 @@ self.addEventListener('message', (event) => {
   if (type === 'server-unregistered' && data) {
     registeredPorts.delete(data.port);
     DEBUG && console.log(`[SW] Server unregistered from port ${data.port}`);
+  }
+
+  if (type === 'eruda-toggle') {
+    erudaEnabled = !!data?.enabled;
+    DEBUG && console.log(`[SW] Eruda injection ${erudaEnabled ? 'enabled' : 'disabled'}`);
   }
 });
 
@@ -181,6 +189,41 @@ async function sendRequest(port, method, url, headers, body) {
   });
 }
 
+async function sendModuleRequest(url) {
+  if (!mainPort) {
+    const allClients = await self.clients.matchAll({ type: 'window' });
+    for (const client of allClients) {
+      client.postMessage({ type: 'sw-needs-init' });
+    }
+    await new Promise(resolve => {
+      const check = setInterval(() => { if (mainPort) { clearInterval(check); resolve(); } }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+    });
+    if (!mainPort) {
+      throw new Error('Service Worker not initialized - no connection to main thread');
+    }
+  }
+
+  const id = ++requestId;
+
+  return new Promise((resolve, reject) => {
+    pendingRequests.set(id, { resolve, reject });
+
+    setTimeout(() => {
+      if (pendingRequests.has(id)) {
+        pendingRequests.delete(id);
+        reject(new Error('Request timeout'));
+      }
+    }, 30000);
+
+    mainPort.postMessage({
+      type: 'module-request',
+      id,
+      data: { url },
+    });
+  });
+}
+
 /**
  * Send streaming request to main thread
  * Returns a ReadableStream that receives chunks from main thread
@@ -244,6 +287,11 @@ self.addEventListener('fetch', (event) => {
 
   DEBUG && console.log('[SW] Fetch:', url.pathname, 'mainPort:', !!mainPort);
 
+  if (url.pathname.startsWith('/__modules__/r/')) {
+    event.respondWith(handleModuleRequest(event.request, url.pathname + url.search));
+    return;
+  }
+
   // Check if this is a virtual server request
   const match = url.pathname.match(/^\/__virtual__\/(\d+)(\/.*)?$/);
 
@@ -291,6 +339,132 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(handleVirtualRequest(event.request, port, path + url.search));
 });
 
+async function handleModuleRequest(request, url) {
+  try {
+    const response = await sendModuleRequest(url);
+    const headers = new Headers(response.headers || {});
+    headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+    headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+    headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    headers.delete('X-Frame-Options');
+
+    if (response.bodyBase64 && response.bodyBase64.length > 0) {
+      const bytes = base64ToBytes(response.bodyBase64);
+      return new Response(new Blob([bytes], {
+        type: headers.get('Content-Type') || 'application/javascript',
+      }), {
+        status: response.statusCode,
+        statusText: response.statusMessage,
+        headers,
+      });
+    }
+
+    return new Response(null, {
+      status: response.statusCode,
+      statusText: response.statusMessage,
+      headers,
+    });
+  } catch (error) {
+    return new Response(`Module Worker Error: ${error.message}`, {
+      status: 500,
+      statusText: 'Internal Server Error',
+      headers: { 'Content-Type': 'text/plain' },
+    });
+  }
+}
+
+/**
+ * Script injected into HTML responses for Eruda devtools + console bridge.
+ * The console bridge always runs; Eruda init is guarded in case the CDN fails.
+ */
+function getErudaInjectionScript() {
+  return `<script data-almostnode-devtools>
+(function() {
+  // ── Console bridge (always active) ──
+  var origLog = console.log, origWarn = console.warn,
+      origError = console.error, origInfo = console.info;
+
+  function forward(level, args) {
+    try {
+      var serialized = Array.prototype.map.call(args, function(a) {
+        if (a === null) return 'null';
+        if (a === undefined) return 'undefined';
+        if (typeof a === 'object') {
+          try { return JSON.stringify(a, null, 2); } catch(e) { return String(a); }
+        }
+        return String(a);
+      });
+      window.parent.postMessage({
+        type: 'almostnode-console',
+        level: level,
+        args: serialized,
+        timestamp: Date.now()
+      }, '*');
+    } catch(e) { /* ignore bridge errors */ }
+  }
+
+  console.log = function() { forward('log', arguments); return origLog.apply(console, arguments); };
+  console.warn = function() { forward('warn', arguments); return origWarn.apply(console, arguments); };
+  console.error = function() { forward('error', arguments); return origError.apply(console, arguments); };
+  console.info = function() { forward('info', arguments); return origInfo.apply(console, arguments); };
+
+  window.addEventListener('error', function(e) {
+    forward('error', [e.message + ' at ' + (e.filename || '') + ':' + (e.lineno || '')]);
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    forward('error', ['Unhandled rejection: ' + (e.reason && e.reason.message || e.reason || '')]);
+  });
+
+  // ── Eruda devtools ──
+  var script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/eruda@3.4.0/eruda.min.js';
+  script.onload = function() {
+    if (typeof eruda === 'undefined') return;
+    eruda.init({ useShadowDom: true, defaults: { theme: 'Dark' } });
+    eruda.hide();
+  };
+  script.onerror = function() { /* CDN unavailable — console bridge still works */ };
+  document.head.appendChild(script);
+
+  // ── DevTools toggle listener ──
+  window.addEventListener('message', function(e) {
+    if (!e.data || e.data.type !== 'almostnode-devtools') return;
+    if (typeof eruda === 'undefined') return;
+    var action = e.data.action;
+    if (action === 'show') eruda.show();
+    else if (action === 'hide') eruda.hide();
+    else if (action === 'toggle') {
+      var entry = eruda.get().entryBtn;
+      if (entry && entry.isVisible && entry.isVisible()) eruda.hide();
+      else eruda.show();
+    }
+  });
+})();
+</` + `script>`;
+}
+
+/**
+ * Inject devtools script into an HTML response body if applicable
+ */
+function maybeInjectEruda(bytes, contentType) {
+  if (!erudaEnabled) return bytes;
+  if (!contentType || !contentType.includes('text/html')) return bytes;
+
+  var html = new TextDecoder().decode(bytes);
+  var injection = getErudaInjectionScript();
+
+  // Inject before </body> if present, otherwise before </html>, otherwise append
+  if (html.includes('</body>')) {
+    html = html.replace('</body>', injection + '</body>');
+  } else if (html.includes('</html>')) {
+    html = html.replace('</html>', injection + '</html>');
+  } else {
+    html += injection;
+  }
+
+  return new TextEncoder().encode(html);
+}
+
 /**
  * Handle a request to a virtual server
  */
@@ -330,8 +504,12 @@ async function handleVirtualRequest(request, port, path) {
     let finalResponse;
     if (response.bodyBase64 && response.bodyBase64.length > 0) {
       try {
-        const bytes = base64ToBytes(response.bodyBase64);
+        let bytes = base64ToBytes(response.bodyBase64);
         DEBUG && console.log('[SW] Decoded body length:', bytes.length);
+
+        // Inject Eruda devtools into HTML responses
+        const ct = response.headers['Content-Type'] || response.headers['content-type'] || '';
+        bytes = maybeInjectEruda(bytes, ct);
 
         // Use Blob to ensure proper body handling
         const blob = new Blob([bytes], { type: response.headers['Content-Type'] || 'application/octet-stream' });

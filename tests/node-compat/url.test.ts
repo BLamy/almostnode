@@ -479,6 +479,13 @@ describe('url module (Node.js compat)', () => {
       assert.strictEqual(path, '/home/user/my file.txt');
     });
 
+    it('should decode almostnode module URLs back to virtual file paths', () => {
+      const path = fileURLToPath(
+        'http://localhost:5175/__modules__/r/almostnode-runtime-2/esm/0/1k4pqc?id=%2Fnode_modules%2F%40anthropic-ai%2Fclaude-code%2Fcli.js'
+      );
+      assert.strictEqual(path, '/node_modules/@anthropic-ai/claude-code/cli.js');
+    });
+
     it('should throw for non-file protocol', () => {
       assert.throws(
         () => fileURLToPath('http://example.com/path'),

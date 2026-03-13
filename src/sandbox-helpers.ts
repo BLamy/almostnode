@@ -146,7 +146,7 @@ ${serviceWorkerScript}
             parent.postMessage({ type: 'error', id, error: 'Runtime not initialized' }, '*');
             return;
           }
-          const execResult = runtime.execute(code, filename);
+          const execResult = await runtime.execute(code, filename);
           parent.postMessage({ type: 'result', id, result: execResult }, '*');
           break;
 
@@ -155,7 +155,7 @@ ${serviceWorkerScript}
             parent.postMessage({ type: 'error', id, error: 'Runtime not initialized' }, '*');
             return;
           }
-          const runResult = runtime.runFile(filename);
+          const runResult = await runtime.runFile(filename);
           parent.postMessage({ type: 'result', id, result: runResult }, '*');
           break;
 

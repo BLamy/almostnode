@@ -47,7 +47,7 @@ exec('echo "Hello from bash"', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
 
       // Wait for async execution
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -79,7 +79,7 @@ exec('ls /', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
 
       // Wait for async execution
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -109,7 +109,7 @@ exec('cat /hello.txt', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
 
       // Wait for async execution
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -137,7 +137,7 @@ exec('pwd', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/workspace/test.js');
+      await runtime.execute(code, '/workspace/test.js');
       await new Promise(resolve => setTimeout(resolve, 100));
 
       expect(consoleOutput.some(o => o.includes('PWD:/workspace'))).toBe(true);
@@ -180,7 +180,7 @@ exec('node /workspace/app.js', (error, stdout, stderr) => {
         'const yoga = require("yoga-layout"); console.log("YOGA:" + yoga.Node.create());'
       );
 
-      runtime.execute(code, '/workspace/test.js');
+      await runtime.execute(code, '/workspace/test.js');
       await waitFor(() => consoleOutput.some(o => o.includes('YOGA:from-preload')));
 
       expect(consoleOutput.some(o => o.includes('YOGA:from-preload'))).toBe(true);
@@ -206,7 +206,7 @@ exec('node /workspace/tty-check.js', (error, stdout, stderr) => {
 });
         `;
 
-        runtime.execute(code, '/test.js');
+        await runtime.execute(code, '/test.js');
         await waitFor(() => consoleOutput.some(o => o.includes('OUT:TTY:1')));
       } finally {
         clearStreamingCallbacks();
@@ -236,7 +236,7 @@ exec('node /node_modules/cli/cli.js --version', {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await waitFor(() => consoleOutput.some(o => o.includes('STDOUT:cli-version')), 3000);
 
       expect(consoleOutput.some(o => o.includes('STDOUT:cli-version'))).toBe(true);
@@ -245,8 +245,8 @@ exec('node /node_modules/cli/cli.js --version', {
   });
 
   describe('execFileSync', () => {
-    it('should support architecture probe commands like getconf LONG_BIT', () => {
-      const { exports } = runtime.execute(`
+    it('should support architecture probe commands like getconf LONG_BIT', async () => {
+      const { exports } = await runtime.execute(`
         const cp = require('child_process');
         module.exports = cp.execFileSync('getconf', ['LONG_BIT'], { encoding: 'utf8' }).trim();
       `, '/test.js');
@@ -254,8 +254,8 @@ exec('node /node_modules/cli/cli.js --version', {
       expect(exports).toBe('64');
     });
 
-    it('should expose execFileSync on default import interop shape', () => {
-      const { exports } = runtime.execute(`
+    it('should expose execFileSync on default import interop shape', async () => {
+      const { exports } = await runtime.execute(`
         var __create = Object.create;
         var __defProp = Object.defineProperty;
         var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -289,8 +289,8 @@ exec('node /node_modules/cli/cli.js --version', {
   });
 
   describe('execSync', () => {
-    it('should support shell detection probes used by interactive CLIs', () => {
-      const { exports } = runtime.execute(`
+    it('should support shell detection probes used by interactive CLIs', async () => {
+      const { exports } = await runtime.execute(`
         const cp = require('child_process');
         module.exports = {
           shellPath: cp.execSync('which bash', { encoding: 'utf8' }).trim(),
@@ -303,11 +303,96 @@ exec('node /node_modules/cli/cli.js --version', {
         shellVersion: 'GNU bash, version 5.2.15(1)-release (x86_64-pc-linux-gnu)',
       });
     });
+
+    it('should execute common bash commands synchronously', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      vfs.writeFileSync('/workspace/hello.txt', 'Hello, World!');
+      vfs.writeFileSync('/workspace/readme.md', 'README');
+
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const { exports } = await runtime.execute(`
+        const cp = require('child_process');
+        module.exports = {
+          pwd: cp.execSync('pwd', { encoding: 'utf8' }).trim(),
+          ls: cp.execSync('ls /workspace', { encoding: 'utf8' }).trim(),
+          echo: cp.execSync('echo hello world', { encoding: 'utf8' }).trim(),
+          cat: cp.execSync('cat /workspace/hello.txt', { encoding: 'utf8' }),
+          bashLs: cp.execSync('/bin/bash -c "ls /workspace"', { encoding: 'utf8' }).trim(),
+          bashPwd: cp.execSync('bash -c pwd', { encoding: 'utf8' }).trim(),
+          uname: cp.execSync('uname -s', { encoding: 'utf8' }).trim(),
+          whoami: cp.execSync('whoami', { encoding: 'utf8' }).trim(),
+          trueCmd: (() => { try { cp.execSync('true'); return 'ok'; } catch { return 'error'; } })(),
+        };
+      `, '/test.js');
+      const result = exports as {
+        pwd: string;
+        ls: string;
+        echo: string;
+        cat: string;
+        bashLs: string;
+        bashPwd: string;
+        uname: string;
+        whoami: string;
+        trueCmd: string;
+      };
+
+      expect(result.pwd).toBe('/workspace');
+      expect(result.ls).toContain('hello.txt');
+      expect(result.ls).toContain('readme.md');
+      expect(result.echo).toBe('hello world');
+      expect(result.cat).toBe('Hello, World!');
+      expect(result.bashLs).toContain('hello.txt');
+      expect(result.bashPwd).toBe('/workspace');
+      expect(result.uname).toBe('Linux');
+      expect(result.whoami).toBe('user');
+      expect(result.trueCmd).toBe('ok');
+    });
+
+    it('should execute spawnSync with common commands', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      vfs.writeFileSync('/workspace/file.txt', 'content');
+
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const { exports } = await runtime.execute(`
+        const cp = require('child_process');
+        const result = cp.spawnSync('ls', ['/workspace'], { encoding: 'utf8' });
+        const bashResult = cp.spawnSync('/bin/bash', ['-c', 'pwd'], { encoding: 'utf8', cwd: '/workspace' });
+        module.exports = {
+          ls: result.stdout.trim(),
+          status: result.status,
+          bashPwd: bashResult.stdout.trim(),
+          bashStatus: bashResult.status,
+        };
+      `, '/test.js');
+      const result = exports as {
+        ls: string;
+        status: number;
+        bashPwd: string;
+        bashStatus: number;
+      };
+
+      expect(result.ls).toContain('file.txt');
+      expect(result.status).toBe(0);
+      expect(result.bashPwd).toBe('/workspace');
+      expect(result.bashStatus).toBe(0);
+    });
   });
 
   describe('spawnSync', () => {
-    it('should support which-style dependency probes used by CLIs', () => {
-      const { exports } = runtime.execute(`
+    it('should support which-style dependency probes used by CLIs', async () => {
+      const { exports } = await runtime.execute(`
         const cp = require('child_process');
         const found = cp.spawnSync('which', ['node'], { encoding: 'utf8' });
         const missing = cp.spawnSync('which', ['rg'], { encoding: 'utf8' });
@@ -346,7 +431,7 @@ child.on('exit', (code) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
 
       // Wait for async execution
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -381,10 +466,43 @@ child.on('close', (code) => {
 });
       `;
 
-      runtime.execute(code, '/workspace/test.js');
+      await runtime.execute(code, '/workspace/test.js');
       await waitFor(() => consoleOutput.some(o => o.includes('RESULT:0:/workspace')));
 
       expect(consoleOutput.some(o => o.includes('RESULT:0:/workspace'))).toBe(true);
+    });
+
+    it('should keep writing to numeric stdio fds after the parent closes its copy', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const fs = require('fs');
+const { spawn } = require('child_process');
+
+const outputPath = '/workspace/claude-shell-output-detached.txt';
+const fd = fs.openSync(outputPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND);
+const child = spawn('pwd', [], {
+  cwd: '/workspace',
+  stdio: ['pipe', fd, fd],
+});
+
+fs.closeSync(fd);
+
+child.on('close', (code) => {
+  console.log('RESULT_AFTER_CLOSE:' + code + ':' + fs.readFileSync(outputPath, 'utf8').trim());
+});
+      `;
+
+      await runtime.execute(code, '/workspace/test-close-fd.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('RESULT_AFTER_CLOSE:0:/workspace')));
+
+      expect(consoleOutput.some(o => o.includes('RESULT_AFTER_CLOSE:0:/workspace'))).toBe(true);
     });
 
     it('should default spawn cwd to process.cwd()', async () => {
@@ -404,12 +522,70 @@ child.on('close', () => {
 });
       `;
 
-      runtime.execute(code, '/workspace/test.js');
+      await runtime.execute(code, '/workspace/test.js');
       await new Promise(resolve => setTimeout(resolve, 120));
 
       expect(consoleOutput.some(o => o.includes('SPAWN_DONE'))).toBe(true);
       expect(vfs.existsSync('/workspace/spawned-from-spawn')).toBe(true);
       expect(vfs.existsSync('/spawned-from-spawn')).toBe(false);
+    });
+
+    it('should pipe spawn stdout data to child.stdout stream', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      vfs.writeFileSync('/workspace/hello.txt', 'content');
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { spawn } = require('child_process');
+const child = spawn('ls', ['/workspace']);
+
+let stdout = '';
+child.stdout.on('data', (chunk) => {
+  stdout += chunk.toString();
+});
+child.on('close', (code) => {
+  console.log('SPAWN_STDOUT:' + (stdout.includes('hello.txt') ? 'HAS_FILE' : 'MISSING') + ':EXIT:' + code);
+});
+      `;
+
+      await runtime.execute(code, '/workspace/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('SPAWN_STDOUT:')));
+
+      expect(consoleOutput.some(o => o.includes('SPAWN_STDOUT:HAS_FILE:EXIT:0'))).toBe(true);
+    });
+
+    it('should pipe spawn stdout via bash -c', async () => {
+      vfs.mkdirSync('/workspace', { recursive: true });
+      vfs.writeFileSync('/workspace/test.txt', 'content');
+      runtime = new Runtime(vfs, {
+        cwd: '/workspace',
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { spawn } = require('child_process');
+const child = spawn('/bin/bash', ['-c', 'ls /workspace']);
+
+let stdout = '';
+child.stdout.on('data', (chunk) => {
+  stdout += chunk.toString();
+});
+child.on('close', (code) => {
+  console.log('BASH_STDOUT:' + (stdout.includes('test.txt') ? 'HAS_FILE' : 'MISSING') + ':EXIT:' + code);
+});
+      `;
+
+      await runtime.execute(code, '/workspace/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('BASH_STDOUT:')));
+
+      expect(consoleOutput.some(o => o.includes('BASH_STDOUT:HAS_FILE:EXIT:0'))).toBe(true);
     });
   });
 
@@ -424,10 +600,29 @@ execFile('/bin/bash', ['-lc', 'echo shell-path-ready'], (error, stdout, stderr) 
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 100));
 
       expect(consoleOutput.some(o => o.includes('STDOUT:shell-path-ready'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
+
+    it('should support /dev/null redirection in synthetic shell commands', async () => {
+      const code = `
+const { execFile } = require('child_process');
+
+execFile('/bin/bash', ['-lc', 'shopt -u extglob 2>/dev/null || true; echo shell-null-ready'], (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout.trim());
+  if (stderr) console.log('STDERR:' + stderr.trim());
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      await runtime.execute(code, '/test-null-device.js');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(consoleOutput.some(o => o.includes('STDOUT:shell-null-ready'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('/dev/null'))).toBe(false);
       expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
     });
   });
@@ -446,7 +641,7 @@ exec('echo "line1\\nline2\\nline3" | wc -l', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
 
       // Wait for async execution
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -467,7 +662,7 @@ exec('echo "first" && echo "second"', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
 
       // Wait for async execution
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -498,7 +693,7 @@ exec('npm run hello', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('hello from npm'))).toBe(true);
@@ -523,7 +718,7 @@ exec('npm run', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('build') && o.includes('dev'))).toBe(true);
@@ -549,7 +744,7 @@ exec('npm start', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('started'))).toBe(true);
@@ -575,7 +770,7 @@ exec('npm test', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('tested'))).toBe(true);
@@ -601,7 +796,7 @@ exec('npm run nonexistent', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('Missing script') && o.includes('nonexistent'))).toBe(true);
@@ -619,7 +814,7 @@ exec('npm run build', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('no package.json'))).toBe(true);
@@ -650,7 +845,7 @@ exec('npm run build', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 300));
 
       const stdoutLine = consoleOutput.find(o => o.startsWith('STDOUT:'));
@@ -685,7 +880,7 @@ exec('npm run combo', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('first') && o.includes('second'))).toBe(true);
@@ -712,7 +907,7 @@ exec('npm start', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 300));
 
       expect(consoleOutput.some(o => o.includes('node script ran'))).toBe(true);
@@ -726,7 +921,7 @@ exec('npm --help', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('Usage: npm'))).toBe(true);
@@ -741,7 +936,7 @@ exec('npm foobar', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('Unknown command') && o.includes('foobar'))).toBe(true);
@@ -770,7 +965,7 @@ exec('npx hello', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await waitFor(() => consoleOutput.some(o => o.includes('ERROR_CODE:1')));
 
       expect(consoleOutput.some(o => o.includes('hello from npx'))).toBe(true);
@@ -796,7 +991,7 @@ exec('npx greeter world foo', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await waitFor(() => consoleOutput.some(o => o.includes('ERROR_CODE:1')));
 
       expect(consoleOutput.some(o => o.includes('greeting: world foo'))).toBe(true);
@@ -811,7 +1006,7 @@ exec('npx', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 200));
 
       expect(consoleOutput.some(o => o.includes('missing command'))).toBe(true);
@@ -843,7 +1038,7 @@ exec('npx mypkg@1.0.0', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       expect(consoleOutput.some(o => o.includes('mypkg ran'))).toBe(true);
@@ -870,7 +1065,7 @@ exec('npx -p @babel/cli babel', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       expect(consoleOutput.some(o => o.includes('babel ran'))).toBe(true);
@@ -901,7 +1096,7 @@ exec('npx failpkg', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       expect(consoleOutput.some(o => o.includes('ERROR_CODE:1'))).toBe(true);
@@ -939,14 +1134,14 @@ exec('npx failstderr', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       expect(consoleOutput.some(o => o.includes('ERROR_CODE:1'))).toBe(true);
       expect(consoleOutput.some(o => o.includes('npx: first stderr line: boom reason'))).toBe(true);
     });
 
-    it('should run bins that require packages with top-level await import syntax', async () => {
+    it('should surface ERR_REQUIRE_ESM when a CommonJS bin requires an ESM-only dependency', async () => {
       vfs.mkdirSync('/node_modules/gemini-cli/dist', { recursive: true });
       vfs.writeFileSync('/node_modules/gemini-cli/package.json', JSON.stringify({
         name: 'gemini-cli',
@@ -993,13 +1188,13 @@ exec('npx gemini-cli', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       const output = consoleOutput.join('\n');
-      expect(output).toContain('gemini uses ink-ok');
-      expect(output).not.toContain('await is only valid in async functions');
-      expect(output).not.toContain('ERROR_CODE:1');
+      expect(output).toContain('ERR_REQUIRE_ESM');
+      expect(output).toContain(`require() of ES Module 'ink' is not supported`);
+      expect(output).toContain('ERROR_CODE:1');
     });
 
     it('should run npx bins whose ESM entrypoints use arbitrary top-level await', async () => {
@@ -1041,7 +1236,7 @@ exec('npx @openai/codex', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       const output = consoleOutput.join('\n');
@@ -1076,7 +1271,7 @@ exec('hello', (error, stdout, stderr) => {
 });
       `;
 
-      runtime.execute(code, '/test.js');
+      await runtime.execute(code, '/test.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       const output = consoleOutput.join('\n');
@@ -1108,7 +1303,7 @@ const { execa } = require('execa');
 })();
       `;
 
-      runtime.execute(code, '/workspace/test-execa.js');
+      await runtime.execute(code, '/workspace/test-execa.js');
       await new Promise(resolve => setTimeout(resolve, 500));
 
       expect(consoleOutput.some(o => o.includes('EXECA_STDOUT:execa-ok'))).toBe(true);

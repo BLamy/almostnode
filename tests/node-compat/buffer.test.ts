@@ -202,9 +202,9 @@ describe('Buffer module (Node.js compat)', () => {
       assert.strictEqual(Buffer.isBuffer(Buffer.alloc(5)), true);
     });
 
-    it('should return true for Uint8Array (browser compat)', () => {
-      // In our shim, Uint8Arrays are also considered buffers
-      assert.strictEqual(Buffer.isBuffer(new Uint8Array(5)), true);
+    it('should return false for plain Uint8Array (matches Node.js behavior)', () => {
+      // In Node.js, Buffer.isBuffer(new Uint8Array()) returns false
+      assert.strictEqual(Buffer.isBuffer(new Uint8Array(5)), false);
     });
 
     it('should return false for non-buffers', () => {

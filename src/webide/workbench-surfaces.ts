@@ -20,6 +20,7 @@ const PREVIEW_EDITOR_RESOURCE = URI.from({
 });
 const FILES_VIEW_ID = 'almostnode.sidebar.files';
 const TERMINAL_VIEW_ID = 'almostnode.panel.terminal';
+const CLAUDE_VIEW_ID = 'almostnode.auxiliarybar.claude';
 
 interface PreviewSurfaceCommands {
   run(): void;
@@ -30,12 +31,86 @@ export interface RegisteredWorkbenchSurfaces {
   previewInput: SimpleEditorInput;
   filesViewId: string;
   terminalViewId: string;
+  claudeViewId: string;
   dispose(): void;
 }
 
 export class FilesSidebarSurface {
   private readonly root = document.createElement('div');
   private readonly refresh = () => this.render();
+  private selectedPath: string | null = null;
+  private contextMenu: HTMLDivElement | null = null;
+  private autoExpandTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /* Lucide-compatible SVG paths (viewBox 0 0 24 24) */
+  private static readonly P = {
+    chevron: '<path d="m9 18 6-6-6-6"/>',
+    folder:
+      '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+    folderOpen:
+      '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
+    file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+    fileCode:
+      '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m10 13-2 2 2 2"/><path d="m14 17 2-2-2-2"/>',
+    fileJson:
+      '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1"/><path d="M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1"/>',
+    fileText:
+      '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 17H8"/><path d="M16 13h-2"/>',
+    hash: '<line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/>',
+    settings:
+      '<circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>',
+    image:
+      '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+    globe:
+      '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+    box: '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  } as const;
+
+  private static readonly EXT: Record<string, [keyof typeof FilesSidebarSurface.P, string]> = {
+    ts: ['fileCode', '#3178C6'],
+    tsx: ['fileCode', '#3178C6'],
+    js: ['fileCode', '#CBCB41'],
+    jsx: ['fileCode', '#CBCB41'],
+    mjs: ['fileCode', '#CBCB41'],
+    cjs: ['fileCode', '#CBCB41'],
+    json: ['fileJson', '#CBCB41'],
+    css: ['hash', '#519ABA'],
+    scss: ['hash', '#F55385'],
+    less: ['hash', '#563D7C'],
+    html: ['globe', '#E44D26'],
+    htm: ['globe', '#E44D26'],
+    svg: ['image', '#F7B93E'],
+    png: ['image', '#A074C4'],
+    jpg: ['image', '#A074C4'],
+    jpeg: ['image', '#A074C4'],
+    gif: ['image', '#A074C4'],
+    ico: ['image', '#A074C4'],
+    md: ['fileText', '#519ABA'],
+    txt: ['fileText', '#8ca0bb'],
+    yaml: ['settings', '#CB171E'],
+    yml: ['settings', '#CB171E'],
+    toml: ['settings', '#6D8086'],
+    env: ['settings', '#ECD53F'],
+    sh: ['fileCode', '#4EAA25'],
+    py: ['fileCode', '#3572A5'],
+  };
+
+  private static readonly NAMES: Record<string, [keyof typeof FilesSidebarSurface.P, string]> = {
+    'package.json': ['box', '#E8274B'],
+    'package-lock.json': ['box', '#E8274B'],
+    'tsconfig.json': ['settings', '#3178C6'],
+    'tsconfig.node.json': ['settings', '#3178C6'],
+    '.gitignore': ['settings', '#F05032'],
+    '.eslintrc.json': ['settings', '#4B32C3'],
+    '.prettierrc': ['settings', '#F7B93E'],
+    'vite.config.ts': ['settings', '#646CFF'],
+    'vite.config.js': ['settings', '#646CFF'],
+    'next.config.js': ['settings', '#e6edf7'],
+    'next.config.mjs': ['settings', '#e6edf7'],
+    'tailwind.config.js': ['settings', '#38BDF8'],
+    'tailwind.config.ts': ['settings', '#38BDF8'],
+    'postcss.config.js': ['settings', '#DD3A0A'],
+  };
 
   constructor(
     private readonly vfs: VirtualFS,
@@ -48,6 +123,46 @@ export class FilesSidebarSurface {
     this.vfs.on('change', this.refresh);
     this.vfs.on('delete', this.refresh);
     this.render();
+
+    // Right-click on empty space in tree root
+    this.root.addEventListener('contextmenu', (e) => {
+      // Only handle clicks on the root itself, not on items within it
+      if (e.target === this.root) {
+        e.preventDefault();
+        this.showContextMenu(e.clientX, e.clientY, [
+          { label: 'New File', action: () => this.startInlineInput(this.workspaceRoot, 'file') },
+          { label: 'New Folder', action: () => this.startInlineInput(this.workspaceRoot, 'folder') },
+        ]);
+      }
+    });
+
+    // Root tree as drop target (move to workspace root)
+    this.root.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = 'move';
+      this.root.classList.add('is-drag-over');
+    });
+    this.root.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget && this.root.contains(e.relatedTarget as Node)) return;
+      this.root.classList.remove('is-drag-over');
+    });
+    this.root.addEventListener('drop', (e) => {
+      e.preventDefault();
+      this.root.classList.remove('is-drag-over');
+      this.clearAutoExpand();
+      const sourcePath = e.dataTransfer?.getData('text/plain');
+      if (!sourcePath || !this.canMoveTo(sourcePath, this.workspaceRoot)) return;
+      const newPath = this.joinPath(this.workspaceRoot, this.nameOf(sourcePath));
+      this.vfs.renameSync(sourcePath, newPath);
+      if (this.selectedPath === sourcePath) this.selectedPath = newPath;
+      this.render();
+    });
+
+    // Dismiss context menu on click outside or Escape
+    document.addEventListener('click', () => this.dismissContextMenu());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.dismissContextMenu();
+    });
   }
 
   attach(container: HTMLElement): IDisposable {
@@ -73,15 +188,122 @@ export class FilesSidebarSurface {
     }
   }
 
+  private svg(pathKey: keyof typeof FilesSidebarSurface.P, color: string, sw: number, ...cls: string[]): SVGSVGElement {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    el.setAttribute('viewBox', '0 0 24 24');
+    el.setAttribute('width', '16');
+    el.setAttribute('height', '16');
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke', color);
+    el.setAttribute('stroke-width', String(sw));
+    el.setAttribute('stroke-linecap', 'round');
+    el.setAttribute('stroke-linejoin', 'round');
+    for (const c of cls) el.classList.add(c);
+    el.innerHTML = FilesSidebarSurface.P[pathKey];
+    return el;
+  }
+
+  private folderSvg(pathKey: 'folder' | 'folderOpen', ...cls: string[]): SVGSVGElement {
+    const color = '#C09553';
+    const el = this.svg(pathKey, color, 1.5, ...cls);
+    el.setAttribute('fill', color);
+    el.setAttribute('fill-opacity', '0.2');
+    return el;
+  }
+
+  private fileIcon(name: string): SVGSVGElement {
+    const match = FilesSidebarSurface.NAMES[name] ?? FilesSidebarSurface.EXT[name.split('.').pop()?.toLowerCase() ?? ''];
+    const [key, color] = match ?? (['file', '#8ca0bb'] as const);
+    return this.svg(key, color, 1.5, 'almostnode-files-tree__icon');
+  }
+
   private renderDirectory(path: string, depth: number): HTMLElement {
     const details = document.createElement('details');
     details.className = 'almostnode-files-tree__directory';
+    details.dataset.path = path;
     details.open = depth < 2;
 
     const summary = document.createElement('summary');
     summary.className = 'almostnode-files-tree__summary';
-    summary.textContent = path === this.workspaceRoot ? 'project' : this.nameOf(path);
+
+    const chevron = this.svg('chevron', '#8ca0bb', 2, 'almostnode-files-tree__chevron');
+    const closed = this.folderSvg('folder', 'almostnode-files-tree__icon', 'almostnode-files-tree__icon--closed');
+    const open = this.folderSvg('folderOpen', 'almostnode-files-tree__icon', 'almostnode-files-tree__icon--open');
+
+    const label = document.createElement('span');
+    label.className = 'almostnode-files-tree__label';
+    label.textContent = path === this.workspaceRoot ? 'project' : this.nameOf(path);
+
+    summary.append(chevron, closed, open, label);
     details.appendChild(summary);
+
+    // Drag source (skip workspace root)
+    if (path !== this.workspaceRoot) {
+      summary.setAttribute('draggable', 'true');
+      summary.addEventListener('dragstart', (e) => {
+        e.dataTransfer!.setData('text/plain', path);
+        e.dataTransfer!.effectAllowed = 'move';
+        details.classList.add('is-dragging');
+      });
+      summary.addEventListener('dragend', () => {
+        details.classList.remove('is-dragging');
+      });
+    }
+
+    // Drop target on folder summary
+    summary.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer!.dropEffect = 'move';
+      summary.classList.add('is-drag-over');
+      // Auto-expand closed folder after 600ms
+      if (!details.open && !this.autoExpandTimer) {
+        this.autoExpandTimer = setTimeout(() => {
+          details.open = true;
+          this.autoExpandTimer = null;
+        }, 600);
+      }
+    });
+    summary.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget && summary.contains(e.relatedTarget as Node)) return;
+      summary.classList.remove('is-drag-over');
+      this.clearAutoExpand();
+    });
+    summary.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      summary.classList.remove('is-drag-over');
+      this.clearAutoExpand();
+      const sourcePath = e.dataTransfer?.getData('text/plain');
+      if (!sourcePath || !this.canMoveTo(sourcePath, path)) return;
+      const newPath = this.joinPath(path, this.nameOf(sourcePath));
+      this.vfs.renameSync(sourcePath, newPath);
+      if (this.selectedPath === sourcePath) this.selectedPath = newPath;
+      this.render();
+    });
+
+    // Context menu on folder summary
+    summary.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const menuItems: Array<{ label: string; action: () => void } | 'separator'> = [
+        { label: 'New File', action: () => this.startInlineInput(path, 'file') },
+        { label: 'New Folder', action: () => this.startInlineInput(path, 'folder') },
+      ];
+      // Don't allow rename/delete on workspace root
+      if (path !== this.workspaceRoot) {
+        menuItems.push(
+          'separator',
+          { label: 'Rename', action: () => this.startInlineInput(path, 'folder', path) },
+          { label: 'Delete', action: () => {
+            if (confirm(`Delete folder "${this.nameOf(path)}" and all its contents?`)) {
+              try { this.deleteRecursive(path); } catch { /* ignore */ }
+            }
+          }},
+        );
+      }
+      this.showContextMenu(e.clientX, e.clientY, menuItems);
+    });
 
     const children = document.createElement('div');
     children.className = 'almostnode-files-tree__children';
@@ -110,15 +332,286 @@ export class FilesSidebarSurface {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'almostnode-files-tree__file';
-      button.textContent = entry;
+      button.dataset.path = fullPath;
+      if (fullPath === this.selectedPath) button.classList.add('is-selected');
+
+      const icon = this.fileIcon(entry);
+      const fileLabel = document.createElement('span');
+      fileLabel.className = 'almostnode-files-tree__label';
+      fileLabel.textContent = entry;
+
+      button.append(icon, fileLabel);
+      button.setAttribute('draggable', 'true');
+      button.addEventListener('dragstart', (e) => {
+        e.dataTransfer!.setData('text/plain', fullPath);
+        e.dataTransfer!.effectAllowed = 'move';
+        button.classList.add('is-dragging');
+      });
+      button.addEventListener('dragend', () => {
+        button.classList.remove('is-dragging');
+      });
       button.addEventListener('click', () => {
+        this.selectedPath = fullPath;
+        this.root.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
+        button.classList.add('is-selected');
         this.openFile(fullPath);
       });
+
+      // Context menu on file
+      button.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.showContextMenu(e.clientX, e.clientY, [
+          { label: 'Rename', action: () => this.startInlineInput(path, 'file', fullPath) },
+          { label: 'Delete', action: () => {
+            try { this.vfs.unlinkSync(fullPath); } catch { /* ignore */ }
+          }},
+        ]);
+      });
+
       children.appendChild(button);
     }
 
     details.appendChild(children);
     return details;
+  }
+
+  private showContextMenu(x: number, y: number, items: Array<{ label: string; action: () => void } | 'separator'>): void {
+    this.dismissContextMenu();
+
+    const menu = document.createElement('div');
+    menu.className = 'almostnode-files-tree__context-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    for (const item of items) {
+      if (item === 'separator') {
+        const sep = document.createElement('div');
+        sep.className = 'almostnode-files-tree__context-separator';
+        menu.appendChild(sep);
+        continue;
+      }
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'almostnode-files-tree__context-item';
+      btn.textContent = item.label;
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.dismissContextMenu();
+        item.action();
+      });
+      menu.appendChild(btn);
+    }
+
+    this.contextMenu = menu;
+    document.body.appendChild(menu);
+
+    // Adjust if menu goes off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 4}px`;
+    if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 4}px`;
+  }
+
+  private dismissContextMenu(): void {
+    if (this.contextMenu) {
+      this.contextMenu.remove();
+      this.contextMenu = null;
+    }
+  }
+
+  private startInlineInput(parentDir: string, type: 'file' | 'folder', renamePath?: string): void {
+    // Find the children container for the parent directory
+    const detailsEls = Array.from(this.root.querySelectorAll('.almostnode-files-tree__directory')) as HTMLDetailsElement[];
+    let targetChildren: HTMLElement | null = null;
+
+    if (parentDir === this.workspaceRoot) {
+      // Root-level: the root itself is the top-level <details>
+      const topDetails = this.root.querySelector('.almostnode-files-tree__directory') as HTMLDetailsElement | null;
+      if (topDetails) {
+        topDetails.open = true;
+        targetChildren = topDetails.querySelector(':scope > .almostnode-files-tree__children') as HTMLElement | null;
+      }
+    } else {
+      for (let i = 0; i < detailsEls.length; i++) {
+        const d = detailsEls[i];
+        if (d.dataset.path === parentDir) {
+          d.open = true;
+          targetChildren = d.querySelector(':scope > .almostnode-files-tree__children') as HTMLElement | null;
+          break;
+        }
+      }
+    }
+
+    if (renamePath) {
+      // Rename: find the element and swap label with input
+      this.startRenameInput(renamePath);
+      return;
+    }
+
+    if (!targetChildren) return;
+
+    // Create inline input row
+    const row = document.createElement('div');
+    row.className = 'almostnode-files-tree__file';
+    row.style.paddingLeft = type === 'folder' ? '0.45rem' : '';
+
+    const icon = type === 'folder'
+      ? this.folderSvg('folder', 'almostnode-files-tree__icon')
+      : this.svg('file', '#8ca0bb', 1.5, 'almostnode-files-tree__icon');
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'almostnode-files-tree__inline-input';
+    input.placeholder = type === 'file' ? 'filename' : 'folder name';
+
+    row.append(icon, input);
+    targetChildren.insertBefore(row, targetChildren.firstChild);
+
+    input.focus();
+
+    const commit = () => {
+      const name = input.value.trim();
+      row.remove();
+      if (!name) return;
+      const fullPath = this.joinPath(parentDir, name);
+      try {
+        if (type === 'folder') {
+          this.vfs.mkdirSync(fullPath);
+        } else {
+          this.vfs.writeFileSync(fullPath, '');
+          this.openFile(fullPath);
+        }
+      } catch {
+        // Name conflict or invalid — silently ignore, tree stays as-is
+      }
+    };
+
+    let committed = false;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        committed = true;
+        commit();
+      } else if (e.key === 'Escape') {
+        committed = true;
+        row.remove();
+      }
+    });
+    input.addEventListener('blur', () => {
+      if (!committed) commit();
+    });
+  }
+
+  private startRenameInput(filePath: string): void {
+    const isDir = (() => { try { return this.vfs.statSync(filePath).isDirectory(); } catch { return false; } })();
+    const name = this.nameOf(filePath);
+    const parentDir = filePath.substring(0, filePath.length - name.length - 1) || '/';
+
+    // Find the element in the tree by data-path
+    let targetEl: HTMLElement | null = null;
+
+    if (isDir) {
+      const allDetails = Array.from(this.root.querySelectorAll('.almostnode-files-tree__directory')) as HTMLElement[];
+      for (let i = 0; i < allDetails.length; i++) {
+        if (allDetails[i].dataset.path === filePath) {
+          targetEl = allDetails[i].querySelector(':scope > .almostnode-files-tree__summary') as HTMLElement | null;
+          break;
+        }
+      }
+    } else {
+      const allFiles = Array.from(this.root.querySelectorAll('.almostnode-files-tree__file')) as HTMLElement[];
+      for (let i = 0; i < allFiles.length; i++) {
+        if (allFiles[i].dataset.path === filePath) {
+          targetEl = allFiles[i];
+          break;
+        }
+      }
+    }
+
+    if (!targetEl) return;
+
+    const labelEl = targetEl.querySelector('.almostnode-files-tree__label') as HTMLElement | null;
+    if (!labelEl) return;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'almostnode-files-tree__inline-input';
+    input.value = name;
+
+    labelEl.replaceWith(input);
+    input.focus();
+    // Select the name part before the extension for files
+    if (!isDir) {
+      const dotIndex = name.lastIndexOf('.');
+      input.setSelectionRange(0, dotIndex > 0 ? dotIndex : name.length);
+    } else {
+      input.select();
+    }
+
+    const commit = () => {
+      const newName = input.value.trim();
+      if (!newName || newName === name) {
+        this.render();
+        return;
+      }
+      const newPath = this.joinPath(parentDir, newName);
+      try {
+        this.vfs.renameSync(filePath, newPath);
+        if (this.selectedPath === filePath) {
+          this.selectedPath = newPath;
+        }
+      } catch {
+        this.render();
+      }
+    };
+
+    let committed = false;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        committed = true;
+        commit();
+      } else if (e.key === 'Escape') {
+        committed = true;
+        this.render();
+      }
+    });
+    input.addEventListener('blur', () => {
+      if (!committed) commit();
+    });
+  }
+
+  private deleteRecursive(path: string): void {
+    const stat = this.vfs.statSync(path);
+    if (stat.isDirectory()) {
+      const entries = this.vfs.readdirSync(path);
+      for (const entry of entries) {
+        this.deleteRecursive(this.joinPath(path, entry));
+      }
+      this.vfs.rmdirSync(path);
+    } else {
+      this.vfs.unlinkSync(path);
+    }
+  }
+
+  private canMoveTo(sourcePath: string, targetDir: string): boolean {
+    const basename = this.nameOf(sourcePath);
+    const currentParent = sourcePath.substring(0, sourcePath.length - basename.length - 1) || '/';
+    // Same parent — no-op
+    if (currentParent === targetDir) return false;
+    // Can't move folder into itself or descendant
+    if (targetDir.startsWith(sourcePath + '/') || targetDir === sourcePath) return false;
+    // Name conflict
+    const newPath = this.joinPath(targetDir, basename);
+    try { if (this.vfs.statSync(newPath)) return false; } catch { /* doesn't exist — good */ }
+    return true;
+  }
+
+  private clearAutoExpand(): void {
+    if (this.autoExpandTimer) {
+      clearTimeout(this.autoExpandTimer);
+      this.autoExpandTimer = null;
+    }
   }
 
   private joinPath(parent: string, child: string): string {
@@ -137,10 +630,12 @@ export class PreviewSurface {
   private readonly actions = document.createElement('div');
   private readonly runButton = document.createElement('button');
   private readonly refreshButton = document.createElement('button');
+  private readonly devtoolsButton = document.createElement('button');
   private readonly body = document.createElement('div');
   private readonly emptyState = document.createElement('div');
   private readonly iframe = document.createElement('iframe');
   private currentUrl: string | null = null;
+  private erudaVisible = false;
 
   constructor(commands: PreviewSurfaceCommands) {
     this.root.className = 'almostnode-preview-surface';
@@ -168,7 +663,14 @@ export class PreviewSurface {
       commands.refresh();
     });
 
-    this.actions.append(this.runButton, this.refreshButton);
+    this.devtoolsButton.type = 'button';
+    this.devtoolsButton.className = 'almostnode-preview-surface__button';
+    this.devtoolsButton.textContent = 'DevTools';
+    this.devtoolsButton.addEventListener('click', () => {
+      this.toggleDevtools();
+    });
+
+    this.actions.append(this.runButton, this.refreshButton, this.devtoolsButton);
     this.toolbar.append(this.status, this.actions);
 
     this.body.className = 'almostnode-preview-surface__body';
@@ -243,6 +745,84 @@ export class PreviewSurface {
 
     this.root.focus();
   }
+
+  toggleDevtools(): void {
+    if (!this.iframe.contentWindow) return;
+    this.erudaVisible = !this.erudaVisible;
+    this.devtoolsButton.classList.toggle('is-active', this.erudaVisible);
+    this.iframe.contentWindow.postMessage({
+      type: 'almostnode-devtools',
+      action: this.erudaVisible ? 'show' : 'hide',
+    }, '*');
+  }
+
+  getIframe(): HTMLIFrameElement {
+    return this.iframe;
+  }
+}
+
+export class ConsolePanelElement {
+  readonly root = document.createElement('div');
+  private readonly toolbar = document.createElement('div');
+  private readonly clearButton = document.createElement('button');
+  private readonly entries = document.createElement('div');
+  private entryCount = 0;
+  private static readonly MAX_ENTRIES = 1000;
+
+  constructor() {
+    this.root.className = 'almostnode-console-panel';
+
+    this.toolbar.className = 'almostnode-console-panel__toolbar';
+
+    this.clearButton.type = 'button';
+    this.clearButton.className = 'almostnode-console-panel__clear';
+    this.clearButton.textContent = 'Clear';
+    this.clearButton.addEventListener('click', () => this.clear());
+
+    this.toolbar.appendChild(this.clearButton);
+
+    this.entries.className = 'almostnode-console-panel__entries';
+
+    this.root.append(this.toolbar, this.entries);
+  }
+
+  addEntry(level: string, args: string[], timestamp: number): void {
+    // Evict oldest if at capacity
+    while (this.entryCount >= ConsolePanelElement.MAX_ENTRIES) {
+      const first = this.entries.firstChild;
+      if (!first) break;
+      this.entries.removeChild(first);
+      this.entryCount--;
+    }
+
+    const row = document.createElement('div');
+    row.className = `almostnode-console-entry almostnode-console-entry--${level}`;
+
+    const badge = document.createElement('span');
+    badge.className = 'almostnode-console-entry__level';
+    badge.textContent = level;
+
+    const time = document.createElement('span');
+    time.className = 'almostnode-console-entry__time';
+    const d = new Date(timestamp);
+    time.textContent = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+
+    const msg = document.createElement('span');
+    msg.className = 'almostnode-console-entry__message';
+    msg.textContent = args.join(' ');
+
+    row.append(badge, time, msg);
+    this.entries.appendChild(row);
+    this.entryCount++;
+
+    // Auto-scroll to bottom
+    this.entries.scrollTop = this.entries.scrollHeight;
+  }
+
+  clear(): void {
+    this.entries.innerHTML = '';
+    this.entryCount = 0;
+  }
 }
 
 export class TerminalPanelSurface {
@@ -260,6 +840,7 @@ export class TerminalPanelSurface {
   private readonly tabBodies = new Map<string, HTMLDivElement>();
   private readonly tabStatuses = new Map<string, string>();
   private readonly terminals = new Map<string, { terminal: Terminal; fitAddon: FitAddon }>();
+  private readonly customTabs = new Set<string>();
 
   constructor(
     private readonly callbacks: {
@@ -394,6 +975,56 @@ export class TerminalPanelSurface {
     }
   }
 
+  addCustomTab(tab: {
+    id: string;
+    title: string;
+    element: HTMLElement;
+    closable: boolean;
+  }): void {
+    if (this.tabButtons.has(tab.id)) return;
+
+    this.customTabs.add(tab.id);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'almostnode-terminal-surface__tab';
+    button.dataset.terminalId = tab.id;
+    button.addEventListener('click', () => {
+      this.callbacks.onSelectTab(tab.id);
+    });
+
+    const label = document.createElement('span');
+    label.className = 'almostnode-terminal-surface__tab-label';
+    label.textContent = tab.title;
+    button.appendChild(label);
+
+    if (tab.closable) {
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'almostnode-terminal-surface__tab-close';
+      closeButton.textContent = 'x';
+      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
+      closeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.callbacks.onCloseTab(tab.id);
+      });
+      button.appendChild(closeButton);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'almostnode-terminal-surface__terminal';
+    body.dataset.terminalId = tab.id;
+    body.hidden = true;
+    body.style.display = 'none';
+    body.appendChild(tab.element);
+
+    this.tabButtons.set(tab.id, button);
+    this.tabBodies.set(tab.id, body);
+    this.tabStatuses.set(tab.id, '');
+    this.tabs.appendChild(button);
+    this.body.appendChild(body);
+  }
+
   removeTab(id: string): void {
     this.tabButtons.get(id)?.remove();
     this.tabBodies.get(id)?.remove();
@@ -401,6 +1032,7 @@ export class TerminalPanelSurface {
     this.tabBodies.delete(id);
     this.tabStatuses.delete(id);
     this.terminals.delete(id);
+    this.customTabs.delete(id);
 
     if (this.activeTabId === id) {
       this.activeTabId = null;
@@ -432,11 +1064,254 @@ export class TerminalPanelSurface {
       const isActive = tabId === id;
       body.hidden = !isActive;
       body.style.display = isActive ? 'block' : 'none';
-      if (isActive) {
-        body.id = 'webideTerminal';
-      } else if (body.id === 'webideTerminal') {
-        body.removeAttribute('id');
+      // Only assign webideTerminal id to non-custom tabs
+      if (!this.customTabs.has(tabId)) {
+        if (isActive) {
+          body.id = 'webideTerminal';
+        } else if (body.id === 'webideTerminal') {
+          body.removeAttribute('id');
+        }
       }
+    }
+    this.status.textContent = this.tabStatuses.get(id) || 'Idle';
+    this.fit();
+  }
+
+  private fit(): void {
+    if (!this.opened || !this.activeTabId) {
+      return;
+    }
+    // Skip terminal-specific fit for custom tabs
+    if (this.customTabs.has(this.activeTabId)) {
+      return;
+    }
+    const activeBody = this.tabBodies.get(this.activeTabId);
+    const activeTerminal = this.terminals.get(this.activeTabId);
+    if (!activeBody || !activeTerminal) {
+      return;
+    }
+    if (activeBody.clientWidth === 0 || activeBody.clientHeight === 0) {
+      return;
+    }
+
+    activeTerminal.fitAddon.fit();
+  }
+}
+
+export class ClaudeTerminalSurface {
+  private readonly root = document.createElement('div');
+  private readonly statusRow = document.createElement('div');
+  private readonly tabs = document.createElement('div');
+  private readonly status = document.createElement('div');
+  private readonly actions = document.createElement('div');
+  private readonly newTabButton = document.createElement('button');
+  private readonly body = document.createElement('div');
+  private readonly loading = document.createElement('div');
+  private readonly resizeObserver: ResizeObserver;
+  private opened = false;
+  private activeTabId: string | null = null;
+  private readonly tabButtons = new Map<string, HTMLButtonElement>();
+  private readonly tabBodies = new Map<string, HTMLDivElement>();
+  private readonly tabStatuses = new Map<string, string>();
+  private readonly terminals = new Map<string, { terminal: Terminal; fitAddon: FitAddon }>();
+
+  constructor(
+    private readonly callbacks: {
+      onCreateTab: () => void;
+      onCloseTab: (id: string) => void;
+      onSelectTab: (id: string) => void;
+    },
+  ) {
+    this.root.className = 'almostnode-claude-surface';
+    this.statusRow.className = 'almostnode-claude-surface__status-row';
+    this.tabs.className = 'almostnode-claude-surface__tabs';
+    this.actions.className = 'almostnode-claude-surface__actions';
+
+    this.status.className = 'almostnode-claude-surface__status';
+    this.status.textContent = 'Idle';
+
+    this.newTabButton.type = 'button';
+    this.newTabButton.className = 'almostnode-claude-surface__new-tab';
+    this.newTabButton.textContent = '+';
+    this.newTabButton.setAttribute('aria-label', 'New Claude terminal');
+    this.newTabButton.addEventListener('click', () => {
+      this.callbacks.onCreateTab();
+    });
+
+    this.body.className = 'almostnode-claude-surface__body';
+
+    this.loading.className = 'almostnode-claude-surface__loading';
+    this.loading.innerHTML =
+      '<div class="almostnode-claude-surface__loading-content">'
+      + '<div class="almostnode-claude-surface__loading-icon">✦</div>'
+      + '<div class="almostnode-claude-surface__loading-text">Starting Claude Code...</div>'
+      + '</div>';
+    this.loading.hidden = true;
+    this.loading.style.display = 'none';
+
+    this.actions.append(this.newTabButton);
+    this.statusRow.append(this.tabs, this.status, this.actions);
+    this.root.append(this.statusRow, this.body, this.loading);
+
+    this.resizeObserver = new ResizeObserver(() => {
+      this.fit();
+    });
+    this.resizeObserver.observe(this.root);
+    this.resizeObserver.observe(this.body);
+  }
+
+  attach(container: HTMLElement): IDisposable {
+    container.classList.add('almostnode-claude-panel-host');
+    container.appendChild(this.root);
+
+    if (!this.opened) {
+      for (const [tabId, { terminal }] of this.terminals.entries()) {
+        const body = this.tabBodies.get(tabId);
+        if (body) {
+          terminal.open(body);
+        }
+      }
+      this.opened = true;
+    }
+
+    this.fit();
+
+    return {
+      dispose: () => {
+        if (this.root.parentElement === container) {
+          container.removeChild(this.root);
+        }
+      },
+    };
+  }
+
+  showLoading(): void {
+    this.loading.hidden = false;
+    this.loading.style.display = 'flex';
+  }
+
+  hideLoading(): void {
+    this.loading.classList.add('is-hiding');
+    const onEnd = () => {
+      this.loading.removeEventListener('transitionend', onEnd);
+      this.loading.hidden = true;
+      this.loading.style.display = 'none';
+      this.loading.classList.remove('is-hiding');
+    };
+    this.loading.addEventListener('transitionend', onEnd);
+    // Fallback if transition doesn't fire
+    window.setTimeout(onEnd, 500);
+  }
+
+  updateStatus(text: string): void {
+    if (!this.activeTabId) {
+      this.status.textContent = text;
+      return;
+    }
+    this.updateTabStatus(this.activeTabId, text);
+  }
+
+  focus(): void {
+    const active = this.activeTabId ? this.terminals.get(this.activeTabId) : null;
+    active?.terminal.focus();
+  }
+
+  addTab(tab: {
+    id: string;
+    title: string;
+    terminal: Terminal;
+    fitAddon: FitAddon;
+    closable: boolean;
+  }): void {
+    if (this.tabButtons.has(tab.id)) {
+      this.updateTabTitle(tab.id, tab.title);
+      return;
+    }
+
+    tab.terminal.loadAddon(tab.fitAddon);
+    this.terminals.set(tab.id, { terminal: tab.terminal, fitAddon: tab.fitAddon });
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'almostnode-claude-surface__tab';
+    button.dataset.terminalId = tab.id;
+    button.addEventListener('click', () => {
+      this.callbacks.onSelectTab(tab.id);
+    });
+
+    const label = document.createElement('span');
+    label.className = 'almostnode-claude-surface__tab-label';
+    label.textContent = tab.title;
+    button.appendChild(label);
+
+    if (tab.closable) {
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'almostnode-claude-surface__tab-close';
+      closeButton.textContent = 'x';
+      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
+      closeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.callbacks.onCloseTab(tab.id);
+      });
+      button.appendChild(closeButton);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'almostnode-claude-surface__terminal';
+    body.dataset.terminalId = tab.id;
+    body.hidden = true;
+    body.style.display = 'none';
+
+    this.tabButtons.set(tab.id, button);
+    this.tabBodies.set(tab.id, body);
+    this.tabStatuses.set(tab.id, 'Idle');
+    this.tabs.appendChild(button);
+    this.body.appendChild(body);
+
+    if (this.opened) {
+      tab.terminal.open(body);
+    }
+  }
+
+  removeTab(id: string): void {
+    this.tabButtons.get(id)?.remove();
+    this.tabBodies.get(id)?.remove();
+    this.tabButtons.delete(id);
+    this.tabBodies.delete(id);
+    this.tabStatuses.delete(id);
+    this.terminals.delete(id);
+
+    if (this.activeTabId === id) {
+      this.activeTabId = null;
+      this.status.textContent = 'Idle';
+    }
+  }
+
+  updateTabTitle(id: string, title: string): void {
+    const button = this.tabButtons.get(id);
+    const label = button?.querySelector('.almostnode-claude-surface__tab-label');
+    if (label) {
+      label.textContent = title;
+    }
+  }
+
+  updateTabStatus(id: string, text: string): void {
+    this.tabStatuses.set(id, text);
+    if (this.activeTabId === id) {
+      this.status.textContent = text;
+    }
+  }
+
+  setActiveTab(id: string): void {
+    this.activeTabId = id;
+    for (const [tabId, button] of this.tabButtons.entries()) {
+      button.classList.toggle('is-active', tabId === id);
+    }
+    for (const [tabId, body] of this.tabBodies.entries()) {
+      const isActive = tabId === id;
+      body.hidden = !isActive;
+      body.style.display = isActive ? 'block' : 'none';
     }
     this.status.textContent = this.tabStatuses.get(id) || 'Idle';
     this.fit();
@@ -463,6 +1338,7 @@ export function registerWorkbenchSurfaces(options: {
   filesSurface: FilesSidebarSurface;
   previewSurface: PreviewSurface;
   terminalSurface: TerminalPanelSurface;
+  claudeSurface: ClaudeTerminalSurface;
 }): RegisteredWorkbenchSurfaces {
   class PreviewEditorInput extends SimpleEditorInput {
     readonly typeId = PREVIEW_EDITOR_TYPE_ID;
@@ -510,6 +1386,8 @@ export function registerWorkbenchSurfaces(options: {
       name: 'Files',
       location: ViewContainerLocation.Sidebar,
       default: true,
+      order: -1,
+      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></svg>'),
       renderBody: (container) => options.filesSurface.attach(container),
     }),
   );
@@ -521,11 +1399,20 @@ export function registerWorkbenchSurfaces(options: {
       renderBody: (container) => options.terminalSurface.attach(container),
     }),
   );
+  disposables.add(
+    registerCustomView({
+      id: CLAUDE_VIEW_ID,
+      name: 'Claude Code',
+      location: ViewContainerLocation.AuxiliaryBar,
+      renderBody: (container) => options.claudeSurface.attach(container),
+    }),
+  );
 
   return {
     previewInput,
     filesViewId: FILES_VIEW_ID,
     terminalViewId: TERMINAL_VIEW_ID,
+    claudeViewId: CLAUDE_VIEW_ID,
     dispose: () => disposables.dispose(),
   };
 }

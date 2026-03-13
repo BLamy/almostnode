@@ -271,6 +271,7 @@ export async function createBuiltinModules(
   createFsShim?: () => unknown | Promise<unknown>
 ): Promise<Record<string, unknown>> {
   const streamModule = await import('../shims/stream');
+  const streamConsumersModule = await import('../shims/stream-consumers');
   const modules: Record<string, unknown> = {
     https: await import('../shims/https'),
     http: await import('../shims/http'),
@@ -280,6 +281,7 @@ export async function createBuiltinModules(
     util: await import('../shims/util'),
     events: await import('../shims/events'),
     stream: streamModule,
+    'stream/consumers': streamConsumersModule.default,
     'stream/promises': streamModule.promises,
     buffer: await import('../shims/buffer'),
     crypto: await import('../shims/crypto'),

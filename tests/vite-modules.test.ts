@@ -59,7 +59,7 @@ describe('Node.js built-in modules for Vite', () => {
   ];
 
   for (const moduleName of requiredModules) {
-    it(`should have shim for '${moduleName}'`, () => {
+    it(`should have shim for '${moduleName}'`, async () => {
       // Test that requiring the module doesn't throw
       const code = `
         const mod = require('${moduleName}');
@@ -67,7 +67,7 @@ describe('Node.js built-in modules for Vite', () => {
       `;
 
       vfs.writeFileSync(`/test-${moduleName.replace('/', '-')}.js`, code);
-      const { exports } = runtime.runFile(`/test-${moduleName.replace('/', '-')}.js`);
+      const { exports } = await runtime.runFile(`/test-${moduleName.replace('/', '-')}.js`);
       const result = exports as { loaded: boolean; type: string };
 
       expect(result.loaded).toBe(true);
@@ -77,7 +77,7 @@ describe('Node.js built-in modules for Vite', () => {
   }
 
   // Test node: prefix works
-  it('should handle node: prefix for built-ins', () => {
+  it('should handle node: prefix for built-ins', async () => {
     const code = `
       const path = require('node:path');
       const fs = require('node:fs');
@@ -85,7 +85,7 @@ describe('Node.js built-in modules for Vite', () => {
     `;
 
     vfs.writeFileSync('/test-node-prefix.js', code);
-    const { exports } = runtime.runFile('/test-node-prefix.js');
+    const { exports } = await runtime.runFile('/test-node-prefix.js');
     const result = exports as { path: string; fs: string };
 
     expect(result.path).toBe('object');

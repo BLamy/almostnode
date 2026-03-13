@@ -41,11 +41,14 @@ export class WriteStream extends Writable {
   }
 
   getColorDepth(env?: object): number {
-    return 1; // No color support in browser
+    return this.isTTY ? 8 : 1;
   }
 
   hasColors(count?: number | object, env?: object): boolean {
-    return false;
+    if (!this.isTTY) return false;
+    const depth = this.getColorDepth(typeof count === 'object' ? count : env);
+    const needed = typeof count === 'number' ? count : 16;
+    return (2 ** depth) >= needed;
   }
 
   getWindowSize(): [number, number] {
@@ -54,7 +57,16 @@ export class WriteStream extends Writable {
 }
 
 export function isatty(fd: number): boolean {
-  return false; // Browser is never a TTY
+  try {
+    const proc = (globalThis as any).process;
+    if (!proc) return false;
+    if (fd === 0) return !!proc.stdin?.isTTY;
+    if (fd === 1) return !!proc.stdout?.isTTY;
+    if (fd === 2) return !!proc.stderr?.isTTY;
+  } catch {
+    // fall through
+  }
+  return false;
 }
 
 export default {

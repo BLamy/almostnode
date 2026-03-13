@@ -143,6 +143,20 @@ export const URLSearchParams = globalThis.URLSearchParams;
  */
 export function fileURLToPath(url: string | URL): string {
   const urlObj = typeof url === 'string' ? new globalThis.URL(url) : url;
+  if (urlObj.protocol === 'http:' || urlObj.protocol === 'https:') {
+    const moduleId = urlObj.searchParams.get('id');
+    if (moduleId) {
+      if (moduleId.startsWith('/')) {
+        return moduleId;
+      }
+      if (moduleId.startsWith('file://')) {
+        return fileURLToPath(moduleId);
+      }
+    }
+    if (urlObj.pathname.startsWith('/@fs/')) {
+      return decodeURIComponent(urlObj.pathname.slice(4));
+    }
+  }
   if (urlObj.protocol !== 'file:') {
     throw new TypeError('The URL must be of scheme file');
   }

@@ -430,7 +430,7 @@ async function start() {
 module.exports = { start };
 `;
 
-    const { exports } = runtime.execute(code, '/run-vite.js');
+    const { exports } = await runtime.execute(code, '/run-vite.js');
     const { start } = exports as { start: () => Promise<unknown> };
 
     log('Executing Vite createServer...');
