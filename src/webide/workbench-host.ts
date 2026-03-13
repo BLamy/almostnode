@@ -9,7 +9,7 @@ import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } 
 import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
 import { ClaudeAuthVault, type ClaudeAuthVaultState } from './claude-auth-vault';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
-import { IEditorService, IPaneCompositePartService, IStatusbarService } from '@codingame/monaco-vscode-api/services';
+import { IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService } from '@codingame/monaco-vscode-api/services';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
 import {
   StatusbarAlignment,
@@ -531,8 +531,8 @@ export class WebIDEHost {
 
   async revealClaudePanel(focus: boolean): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
-    setPartVisibility(Parts.AUXILIARYBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.claudeViewId, ViewContainerLocation.AuxiliaryBar, focus);
+    setPartVisibility(Parts.SIDEBAR_PART, true);
+    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.claudeViewId, ViewContainerLocation.Sidebar, focus);
     if (this.claudeTerminalTabs.size === 0) {
       await this.createClaudeTerminalTab(focus);
     }
@@ -1085,6 +1085,7 @@ export class WebIDEHost {
         defaultLayout: {
           force: true,
           views: [
+            { id: this.workbenchSurfaces.claudeViewId },
             { id: this.workbenchSurfaces.filesViewId },
             { id: this.workbenchSurfaces.terminalViewId },
           ],
@@ -1165,20 +1166,26 @@ export class WebIDEHost {
     const paneCompositeService = await getService(IPaneCompositePartService);
     const editorService = await getService(IEditorService);
 
+    // Open Claude Code panel in the primary sidebar by default
     setPartVisibility(Parts.SIDEBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.filesViewId, ViewContainerLocation.Sidebar, false);
+    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.claudeViewId, ViewContainerLocation.Sidebar, false);
 
-    await this.openWorkspaceFile(DEFAULT_FILE);
+    // Open preview as the only editor (no default source file)
     await editorService.openEditor(
       this.workbenchSurfaces.previewInput,
       {
         pinned: true,
         preserveFocus: true,
       },
-      SIDE_GROUP,
     );
 
-    await this.revealTerminalPanel(false);
+    // Keep terminal collapsed by default
+    setPartVisibility(Parts.PANEL_PART, false);
+
+    // Set sidebar to 600px initial width
+    const layoutService = await getService(IWorkbenchLayoutService);
+    const currentSize = layoutService.getSize(Parts.SIDEBAR_PART);
+    layoutService.setSize(Parts.SIDEBAR_PART, { width: 600, height: currentSize.height });
   }
 
   private async init(): Promise<void> {
@@ -1258,6 +1265,24 @@ export class WebIDEHost {
     await this.initWorkbench();
     this.ensurePreviewServerRunning();
     window.__almostnodeWebIDE = this;
+
+    // Show Claude loading splash immediately so it's visible during WebAuthn
+    this.claudeSurface.showLoading();
+
+    // Auto-start Claude Code: if there's a stored API key, prompt WebAuthn
+    // to unlock it, then start a Claude Code session
+    const claudeState = this.claudeAuthVault.getState();
+    if (claudeState.hasStoredVault && !claudeState.hasLiveCredentials) {
+      this.claudeAuthVault.handlePrimaryAction().then(() => {
+        void this.revealClaudePanel(false);
+      }).catch(() => {
+        // Auth unlock declined/failed — still reveal the panel so user can retry
+        void this.revealClaudePanel(false);
+      });
+    } else {
+      // No stored vault or already unlocked — just open the Claude panel
+      void this.revealClaudePanel(false);
+    }
   }
 
   private async ensureClaudeCodeInstalled(onProgress?: (message: string) => void): Promise<void> {

@@ -20,7 +20,7 @@ const PREVIEW_EDITOR_RESOURCE = URI.from({
 });
 const FILES_VIEW_ID = 'almostnode.sidebar.files';
 const TERMINAL_VIEW_ID = 'almostnode.panel.terminal';
-const CLAUDE_VIEW_ID = 'almostnode.auxiliarybar.claude';
+const CLAUDE_VIEW_ID = 'almostnode.sidebar.claude';
 const NODE_MODULES_REFRESH_DELAY_MS = 48;
 
 function scheduleUiFrame(callback: () => void): { cancel: () => void } {
@@ -1526,7 +1526,10 @@ export function registerWorkbenchSurfaces(options: {
     registerCustomView({
       id: CLAUDE_VIEW_ID,
       name: 'Claude Code',
-      location: ViewContainerLocation.AuxiliaryBar,
+      location: ViewContainerLocation.Sidebar,
+      default: true,
+      order: 0,
+      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.5V20a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-2.5c2.9-1.2 5-4.1 5-7.5a8 8 0 0 0-8-8Z"/><path d="M9.5 9.5 12 12l2.5-2.5"/><path d="M9 22h6"/></svg>'),
       renderBody: (container) => options.claudeSurface.attach(container),
     }),
   );
