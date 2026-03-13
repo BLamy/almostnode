@@ -1216,6 +1216,17 @@ export class WebIDEHost {
       this.previewUrl = `${url}/`;
       this.previewStartRequested = false;
       this.previewSurface.setUrl(this.previewUrl);
+
+      const iframe = this.previewSurface.getIframe();
+      const registerHMRTarget = () => {
+        if (iframe.contentWindow && this.previewPort !== null) {
+          this.container.setHMRTargetForPort(this.previewPort, iframe.contentWindow);
+        }
+      };
+      iframe.addEventListener('load', registerHMRTarget, { once: true });
+      // Also register immediately if iframe is already loaded
+      registerHMRTarget();
+
       const previewTab = this.previewTerminalTabId ? this.terminalTabs.get(this.previewTerminalTabId) : null;
       if (previewTab) {
         this.updateTerminalStatus(previewTab, `Preview ready: ${this.previewUrl}`);

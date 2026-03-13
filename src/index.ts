@@ -188,6 +188,7 @@ export function createContainer(options?: ContainerOptions): {
   sendInput: (data: string) => void;
   createREPL: () => { eval: (code: string) => Promise<unknown> };
   on: (event: string, listener: (...args: unknown[]) => void) => void;
+  setHMRTargetForPort: (port: number, targetWindow: Window) => void;
 } {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
   let gitAuth = sanitizeGitAuth(options?.git);
@@ -431,6 +432,14 @@ export function createContainer(options?: ContainerOptions): {
     createREPL: () => runtime.createREPL(),
     on: (event: string, listener: (...args: unknown[]) => void) => {
       serverBridge.on(event, listener);
+    },
+    setHMRTargetForPort: (port: number, targetWindow: Window) => {
+      for (const server of childProcessController.frameworkDevServers.values()) {
+        if (server.port === port) {
+          server.setHMRTarget?.(targetWindow);
+          return;
+        }
+      }
     },
   };
 }

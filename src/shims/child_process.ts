@@ -55,6 +55,7 @@ type ManagedFrameworkDevServer = {
   port: number;
   stop: () => void;
   clearInstalledPackagesCache?: () => void;
+  setHMRTarget?: (targetWindow: Window) => void;
 };
 
 const CONTROLLER_ID_ENV_KEY = '__ALMOSTNODE_CONTROLLER_ID';
@@ -1270,6 +1271,7 @@ module.exports = (async () => {
         framework: 'next',
         port,
         clearInstalledPackagesCache: () => server.clearInstalledPackagesCache(),
+        setHMRTarget: (targetWindow: Window) => server.setHMRTarget(targetWindow),
         stop: () => {
           try {
             server.stop();
@@ -1400,6 +1402,7 @@ module.exports = (async () => {
         clearInstalledPackagesCache: typeof (server as { clearInstalledPackagesCache?: () => void }).clearInstalledPackagesCache === 'function'
           ? () => (server as { clearInstalledPackagesCache: () => void }).clearInstalledPackagesCache()
           : undefined,
+        setHMRTarget: (targetWindow: Window) => server.setHMRTarget(targetWindow),
         stop: () => {
           try {
             server.stop();

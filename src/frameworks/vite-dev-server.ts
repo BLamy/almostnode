@@ -494,9 +494,15 @@ export class ViteDevServer extends DevServer {
     const isJS = /\.(jsx?|tsx?)$/.test(path);
     const updateType = (isCSS || isJS) ? 'update' : 'full-reload';
 
+    // Strip the project root prefix so the path is relative to the server root
+    // (e.g. /project/src/App.tsx → /src/App.tsx) matching how the browser loads modules
+    const hmrPath = this.root !== '/' && path.startsWith(this.root + '/')
+      ? path.slice(this.root.length)
+      : path;
+
     const update: HMRUpdate = {
       type: updateType,
-      path,
+      path: hmrPath,
       timestamp: Date.now(),
     };
 
