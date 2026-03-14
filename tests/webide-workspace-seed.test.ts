@@ -52,6 +52,10 @@ describe("webide workspace seed", () => {
       ),
     ) as Record<string, unknown>;
     const appSource = container.vfs.readFileSync(DEFAULT_FILE, "utf8");
+    const homeSource = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/src/pages/Home.tsx`,
+      "utf8",
+    );
     const readme = container.vfs.readFileSync(
       `${WORKSPACE_ROOT}/README.md`,
       "utf8",
@@ -65,8 +69,9 @@ describe("webide workspace seed", () => {
     expect(settings["files.autoSave"]).toBe("onFocusChange");
     expect(settings["editor.minimap.enabled"]).toBe(false);
     expect(settings["workbench.colorTheme"]).toBe("Islands Dark");
-    expect(appSource).toContain("Tailwind + shadcn starter");
-    expect(appSource).toContain("import { Button } from '@/components/ui/button';");
+    expect(appSource).toContain("react-router-dom");
+    expect(homeSource).toContain("Tailwind + shadcn starter");
+    expect(homeSource).toContain("import { Button } from '@/components/ui/button';");
     expect(readme).toContain("npx shadcn@latest add dropdown-menu");
   });
 });

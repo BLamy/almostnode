@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Deploy Web IDE Demo
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-web-ide
   cancel-in-progress: false
 
 jobs:
@@ -32,10 +32,17 @@ jobs:
       - name: Build site
         run: npm run build
 
+      - name: Prepare web-ide deploy directory
+        run: |
+          mkdir -p deploy
+          cp dist-site/examples/web-ide-demo.html deploy/index.html
+          # Copy all shared assets (JS chunks, CSS, wasm, etc.)
+          cp -r dist-site/assets deploy/assets
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist-site
+          path: deploy
 
   deploy:
     environment:
