@@ -63,6 +63,17 @@ const CONTROLLER_ID_ENV_KEY = '__ALMOSTNODE_CONTROLLER_ID';
 const EXECUTION_ID_ENV_KEY = '__ALMOSTNODE_EXECUTION_ID';
 const INTERNAL_ENV_KEYS = [CONTROLLER_ID_ENV_KEY, EXECUTION_ID_ENV_KEY] as const;
 
+/**
+ * Convert ctx.env to a plain Record<string, string>.
+ * just-bash 2.13+ changed CommandContext.env from Record to Map<string, string>.
+ * All our code expects a plain object, so we normalize here.
+ */
+function envToRecord(env: Map<string, string> | Record<string, string> | undefined): Record<string, string> {
+  if (!env) return {};
+  if (env instanceof Map) return Object.fromEntries(env);
+  return env;
+}
+
 const DEFAULT_SHELL_ENV: Record<string, string> = {
   HOME: '/home/user',
   USER: 'user',
@@ -680,8 +691,9 @@ export function initChildProcess(
   let controller: ChildProcessController;
 
   const nodeCommand = defineCommand('node', async (args, ctx) => {
-    const execution = getExecutionContextFromEnv(controller, ctx.env) ?? createExecutionContext(controller);
-    const ownsExecution = !getExecutionContextFromEnv(controller, ctx.env);
+    const env = envToRecord(ctx.env);
+    const execution = getExecutionContextFromEnv(controller, env) ?? createExecutionContext(controller);
+    const ownsExecution = !getExecutionContextFromEnv(controller, env);
 
     const scriptPath = args[0];
     if (!scriptPath) {
@@ -694,11 +706,11 @@ export function initChildProcess(
       : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, '/');
     const isNodeModulesCli = resolvedPath.includes('/node_modules/');
     const isOneShotNodeModulesCli = isNodeModulesCli && isLikelyOneShotCliInvocation(args.slice(1));
-    const isNpxExec = ctx.env?.ALMOSTNODE_NPX_EXEC === '1';
+    const isNpxExec = env.ALMOSTNODE_NPX_EXEC === '1';
     const isLongIdleNodeModulesCli =
       isNodeModulesCli &&
       !isOneShotNodeModulesCli &&
-      (ctx.env?.ALMOSTNODE_LONG_NODE_IDLE === '1' || ctx.env?.ALMOSTNODE_LONG_NODE_IDLE === 'true');
+      (env.ALMOSTNODE_LONG_NODE_IDLE === '1' || env.ALMOSTNODE_LONG_NODE_IDLE === 'true');
 
     if (!controller.vfs.existsSync(resolvedPath)) {
       if (ownsExecution) destroyExecutionContext(controller, execution.id);
@@ -731,7 +743,7 @@ export function initChildProcess(
 
     const runtime = new Runtime(controller.vfs, {
       cwd: ctx.cwd,
-      env: ctx.env,
+      env,
       childProcessController: controller,
       onConsole: (method, consoleArgs) => {
         const msg = consoleArgs.map((arg) => String(arg)).join(' ') + '\n';
@@ -897,10 +909,10 @@ module.exports = (async () => {
           pendingTimerIdleMs += CHECK_MS;
         }
 
-        const keepAliveForInteractiveInput = execution.interactive || (
+        const keepAliveForInteractiveInput = execution.interactive || (!!execution.signal && (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
-        );
+        ));
         if (keepAliveForInteractiveInput) {
           continue;
         }
@@ -998,7 +1010,8 @@ module.exports = (async () => {
   });
 
   const npxCommand = defineCommand('npx', async (args, ctx) => {
-    const execution = getExecutionContextFromEnv(controller, ctx.env);
+    const env = envToRecord(ctx.env);
+    const execution = getExecutionContextFromEnv(controller, env);
     let packageSpec: string | null = null;
     const cmdArgs: string[] = [];
     let i = 0;
@@ -1167,7 +1180,7 @@ module.exports = (async () => {
     }
 
     const execEnv = {
-      ...ctx.env,
+      ...env,
       ...(useExtendedNodeIdle ? { ALMOSTNODE_LONG_NODE_IDLE: '1' } : {}),
       ALMOSTNODE_NPX_EXEC: '1',
     };
@@ -1224,7 +1237,8 @@ module.exports = (async () => {
   });
 
   const nextCommand = defineCommand('next', async (args, ctx) => {
-    const execution = getExecutionContextFromEnv(controller, ctx.env);
+    const env = envToRecord(ctx.env);
+    const execution = getExecutionContextFromEnv(controller, env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
     const explicitSubcommand = args[0] && !args[0].startsWith('-') ? args[0] : 'dev';
     const devArgs = explicitSubcommand === 'dev' ? args.slice(args[0] === 'dev' ? 1 : 0) : args.slice(1);
@@ -1304,7 +1318,7 @@ module.exports = (async () => {
         pagesDir: `${root}/pages`.replace(/\/+/g, '/'),
         appDir: `${root}/app`.replace(/\/+/g, '/'),
         publicDir: `${root}/public`.replace(/\/+/g, '/'),
-        env: { ...ctx.env },
+        env: { ...env },
         deploymentBasePath: bridge.getBasePath(),
       });
 
@@ -1345,7 +1359,8 @@ module.exports = (async () => {
   });
 
   const viteCommand = defineCommand('vite', async (args, ctx) => {
-    const execution = getExecutionContextFromEnv(controller, ctx.env);
+    const env = envToRecord(ctx.env);
+    const execution = getExecutionContextFromEnv(controller, env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
     let root = normalizedCwd;
     let devArgs = args;
@@ -1547,7 +1562,7 @@ module.exports = (async () => {
             exitCode: 1,
           };
         }
-        return ctx.exec(parsed.script, { cwd: ctx.cwd, env: ctx.env });
+        return ctx.exec(parsed.script, { cwd: ctx.cwd, env: envToRecord(ctx.env) });
       }
 
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -1693,13 +1708,14 @@ async function execInstalledPackageBin(
     return { stdout: '', stderr: `${binName}: execution context unavailable\n`, exitCode: 1 };
   }
 
+  const env = envToRecord(ctx.env);
   const normalizedCwd = normalizeCommandCwd(ctx.cwd);
   const resolvedTarget = getPackageBinTarget(controller, pkgName, binName, normalizedCwd)
     || getPackageBinTarget(controller, pkgName, binName, '/');
 
   if (resolvedTarget) {
     const fullCommand = ['node', resolvedTarget, ...args].map((value) => shellQuote(value)).join(' ');
-    return ctx.exec(fullCommand, { cwd: normalizedCwd, env: ctx.env });
+    return ctx.exec(fullCommand, { cwd: normalizedCwd, env });
   }
 
   const binCandidates = [
@@ -1712,7 +1728,7 @@ async function execInstalledPackageBin(
   }
 
   const fullCommand = [binPath, ...args].map((value) => shellQuote(value)).join(' ');
-  return ctx.exec(fullCommand, { cwd: normalizedCwd, env: ctx.env });
+  return ctx.exec(fullCommand, { cwd: normalizedCwd, env });
 }
 
 function hasActiveStdinListeners(stdin: { listenerCount?: (event: string) => number }): boolean {
@@ -1901,7 +1917,7 @@ async function handleNpmRun(
 
   // Set up npm-specific environment variables
   const npmEnv: Record<string, string> = {
-    ...ctx.env,
+    ...envToRecord(ctx.env),
     npm_lifecycle_event: scriptName,
   };
   if (pkgJson.name) npmEnv.npm_package_name = pkgJson.name;
@@ -1992,7 +2008,7 @@ async function handleNpmInstall(
   const pm = await createPackageManager(controller, ctx.cwd);
 
   let stdout = '';
-  const execution = getExecutionContextFromEnv(controller, ctx.env);
+  const execution = getExecutionContextFromEnv(controller, envToRecord(ctx.env));
   const emitProgress = (message: string) => {
     const line = `${message}\n`;
     stdout += line;
