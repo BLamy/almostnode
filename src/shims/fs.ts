@@ -57,6 +57,7 @@ export interface FsShim {
   mkdtempSync(prefix: string): string;
   mkdtemp(prefix: string, callback: (err: Error | null, directory?: string) => void): void;
   rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  cpSync(src: string, dest: string, options?: { recursive?: boolean; force?: boolean }): void;
   watch(filename: string, options?: { persistent?: boolean; recursive?: boolean }, listener?: WatchListener): FSWatcher;
   watch(filename: string, listener?: WatchListener): FSWatcher;
   readFile(path: string, callback: (err: Error | null, data?: Uint8Array) => void): void;
@@ -84,6 +85,8 @@ export interface FsShim {
   readlink(path: string, callback: (err: Error | null, linkString?: string) => void): void;
   rm(path: string, callback: (err: Error | null) => void): void;
   rm(path: string, options: { recursive?: boolean; force?: boolean }, callback: (err: Error | null) => void): void;
+  cp(src: string, dest: string, callback: (err: Error | null) => void): void;
+  cp(src: string, dest: string, options: { recursive?: boolean; force?: boolean }, callback: (err: Error | null) => void): void;
   realpath(path: string, callback: (err: Error | null, resolvedPath?: string) => void): void;
   realpath(path: string, options: unknown, callback: (err: Error | null, resolvedPath?: string) => void): void;
   access(path: string, callback: (err: Error | null) => void): void;
@@ -123,6 +126,7 @@ export interface FsPromises {
   truncate(path: PathLike, len?: number): Promise<void>;
   realpath(path: PathLike): Promise<string>;
   copyFile(src: PathLike, dest: PathLike): Promise<void>;
+  cp(src: PathLike, dest: PathLike, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   link(existingPath: PathLike, newPath: PathLike): Promise<void>;
   symlink(target: PathLike, path: PathLike, type?: string): Promise<void>;
   readlink(path: PathLike): Promise<string>;
@@ -990,6 +994,16 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         }
       });
     },
+    cp(src: string, dest: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> {
+      return new Promise((resolve, reject) => {
+        try {
+          shim.cpSync(src, dest, options);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    },
     link(existingPathLike: unknown, newPathLike: unknown): Promise<void> {
       return new Promise((resolve, reject) => {
         try {
@@ -1399,6 +1413,42 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       vfs.writeFileSync(dest, data);
     },
 
+    cpSync(srcLike: unknown, destLike: unknown, options?: { recursive?: boolean; force?: boolean }): void {
+      const src = resolvePath(srcLike);
+      const dest = resolvePath(destLike);
+      if (!vfs.existsSync(src)) {
+        if (symlinkTargets.has(src)) {
+          // Copy symlink target
+          const target = symlinkTargets.get(src)!;
+          symlinkTargets.set(dest, target);
+          return;
+        }
+        throw createNodeError('ENOENT', 'cp', src);
+      }
+      const stats = vfs.statSync(src);
+      if (stats.isDirectory()) {
+        if (!options?.recursive) {
+          throw createNodeError('EISDIR', 'cp', src);
+        }
+        if (!vfs.existsSync(dest)) {
+          vfs.mkdirSync(dest, { recursive: true });
+        }
+        const entries = vfs.readdirSync(src);
+        for (const entry of entries) {
+          const srcEntry = src.endsWith('/') ? src + entry : src + '/' + entry;
+          const destEntry = dest.endsWith('/') ? dest + entry : dest + '/' + entry;
+          this.cpSync(srcEntry, destEntry, options);
+        }
+      } else {
+        // Check if dest exists and force is not set
+        if (vfs.existsSync(dest) && options?.force === false) {
+          throw createNodeError('EEXIST', 'cp', dest);
+        }
+        const data = vfs.readFileSync(src);
+        vfs.writeFileSync(dest, data);
+      }
+    },
+
     linkSync(existingPathLike: unknown, newPathLike: unknown): void {
       createLinkCopy(existingPathLike, newPathLike, 'link');
     },
@@ -1636,6 +1686,22 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         queueMicrotask(() => callback(null));
       } catch (err) {
         queueMicrotask(() => callback(err as Error));
+      }
+    },
+
+    cp(
+      srcLike: unknown,
+      destLike: unknown,
+      optionsOrCallback: { recursive?: boolean; force?: boolean } | ((err: Error | null) => void),
+      callback?: (err: Error | null) => void
+    ): void {
+      const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback!;
+      const options = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
+      try {
+        shim.cpSync(srcLike as string, destLike as string, options);
+        queueMicrotask(() => cb(null));
+      } catch (err) {
+        queueMicrotask(() => cb(err as Error));
       }
     },
 

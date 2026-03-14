@@ -52,6 +52,18 @@ const VITE_FILES: Record<string, string> = {
     null,
     2,
   ),
+  [`${WORKSPACE_ROOT}/.mcp.json`]: JSON.stringify(
+    {
+      mcpServers: {
+        shadcn: {
+          command: "npx",
+          args: ["shadcn@latest", "mcp"],
+        },
+      },
+    },
+    null,
+    2,
+  ),
   [`${WORKSPACE_ROOT}/tsconfig.json`]: JSON.stringify(
     {
       compilerOptions: {

@@ -1,12 +1,26 @@
 import type { Command, CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import { defineCommand } from 'just-bash';
 import git from 'isomorphic-git';
-import http from 'isomorphic-git/http/web';
+import httpClient from 'isomorphic-git/http/web';
 import { structuredPatch } from 'diff';
 import type { VirtualFS } from '../virtual-fs';
 import * as path from './path';
 
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
+
+function createProxiedHttp(corsProxy: string) {
+  return {
+    async request(options: { url: string; method?: string; headers?: Record<string, string>; body?: AsyncIterableIterator<Uint8Array> }) {
+      const proxiedUrl = `${corsProxy}${encodeURIComponent(options.url)}`;
+      try {
+        return await httpClient.request({ ...options, url: proxiedUrl });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`git: network error fetching ${options.url}: ${msg}`);
+      }
+    }
+  };
+}
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1201,15 +1215,15 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
   }
 
   const gitEnv = resolveGitEnv(ctx.env);
+  const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.clone({
     fs: createGitFs(vfs),
-    http,
+    http: proxiedHttp,
     dir,
     url,
     depth,
     singleBranch,
     ref,
-    corsProxy: gitEnv.corsProxy,
     onAuth: () => resolveGitAuth(gitEnv),
   });
 
@@ -1254,16 +1268,16 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
   const ref = positionals[1];
   const remoteLooksLikeUrl = isUrlLike(remote);
 
+  const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.fetch({
     fs: gitFs,
-    http,
+    http: proxiedHttp,
     dir,
     remote: remoteLooksLikeUrl ? undefined : remote,
     url: remoteLooksLikeUrl ? remote : undefined,
     ref,
     singleBranch,
     depth,
-    corsProxy: gitEnv.corsProxy,
     onAuth: () => resolveGitAuth(gitEnv),
   });
 
@@ -1297,16 +1311,16 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
   const remote = positionals[0] || 'origin';
   const remoteRef = positionals[1] || localRef;
 
+  const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.pull({
     fs: gitFs,
-    http,
+    http: proxiedHttp,
     dir,
     remote,
     ref: localRef,
     remoteRef,
     fastForward: true,
     fastForwardOnly,
-    corsProxy: gitEnv.corsProxy,
     onAuth: () => resolveGitAuth(gitEnv),
     author: {
       name: gitEnv.authorName,
@@ -1348,15 +1362,15 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
   const remote = positionals[0] || 'origin';
   const ref = positionals[1] || current;
 
+  const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.push({
     fs: gitFs,
-    http,
+    http: proxiedHttp,
     dir,
     remote,
     ref,
     remoteRef: ref,
     force,
-    corsProxy: gitEnv.corsProxy,
     onAuth: () => resolveGitAuth(gitEnv),
   });
 
@@ -1476,6 +1490,9 @@ function mapGitError(error: unknown): JustBashExecResult {
   }
   if (lower.includes('unknown revision')) {
     return failure(message, 128);
+  }
+  if (lower.includes('network error') || lower.includes('failed to fetch')) {
+    return failure(`git: network error — check your internet connection\n${message}`, 1);
   }
   if (lower.includes('unsupported option') || lower.includes('missing') || lower.includes('invalid')) {
     return failure(message, 2);

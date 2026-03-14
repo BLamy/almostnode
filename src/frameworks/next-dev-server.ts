@@ -553,6 +553,11 @@ export class NextDevServer extends DevServer {
       return this.serveNextShim(pathname);
     }
 
+    // Handle server actions
+    if (pathname === '/_next/server-action' && method === 'POST') {
+      return this.handleServerAction(body);
+    }
+
     // Route info endpoint for client-side navigation params extraction
     if (pathname === '/_next/route-info') {
       return this.serveRouteInfo(urlObj.searchParams.get('pathname') || '/');
@@ -743,6 +748,10 @@ export class NextDevServer extends DevServer {
 
     // First, try the path as-is (handles imports with explicit extensions like .tsx/.ts)
     if (this.exists(rawFilePath) && !this.isDirectory(rawFilePath)) {
+      const content = this.vfs.readFileSync(rawFilePath, 'utf8');
+      if (this.isServerActionFile(content)) {
+        return this.serveServerActionProxy(rawFilePath, content);
+      }
       return this.transformAndServe(rawFilePath, rawFilePath);
     }
 
@@ -754,11 +763,131 @@ export class NextDevServer extends DevServer {
     for (const ext of extensions) {
       const fullPath = filePath + ext;
       if (this.exists(fullPath)) {
+        const content = this.vfs.readFileSync(fullPath, 'utf8');
+        if (this.isServerActionFile(content)) {
+          return this.serveServerActionProxy(fullPath, content);
+        }
         return this.transformAndServe(fullPath, fullPath);
       }
     }
 
     return this.notFound(pathname);
+  }
+
+  private isServerActionFile(content: string): boolean {
+    const trimmed = content.trimStart();
+    return trimmed.startsWith('"use server"') || trimmed.startsWith("'use server'");
+  }
+
+  private serveServerActionProxy(filePath: string, content: string): ResponseData {
+    // Find all exported functions via regex
+    const exports: string[] = [];
+    const funcPattern = /export\s+(?:async\s+)?function\s+(\w+)/g;
+    const constPattern = /export\s+const\s+(\w+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = funcPattern.exec(content)) !== null) {
+      exports.push(match[1]);
+    }
+    while ((match = constPattern.exec(content)) !== null) {
+      exports.push(match[1]);
+    }
+
+    // Generate a proxy module that POSTs to /_next/server-action for each export
+    const proxyFunctions = exports.map(name => {
+      const actionId = `${filePath}:${name}`;
+      return `export async function ${name}(...args) {
+  const prefix = typeof window !== 'undefined' && window.__NEXT_VIRTUAL_PREFIX ? window.__NEXT_VIRTUAL_PREFIX : '';
+  const res = await fetch(prefix + '/_next/server-action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ actionId: ${JSON.stringify(actionId)}, args })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.result;
+}`;
+    }).join('\n\n');
+
+    const proxyCode = proxyFunctions;
+    return {
+      statusCode: 200,
+      statusMessage: 'OK',
+      headers: { 'Content-Type': 'application/javascript; charset=utf-8' },
+      body: Buffer.from(proxyCode),
+    };
+  }
+
+  private async handleServerAction(body?: Buffer): Promise<ResponseData> {
+    try {
+      const payload = JSON.parse(body ? body.toString() : '{}');
+      const { actionId, args = [] } = payload;
+
+      if (!actionId || typeof actionId !== 'string') {
+        return {
+          statusCode: 400,
+          statusMessage: 'Bad Request',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: Buffer.from(JSON.stringify({ error: 'Missing actionId' })),
+        };
+      }
+
+      const [filePath, exportName] = actionId.split(':');
+      if (!filePath || !exportName) {
+        return {
+          statusCode: 400,
+          statusMessage: 'Bad Request',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: Buffer.from(JSON.stringify({ error: 'Invalid actionId format' })),
+        };
+      }
+
+      if (!this.exists(filePath)) {
+        return {
+          statusCode: 404,
+          statusMessage: 'Not Found',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: Buffer.from(JSON.stringify({ error: 'Server action file not found' })),
+        };
+      }
+
+      const code = this.vfs.readFileSync(filePath, 'utf8');
+      const transformed = await this.transformApiHandler(code, filePath);
+
+      const builtinModules = await createBuiltinModules(
+        () => import('../shims/fs').then(m => m.createFsShim(this.vfs))
+      );
+      if (this.options.apiModules) {
+        Object.assign(builtinModules, this.options.apiModules);
+      }
+      const namespace = await this.loadApiNamespace(filePath, transformed, builtinModules);
+
+      const fn = namespace[exportName];
+      if (typeof fn !== 'function') {
+        return {
+          statusCode: 404,
+          statusMessage: 'Not Found',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: Buffer.from(JSON.stringify({ error: `Export "${exportName}" not found or not a function` })),
+        };
+      }
+
+      const result = await fn(...args);
+      return {
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: Buffer.from(JSON.stringify({ result })),
+      };
+    } catch (error) {
+      return {
+        statusCode: 500,
+        statusMessage: 'Internal Server Error',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: Buffer.from(JSON.stringify({
+          error: error instanceof Error ? error.message : 'Server action failed'
+        })),
+      };
+    }
   }
 
   /**

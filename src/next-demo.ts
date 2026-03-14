@@ -1000,6 +1000,7 @@ export default function RootLayout({ children }) {
             <li><a href="/about">About</a></li>
             <li><a href="/dashboard">Dashboard</a></li>
             <li><a href="/users/1">User 1</a></li>
+            <li><a href="/server-actions">Server Actions</a></li>
           </ul>
         </nav>
         <main>
@@ -1549,6 +1550,145 @@ export default function TypeScriptAppRouterDemo(): JSX.Element {
         <button onClick={() => router.push('/')} style={{ marginTop: '1rem' }}>
           ← Back to Home
         </button>
+      </div>
+    </div>
+  );
+}
+`
+  );
+
+  // Create server actions file
+  vfs.writeFileSync(
+    '/app/actions.js',
+    `"use server";
+
+const todos = [
+  { id: 1, text: 'Learn Next.js Server Actions', completed: true },
+  { id: 2, text: 'Build something awesome', completed: false },
+];
+let nextId = 3;
+
+export async function getTodos() {
+  return todos;
+}
+
+export async function addTodo(text) {
+  const todo = { id: nextId++, text, completed: false };
+  todos.push(todo);
+  return todos;
+}
+
+export async function toggleTodo(id) {
+  const todo = todos.find(t => t.id === id);
+  if (todo) {
+    todo.completed = !todo.completed;
+  }
+  return todos;
+}
+`
+  );
+
+  // Create server actions page
+  vfs.mkdirSync('/app/server-actions', { recursive: true });
+  vfs.writeFileSync(
+    '/app/server-actions/page.jsx',
+    `'use client';
+
+import React, { useState, useEffect } from 'react';
+import { getTodos, addTodo, toggleTodo } from '../actions.js';
+
+export default function ServerActionsPage() {
+  const [todos, setTodos] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getTodos().then(data => {
+      setTodos(data);
+      setLoading(false);
+    });
+  }, []);
+
+  async function handleAdd(e) {
+    e.preventDefault();
+    if (!input.trim()) return;
+    setLoading(true);
+    const updated = await addTodo(input.trim());
+    setTodos(updated);
+    setInput('');
+    setLoading(false);
+  }
+
+  async function handleToggle(id) {
+    const updated = await toggleTodo(id);
+    setTodos(updated);
+  }
+
+  return (
+    <div className="container">
+      <h1>Server Actions Demo</h1>
+
+      <div className="card">
+        <h3>How it works</h3>
+        <p>
+          The file <code>/app/actions.js</code> has a <code>"use server"</code> directive.
+          When the browser imports it, almostnode returns a proxy module that sends
+          <code> POST</code> requests to the server. The actual functions run server-side.
+        </p>
+      </div>
+
+      <div className="card">
+        <h3>Todo List (Server-managed state)</h3>
+        <form onSubmit={handleAdd} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+          <input
+            type="text"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            placeholder="Add a todo..."
+            style={{
+              flex: 1,
+              padding: '0.75rem',
+              fontSize: '1rem',
+              border: '1px solid #ddd',
+              borderRadius: '8px',
+            }}
+          />
+          <button type="submit" disabled={loading}>Add</button>
+        </form>
+
+        {loading && todos.length === 0 ? (
+          <p style={{ color: '#888' }}>Loading todos from server...</p>
+        ) : (
+          <ul style={{ listStyle: 'none', padding: 0 }}>
+            {todos.map(todo => (
+              <li
+                key={todo.id}
+                onClick={() => handleToggle(todo.id)}
+                style={{
+                  padding: '0.75rem',
+                  marginBottom: '0.5rem',
+                  background: todo.completed ? '#f0fff0' : '#fff',
+                  border: '1px solid #eee',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  textDecoration: todo.completed ? 'line-through' : 'none',
+                  color: todo.completed ? '#888' : '#333',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                }}
+              >
+                <span style={{ fontSize: '1.2rem' }}>
+                  {todo.completed ? '\\u2611' : '\\u2610'}
+                </span>
+                {todo.text}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p style={{ color: '#888', fontSize: '0.85rem' }}>
+          Click a todo to toggle it. State persists on the server across navigations.
+        </p>
       </div>
     </div>
   );
