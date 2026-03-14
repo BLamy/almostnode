@@ -142,6 +142,8 @@ export interface NextDevServerOptions extends DevServerOptions {
   esmShDeps?: string;
   /** CORS proxy URL prefix for API route handlers (available as process.env.CORS_PROXY_URL) */
   corsProxy?: string;
+  /** Deployment base path prefix (e.g., '/almostnode' for GitHub Pages subpath). NOT the same as Next.js basePath. */
+  deploymentBasePath?: string;
 }
 
 /**
@@ -396,8 +398,8 @@ export class NextDevServer extends DevServer {
       return code;
     }
 
-    // Get the virtual server base path
-    const virtualBase = `/__virtual__/${this.port}`;
+    // Get the virtual server base path (include deployment basePath for subpath hosts)
+    const virtualBase = `${this.options.deploymentBasePath || ''}/__virtual__/${this.port}`;
 
     let result = code;
 
@@ -1241,6 +1243,7 @@ export class NextDevServer extends DevServer {
       generateEnvScript: () => this.generateEnvScript(),
       loadTailwindConfigIfNeeded: () => this.loadTailwindConfigIfNeeded(),
       additionalImportMap: this.options.additionalImportMap,
+      deploymentBasePath: this.options.deploymentBasePath,
     };
   }
 
@@ -1266,7 +1269,7 @@ export class NextDevServer extends DevServer {
    * Serve a basic 404 page
    */
   private serve404Page(): ResponseData {
-    return _serve404Page(this.port);
+    return _serve404Page(this.port, this.options.deploymentBasePath);
   }
 
   /**

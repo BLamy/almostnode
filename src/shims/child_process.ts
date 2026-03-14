@@ -1291,6 +1291,7 @@ module.exports = (async () => {
         appDir: `${root}/app`.replace(/\/+/g, '/'),
         publicDir: `${root}/public`.replace(/\/+/g, '/'),
         env: { ...ctx.env },
+        deploymentBasePath: bridge.getBasePath(),
       });
 
       bridge.registerServer(createBridgeServerWrapper(server) as any, port);

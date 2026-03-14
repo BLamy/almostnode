@@ -32,6 +32,8 @@ export interface HtmlGeneratorContext {
   loadTailwindConfigIfNeeded: () => Promise<string>;
   /** Additional import map entries (e.g., framework-specific CDN mappings) */
   additionalImportMap?: Record<string, string>;
+  /** Deployment base path prefix (e.g., '/almostnode' for GitHub Pages subpath) */
+  deploymentBasePath?: string;
 }
 
 /**
@@ -43,7 +45,8 @@ export async function generateAppRouterHtml(
   pathname: string
 ): Promise<string> {
   // Use virtual server prefix for all file imports so the service worker can intercept them
-  const virtualPrefix = `/__virtual__/${ctx.port}`;
+  // Include deployment basePath (e.g., '/almostnode') so URLs resolve correctly on subpath hosts
+  const virtualPrefix = `${ctx.deploymentBasePath || ''}/__virtual__/${ctx.port}`;
 
   // Check for global CSS files
   const globalCssLinks: string[] = [];
@@ -392,7 +395,8 @@ export async function generatePageHtml(
   // Use virtual server prefix for all file imports so the service worker can intercept them
   // Without this, /pages/index.jsx would go to localhost:5173/pages/index.jsx
   // instead of /__virtual__/3001/pages/index.jsx
-  const virtualPrefix = `/__virtual__/${ctx.port}`;
+  // Include deployment basePath (e.g., '/almostnode') so URLs resolve correctly on subpath hosts
+  const virtualPrefix = `${ctx.deploymentBasePath || ''}/__virtual__/${ctx.port}`;
   const pageModulePath = virtualPrefix + pageFile; // pageFile already starts with /
 
   // Check for global CSS files
@@ -523,8 +527,8 @@ export async function generatePageHtml(
 /**
  * Serve a basic 404 page
  */
-export function serve404Page(port: number): ResponseData {
-  const virtualPrefix = `/__virtual__/${port}`;
+export function serve404Page(port: number, deploymentBasePath?: string): ResponseData {
+  const virtualPrefix = `${deploymentBasePath || ''}/__virtual__/${port}`;
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
