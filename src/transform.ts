@@ -154,6 +154,11 @@ export async function initTransformer(): Promise<void> {
     return window.__esbuildInitPromise;
   }
 
+  // Permanent bail-out after a previous init failure to prevent retry storms
+  if ((window as any).__esbuildInitFailed) {
+    throw new Error('esbuild initialization previously failed permanently');
+  }
+
   window.__esbuildInitPromise = (async () => {
     try {
       console.log('[transform] Loading esbuild-wasm...');
@@ -184,6 +189,7 @@ export async function initTransformer(): Promise<void> {
       window.__esbuild = esbuildMod;
     } catch (error) {
       console.error('[transform] Failed to initialize esbuild:', error);
+      (window as any).__esbuildInitFailed = true;
       window.__esbuildInitPromise = undefined;
       throw error;
     }

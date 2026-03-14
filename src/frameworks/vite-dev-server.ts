@@ -45,6 +45,11 @@ async function initEsbuild(): Promise<void> {
     return window.__esbuildInitPromise;
   }
 
+  // Permanent bail-out after a previous init failure to prevent retry storms
+  if ((window as any).__esbuildInitFailed) {
+    throw new Error('esbuild initialization previously failed permanently');
+  }
+
   window.__esbuildInitPromise = (async () => {
     try {
       const mod = await import(
@@ -72,6 +77,7 @@ async function initEsbuild(): Promise<void> {
       window.__esbuild = esbuildMod;
     } catch (error) {
       console.error('[ViteDevServer] Failed to initialize esbuild:', error);
+      (window as any).__esbuildInitFailed = true;
       window.__esbuildInitPromise = undefined;
       throw error;
     }

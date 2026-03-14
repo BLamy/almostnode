@@ -1523,6 +1523,14 @@ export class WebIDEHost {
   }
 
   private async init(): Promise<void> {
+    const logMemory = (label: string) => {
+      if ((performance as any).memory) {
+        const m = (performance as any).memory;
+        console.log(`[memory] ${label}: ${(m.usedJSHeapSize / 1024 / 1024).toFixed(1)}MB / ${(m.jsHeapSizeLimit / 1024 / 1024).toFixed(1)}MB`);
+      }
+    };
+
+    logMemory('before workspace seed');
     seedWorkspace(this.container, this.templateId);
 
     this.installWorkerEnvironment();
@@ -1589,6 +1597,7 @@ export class WebIDEHost {
       }
     });
 
+    logMemory('before service worker init');
     try {
       await this.container.serverBridge.initServiceWorker();
     } catch (error) {
@@ -1596,26 +1605,33 @@ export class WebIDEHost {
       this.updatePreviewStatus(message);
     }
 
+    logMemory('before workbench init');
     await this.initWorkbench();
+    logMemory('after workbench init');
     this.ensurePreviewServerRunning();
     window.__almostnodeWebIDE = this;
 
-    // Show Claude loading splash immediately so it's visible during WebAuthn
-    this.claudeSurface.showLoading();
+    logMemory('before claude boot');
+    // Feature flag: skip Claude Code auto-boot to reduce memory pressure (e.g. on GitHub Pages)
+    const skipClaude = new URLSearchParams(window.location.search).has('no-claude');
+    if (!skipClaude) {
+      // Show Claude loading splash immediately so it's visible during WebAuthn
+      this.claudeSurface.showLoading();
 
-    // Auto-start Claude Code: if there's a stored API key, prompt WebAuthn
-    // to unlock it, then start a Claude Code session
-    const claudeState = this.claudeAuthVault.getState();
-    if (claudeState.hasStoredVault && !claudeState.hasLiveCredentials) {
-      this.claudeAuthVault.handlePrimaryAction().then(() => {
+      // Auto-start Claude Code: if there's a stored API key, prompt WebAuthn
+      // to unlock it, then start a Claude Code session
+      const claudeState = this.claudeAuthVault.getState();
+      if (claudeState.hasStoredVault && !claudeState.hasLiveCredentials) {
+        this.claudeAuthVault.handlePrimaryAction().then(() => {
+          void this.revealClaudePanel(false);
+        }).catch(() => {
+          // Auth unlock declined/failed — still reveal the panel so user can retry
+          void this.revealClaudePanel(false);
+        });
+      } else {
+        // No stored vault or already unlocked — just open the Claude panel
         void this.revealClaudePanel(false);
-      }).catch(() => {
-        // Auth unlock declined/failed — still reveal the panel so user can retry
-        void this.revealClaudePanel(false);
-      });
-    } else {
-      // No stored vault or already unlocked — just open the Claude panel
-      void this.revealClaudePanel(false);
+      }
     }
 
     // Initialize git repo in the background (non-blocking)

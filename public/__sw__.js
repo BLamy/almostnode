@@ -338,6 +338,25 @@ self.addEventListener('fetch', (event) => {
         // Invalid referer URL, ignore
       }
     }
+
+    // Inject COOP/COEP headers on navigation responses so cross-origin isolation
+    // works on static hosts (e.g. GitHub Pages) that can't set custom headers
+    if (event.request.mode === 'navigate') {
+      event.respondWith(
+        fetch(event.request).then(response => {
+          const newHeaders = new Headers(response.headers);
+          newHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
+          newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+          return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: newHeaders,
+          });
+        }).catch(() => fetch(event.request))
+      );
+      return;
+    }
+
     // Not a virtual request, let it pass through
     return;
   }

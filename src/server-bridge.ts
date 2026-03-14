@@ -240,6 +240,15 @@ export class ServerBridge extends EventEmitter {
     // Without this, fetch requests bypass the SW and go directly to the server
     await controllerReady;
 
+    // If this is the first time the SW controls this page, reload so the SW can
+    // inject COOP/COEP headers on the navigation response (needed for static hosts
+    // like GitHub Pages that can't set custom headers)
+    if (!sessionStorage.getItem('__almostnode_sw_init')) {
+      sessionStorage.setItem('__almostnode_sw_init', '1');
+      window.location.reload();
+      return;
+    }
+
     // Re-establish communication when the SW loses its port (idle termination)
     // or when the SW is replaced (new deployment). The SW sends 'sw-needs-init'
     // to all clients when a request arrives but mainPort is null.
