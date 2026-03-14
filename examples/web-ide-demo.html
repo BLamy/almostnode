@@ -1068,10 +1068,10 @@
 
       .template-picker__cards {
         display: grid;
-        grid-template-columns: repeat(2, 1fr);
+        grid-template-columns: repeat(3, 1fr);
         gap: 1.25rem;
         width: 100%;
-        max-width: 40rem;
+        max-width: 56rem;
       }
 
       .template-picker__card {
@@ -1133,7 +1133,7 @@
         background: rgba(255, 255, 255, 0.02);
       }
 
-      @media (max-width: 600px) {
+      @media (max-width: 800px) {
         .template-picker__cards {
           grid-template-columns: 1fr;
         }
@@ -1180,6 +1180,16 @@
             <span class="template-picker__tag">Next 14</span>
             <span class="template-picker__tag">App Router</span>
             <span class="template-picker__tag">Tailwind</span>
+          </div>
+        </div>
+        <div class="template-picker__card" data-template="tanstack">
+          <svg class="template-picker__logo" viewBox="0 0 633 633" xmlns="http://www.w3.org/2000/svg"><path d="M316.5 0C142 0 0 142 0 316.5S142 633 316.5 633 633 491 633 316.5 491 0 316.5 0z" fill="#002B41"/><path d="M316.5 84c-58 0-105.5 90.4-105.5 200.5 0 8.8.3 17.4.9 25.8C152 327 117 358.5 117 395.5c0 58 90.4 105 200.5 105 8.2 0 16.2-.2 24.1-.7 16.5 56.6 47.7 90.7 82.9 90.7 58 0 105-90.4 105-200.5 0-7-.2-13.9-.5-20.7C584.5 352.3 617 321 617 285c0-58-90.4-105-200.5-105-9.5 0-18.8.3-27.9.8C372.3 126.5 341.8 84 316.5 84z" fill="#FFD94C"/><ellipse cx="316.5" cy="284.5" rx="105.5" ry="200.5" fill="#002B41"/><ellipse cx="316.5" cy="284.5" rx="105.5" ry="200.5" transform="rotate(60 316.5 316.5)" fill="#002B41"/><ellipse cx="316.5" cy="284.5" rx="105.5" ry="200.5" transform="rotate(-60 316.5 316.5)" fill="#002B41"/><circle cx="316.5" cy="316.5" r="45" fill="#FFD94C"/></svg>
+          <h2 class="template-picker__card-title">TanStack Router</h2>
+          <p class="template-picker__card-desc">Type-safe file-based routing with SPA navigation on Vite.</p>
+          <div class="template-picker__tags">
+            <span class="template-picker__tag">React 18</span>
+            <span class="template-picker__tag">TanStack Router</span>
+            <span class="template-picker__tag">Vite</span>
           </div>
         </div>
       </div>

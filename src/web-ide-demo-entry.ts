@@ -81,7 +81,7 @@ function bootIDE(template: TemplateId): void {
   });
 }
 
-const VALID_TEMPLATES: TemplateId[] = ['vite', 'nextjs'];
+const VALID_TEMPLATES: TemplateId[] = ['vite', 'nextjs', 'tanstack'];
 const templateParam = params.get('template');
 
 if (templateParam && VALID_TEMPLATES.includes(templateParam as TemplateId)) {

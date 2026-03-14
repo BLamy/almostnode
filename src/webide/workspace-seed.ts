@@ -4,7 +4,7 @@ export const WORKSPACE_ROOT = "/project";
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
-export type TemplateId = 'vite' | 'nextjs';
+export type TemplateId = 'vite' | 'nextjs' | 'tanstack';
 
 export interface TemplateDefinition {
   id: TemplateId;
@@ -1354,9 +1354,261 @@ const NEXTJS_TEMPLATE: TemplateDefinition = {
   },
 };
 
+const TANSTACK_DIRECTORIES = [
+  `${WORKSPACE_ROOT}/.vscode`,
+  `${WORKSPACE_ROOT}/src`,
+  `${WORKSPACE_ROOT}/src/routes`,
+  `${WORKSPACE_ROOT}/src/styles`,
+];
+
+const TANSTACK_FILES: Record<string, string> = {
+  [`${WORKSPACE_ROOT}/package.json`]: JSON.stringify(
+    {
+      name: "almostnode-tanstack-router-starter",
+      private: true,
+      version: "0.0.1",
+      type: "module",
+      scripts: {
+        dev: "vite --port 3000",
+        build: "vite build",
+        preview: "vite preview",
+      },
+      dependencies: {
+        react: "^18.2.0",
+        "react-dom": "^18.2.0",
+        "@tanstack/react-router": "^1.160.0",
+      },
+      devDependencies: {
+        "@types/react": "^18.2.0",
+        "@types/react-dom": "^18.2.0",
+        typescript: "^5.9.3",
+        vite: "^5.4.0",
+      },
+    },
+    null,
+    2,
+  ),
+  [`${WORKSPACE_ROOT}/tsconfig.json`]: JSON.stringify(
+    {
+      compilerOptions: {
+        target: "ES2022",
+        useDefineForClassFields: true,
+        lib: ["DOM", "DOM.Iterable", "ES2022"],
+        allowJs: false,
+        skipLibCheck: true,
+        esModuleInterop: true,
+        allowSyntheticDefaultImports: true,
+        strict: true,
+        forceConsistentCasingInFileNames: true,
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        baseUrl: ".",
+        paths: {
+          "~/*": ["./src/*"],
+        },
+        resolveJsonModule: true,
+        isolatedModules: true,
+        noEmit: true,
+        jsx: "react-jsx",
+      },
+      include: ["src"],
+    },
+    null,
+    2,
+  ),
+  [`${WORKSPACE_ROOT}/index.html`]: `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TanStack Router App</title>
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0?dev",
+    "react/": "https://esm.sh/react@18.2.0&dev/",
+    "react-dom": "https://esm.sh/react-dom@18.2.0?dev",
+    "react-dom/": "https://esm.sh/react-dom@18.2.0&dev/"
+  }
+}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>
+`,
+  [`${WORKSPACE_ROOT}/src/main.tsx`]: `import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { RouterProvider } from '@tanstack/react-router';
+import { getRouter } from './router';
+
+const router = getRouter();
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <RouterProvider router={router} />
+  </StrictMode>,
+);
+`,
+  [`${WORKSPACE_ROOT}/src/router.tsx`]: `import { createRouter } from '@tanstack/react-router';
+import { routeTree } from './routeTree.gen';
+
+export function getRouter() {
+  const router = createRouter({
+    routeTree,
+    defaultPreload: 'intent',
+  });
+  return router;
+}
+
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: ReturnType<typeof getRouter>;
+  }
+}
+`,
+  [`${WORKSPACE_ROOT}/src/routes/__root.tsx`]: `import { Outlet, Link, createRootRoute } from '@tanstack/react-router';
+
+export const Route = createRootRoute({
+  component: RootLayout,
+});
+
+function RootLayout() {
+  return (
+    <div style={{ minHeight: '100vh', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+      <nav style={{
+        display: 'flex',
+        gap: '1rem',
+        padding: '1rem 1.5rem',
+        borderBottom: '1px solid #e5e7eb',
+        background: '#fff',
+      }}>
+        <Link
+          to="/"
+          style={{ textDecoration: 'none', color: '#111', fontWeight: 600 }}
+          activeProps={{ style: { color: '#2563eb' } }}
+        >
+          Home
+        </Link>
+        <Link
+          to="/about"
+          style={{ textDecoration: 'none', color: '#111', fontWeight: 600 }}
+          activeProps={{ style: { color: '#2563eb' } }}
+        >
+          About
+        </Link>
+      </nav>
+      <main style={{ padding: '1.5rem' }}>
+        <Outlet />
+      </main>
+    </div>
+  );
+}
+`,
+  [`${WORKSPACE_ROOT}/src/routes/index.tsx`]: `import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/')({
+  component: HomePage,
+});
+
+function HomePage() {
+  return (
+    <div>
+      <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>
+        Welcome to TanStack Router
+      </h1>
+      <p style={{ color: '#6b7280', fontSize: '1.1rem', marginBottom: '1.5rem' }}>
+        File-based routing with type-safe navigation, running in the browser via almostnode.
+      </p>
+      <div style={{
+        padding: '1.25rem',
+        background: '#f0f9ff',
+        borderRadius: '0.5rem',
+        border: '1px solid #bae6fd',
+      }}>
+        <h2 style={{ margin: '0 0 0.5rem', fontSize: '1rem', color: '#0c4a6e' }}>
+          How it works
+        </h2>
+        <ul style={{ margin: 0, paddingLeft: '1.25rem', color: '#0369a1', lineHeight: 1.8 }}>
+          <li>Routes are defined in <code>src/routes/</code> as file-based routes</li>
+          <li><code>routeTree.gen.ts</code> is auto-generated from the file structure</li>
+          <li>Add a new file in <code>src/routes/</code> and the route tree updates automatically</li>
+          <li>SPA fallback ensures client-side navigation works on all paths</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+`,
+  [`${WORKSPACE_ROOT}/src/routes/about.tsx`]: `import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/about')({
+  component: AboutPage,
+});
+
+function AboutPage() {
+  return (
+    <div>
+      <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>
+        About
+      </h1>
+      <p style={{ color: '#6b7280', fontSize: '1.1rem', lineHeight: 1.7 }}>
+        This is a TanStack Router project running entirely in the browser
+        using almostnode. The virtual filesystem, npm package manager, and
+        Vite dev server all run client-side — no backend needed.
+      </p>
+      <p style={{ color: '#6b7280', fontSize: '1.1rem', lineHeight: 1.7 }}>
+        Try adding a new route file (e.g. <code>src/routes/contact.tsx</code>)
+        and watch the route tree regenerate automatically!
+      </p>
+    </div>
+  );
+}
+`,
+  [`${WORKSPACE_ROOT}/src/styles/app.css`]: `:root {
+  font-family: system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #213547;
+  background-color: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: #f1f5f9;
+  padding: 0.15em 0.35em;
+  border-radius: 0.25em;
+}
+`,
+};
+
+const TANSTACK_TEMPLATE: TemplateDefinition = {
+  id: 'tanstack',
+  defaultFile: `${WORKSPACE_ROOT}/src/routes/index.tsx`,
+  runCommand: 'npm run dev',
+  directories: TANSTACK_DIRECTORIES,
+  files: {
+    ...TANSTACK_FILES,
+    [`${WORKSPACE_ROOT}/.vscode/settings.json`]: VITE_FILES[`${WORKSPACE_ROOT}/.vscode/settings.json`],
+  },
+};
+
 const TEMPLATES: Record<TemplateId, TemplateDefinition> = {
   vite: VITE_TEMPLATE,
   nextjs: NEXTJS_TEMPLATE,
+  tanstack: TANSTACK_TEMPLATE,
 };
 
 export function getTemplateDefaults(id: TemplateId): { defaultFile: string; runCommand: string } {

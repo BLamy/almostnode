@@ -7,8 +7,8 @@ import { DevServer, DevServerOptions, ResponseData, HMRUpdate } from '../dev-ser
 import { VirtualFS } from '../virtual-fs';
 import { Buffer } from '../shims/stream';
 import { simpleHash } from '../utils/hash';
-import { addReactRefresh as _addReactRefresh } from './code-transforms';
-import { clearNpmBundleCache } from './npm-serve';
+import { addReactRefresh as _addReactRefresh, redirectNpmImports as _redirectNpmImports } from './code-transforms';
+import { clearNpmBundleCache, bundleNpmModuleForBrowser } from './npm-serve';
 import {
   ESBUILD_WASM_ESM_CDN,
   ESBUILD_WASM_BINARY_CDN,
@@ -18,6 +18,7 @@ import {
   TAILWIND_CDN_URL,
 } from '../config/cdn';
 import { loadTailwindConfig } from './tailwind-config-loader';
+import { generateAndWriteRouteTree } from './tanstack-route-tree';
 
 // Check if we're in a real browser environment (not jsdom or Node.js)
 // jsdom has window but doesn't have ServiceWorker or SharedArrayBuffer
@@ -106,6 +107,21 @@ export interface ViteDevServerOptions extends DevServerOptions {
    * Auto-inject React import for JSX files (default: true)
    */
   jsxAutoImport?: boolean;
+
+  /**
+   * Enable SPA fallback - serve index.html for 404s on extensionless paths (default: false)
+   */
+  spaFallback?: boolean;
+
+  /**
+   * Path aliases for import resolution (e.g. { '~/': 'src/', '@/': 'src/' })
+   */
+  aliases?: Record<string, string>;
+
+  /**
+   * Enable TanStack Router route tree auto-generation (default: false)
+   */
+  tanstackRouter?: boolean;
 }
 
 /**
@@ -293,8 +309,11 @@ export class ViteDevServer extends DevServer {
   private hmrTargetWindow: Window | null = null;
   private transformCache: Map<string, { code: string; hash: string }> = new Map();
   private pendingInstalledPackagesCacheClear: ReturnType<typeof setTimeout> | null = null;
+  private pendingRouteTreeRegen: ReturnType<typeof setTimeout> | null = null;
   private tailwindConfigScript: string = '';
   private tailwindConfigLoaded: boolean = false;
+  private _dependencies: Record<string, string> | undefined;
+  private _installedPackages: Set<string> | undefined;
 
   constructor(vfs: VirtualFS, options: ViteDevServerOptions) {
     super(vfs, options);
@@ -317,6 +336,8 @@ export class ViteDevServer extends DevServer {
 
   clearInstalledPackagesCache(): void {
     this.transformCache.clear();
+    this._installedPackages = undefined;
+    this._dependencies = undefined;
     clearNpmBundleCache();
   }
 
@@ -344,6 +365,44 @@ export class ViteDevServer extends DevServer {
     const urlObj = new URL(url, 'http://localhost');
     let pathname = urlObj.pathname;
 
+    // Serve bundled npm modules from VFS node_modules
+    if (pathname.startsWith('/_npm/')) {
+      return this.serveNpmModule(pathname);
+    }
+
+    // Handle ?url query parameter - return file path as URL string export
+    if (urlObj.searchParams.has('url')) {
+      const resolvedPath = this.resolveModulePath(pathname);
+      if (this.exists(resolvedPath)) {
+        const js = `export default ${JSON.stringify(pathname)};`;
+        return {
+          statusCode: 200,
+          statusMessage: 'OK',
+          headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
+          body: Buffer.from(js),
+        };
+      }
+    }
+
+    // Handle ?raw query parameter - return raw file content as string export
+    if (urlObj.searchParams.has('raw')) {
+      const resolvedPath = this.resolveModulePath(pathname);
+      if (this.exists(resolvedPath)) {
+        try {
+          const content = this.vfs.readFileSync(resolvedPath, 'utf8');
+          const js = `export default ${JSON.stringify(content)};`;
+          return {
+            statusCode: 200,
+            statusMessage: 'OK',
+            headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
+            body: Buffer.from(js),
+          };
+        } catch {
+          // Fall through to normal handling
+        }
+      }
+    }
+
     // Handle root path - serve index.html
     if (pathname === '/') {
       pathname = '/index.html';
@@ -361,6 +420,10 @@ export class ViteDevServer extends DevServer {
       // Try index.html in directory
       if (this.isDirectory(filePath) && this.exists(filePath + '/index.html')) {
         return this.serveFile(filePath + '/index.html');
+      }
+      // SPA fallback: serve index.html for extensionless paths (client-side routing)
+      if (this.options.spaFallback && !pathname.includes('.')) {
+        return this.handleRequest(method, '/', headers, body);
       }
       return this.notFound(pathname);
     }
@@ -429,6 +492,15 @@ export class ViteDevServer extends DevServer {
         } else if (eventType === 'rename' && this.vfs.existsSync(fullPath)) {
           // 'rename' with existing file = creation (e.g. atomic write via rename, new file)
           this.handleFileChange(fullPath);
+        }
+
+        // Regenerate route tree when files under src/routes/ change
+        if (this.options.tanstackRouter) {
+          const routesPrefix = srcPath + '/routes';
+          const checkPath = filename.startsWith('/') ? filename : `${srcPath}/${filename}`;
+          if (checkPath.startsWith(routesPrefix) && /\.(tsx?|jsx?)$/.test(checkPath)) {
+            this.scheduleRouteTreeRegen();
+          }
         }
       });
 
@@ -532,6 +604,10 @@ export class ViteDevServer extends DevServer {
     if (this.pendingInstalledPackagesCacheClear) {
       clearTimeout(this.pendingInstalledPackagesCacheClear);
       this.pendingInstalledPackagesCacheClear = null;
+    }
+    if (this.pendingRouteTreeRegen) {
+      clearTimeout(this.pendingRouteTreeRegen);
+      this.pendingRouteTreeRegen = null;
     }
 
     this.hmrTargetWindow = null;
@@ -661,16 +737,185 @@ export class ViteDevServer extends DevServer {
       sourcefile: filename,
     });
 
-    // Add React Refresh registration for JSX/TSX files
-    if (/\.(jsx|tsx)$/.test(filename)) {
-      return this.addReactRefresh(result.code, filename);
+    let transformed = result.code;
+
+    // Redirect bare npm imports to /_npm/ or esm.sh CDN
+    transformed = this.redirectNpmImports(transformed);
+
+    // Rewrite path aliases in import specifiers
+    if (this.options.aliases && Object.keys(this.options.aliases).length > 0) {
+      transformed = this.rewriteAliases(transformed, filename);
     }
 
-    return result.code;
+    // Add React Refresh registration for JSX/TSX files
+    if (/\.(jsx|tsx)$/.test(filename)) {
+      return this.addReactRefresh(transformed, filename);
+    }
+
+    return transformed;
   }
 
   private addReactRefresh(code: string, filename: string): string {
     return _addReactRefresh(code, filename);
+  }
+
+  /**
+   * Rewrite path alias prefixes in import/export specifiers to relative paths
+   */
+  private rewriteAliases(code: string, filename: string): string {
+    const aliases = this.options.aliases;
+    if (!aliases) return code;
+
+    // Match import/export from "specifier" or import("specifier")
+    return code.replace(
+      /((?:import|export)\s+.*?\s+from\s+['"])([^'"]+)(['"])|(\bimport\s*\(\s*['"])([^'"]+)(['"]\s*\))/g,
+      (match, pre1, spec1, post1, pre2, spec2, post2) => {
+        const specifier = spec1 || spec2;
+        const pre = pre1 || pre2;
+        const post = post1 || post2;
+
+        for (const [alias, target] of Object.entries(aliases)) {
+          if (specifier.startsWith(alias)) {
+            // Replace alias with target path, then compute relative from current file
+            const resolved = specifier.replace(alias, target);
+            const fromDir = filename.replace(/\/[^/]+$/, '');
+            // Strip root prefix from fromDir for relative computation
+            const rootPrefix = this.root === '/' ? '' : this.root;
+            const fromDirRel = rootPrefix && fromDir.startsWith(rootPrefix)
+              ? fromDir.slice(rootPrefix.length)
+              : fromDir;
+            const targetFull = '/' + resolved;
+
+            // Compute relative path
+            const fromParts = fromDirRel.split('/').filter(Boolean);
+            const toParts = targetFull.split('/').filter(Boolean);
+
+            // Find common prefix
+            let common = 0;
+            while (common < fromParts.length && common < toParts.length && fromParts[common] === toParts[common]) {
+              common++;
+            }
+
+            const ups = fromParts.length - common;
+            const remainder = toParts.slice(common);
+            let rel = ups > 0
+              ? '../'.repeat(ups) + remainder.join('/')
+              : './' + remainder.join('/');
+
+            return pre + rel + post;
+          }
+        }
+        return match;
+      }
+    );
+  }
+
+  /**
+   * Schedule route tree regeneration (debounced)
+   */
+  private scheduleRouteTreeRegen(): void {
+    if (!this.options.tanstackRouter) return;
+
+    if (this.pendingRouteTreeRegen) {
+      clearTimeout(this.pendingRouteTreeRegen);
+    }
+
+    this.pendingRouteTreeRegen = setTimeout(() => {
+      this.pendingRouteTreeRegen = null;
+      try {
+        const changed = generateAndWriteRouteTree(this.vfs, this.root);
+        if (changed) {
+          console.log('[ViteDevServer] Regenerated routeTree.gen.ts');
+        }
+      } catch (error) {
+        console.warn('[ViteDevServer] Failed to regenerate route tree:', error);
+      }
+    }, 100);
+  }
+
+  private getDependencies(): Record<string, string> {
+    if (this._dependencies) return this._dependencies;
+    let deps: Record<string, string> = {};
+    try {
+      const pkgPath = `${this.root}/package.json`;
+      if (this.vfs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(this.vfs.readFileSync(pkgPath, 'utf-8'));
+        deps = { ...pkg.dependencies, ...pkg.devDependencies };
+      }
+    } catch { /* ignore parse errors */ }
+    this._dependencies = deps;
+    return deps;
+  }
+
+  private getInstalledPackages(): Set<string> {
+    if (this._installedPackages) return this._installedPackages;
+    const pkgs = new Set<string>();
+    const nmDir = this.root === '/' ? '/node_modules' : `${this.root}/node_modules`;
+    try {
+      if (!this.vfs.existsSync(nmDir)) {
+        this._installedPackages = pkgs;
+        return pkgs;
+      }
+      const entries = this.vfs.readdirSync(nmDir) as string[];
+      for (const entry of entries) {
+        if (entry.startsWith('.')) continue;
+        if (entry.startsWith('@')) {
+          const scopeDir = nmDir + '/' + entry;
+          try {
+            const scopeEntries = this.vfs.readdirSync(scopeDir) as string[];
+            for (const sub of scopeEntries) {
+              pkgs.add(entry + '/' + sub);
+            }
+          } catch { /* ignore */ }
+        } else {
+          pkgs.add(entry);
+        }
+      }
+    } catch { /* ignore */ }
+    this._installedPackages = pkgs;
+    return pkgs;
+  }
+
+  /**
+   * Packages handled by the import map injected into index.html.
+   * These must NOT be rewritten by redirectNpmImports — the import map
+   * already maps the bare specifiers to the correct CDN URLs.
+   */
+  private static IMPORT_MAP_PACKAGES = [
+    'react', 'react-dom',
+  ];
+
+  private redirectNpmImports(code: string): string {
+    return _redirectNpmImports(code, ViteDevServer.IMPORT_MAP_PACKAGES, this.getDependencies(), undefined, this.getInstalledPackages());
+  }
+
+  private async serveNpmModule(pathname: string): Promise<ResponseData> {
+    const specifier = pathname.slice('/_npm/'.length);
+    if (!specifier) {
+      return this.notFound(pathname);
+    }
+
+    try {
+      const code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      return {
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+        body: Buffer.from(code),
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[ViteDevServer] Failed to bundle npm module '${specifier}':`, msg);
+      return {
+        statusCode: 500,
+        statusMessage: 'Internal Server Error',
+        headers: { 'Content-Type': 'text/plain' },
+        body: Buffer.from(`Failed to bundle '${specifier}': ${msg}`),
+      };
+    }
   }
 
   /**

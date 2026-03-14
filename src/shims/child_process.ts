@@ -1417,10 +1417,44 @@ module.exports = (async () => {
         }
       }
 
+      // Auto-detect TanStack Router/Start from package.json
+      let spaFallback = false;
+      let aliases: Record<string, string> | undefined;
+      let tanstackRouter = false;
+      try {
+        const pkgPath = root === '/' ? '/package.json' : root + '/package.json';
+        const pkgJson = JSON.parse(controller.vfs.readFileSync(pkgPath, 'utf8') as string);
+        const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+        if (allDeps['@tanstack/react-router'] || allDeps['@tanstack/start']) {
+          spaFallback = true;
+          aliases = { '~/': 'src/', '@/': 'src/' };
+          tanstackRouter = true;
+          console.log('[vite] Detected TanStack Router — enabling SPA fallback and route tree generation');
+        }
+      } catch {
+        // No package.json or parse error, skip detection
+      }
+
       const server = new ViteDevServer(controller.vfs, {
         port,
         root,
+        spaFallback,
+        aliases,
+        tanstackRouter,
       });
+
+      // Generate initial route tree before server starts
+      if (tanstackRouter) {
+        try {
+          const { generateAndWriteRouteTree } = await import('../frameworks/tanstack-route-tree');
+          const wrote = generateAndWriteRouteTree(controller.vfs, root);
+          if (wrote) {
+            console.log('[vite] Generated initial routeTree.gen.ts');
+          }
+        } catch (error) {
+          console.warn('[vite] Failed to generate route tree:', error);
+        }
+      }
 
       bridge.registerServer(createBridgeServerWrapper(server) as any, port);
       server.start();

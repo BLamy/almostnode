@@ -1,0 +1,289 @@
+/**
+ * TanStack Router route tree generator
+ * Generates routeTree.gen.ts from src/routes/ directory structure
+ */
+
+import { VirtualFS } from '../virtual-fs';
+
+interface RouteNode {
+  filePath: string; // relative to routes dir, e.g. 'about.tsx'
+  routeId: string; // e.g. '/about'
+  routePath: string; // e.g. '/about'
+  importName: string; // e.g. 'AboutRouteImport'
+  variableName: string; // e.g. 'AboutRoute'
+  isRoot: boolean;
+  isIndex: boolean;
+  isLayout: boolean; // pathless layout (_layout)
+  parentId: string; // route id of parent
+}
+
+/**
+ * Scan routes directory and collect route files
+ */
+function scanRouteFiles(vfs: VirtualFS, routesDir: string): string[] {
+  const files: string[] = [];
+
+  function walk(dir: string, prefix: string): void {
+    let entries: string[];
+    try {
+      entries = vfs.readdirSync(dir) as string[];
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = dir + '/' + entry;
+      let stat;
+      try {
+        stat = vfs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, prefix ? prefix + '/' + entry : entry);
+      } else if (/\.(tsx?|jsx?)$/.test(entry)) {
+        files.push(prefix ? prefix + '/' + entry : entry);
+      }
+    }
+  }
+
+  walk(routesDir, '');
+  return files.sort();
+}
+
+/**
+ * Convert a file path segment to a route path segment
+ * Strips file extension, handles special naming conventions
+ */
+function fileToRoutePath(filePath: string): { routeId: string; routePath: string; isRoot: boolean; isIndex: boolean; isLayout: boolean } {
+  // Remove extension
+  const withoutExt = filePath.replace(/\.(tsx?|jsx?)$/, '');
+
+  // __root is special
+  if (withoutExt === '__root') {
+    return { routeId: '__root__', routePath: '', isRoot: true, isIndex: false, isLayout: false };
+  }
+
+  const segments = withoutExt.split('/');
+  const pathSegments: string[] = [];
+  let isIndex = false;
+  let isLayout = false;
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+
+    // Route groups (parenthesized) are transparent in URL
+    if (seg.startsWith('(') && seg.endsWith(')')) {
+      continue;
+    }
+
+    // Pathless layout (_prefix)
+    if (seg.startsWith('_')) {
+      if (i === segments.length - 1) {
+        isLayout = true;
+      }
+      continue;
+    }
+
+    // index file
+    if (i === segments.length - 1 && seg === 'index') {
+      isIndex = true;
+      continue;
+    }
+
+    pathSegments.push(seg);
+  }
+
+  const routePath = '/' + pathSegments.join('/');
+  const routeId = isIndex && pathSegments.length === 0 ? '/' :
+    isIndex ? routePath + '/' :
+    routePath;
+
+  return { routeId, routePath: routePath === '' ? '/' : routePath, isRoot: false, isIndex, isLayout };
+}
+
+/**
+ * Generate a safe variable name from a route file path
+ */
+function toVariableName(filePath: string): string {
+  const withoutExt = filePath.replace(/\.(tsx?|jsx?)$/, '');
+  const parts = withoutExt.split('/');
+  const name = parts.map(part => {
+    // Handle special chars
+    let p = part;
+    // Route groups - use content without parens
+    if (p.startsWith('(') && p.endsWith(')')) {
+      p = p.slice(1, -1);
+    }
+    // Layout prefix
+    if (p.startsWith('_')) {
+      p = p.slice(1) || 'Layout';
+    }
+    // Dynamic params $slug -> Slug
+    if (p.startsWith('$')) {
+      if (p === '$') return 'Splat';
+      p = p.slice(1);
+    }
+    // Capitalize first letter
+    return p.charAt(0).toUpperCase() + p.slice(1);
+  }).join('');
+
+  return name + 'Route';
+}
+
+/**
+ * Build route nodes from scanned files
+ */
+function buildRouteNodes(files: string[]): RouteNode[] {
+  const nodes: RouteNode[] = [];
+
+  for (const filePath of files) {
+    const { routeId, routePath, isRoot, isIndex, isLayout } = fileToRoutePath(filePath);
+    const variableName = toVariableName(filePath);
+
+    nodes.push({
+      filePath,
+      routeId: isRoot ? '__root__' : routeId,
+      routePath: isRoot ? '' : routePath,
+      importName: variableName + 'Import',
+      variableName,
+      isRoot,
+      isIndex,
+      isLayout,
+      parentId: '__root__', // simplified: all file routes are children of root
+    });
+  }
+
+  return nodes;
+}
+
+/**
+ * Generate the routeTree.gen.ts content
+ */
+export function generateRouteTree(vfs: VirtualFS, root: string): string {
+  const routesDir = root === '/' ? '/src/routes' : root + '/src/routes';
+
+  // Check routes dir exists
+  try {
+    vfs.statSync(routesDir);
+  } catch {
+    return '';
+  }
+
+  const files = scanRouteFiles(vfs, routesDir);
+  if (files.length === 0) return '';
+
+  const nodes = buildRouteNodes(files);
+  const rootNode = nodes.find(n => n.isRoot);
+  const routeNodes = nodes.filter(n => !n.isRoot);
+
+  if (!rootNode) return '';
+
+  const lines: string[] = [];
+
+  // Header
+  lines.push('/* eslint-disable */');
+  lines.push('');
+  lines.push('// @ts-nocheck');
+  lines.push('');
+  lines.push('// This file was automatically generated by TanStack Router.');
+  lines.push('// You should NOT make any changes in this file as it will be overwritten.');
+  lines.push('');
+
+  // Imports
+  lines.push(`import { Route as ${rootNode.importName} } from './routes/__root'`);
+  for (const node of routeNodes) {
+    const importPath = './routes/' + node.filePath.replace(/\.(tsx?|jsx?)$/, '');
+    lines.push(`import { Route as ${node.importName} } from '${importPath}'`);
+  }
+  lines.push('');
+
+  // Update calls
+  for (const node of routeNodes) {
+    lines.push(`const ${node.variableName} = ${node.importName}.update({`);
+    lines.push(`  id: '${node.routeId}',`);
+    lines.push(`  path: '${node.routePath}',`);
+    lines.push(`  getParentRoute: () => ${rootNode.importName},`);
+    lines.push('} as any)');
+  }
+  if (routeNodes.length > 0) lines.push('');
+
+  // Type interfaces
+  const nonLayoutRoutes = routeNodes.filter(n => !n.isLayout);
+
+  lines.push('export interface FileRoutesByFullPath {');
+  for (const node of nonLayoutRoutes) {
+    lines.push(`  '${node.routePath}': typeof ${node.variableName}`);
+  }
+  lines.push('}');
+
+  lines.push('export interface FileRoutesByTo {');
+  for (const node of nonLayoutRoutes) {
+    lines.push(`  '${node.routePath}': typeof ${node.variableName}`);
+  }
+  lines.push('}');
+
+  lines.push('export interface FileRoutesById {');
+  lines.push(`  __root__: typeof ${rootNode.importName}`);
+  for (const node of nonLayoutRoutes) {
+    lines.push(`  '${node.routeId}': typeof ${node.variableName}`);
+  }
+  lines.push('}');
+
+  lines.push('export interface FileRouteTypes {');
+  lines.push('  fileRoutesByFullPath: FileRoutesByFullPath');
+  const fullPaths = nonLayoutRoutes.map(n => `'${n.routePath}'`).join(' | ');
+  lines.push(`  fullPaths: ${fullPaths || 'never'}`);
+  lines.push('  fileRoutesByTo: FileRoutesByTo');
+  const toPaths = nonLayoutRoutes.map(n => `'${n.routePath}'`).join(' | ');
+  lines.push(`  to: ${toPaths || 'never'}`);
+  const ids = [`'__root__'`, ...nonLayoutRoutes.map(n => `'${n.routeId}'`)].join(' | ');
+  lines.push(`  id: ${ids}`);
+  lines.push('  fileRoutesById: FileRoutesById');
+  lines.push('}');
+
+  // Root route children interface
+  lines.push('export interface RootRouteChildren {');
+  for (const node of routeNodes) {
+    lines.push(`  ${node.variableName}: typeof ${node.variableName}`);
+  }
+  lines.push('}');
+  lines.push('');
+
+  // Children object and export
+  lines.push('const rootRouteChildren: RootRouteChildren = {');
+  for (const node of routeNodes) {
+    lines.push(`  ${node.variableName}: ${node.variableName},`);
+  }
+  lines.push('}');
+
+  lines.push('export const routeTree = ' + rootNode.importName);
+  lines.push('  ._addFileChildren(rootRouteChildren)');
+  lines.push('  ._addFileTypes<FileRouteTypes>()');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+/**
+ * Generate and write the route tree file to VFS
+ * Returns true if the file was written (content changed or new)
+ */
+export function generateAndWriteRouteTree(vfs: VirtualFS, root: string): boolean {
+  const content = generateRouteTree(vfs, root);
+  if (!content) return false;
+
+  const outputPath = root === '/' ? '/src/routeTree.gen.ts' : root + '/src/routeTree.gen.ts';
+
+  // Check if content changed
+  try {
+    const existing = vfs.readFileSync(outputPath, 'utf8');
+    if (existing === content) return false;
+  } catch {
+    // File doesn't exist, will create
+  }
+
+  vfs.writeFileSync(outputPath, content);
+  return true;
+}

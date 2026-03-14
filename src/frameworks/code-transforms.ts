@@ -211,10 +211,13 @@ function resolveNpmPackage(
   esmShDeps?: string,
   installedPackages?: Set<string>,
 ): string | null {
-  // Skip relative, absolute, URL, and virtual paths
+  // Skip relative, absolute, URL, virtual paths, and path alias prefixes.
+  // @/ and ~/ are common path aliases (handled by import maps or bundler config),
+  // not valid npm scopes (which require content between @ and /, like @tanstack/router).
   if (packageName.startsWith('.') || packageName.startsWith('/') ||
       packageName.startsWith('http://') || packageName.startsWith('https://') ||
-      packageName.startsWith('/__virtual__')) {
+      packageName.startsWith('/__virtual__') ||
+      packageName.startsWith('@/') || packageName.startsWith('~/')) {
     return null;
   }
 
