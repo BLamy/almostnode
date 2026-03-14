@@ -344,8 +344,41 @@ export async function generateAppRouterHtml(
           }
         };
         window.addEventListener('popstate', handleNavigation);
-        console.log('[Router] Added popstate listener for path:', path);
-        return () => window.removeEventListener('popstate', handleNavigation);
+
+        // Intercept all <a> clicks for SPA navigation (like real Next.js).
+        // Without this, plain <a href="/about"> causes a full page load that
+        // may escape the virtual server scope on subpath deployments.
+        const handleClick = (e) => {
+          const link = e.target.closest('a[href]');
+          if (!link) return;
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          if (link.target && link.target !== '_self') return;
+          const href = link.getAttribute('href');
+          if (!href || href.startsWith('#') || href.startsWith('?')) return;
+          if (/^(https?:)?\\/\\//.test(href)) return;
+          if (link.hasAttribute('download')) return;
+
+          e.preventDefault();
+          // Resolve href with virtual base prefix
+          let resolved = href;
+          const bp = window.__NEXT_BASE_PATH__ || '';
+          if (bp && resolved.startsWith('/') && !resolved.startsWith(bp + '/') && resolved !== bp) {
+            resolved = bp + resolved;
+          }
+          if (resolved.startsWith('/')) {
+            resolved = virtualBase + resolved.slice(1);
+          } else if (!resolved.startsWith(virtualBase)) {
+            resolved = virtualBase + '/' + resolved;
+          }
+          window.history.pushState({}, '', resolved);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        };
+        document.addEventListener('click', handleClick);
+
+        return () => {
+          window.removeEventListener('popstate', handleNavigation);
+          document.removeEventListener('click', handleClick);
+        };
       }, [path, search]);
 
       if (!Page) return null;
@@ -506,7 +539,34 @@ export async function generatePageHtml(
           }
         };
         window.addEventListener('popstate', handleNavigation);
-        return () => window.removeEventListener('popstate', handleNavigation);
+
+        // Intercept all <a> clicks for SPA navigation (like real Next.js)
+        const handleClick = (e) => {
+          const link = e.target.closest('a[href]');
+          if (!link) return;
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          if (link.target && link.target !== '_self') return;
+          const href = link.getAttribute('href');
+          if (!href || href.startsWith('#') || href.startsWith('?')) return;
+          if (/^(https?:)?\\/\\//.test(href)) return;
+          if (link.hasAttribute('download')) return;
+
+          e.preventDefault();
+          let resolved = href;
+          if (resolved.startsWith('/')) {
+            resolved = virtualBase + resolved.slice(1);
+          } else if (!resolved.startsWith(virtualBase)) {
+            resolved = virtualBase + '/' + resolved;
+          }
+          window.history.pushState({}, '', resolved);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        };
+        document.addEventListener('click', handleClick);
+
+        return () => {
+          window.removeEventListener('popstate', handleNavigation);
+          document.removeEventListener('click', handleClick);
+        };
       }, [path]);
 
       if (!Page) return null;
