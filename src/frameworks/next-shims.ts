@@ -191,7 +191,7 @@ export const NEXT_LINK_SHIM = `
 import React from 'react';
 
 const getVirtualBasePath = () => {
-  const match = window.location.pathname.match(/^\\/__virtual__\\/\\d+(?:\\/|$)/);
+  const match = window.location.pathname.match(/^.*\\/__virtual__\\/\\d+(?:\\/|$)/);
   if (!match) return '';
   return match[0].endsWith('/') ? match[0] : match[0] + '/';
 };
@@ -262,7 +262,7 @@ import React, { useState, useEffect, createContext, useContext } from 'react';
 const RouterContext = createContext(null);
 
 const getVirtualBasePath = () => {
-  const match = window.location.pathname.match(/^\\/__virtual__\\/\\d+(?:\\/|$)/);
+  const match = window.location.pathname.match(/^.*\\/__virtual__\\/\\d+(?:\\/|$)/);
   if (!match) return '';
   return match[0].endsWith('/') ? match[0] : match[0] + '/';
 };
@@ -280,7 +280,7 @@ const applyVirtualBase = (url) => {
 };
 
 const stripVirtualBase = (pathname) => {
-  const match = pathname.match(/^\\/__virtual__\\/\\d+(?:\\/|$)/);
+  const match = pathname.match(/^.*\\/__virtual__\\/\\d+(?:\\/|$)/);
   if (!match) return pathname;
   return '/' + pathname.slice(match[0].length);
 };
@@ -397,7 +397,7 @@ export const NEXT_NAVIGATION_SHIM = `
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
 const getVirtualBasePath = () => {
-  const match = window.location.pathname.match(/^\\/__virtual__\\/\\d+(?:\\/|$)/);
+  const match = window.location.pathname.match(/^.*\\/__virtual__\\/\\d+(?:\\/|$)/);
   if (!match) return '';
   return match[0].endsWith('/') ? match[0] : match[0] + '/';
 };
@@ -415,7 +415,7 @@ const applyVirtualBase = (url) => {
 };
 
 const stripVirtualBase = (pathname) => {
-  const match = pathname.match(/^\\/__virtual__\\/\\d+(?:\\/|$)/);
+  const match = pathname.match(/^.*\\/__virtual__\\/\\d+(?:\\/|$)/);
   if (!match) return pathname;
   return '/' + pathname.slice(match[0].length);
 };

@@ -20,7 +20,16 @@ const registeredPorts = new Set();
 let erudaEnabled = true;
 
 // Base path prefix (e.g. '/almostnode' when deployed to GitHub Pages subpath)
-let basePath = '';
+// Infer from registration scope so it's available immediately on SW restart,
+// before the main thread sends the 'init' message.
+let basePath = (() => {
+  try {
+    const scopePath = new URL(self.registration.scope).pathname.replace(/\/$/, '');
+    return scopePath || '';
+  } catch (e) {
+    return '';
+  }
+})();
 
 /**
  * Decode base64 string to Uint8Array
