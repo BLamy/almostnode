@@ -42,6 +42,9 @@ export default defineConfig({
         if (source === 'node:zlib' || source === 'zlib') {
           return resolve(__dirname, 'src/shims/zlib.ts');
         }
+        if (source === 'node:dns' || source === 'dns') {
+          return resolve(__dirname, 'src/shims/dns.ts');
+        }
         if (source === 'brotli-wasm/pkg.web/brotli_wasm.js') {
           return resolve(__dirname, 'node_modules/brotli-wasm/pkg.web/brotli_wasm.js');
         }
@@ -81,6 +84,14 @@ export default defineConfig({
       {
         find: 'zlib',
         replacement: resolve(__dirname, 'src/shims/zlib.ts'),
+      },
+      {
+        find: 'node:dns',
+        replacement: resolve(__dirname, 'src/shims/dns.ts'),
+      },
+      {
+        find: 'dns',
+        replacement: resolve(__dirname, 'src/shims/dns.ts'),
       },
       {
         find: 'buffer',
