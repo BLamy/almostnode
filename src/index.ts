@@ -131,6 +131,8 @@ export interface MutableGitAuth {
 
 export interface ContainerOptions extends RuntimeOptions {
   baseUrl?: string;
+  /** Base path prefix for subpath deployments (e.g. '/almostnode' for GitHub Pages) */
+  basePath?: string;
   onServerReady?: (port: number, url: string) => void;
   git?: GitAuthOptions;
   installMode?: InstallMode;
@@ -230,6 +232,7 @@ export function createContainer(options?: ContainerOptions): {
   });
   const serverBridge = getServerBridge({
     baseUrl: options?.baseUrl,
+    basePath: options?.basePath,
     onServerReady: options?.onServerReady,
   });
 

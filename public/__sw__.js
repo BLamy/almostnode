@@ -19,6 +19,9 @@ const registeredPorts = new Set();
 // Whether Eruda devtools injection is enabled
 let erudaEnabled = true;
 
+// Base path prefix (e.g. '/almostnode' when deployed to GitHub Pages subpath)
+let basePath = '';
+
 /**
  * Decode base64 string to Uint8Array
  */
@@ -44,7 +47,10 @@ self.addEventListener('message', (event) => {
     // Initialize communication channel
     mainPort = event.ports[0];
     mainPort.onmessage = handleMainMessage;
-    DEBUG && console.log('[SW] Initialized communication channel with transferred port');
+    if (data && data.basePath) {
+      basePath = data.basePath.replace(/\/$/, ''); // strip trailing slash
+    }
+    DEBUG && console.log('[SW] Initialized communication channel with transferred port, basePath:', basePath);
     // Re-claim clients so that pages opened after SW activation get controlled.
     // Without this, controllerchange never fires for late-arriving pages.
     self.clients.claim();
@@ -285,15 +291,19 @@ async function sendStreamingRequest(port, method, url, headers, body) {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  DEBUG && console.log('[SW] Fetch:', url.pathname, 'mainPort:', !!mainPort);
+  // Strip basePath prefix from pathname for matching
+  const rawPathname = url.pathname;
+  const pathname = basePath && rawPathname.startsWith(basePath) ? rawPathname.slice(basePath.length) || '/' : rawPathname;
 
-  if (url.pathname.startsWith('/__modules__/r/')) {
-    event.respondWith(handleModuleRequest(event.request, url.pathname + url.search));
+  DEBUG && console.log('[SW] Fetch:', pathname, 'mainPort:', !!mainPort, 'basePath:', basePath);
+
+  if (pathname.startsWith('/__modules__/r/')) {
+    event.respondWith(handleModuleRequest(event.request, pathname + url.search));
     return;
   }
 
   // Check if this is a virtual server request
-  const match = url.pathname.match(/^\/__virtual__\/(\d+)(\/.*)?$/);
+  const match = pathname.match(/^\/__virtual__\/(\d+)(\/.*)?$/);
 
   if (!match) {
     // Not a virtual request - but check if it's from a virtual context
@@ -303,12 +313,13 @@ self.addEventListener('fetch', (event) => {
     if (referer) {
       try {
         const refererUrl = new URL(referer);
-        const refererMatch = refererUrl.pathname.match(/^\/__virtual__\/(\d+)/);
+        const refererPathname = basePath && refererUrl.pathname.startsWith(basePath) ? refererUrl.pathname.slice(basePath.length) || '/' : refererUrl.pathname;
+        const refererMatch = refererPathname.match(/^\/__virtual__\/(\d+)/);
         if (refererMatch) {
           // Request from within a virtual server context
-          const virtualPrefix = refererMatch[0];
+          const virtualPrefix = basePath + refererMatch[0];
           const virtualPort = parseInt(refererMatch[1], 10);
-          const targetPath = url.pathname + url.search;
+          const targetPath = pathname + url.search;
 
           if (event.request.mode === 'navigate') {
             // Navigation requests: redirect to include the virtual prefix

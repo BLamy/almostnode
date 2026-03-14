@@ -38,6 +38,8 @@ export interface VirtualServer {
 
 export interface BridgeOptions {
   baseUrl?: string;
+  /** Base path prefix for subpath deployments (e.g. '/almostnode' for GitHub Pages) */
+  basePath?: string;
   onServerReady?: (port: number, url: string) => void;
 }
 
@@ -59,6 +61,7 @@ export class ServerBridge extends EventEmitter {
   private servers: Map<number, VirtualServer> = new Map();
   private moduleProviders: Map<string, ModuleRequestHandler> = new Map();
   private baseUrl: string;
+  private basePath: string;
   private options: BridgeOptions;
   private messageChannel: MessageChannel | null = null;
   private serviceWorkerReady: boolean = false;
@@ -68,6 +71,7 @@ export class ServerBridge extends EventEmitter {
   constructor(options: BridgeOptions = {}) {
     super();
     this.options = options;
+    this.basePath = (options.basePath || '').replace(/\/$/, '');
 
     // Handle browser vs Node.js environment
     if (typeof location !== 'undefined') {
@@ -113,10 +117,17 @@ export class ServerBridge extends EventEmitter {
   }
 
   /**
+   * Get the base path prefix (e.g. '/almostnode' for GitHub Pages subpath deployments)
+   */
+  getBasePath(): string {
+    return this.basePath;
+  }
+
+  /**
    * Get server URL for a port
    */
   getServerUrl(port: number): string {
-    return `${this.baseUrl}/__virtual__/${port}`;
+    return `${this.baseUrl}${this.basePath}/__virtual__/${port}`;
   }
 
   /**
@@ -179,7 +190,7 @@ export class ServerBridge extends EventEmitter {
       throw new Error('Service Workers not supported');
     }
 
-    const swUrl = options?.swUrl ?? '/__sw__.js';
+    const swUrl = options?.swUrl ?? `${this.basePath}/__sw__.js`;
 
     // Set up controllerchange listener BEFORE registration so we don't miss the event.
     // clients.claim() in the SW's activate handler fires controllerchange, and it can
@@ -192,7 +203,7 @@ export class ServerBridge extends EventEmitter {
 
     // Register service worker
     const registration = await navigator.serviceWorker.register(swUrl, {
-      scope: '/',
+      scope: `${this.basePath}/`,
     });
 
     // Wait for service worker to be active
@@ -221,7 +232,7 @@ export class ServerBridge extends EventEmitter {
     this.messageChannel.port1.onmessage = this.handleServiceWorkerMessage.bind(this);
 
     // Send port to service worker
-    sw.postMessage({ type: 'init', port: this.messageChannel.port2 }, [
+    sw.postMessage({ type: 'init', data: { basePath: this.basePath }, port: this.messageChannel.port2 }, [
       this.messageChannel.port2,
     ]);
 
@@ -237,7 +248,7 @@ export class ServerBridge extends EventEmitter {
         this.messageChannel = new MessageChannel();
         this.messageChannel.port1.onmessage = this.handleServiceWorkerMessage.bind(this);
         navigator.serviceWorker.controller.postMessage(
-          { type: 'init', port: this.messageChannel.port2 },
+          { type: 'init', data: { basePath: this.basePath }, port: this.messageChannel.port2 },
           [this.messageChannel.port2]
         );
       }

@@ -434,7 +434,9 @@ interface TerminalTabState {
 }
 
 export class WebIDEHost {
-  readonly container = createContainer();
+  readonly container = createContainer({
+    basePath: import.meta.env.BASE_URL?.replace(/\/$/, '') || '',
+  });
   private readonly marketplaceMode: MarketplaceMode;
   private readonly debugSections: string[];
   private readonly filesSurface: FilesSidebarSurface;
