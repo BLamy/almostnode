@@ -1,5 +1,5 @@
 import { createContainer, type TerminalSession } from '../index';
-import { DEFAULT_FILE, DEFAULT_RUN_COMMAND, WORKSPACE_ROOT, seedWorkspace } from './workspace-seed';
+import { DEFAULT_FILE, DEFAULT_RUN_COMMAND, WORKSPACE_ROOT, seedWorkspace, getTemplateDefaults, type TemplateId } from './workspace-seed';
 import { FixtureMarketplaceClient } from './fixture-extensions';
 import { OpenVSXClient } from './open-vsx';
 import { prunePersistedWorkbenchExtensions } from './persisted-extensions';
@@ -84,6 +84,7 @@ export interface WebIDEHostOptions {
   elements: WebIDEHostElements;
   marketplaceMode?: MarketplaceMode;
   debugSections?: string[];
+  template?: TemplateId;
 }
 
 const PRELOADED_WORKBENCH_LANGUAGES: Array<Parameters<typeof monaco.languages.register>[0]> = [
@@ -458,8 +459,10 @@ export class WebIDEHost {
   private readonly claudeAuthVault: ClaudeAuthVault;
   private claudeAuthStatusEntry: IStatusbarEntryAccessor | null = null;
   private claudeCodeInstallPromise: Promise<void> | null = null;
+  private readonly templateId: TemplateId;
 
   constructor(private readonly options: WebIDEHostOptions) {
+    this.templateId = options.template || 'vite';
     this.marketplaceMode = options.marketplaceMode || 'open-vsx';
     this.debugSections = Array.from(new Set((options.debugSections || []).map((section) => section.trim()).filter(Boolean)));
     this.filesSurface = new FilesSidebarSurface(this.container.vfs, WORKSPACE_ROOT, (path) => {
@@ -467,7 +470,7 @@ export class WebIDEHost {
     });
     this.previewSurface = new PreviewSurface({
       run: () => {
-        void this.runPreviewCommand(DEFAULT_RUN_COMMAND);
+        void this.runPreviewCommand(getTemplateDefaults(this.templateId).runCommand);
       },
       refresh: () => this.refreshPreview(),
     });
@@ -588,7 +591,7 @@ export class WebIDEHost {
     }
 
     this.previewStartRequested = true;
-    void this.runPreviewCommand(DEFAULT_RUN_COMMAND)
+    void this.runPreviewCommand(getTemplateDefaults(this.templateId).runCommand)
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         this.updatePreviewStatus(message);
@@ -842,7 +845,7 @@ export class WebIDEHost {
   }
 
   async executeHostCommand(command?: string): Promise<void> {
-    const resolved = command || window.prompt('Command to run', DEFAULT_RUN_COMMAND) || '';
+    const resolved = command || window.prompt('Command to run', getTemplateDefaults(this.templateId).runCommand) || '';
     await this.runCommand(this.requireActiveTerminalTab(), resolved, { echoCommand: true });
   }
 
@@ -1513,7 +1516,7 @@ export class WebIDEHost {
   }
 
   private async init(): Promise<void> {
-    seedWorkspace(this.container);
+    seedWorkspace(this.container, this.templateId);
 
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);

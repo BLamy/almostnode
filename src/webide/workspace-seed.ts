@@ -4,7 +4,17 @@ export const WORKSPACE_ROOT = "/project";
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
-const DIRECTORIES = [
+export type TemplateId = 'vite' | 'nextjs';
+
+export interface TemplateDefinition {
+  id: TemplateId;
+  defaultFile: string;
+  runCommand: string;
+  directories: string[];
+  files: Record<string, string>;
+}
+
+const VITE_DIRECTORIES = [
   `${WORKSPACE_ROOT}/.vscode`,
   `${WORKSPACE_ROOT}/src`,
   `${WORKSPACE_ROOT}/src/components`,
@@ -13,7 +23,7 @@ const DIRECTORIES = [
   `${WORKSPACE_ROOT}/src/lib`,
 ];
 
-const FILES: Record<string, string> = {
+const VITE_FILES: Record<string, string> = {
   [`${WORKSPACE_ROOT}/package.json`]: JSON.stringify(
     {
       name: "almostnode-webide-tailwind-starter",
@@ -1106,6 +1116,254 @@ code {
 `,
 };
 
+const NEXTJS_DIRECTORIES = [
+  `${WORKSPACE_ROOT}/.vscode`,
+  `${WORKSPACE_ROOT}/app`,
+  `${WORKSPACE_ROOT}/app/about`,
+  `${WORKSPACE_ROOT}/public`,
+];
+
+const NEXTJS_FILES: Record<string, string> = {
+  [`${WORKSPACE_ROOT}/package.json`]: JSON.stringify(
+    {
+      name: "almostnode-webide-nextjs-starter",
+      private: true,
+      version: "0.0.1",
+      scripts: {
+        dev: "next dev --port 3000",
+        build: "next build",
+        start: "next start",
+      },
+      dependencies: {
+        next: "^14.2.0",
+        react: "^18.2.0",
+        "react-dom": "^18.2.0",
+      },
+      devDependencies: {
+        "@types/react": "^18.2.0",
+        "@types/react-dom": "^18.2.0",
+        typescript: "^5.9.3",
+      },
+    },
+    null,
+    2,
+  ),
+  [`${WORKSPACE_ROOT}/app/globals.css`]: `:root {
+  --background: 36 40% 96%;
+  --foreground: 222 39% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 39% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 39% 11%;
+  --primary: 23 92% 58%;
+  --primary-foreground: 24 28% 10%;
+  --secondary: 210 32% 92%;
+  --secondary-foreground: 222 39% 18%;
+  --muted: 210 22% 89%;
+  --muted-foreground: 222 15% 40%;
+  --accent: 198 69% 47%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 54%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 25% 84%;
+  --input: 215 25% 84%;
+  --ring: 23 92% 58%;
+  --radius: 1.4rem;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.dark {
+  --background: 224 36% 9%;
+  --foreground: 36 43% 96%;
+  --card: 223 33% 13%;
+  --card-foreground: 36 43% 96%;
+  --popover: 223 33% 13%;
+  --popover-foreground: 36 43% 96%;
+  --primary: 24 96% 63%;
+  --primary-foreground: 20 28% 10%;
+  --secondary: 222 24% 18%;
+  --secondary-foreground: 36 43% 96%;
+  --muted: 223 21% 17%;
+  --muted-foreground: 218 19% 72%;
+  --accent: 198 72% 54%;
+  --accent-foreground: 224 36% 9%;
+  --destructive: 0 74% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 222 17% 23%;
+  --input: 222 17% 23%;
+  --ring: 24 96% 63%;
+}
+
+* {
+  box-sizing: border-box;
+  border-color: hsl(var(--border));
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: hsl(var(--foreground));
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.22), transparent 28rem),
+    radial-gradient(circle at bottom right, rgba(56, 189, 248, 0.16), transparent 32rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0));
+}
+
+.dark body {
+  background-image:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.2), transparent 28rem),
+    radial-gradient(circle at bottom right, rgba(56, 189, 248, 0.14), transparent 32rem),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.45), rgba(15, 23, 42, 0));
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+::selection {
+  background: rgba(249, 115, 22, 0.24);
+}
+`,
+  [`${WORKSPACE_ROOT}/app/layout.jsx`]: `import React from 'react';
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <head>
+        <title>almostnode Next.js starter</title>
+      </head>
+      <body>
+        <nav style={{ background: '#111', padding: '0.75rem 1.5rem', display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
+          <span style={{ fontWeight: 600, color: '#fff' }}>almostnode</span>
+          <a href="/" style={{ color: '#aaa', textDecoration: 'none', fontSize: '0.875rem' }}>Home</a>
+          <a href="/about" style={{ color: '#aaa', textDecoration: 'none', fontSize: '0.875rem' }}>About</a>
+        </nav>
+        <main>{children}</main>
+      </body>
+    </html>
+  );
+}
+`,
+  [`${WORKSPACE_ROOT}/app/page.jsx`]: `'use client';
+
+import React, { useState } from 'react';
+
+export default function HomePage() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '2rem' }}>
+      <div style={{ background: '#1a1a2e', borderRadius: '1rem', padding: '2rem', marginBottom: '1.5rem' }}>
+        <span style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.2em', color: '#888' }}>
+          Next.js App Router
+        </span>
+        <h1 style={{ fontSize: '2.5rem', fontWeight: 600, margin: '1rem 0', color: '#fff' }}>
+          Next.js running natively in the browser.
+        </h1>
+        <p style={{ color: '#999', lineHeight: 1.7 }}>
+          Full App Router support with file-based routing, layouts, and client components.
+          Edit the files and see changes reflected instantly.
+        </p>
+        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
+          <button
+            onClick={() => setCount(c => c + 1)}
+            style={{ padding: '0.6rem 1.2rem', borderRadius: '0.5rem', border: 'none', background: '#f97316', color: '#fff', cursor: 'pointer', fontWeight: 500 }}
+          >
+            Count: {count}
+          </button>
+          <button
+            onClick={() => setCount(0)}
+            style={{ padding: '0.6rem 1.2rem', borderRadius: '0.5rem', border: '1px solid #333', background: 'transparent', color: '#ccc', cursor: 'pointer' }}
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
+        {[
+          { title: 'App Router', detail: 'File-based routing with layouts and nested routes.' },
+          { title: 'Client Components', detail: 'Interactive components with useState and event handlers.' },
+          { title: 'Hot Reload', detail: 'Edit files and see changes reflected without losing state.' },
+        ].map(item => (
+          <div key={item.title} style={{ background: '#1a1a2e', borderRadius: '0.75rem', padding: '1.25rem' }}>
+            <p style={{ fontWeight: 600, color: '#fff', margin: 0 }}>{item.title}</p>
+            <p style={{ color: '#888', fontSize: '0.875rem', marginTop: '0.5rem', lineHeight: 1.5 }}>{item.detail}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`,
+  [`${WORKSPACE_ROOT}/app/about/page.jsx`]: `'use client';
+
+import React from 'react';
+import { usePathname } from 'next/navigation';
+
+export default function AboutPage() {
+  const pathname = usePathname();
+
+  return (
+    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '2rem' }}>
+      <div style={{ background: '#1a1a2e', borderRadius: '1rem', padding: '2rem' }}>
+        <span style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.2em', color: '#888' }}>
+          {pathname}
+        </span>
+        <h1 style={{ fontSize: '2rem', fontWeight: 600, margin: '1rem 0', color: '#fff' }}>About</h1>
+        <p style={{ color: '#999', lineHeight: 1.7 }}>
+          This is a Next.js App Router project running entirely in the browser using almostnode.
+          Navigate between pages using the nav bar above to see client-side routing in action.
+        </p>
+      </div>
+    </div>
+  );
+}
+`,
+};
+
+const VITE_TEMPLATE: TemplateDefinition = {
+  id: 'vite',
+  defaultFile: `${WORKSPACE_ROOT}/src/App.tsx`,
+  runCommand: 'npm run dev',
+  directories: VITE_DIRECTORIES,
+  files: VITE_FILES,
+};
+
+const NEXTJS_TEMPLATE: TemplateDefinition = {
+  id: 'nextjs',
+  defaultFile: `${WORKSPACE_ROOT}/app/page.jsx`,
+  runCommand: 'npm run dev',
+  directories: NEXTJS_DIRECTORIES,
+  files: {
+    ...NEXTJS_FILES,
+    [`${WORKSPACE_ROOT}/.vscode/settings.json`]: VITE_FILES[`${WORKSPACE_ROOT}/.vscode/settings.json`],
+  },
+};
+
+const TEMPLATES: Record<TemplateId, TemplateDefinition> = {
+  vite: VITE_TEMPLATE,
+  nextjs: NEXTJS_TEMPLATE,
+};
+
+export function getTemplateDefaults(id: TemplateId): { defaultFile: string; runCommand: string } {
+  const template = TEMPLATES[id];
+  return { defaultFile: template.defaultFile, runCommand: template.runCommand };
+}
+
 const CLAUDE_WRAPPER_PATH = '/usr/local/bin/claude-wrapper';
 const CLAUDE_WRAPPER_SCRIPT = '#!/bin/sh\nexec claude "$@"\n';
 const SETTINGS_PATH = `${WORKSPACE_ROOT}/.vscode/settings.json`;
@@ -1119,12 +1377,14 @@ function ensureDirectory(
   }
 }
 
-export function seedWorkspace(container: ReturnTypeOfCreateContainer): void {
-  for (const directory of DIRECTORIES) {
+export function seedWorkspace(container: ReturnTypeOfCreateContainer, templateId: TemplateId = 'vite'): void {
+  const template = TEMPLATES[templateId];
+
+  for (const directory of template.directories) {
     ensureDirectory(container, directory);
   }
 
-  for (const [path, content] of Object.entries(FILES)) {
+  for (const [path, content] of Object.entries(template.files)) {
     // Guard settings file: only seed if it doesn't already exist (preserve user changes on IDB-backed sessions)
     if (path === SETTINGS_PATH && container.vfs.existsSync(path)) {
       continue;

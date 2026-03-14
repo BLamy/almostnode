@@ -1,4 +1,5 @@
 import { WebIDEHost } from './webide/workbench-host';
+import type { TemplateId } from './webide/workspace-seed';
 
 const workbench = document.getElementById('webideWorkbench');
 
@@ -59,10 +60,55 @@ function syncDebugState(raw: string | null): string[] {
 
 const debugSections = syncDebugState(params.get('debug'));
 
-void WebIDEHost.bootstrap({
-  elements: {
-    workbench,
-  },
-  debugSections,
-  marketplaceMode,
-});
+function bootIDE(template: TemplateId): void {
+  // Set template in URL so reloads preserve the choice
+  const url = new URL(window.location.href);
+  url.searchParams.set('template', template);
+  window.history.replaceState(null, '', url.toString());
+
+  const shell = document.querySelector('.webide-shell') as HTMLElement | null;
+  if (shell) {
+    shell.style.display = '';
+  }
+
+  void WebIDEHost.bootstrap({
+    elements: {
+      workbench,
+    },
+    debugSections,
+    marketplaceMode,
+    template,
+  });
+}
+
+const VALID_TEMPLATES: TemplateId[] = ['vite', 'nextjs'];
+const templateParam = params.get('template');
+
+if (templateParam && VALID_TEMPLATES.includes(templateParam as TemplateId)) {
+  // URL param specified — skip picker, boot directly
+  const picker = document.getElementById('templatePicker');
+  if (picker) {
+    picker.style.display = 'none';
+  }
+  bootIDE(templateParam as TemplateId);
+} else {
+  // Show picker, hide shell
+  const shell = document.querySelector('.webide-shell') as HTMLElement | null;
+  if (shell) {
+    shell.style.display = 'none';
+  }
+
+  const picker = document.getElementById('templatePicker');
+  if (picker) {
+    picker.addEventListener('click', (event) => {
+      const card = (event.target as HTMLElement).closest<HTMLElement>('[data-template]');
+      if (!card) return;
+
+      const templateId = card.dataset.template as TemplateId;
+      if (!VALID_TEMPLATES.includes(templateId)) return;
+
+      picker.style.display = 'none';
+      bootIDE(templateId);
+    });
+  }
+}

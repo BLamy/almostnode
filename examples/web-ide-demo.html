@@ -1030,6 +1030,115 @@
         color: #0969da;
       }
 
+      /* Hide the VS Code hamburger menu button */
+      #webideWorkbench .menubar-menu-button[aria-label="Application Menu"],
+      #webideWorkbench .monaco-workbench .menubar .menubar-menu-button:first-child {
+        display: none !important;
+      }
+
+      /* ── Template Picker ── */
+      .template-picker {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100dvh;
+        padding: 2rem;
+        gap: 2.5rem;
+      }
+
+      .template-picker__header {
+        text-align: center;
+        max-width: 36rem;
+      }
+
+      .template-picker__title {
+        margin: 0;
+        font-size: 2rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      .template-picker__subtitle {
+        margin: 0.65rem 0 0;
+        font-size: 1rem;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .template-picker__cards {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1.25rem;
+        width: 100%;
+        max-width: 40rem;
+      }
+
+      .template-picker__card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1rem;
+        padding: 2rem 1.5rem;
+        border: 1px solid var(--panel-border);
+        border-radius: 1.25rem;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+          var(--panel-bg);
+        cursor: pointer;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+        text-align: center;
+      }
+
+      .template-picker__card:hover {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent), 0 12px 40px rgba(0, 0, 0, 0.2);
+        transform: translateY(-2px);
+      }
+
+      .template-picker__logo {
+        width: 3.5rem;
+        height: 3.5rem;
+        flex: none;
+      }
+
+      .template-picker__card-title {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 600;
+      }
+
+      .template-picker__card-desc {
+        margin: 0;
+        font-size: 0.85rem;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .template-picker__tags {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.4rem;
+        margin-top: 0.25rem;
+      }
+
+      .template-picker__tag {
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.68rem;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid var(--panel-border);
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      @media (max-width: 600px) {
+        .template-picker__cards {
+          grid-template-columns: 1fr;
+        }
+      }
+
       @media (max-width: 760px) {
         .webide-header {
           align-items: flex-start;
@@ -1047,6 +1156,35 @@
     </style>
   </head>
   <body>
+    <div id="templatePicker" class="template-picker">
+      <div class="template-picker__header">
+        <h1 class="template-picker__title">Start a new project</h1>
+        <p class="template-picker__subtitle">Pick a template to seed the workspace and boot the IDE.</p>
+      </div>
+      <div class="template-picker__cards">
+        <div class="template-picker__card" data-template="vite">
+          <svg class="template-picker__logo" viewBox="0 0 256 257" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="viteA" x1="-.83%" y1="7.65%" x2="57.64%" y2="78.39%"><stop offset="0%" stop-color="#41D1FF"/><stop offset="100%" stop-color="#BD34FE"/></linearGradient><linearGradient id="viteB" x1="43.38%" y1="2.24%" x2="50.32%" y2="60.15%"><stop offset="0%" stop-color="#FFBD4F"/><stop offset="100%" stop-color="#FF9640"/></linearGradient></defs><path d="M255.15 37.95 134.24 228.69c-2.13 3.36-7.01 3.49-9.32.25L1.58 38.17c-2.52-3.53.88-8.03 4.97-6.57l121.35 43.05a5.34 5.34 0 0 0 3.56-.01L251.94 31.3c4.06-1.5 7.52 2.92 5.02 6.46l-1.81.19Z" fill="url(#viteA)"/><path d="M185.58.64 96.35 17.53a2.67 2.67 0 0 0-2.14 2.24l-15.47 83.58a2.67 2.67 0 0 0 3.18 3.07l26.82-5.57c1.73-.36 3.27 1.14 2.96 2.89l-4.66 26.25a2.67 2.67 0 0 0 3.28 3.04l16.55-3.93c1.73-.41 3.29 1.1 2.97 2.86l-7.41 40.62c-.5 2.74 3.16 4.21 4.72 1.9l1.04-1.54 57.48-112.68c.9-1.77-.7-3.76-2.62-3.24l-27.94 7.54a2.67 2.67 0 0 1-3.18-3.34l18.27-62.23A2.67 2.67 0 0 0 167 .87L185.58.64Z" fill="url(#viteB)"/></svg>
+          <h2 class="template-picker__card-title">Vite + React</h2>
+          <p class="template-picker__card-desc">Fast dev server with HMR, Tailwind CSS, and shadcn-ready aliases.</p>
+          <div class="template-picker__tags">
+            <span class="template-picker__tag">React 18</span>
+            <span class="template-picker__tag">Vite 5</span>
+            <span class="template-picker__tag">Tailwind</span>
+          </div>
+        </div>
+        <div class="template-picker__card" data-template="nextjs">
+          <svg class="template-picker__logo" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg"><mask id="nextMask" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="180" height="180"><circle cx="90" cy="90" r="90" fill="black"/></mask><g mask="url(#nextMask)"><circle cx="90" cy="90" r="90" fill="black"/><path d="M149.51 157.47L71.2 52H56v76.01h12.17V67.63l72.32 97.73A90.42 90.42 0 0 0 149.51 157.47Z" fill="url(#nextGradA)"/><rect x="113" y="52" width="12" height="76" fill="url(#nextGradB)"/></g><defs><linearGradient id="nextGradA" x1="109" y1="116.5" x2="144.5" y2="160.5" gradientUnits="userSpaceOnUse"><stop stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient><linearGradient id="nextGradB" x1="121" y1="52" x2="120.8" y2="116.5" gradientUnits="userSpaceOnUse"><stop stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient></defs></svg>
+          <h2 class="template-picker__card-title">Next.js</h2>
+          <p class="template-picker__card-desc">App Router with file-based routing, layouts, and Tailwind CSS.</p>
+          <div class="template-picker__tags">
+            <span class="template-picker__tag">Next 14</span>
+            <span class="template-picker__tag">App Router</span>
+            <span class="template-picker__tag">Tailwind</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="webide-shell">
       <header class="webide-header">
       </header>
