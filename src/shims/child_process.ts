@@ -34,6 +34,7 @@ import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash
 import { EventEmitter } from './events';
 import { closeFdSync, dupFdSync, writeToFdSync } from './fs';
 import { Readable, Writable, Buffer } from './stream';
+import type { Process } from './process';
 import type { VirtualFS } from '../virtual-fs';
 import { VirtualFSAdapter } from './vfs-adapter';
 import { Runtime } from '../runtime';
@@ -84,11 +85,14 @@ export interface ChildProcessExecutionContext {
   /** Keep the execution alive until it explicitly exits or is aborted. */
   interactive: boolean;
   activeProcessStdin: ActiveProcessStdin | null;
+  activeProcess: Process | null;
   activeForkedChildren: number;
   onForkedChildExit: (() => void) | null;
   activeShellChildren: number;
   /** Set to true by command handlers (e.g. node) that stream their own output via onStdout/onStderr */
   outputStreamed: boolean;
+  columns: number;
+  rows: number;
 }
 
 export interface ChildProcessController {
@@ -105,6 +109,8 @@ export interface ChildProcessController {
     onStderr?: (data: string) => void;
     signal?: AbortSignal;
     interactive?: boolean;
+    cols?: number;
+    rows?: number;
   }) => ChildProcessExecutionContext;
   destroyExecution: (executionId: string | null | undefined) => void;
   runCommand: (
@@ -113,6 +119,7 @@ export interface ChildProcessController {
     executionId?: string | null
   ) => Promise<JustBashExecResult>;
   sendInput: (executionId: string | null | undefined, data: string) => void;
+  updateExecutionSize: (executionId: string | null | undefined, cols: number, rows: number) => void;
 }
 
 export interface ChildProcessModuleBinding {
@@ -184,6 +191,8 @@ function createExecutionContext(
     onStderr?: (data: string) => void;
     signal?: AbortSignal;
     interactive?: boolean;
+    cols?: number;
+    rows?: number;
   }
 ): ChildProcessExecutionContext {
   const execution: ChildProcessExecutionContext = {
@@ -194,13 +203,31 @@ function createExecutionContext(
     signal: opts?.signal || null,
     interactive: !!opts?.interactive,
     activeProcessStdin: null,
+    activeProcess: null,
     activeForkedChildren: 0,
     onForkedChildExit: null,
     activeShellChildren: 0,
     outputStreamed: false,
+    columns: Number.isFinite(opts?.cols) ? Math.max(1, Math.floor(opts!.cols!)) : 80,
+    rows: Number.isFinite(opts?.rows) ? Math.max(1, Math.floor(opts!.rows!)) : 24,
   };
   controller.executions.set(execution.id, execution);
   return execution;
+}
+
+function applyExecutionTerminalSize(execution: ChildProcessExecutionContext, proc: Process): void {
+  const columns = Math.max(1, Math.floor(execution.columns || 80));
+  const rows = Math.max(1, Math.floor(execution.rows || 24));
+
+  proc.env.COLUMNS = String(columns);
+  proc.env.LINES = String(rows);
+  proc.stdout.columns = columns;
+  proc.stdout.rows = rows;
+  proc.stderr.columns = columns;
+  proc.stderr.rows = rows;
+  proc.stdout.emit?.('resize', columns, rows);
+  proc.stderr.emit?.('resize', columns, rows);
+  proc.emit?.('SIGWINCH', rows, columns);
 }
 
 function destroyExecutionContext(
@@ -208,6 +235,11 @@ function destroyExecutionContext(
   executionId: string | null | undefined
 ): void {
   if (!executionId) return;
+  const execution = controller.executions.get(executionId);
+  if (execution) {
+    execution.activeProcessStdin = null;
+    execution.activeProcess = null;
+  }
   controller.executions.delete(executionId);
 }
 
@@ -714,6 +746,7 @@ export function initChildProcess(
     });
 
     const proc = runtime.getProcess();
+    execution.activeProcess = proc;
     proc.exit = ((code = 0) => {
       if (!exitCalled) {
         exitCalled = true;
@@ -738,6 +771,7 @@ export function initChildProcess(
         return proc.stdin;
       };
       execution.activeProcessStdin = proc.stdin;
+      applyExecutionTerminalSize(execution, proc);
     }
 
     (globalThis as any).__almostnodeYogaLayout = undefined;
@@ -863,8 +897,6 @@ module.exports = (async () => {
           pendingTimerIdleMs += CHECK_MS;
         }
 
-        if (Date.now() - startTime >= MAX_TOTAL_MS) break;
-
         const keepAliveForInteractiveInput = execution.interactive && (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
@@ -872,6 +904,8 @@ module.exports = (async () => {
         if (keepAliveForInteractiveInput) {
           continue;
         }
+
+        if (Date.now() - startTime >= MAX_TOTAL_MS) break;
 
         const hasPendingRefedTimers = runtime.hasPendingRefedTimers();
         if (hasPendingRefedTimers) {
@@ -1497,6 +1531,16 @@ module.exports = (async () => {
       if (!execution?.activeProcessStdin) return;
       pushInputToExecutionStdin(execution.activeProcessStdin, data);
     },
+    updateExecutionSize: (executionId, cols, rows) => {
+      if (!executionId) return;
+      const execution = controller.executions.get(executionId);
+      if (!execution) return;
+      execution.columns = Math.max(1, Math.floor(cols));
+      execution.rows = Math.max(1, Math.floor(rows));
+      if (execution.activeProcess) {
+        applyExecutionTerminalSize(execution, execution.activeProcess);
+      }
+    },
   };
 
   controllersByVfs.set(vfs, controller);
@@ -2002,7 +2046,9 @@ const SYNTHETIC_WHICH_TARGETS: Record<string, string> = {
   node: '/usr/bin/node',
   npm: '/usr/bin/npm',
   npx: '/usr/bin/npx',
+  rec: '/usr/bin/rec',
   sh: '/bin/sh',
+  sox: '/usr/bin/sox',
   tar: '/usr/bin/tar',
   zsh: '/bin/zsh',
 };
@@ -2591,6 +2637,144 @@ type SpawnSyncResult = {
   error?: Error;
 };
 
+/**
+ * Inline check for rec/sox audio capture commands (avoids dynamic import on every spawn).
+ */
+function isAudioCaptureCommand(command: string, args: string[]): boolean {
+  const basename = command.slice(command.lastIndexOf('/') + 1);
+  if (basename === 'rec') return true;
+  if (basename === 'sox' && args.includes('-d')) return true;
+  return false;
+}
+
+const DEBUG_REC_INTERCEPT = true;
+
+function debugRecLog(message: string, data?: unknown) {
+  if (!DEBUG_REC_INTERCEPT) return;
+  if (data !== undefined) {
+    console.log(`[rec-intercept] ${message}`, data);
+  } else {
+    console.log(`[rec-intercept] ${message}`);
+  }
+}
+
+/**
+ * Intercept rec/sox audio capture commands and use browser getUserMedia instead.
+ * Returns true if the command was intercepted (caller should return child early).
+ */
+function tryInterceptAudioCommand(command: string, args: string[], child: ChildProcess): boolean {
+  if (!isAudioCaptureCommand(command, args)) return false;
+
+  console.log('%c[ALMOSTNODE] REC/SOX COMMAND INTERCEPTED!', 'background: #ff0; color: #000; font-size: 16px; padding: 4px;', { command, args });
+  debugRecLog('Intercepted audio command', { command, args });
+
+  let handle: { cleanup: () => void } | null = null;
+  let totalBytes = 0;
+  let chunkCount = 0;
+  const startTime = Date.now();
+
+  child.kill = (signal?: string): boolean => {
+    const elapsedMs = Date.now() - startTime;
+    debugRecLog(`kill(${signal}) called — SUMMARY`, { 
+      totalBytes, 
+      chunkCount, 
+      elapsedMs,
+      stdoutBufferLength: (child.stdout as any)?._buffer?.length,
+      stdoutFlowing: (child.stdout as any)?._flowing,
+    });
+    if (totalBytes === 0) {
+      debugRecLog('*** WARNING: NO AUDIO DATA WAS SENT! Silence detector may have filtered everything.');
+    }
+    if (handle) {
+      handle.cleanup();
+    }
+    child.killed = true;
+    child.stdout?.push(null);
+    queueMicrotask(() => {
+      queueMicrotask(() => {
+        debugRecLog('Emitting close/exit after kill', { signal: signal || 'SIGTERM' });
+        child.emit('close', null, signal || 'SIGTERM');
+        child.emit('exit', null, signal || 'SIGTERM');
+      });
+    });
+    return true;
+  };
+
+  (async () => {
+    try {
+      if (child.killed) {
+        debugRecLog('Child already killed before async setup');
+        return;
+      }
+
+      const { parseSoxArgs, startAudioCapture } = await import('./sox-audio-capture');
+      if (child.killed) {
+        debugRecLog('Child killed during import');
+        return;
+      }
+
+      const config = parseSoxArgs(command, args);
+      debugRecLog('Parsed SoX config', config);
+
+      // Add listener to track if data is being consumed
+      let dataEventsEmitted = 0;
+      child.stdout?.on('data', () => {
+        dataEventsEmitted++;
+      });
+
+      handle = await startAudioCapture(
+        config,
+        (pcmBytes: Uint8Array) => {
+          if (!child.killed) {
+            totalBytes += pcmBytes.length;
+            chunkCount++;
+            if (chunkCount <= 5 || chunkCount % 20 === 1) {
+              debugRecLog(`stdout.push chunk #${chunkCount}`, { 
+                bytes: pcmBytes.length, 
+                totalBytes,
+                dataEventsEmitted,
+                stdoutFlowing: (child.stdout as any)?._flowing,
+              });
+            }
+            child.stdout?.push(Buffer.from(pcmBytes));
+          }
+        },
+        () => {
+          const elapsedMs = Date.now() - startTime;
+          debugRecLog('onEnd() called — natural recording end', { totalBytes, chunkCount, elapsedMs });
+          child.stdout?.push(null);
+          child.exitCode = 0;
+          child.emit('close', 0, null);
+          child.emit('exit', 0, null);
+        },
+        (error: Error) => {
+          debugRecLog('onError() called', { error: error.message });
+          console.warn('[almostnode:rec] Audio capture error:', error.message);
+          child.stderr?.push(Buffer.from(error.message + '\n'));
+          child.stdout?.push(null);
+          child.exitCode = 1;
+          child.emit('close', 1, null);
+          child.emit('exit', 1, null);
+        },
+      );
+
+      if (child.killed) {
+        debugRecLog('Child killed while startAudioCapture was running — cleaning up');
+        handle.cleanup();
+        return;
+      }
+
+      debugRecLog('Emitting spawn event');
+      child.emit('spawn');
+    } catch (error) {
+      debugRecLog('Async setup error', error);
+      child.emit('error', error);
+    }
+  })();
+
+  return true;
+}
+
 function spawnWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   command: string,
@@ -2624,8 +2808,14 @@ function spawnWithBinding(
   if (stderrTarget !== 'pipe') {
     child.stderr = null;
   }
+  child.stdio = [child.stdin, child.stdout, child.stderr];
   child.spawnfile = command;
   child.spawnargs = [command, ...spawnArgs];
+
+  // Intercept rec/sox audio capture commands before they reach just-bash
+  if (tryInterceptAudioCommand(command, spawnArgs, child)) {
+    return child;
+  }
 
   // Build the full command
   const fullCommand = spawnArgs.length > 0
@@ -2643,6 +2833,8 @@ function spawnWithBinding(
       child.emit('error', error);
       return;
     }
+
+    child.emit('spawn');
 
     const existingExecution = getActiveExecutionContext(controller, binding, envHint);
     const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
@@ -3022,6 +3214,7 @@ export class ChildProcess extends EventEmitter {
   stdin: Writable | null;
   stdout: Readable | null;
   stderr: Readable | null;
+  stdio: [Writable | null, Readable | null, Readable | null];
 
   constructor() {
     super();
@@ -3029,11 +3222,13 @@ export class ChildProcess extends EventEmitter {
     this.stdin = new Writable();
     this.stdout = new Readable();
     this.stderr = new Readable();
+    this.stdio = [this.stdin, this.stdout, this.stderr];
   }
 
   kill(signal?: string): boolean {
     this.killed = true;
     this.emit('exit', null, signal || 'SIGTERM');
+    this.emit('close', null, signal || 'SIGTERM');
     return true;
   }
 

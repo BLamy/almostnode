@@ -532,22 +532,32 @@
         position: relative;
         overflow: hidden;
         min-height: 0;
-        padding: 0.35rem;
+        padding: 0;
+        background: transparent;
+      }
+
+      .almostnode-claude-surface__terminal {
+        display: flex;
+        flex: 1 1 auto;
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
         background:
           linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
           #071018;
       }
 
-      .almostnode-claude-surface__terminal {
+      .almostnode-claude-surface__terminal > .xterm {
+        flex: 1 1 auto;
         width: 100%;
         height: 100%;
-        min-width: 0;
-        min-height: 0;
       }
 
-      .almostnode-claude-surface__terminal > .xterm {
-        width: 100%;
-        height: 100%;
+      .almostnode-claude-surface__terminal .xterm-viewport,
+      .almostnode-claude-surface__terminal .xterm-screen {
+        background: transparent !important;
       }
 
       /* Loading overlay */
@@ -786,6 +796,238 @@
 
       .almostnode-console-entry--info .almostnode-console-entry__level {
         color: #5ea8ff;
+      }
+
+      /* ── Light theme overrides (scoped to Monaco's .vs class) ── */
+
+      /* Outer page: follow system preference so the page chrome matches */
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --page-bg: #f0f1f3;
+          --header-bg: rgba(240, 241, 243, 0.9);
+          --panel-border: rgba(0, 0, 0, 0.08);
+          --panel-bg: #f6f7f9;
+          --panel-alt: #eef1f4;
+          --text: #24292f;
+          --muted: #57606a;
+          --accent: #d1480a;
+        }
+        body {
+          background:
+            radial-gradient(circle at top left, rgba(209, 72, 10, 0.08), transparent 24rem),
+            linear-gradient(180deg, #f6f7f9 0%, var(--page-bg) 100%);
+        }
+        #webideWorkbench {
+          box-shadow: 0 24px 80px rgba(0, 0, 0, 0.08);
+        }
+      }
+
+      .monaco-workbench.vs {
+        --panel-border: rgba(0, 0, 0, 0.08);
+        --panel-bg: #f6f7f9;
+        --panel-alt: #eef1f4;
+        --text: #24292f;
+        --muted: #57606a;
+        --accent: #d1480a;
+      }
+
+      .monaco-workbench.vs .almostnode-preview-surface,
+      .monaco-workbench.vs .almostnode-terminal-surface {
+        background:
+          linear-gradient(180deg, rgba(0, 0, 0, 0.015), rgba(0, 0, 0, 0)),
+          var(--panel-bg);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree {
+        background: var(--vscode-sideBar-background, var(--panel-bg));
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__children {
+        border-left-color: rgba(0, 0, 0, 0.08);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__file.is-selected {
+        background: rgba(209, 72, 10, 0.10);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__summary:hover,
+      .monaco-workbench.vs .almostnode-files-tree__file:hover {
+        background: rgba(0, 0, 0, 0.04);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__context-menu {
+        background: #ffffff;
+        border-color: rgba(0, 0, 0, 0.12);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__context-item:hover {
+        background: rgba(209, 72, 10, 0.08);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__context-separator {
+        background: rgba(0, 0, 0, 0.08);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__inline-input {
+        background: rgba(255, 255, 255, 0.8);
+        border-color: rgba(209, 72, 10, 0.4);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree__summary.is-drag-over {
+        background: rgba(209, 72, 10, 0.08);
+        outline-color: rgba(209, 72, 10, 0.4);
+      }
+
+      .monaco-workbench.vs .almostnode-files-tree.is-drag-over {
+        background: rgba(209, 72, 10, 0.04);
+      }
+
+      .monaco-workbench.vs .almostnode-preview-surface__toolbar,
+      .monaco-workbench.vs .almostnode-terminal-surface__status-row {
+        background: rgba(0, 0, 0, 0.02);
+      }
+
+      .monaco-workbench.vs .almostnode-terminal-surface__tab,
+      .monaco-workbench.vs .almostnode-terminal-surface__new-tab,
+      .monaco-workbench.vs .almostnode-terminal-surface__tab-close {
+        background: rgba(0, 0, 0, 0.03);
+      }
+
+      .monaco-workbench.vs .almostnode-terminal-surface__tab.is-active {
+        border-color: rgba(209, 72, 10, 0.35);
+        background: rgba(209, 72, 10, 0.08);
+      }
+
+      .monaco-workbench.vs .almostnode-terminal-surface__new-tab:hover,
+      .monaco-workbench.vs .almostnode-terminal-surface__tab:hover,
+      .monaco-workbench.vs .almostnode-terminal-surface__tab-close:hover {
+        border-color: rgba(209, 72, 10, 0.35);
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface {
+        background:
+          linear-gradient(180deg, rgba(0, 0, 0, 0.015), rgba(0, 0, 0, 0)),
+          var(--panel-bg);
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__terminal {
+        background:
+          linear-gradient(180deg, rgba(0, 0, 0, 0.01), rgba(0, 0, 0, 0)),
+          #ffffff;
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__status-row {
+        background: rgba(0, 0, 0, 0.02);
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__tab,
+      .monaco-workbench.vs .almostnode-claude-surface__new-tab,
+      .monaco-workbench.vs .almostnode-claude-surface__tab-close {
+        background: rgba(0, 0, 0, 0.03);
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__tab.is-active {
+        border-color: rgba(186, 102, 42, 0.35);
+        background: rgba(186, 102, 42, 0.08);
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__new-tab:hover,
+      .monaco-workbench.vs .almostnode-claude-surface__tab:hover,
+      .monaco-workbench.vs .almostnode-claude-surface__tab-close:hover {
+        border-color: rgba(186, 102, 42, 0.35);
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__body {
+        background: transparent;
+      }
+
+      .monaco-workbench.vs .almostnode-claude-surface__loading {
+        background: linear-gradient(
+          160deg,
+          rgba(246, 247, 249, 0.97) 0%,
+          rgba(238, 241, 244, 0.98) 50%,
+          rgba(246, 247, 249, 0.97) 100%
+        );
+      }
+
+      .monaco-workbench.vs .almostnode-preview-surface__button {
+        background: rgba(0, 0, 0, 0.03);
+      }
+
+      .monaco-workbench.vs .almostnode-preview-surface__button:hover {
+        border-color: rgba(209, 72, 10, 0.35);
+        background: rgba(209, 72, 10, 0.06);
+      }
+
+      .monaco-workbench.vs .almostnode-preview-surface__button.is-active {
+        border-color: var(--accent);
+        background: rgba(209, 72, 10, 0.10);
+        color: var(--accent);
+      }
+
+      .monaco-workbench.vs #webideTerminal {
+        background:
+          linear-gradient(180deg, rgba(0, 0, 0, 0.01), rgba(0, 0, 0, 0)),
+          #ffffff;
+      }
+
+      .monaco-workbench.vs #webideTerminal .xterm .scrollbar.vertical .slider {
+        background: rgba(209, 72, 10, 0.18) !important;
+      }
+
+      .monaco-workbench.vs #webideTerminal .xterm .scrollbar.vertical .slider:hover,
+      .monaco-workbench.vs #webideTerminal .xterm .scrollbar.vertical .slider.active {
+        background: rgba(209, 72, 10, 0.35) !important;
+      }
+
+      .monaco-workbench.vs #webideTerminal .xterm .xterm-selection div {
+        background: rgba(209, 72, 10, 0.18) !important;
+      }
+
+      .monaco-workbench.vs .almostnode-console-panel {
+        background: #ffffff;
+      }
+
+      .monaco-workbench.vs .almostnode-console-panel__toolbar {
+        background: rgba(0, 0, 0, 0.02);
+      }
+
+      .monaco-workbench.vs .almostnode-console-panel__clear {
+        background: rgba(0, 0, 0, 0.03);
+      }
+
+      .monaco-workbench.vs .almostnode-console-panel__clear:hover {
+        border-color: rgba(209, 72, 10, 0.35);
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry {
+        border-bottom-color: rgba(0, 0, 0, 0.04);
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry:hover {
+        background: rgba(0, 0, 0, 0.02);
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry--warn {
+        background: rgba(154, 103, 0, 0.06);
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry--warn .almostnode-console-entry__level {
+        color: #9a6700;
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry--error {
+        background: rgba(207, 34, 46, 0.06);
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry--error .almostnode-console-entry__level {
+        color: #cf222e;
+      }
+
+      .monaco-workbench.vs .almostnode-console-entry--info .almostnode-console-entry__level {
+        color: #0969da;
       }
 
       @media (max-width: 760px) {

@@ -62,9 +62,9 @@ describe("webide workspace seed", () => {
     expect(componentsConfig.tailwind?.config).toBe("tailwind.config.ts");
     expect(componentsConfig.tailwind?.css).toBe("src/index.css");
     expect(componentsConfig.aliases?.ui).toBe("@/components/ui");
-    expect(settings["files.autoSave"]).toBe("afterDelay");
+    expect(settings["files.autoSave"]).toBe("onFocusChange");
     expect(settings["editor.minimap.enabled"]).toBe(false);
-    expect(settings["workbench.colorTheme"]).toBe("Default Dark Modern");
+    expect(settings["workbench.colorTheme"]).toBe("Islands Dark");
     expect(appSource).toContain("Tailwind + shadcn starter");
     expect(appSource).toContain("import { Button } from '@/components/ui/button';");
     expect(readme).toContain("npx shadcn@latest add dropdown-menu");

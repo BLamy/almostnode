@@ -68,7 +68,10 @@ export class Readable extends Stream {
       // Otherwise, 'end' will be emitted when resume() flushes the buffer
       if (this._flowing && this._buffer.length === 0 && !this._endEmitted) {
         this._endEmitted = true;
-        queueMicrotask(() => this.emit('end'));
+        queueMicrotask(() => {
+          this.emit('end');
+          queueMicrotask(() => this.emit('close'));
+        });
       }
       return false;
     }
@@ -94,6 +97,7 @@ export class Readable extends Stream {
     if (this._ended && this._buffer.length === 0 && !this._endEmitted) {
       this._endEmitted = true;
       this.emit('end');
+      queueMicrotask(() => this.emit('close'));
     }
   }
 

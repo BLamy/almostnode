@@ -50,6 +50,11 @@ export interface Stats {
 
 const NULL_DEVICE_DIRECTORY = '/dev';
 const NULL_DEVICE_PATH = '/dev/null';
+const GIT_INTERNAL_SEGMENT = '/.git/';
+
+function isGitInternalPath(normalized: string): boolean {
+  return normalized.includes(GIT_INTERNAL_SEGMENT);
+}
 
 function createSyntheticStats(kind: 'file' | 'directory'): Stats {
   const isDirectory = kind === 'directory';
@@ -339,7 +344,7 @@ export class VirtualFS {
       ino: this.allocateInode(),
     });
 
-    if (emitEvent) {
+    if (emitEvent && !isGitInternalPath(normalized)) {
       // Notify watchers
       this.notifyWatchers(normalized, existed ? 'change' : 'rename');
       // Emit change event for worker sync
@@ -641,10 +646,12 @@ export class VirtualFS {
 
     parent.children!.delete(basename);
 
-    // Notify watchers
-    this.notifyWatchers(normalized, 'rename');
-    // Emit delete event for worker sync
-    this.emit('delete', normalized);
+    if (!isGitInternalPath(normalized)) {
+      // Notify watchers
+      this.notifyWatchers(normalized, 'rename');
+      // Emit delete event for worker sync
+      this.emit('delete', normalized);
+    }
   }
 
   /**

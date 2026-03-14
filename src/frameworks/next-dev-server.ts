@@ -1557,8 +1557,9 @@ export class NextDevServer extends DevServer {
     // Watch /pages directory
     try {
       const pagesWatcher = this.vfs.watch(this.pagesDir, { recursive: true }, (eventType, filename) => {
-        if (eventType === 'change' && filename) {
-          const fullPath = filename.startsWith('/') ? filename : `${this.pagesDir}/${filename}`;
+        if (!filename) return;
+        const fullPath = filename.startsWith('/') ? filename : `${this.pagesDir}/${filename}`;
+        if (eventType === 'change' || (eventType === 'rename' && this.vfs.existsSync(fullPath))) {
           this.handleFileChange(fullPath);
         }
       });
@@ -1571,8 +1572,9 @@ export class NextDevServer extends DevServer {
     if (this.useAppRouter) {
       try {
         const appWatcher = this.vfs.watch(this.appDir, { recursive: true }, (eventType, filename) => {
-          if (eventType === 'change' && filename) {
-            const fullPath = filename.startsWith('/') ? filename : `${this.appDir}/${filename}`;
+          if (!filename) return;
+          const fullPath = filename.startsWith('/') ? filename : `${this.appDir}/${filename}`;
+          if (eventType === 'change' || (eventType === 'rename' && this.vfs.existsSync(fullPath))) {
             this.handleFileChange(fullPath);
           }
         });
@@ -1585,8 +1587,10 @@ export class NextDevServer extends DevServer {
     // Watch /public directory for static assets
     try {
       const publicWatcher = this.vfs.watch(this.publicDir, { recursive: true }, (eventType, filename) => {
-        if (eventType === 'change' && filename) {
-          this.handleFileChange(`${this.publicDir}/${filename}`);
+        if (!filename) return;
+        const fullPath = `${this.publicDir}/${filename}`;
+        if (eventType === 'change' || (eventType === 'rename' && this.vfs.existsSync(fullPath))) {
+          this.handleFileChange(fullPath);
         }
       });
       watchers.push(publicWatcher);

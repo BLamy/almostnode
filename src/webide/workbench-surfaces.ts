@@ -37,6 +37,23 @@ function scheduleUiFrame(callback: () => void): { cancel: () => void } {
   };
 }
 
+function queueTerminalFit(callback: () => void): void {
+  scheduleUiFrame(callback);
+
+  if (typeof window !== 'undefined') {
+    window.setTimeout(callback, 0);
+    window.setTimeout(callback, 120);
+    window.setTimeout(callback, 400);
+  }
+
+  // Xterm can calculate stale rows before the web fonts finish loading.
+  if (typeof document !== 'undefined' && 'fonts' in document) {
+    void document.fonts.ready.then(() => {
+      callback();
+    }).catch(() => undefined);
+  }
+}
+
 function normalizeWorkbenchPath(path: string): string {
   if (!path) return '/';
   return path.startsWith('/') ? path.replace(/\/+/g, '/') : `/${path}`.replace(/\/+/g, '/');
@@ -343,6 +360,7 @@ export class FilesSidebarSurface {
     });
 
     for (const entry of entries) {
+      if (entry === '.git') continue;
       const fullPath = this.joinPath(path, entry);
       const stats = this.vfs.statSync(fullPath);
       if (stats.isDirectory()) {
@@ -970,6 +988,7 @@ export class TerminalPanelSurface {
       onCreateTab: () => void;
       onCloseTab: (id: string) => void;
       onSelectTab: (id: string) => void;
+      onResize?: (id: string, cols: number, rows: number) => void;
     },
   ) {
     this.root.className = 'almostnode-terminal-surface';
@@ -1017,6 +1036,7 @@ export class TerminalPanelSurface {
     }
 
     this.fit();
+    queueTerminalFit(() => this.fit());
 
     return {
       dispose: () => {
@@ -1096,6 +1116,8 @@ export class TerminalPanelSurface {
     if (this.opened) {
       tab.terminal.open(body);
     }
+
+    queueTerminalFit(() => this.fit());
   }
 
   addCustomTab(tab: {
@@ -1198,6 +1220,7 @@ export class TerminalPanelSurface {
     }
     this.status.textContent = this.tabStatuses.get(id) || 'Idle';
     this.fit();
+    queueTerminalFit(() => this.fit());
   }
 
   private fit(): void {
@@ -1218,6 +1241,8 @@ export class TerminalPanelSurface {
     }
 
     activeTerminal.fitAddon.fit();
+    this.callbacks.onResize?.(this.activeTabId, activeTerminal.terminal.cols, activeTerminal.terminal.rows);
+    activeTerminal.terminal.scrollToBottom();
   }
 }
 
@@ -1243,6 +1268,7 @@ export class ClaudeTerminalSurface {
       onCreateTab: () => void;
       onCloseTab: (id: string) => void;
       onSelectTab: (id: string) => void;
+      onResize?: (id: string, cols: number, rows: number) => void;
     },
   ) {
     this.root.className = 'almostnode-claude-surface';
@@ -1298,6 +1324,7 @@ export class ClaudeTerminalSurface {
     }
 
     this.fit();
+    queueTerminalFit(() => this.fit());
 
     return {
       dispose: () => {
@@ -1395,6 +1422,8 @@ export class ClaudeTerminalSurface {
     if (this.opened) {
       tab.terminal.open(body);
     }
+
+    queueTerminalFit(() => this.fit());
   }
 
   removeTab(id: string): void {
@@ -1438,6 +1467,7 @@ export class ClaudeTerminalSurface {
     }
     this.status.textContent = this.tabStatuses.get(id) || 'Idle';
     this.fit();
+    queueTerminalFit(() => this.fit());
   }
 
   private fit(): void {
@@ -1454,6 +1484,8 @@ export class ClaudeTerminalSurface {
     }
 
     activeTerminal.fitAddon.fit();
+    this.callbacks.onResize?.(this.activeTabId, activeTerminal.terminal.cols, activeTerminal.terminal.rows);
+    activeTerminal.terminal.scrollToBottom();
   }
 }
 
@@ -1529,7 +1561,7 @@ export function registerWorkbenchSurfaces(options: {
       location: ViewContainerLocation.Sidebar,
       default: true,
       order: 0,
-      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.5V20a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-2.5c2.9-1.2 5-4.1 5-7.5a8 8 0 0 0-8-8Z"/><path d="M9.5 9.5 12 12l2.5-2.5"/><path d="M9 22h6"/></svg>'),
+      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19L8 5L13 19M5.5 14H10.5M18 5V19"/></svg>'),
       renderBody: (container) => options.claudeSurface.attach(container),
     }),
   );

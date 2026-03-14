@@ -9,7 +9,7 @@ import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } 
 import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
 import { ClaudeAuthVault, type ClaudeAuthVaultState } from './claude-auth-vault';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
-import { IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService } from '@codingame/monaco-vscode-api/services';
+import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
 import {
   StatusbarAlignment,
@@ -153,7 +153,7 @@ function inferWorkbenchLanguageId(path: string): string | null {
   return null;
 }
 
-const TERMINAL_THEME = {
+const TERMINAL_THEME_DARK = {
   background: '#0e1218',
   foreground: '#dce5f3',
   cursor: '#ff7a59',
@@ -177,6 +177,246 @@ const TERMINAL_THEME = {
   brightCyan: '#b3f0f5',
   brightWhite: '#ffffff',
 };
+
+const TERMINAL_THEME_LIGHT = {
+  background: '#ffffff',
+  foreground: '#24292f',
+  cursor: '#d1480a',
+  cursorAccent: '#ffffff',
+  selectionBackground: 'rgba(209, 72, 10, 0.18)',
+  selectionInactiveBackground: 'rgba(209, 72, 10, 0.12)',
+  black: '#24292f',
+  red: '#cf222e',
+  green: '#116329',
+  yellow: '#9a6700',
+  blue: '#0550ae',
+  magenta: '#8250df',
+  cyan: '#1b7c83',
+  white: '#6e7781',
+  brightBlack: '#57606a',
+  brightRed: '#a40e26',
+  brightGreen: '#1a7f37',
+  brightYellow: '#7d5600',
+  brightBlue: '#0969da',
+  brightMagenta: '#6639ba',
+  brightCyan: '#3192aa',
+  brightWhite: '#8b949e',
+};
+
+/**
+ * CSS overrides for light mode. Scoped to Monaco's `.vs` theme class so they
+ * activate when the workbench color theme is light — independent of the OS
+ * color scheme. The `.vs` class is added to `.monaco-workbench` by Monaco.
+ */
+
+/**
+ * Layout overrides injected unconditionally — hides panel/sidebar titles
+ * and removes padding so terminals fill their containers edge-to-edge.
+ * These are injected via the style tag rather than settings so they apply
+ * even when IndexedDB preserves stale settings from a previous session.
+ */
+const LAYOUT_OVERRIDES = `
+/* Hide sidebar composite title and pane headers */
+.part.sidebar .composite.title {
+  display: none !important;
+}
+.part.sidebar .pane-header {
+  display: none !important;
+}
+.part.sidebar .content {
+  width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* Keep the sidebar chrome aligned with the editor and let custom views stretch */
+.part.sidebar {
+  max-height: calc(100% - 12px) !important;
+  height: calc(100% - 12px) !important;
+  margin-top: 8px !important;
+  margin-bottom: 4px !important;
+}
+.part.sidebar .content,
+.part.sidebar .composite,
+.part.sidebar .split-view-container,
+.part.sidebar .split-view-view,
+.part.sidebar .pane-body,
+.part.sidebar .pane-body > .monaco-scrollable-element,
+.part.sidebar .almostnode-claude-panel-host,
+.part.sidebar .almostnode-files-tree-host {
+  height: 100% !important;
+  min-height: 0 !important;
+}
+.part.sidebar .almostnode-claude-panel-host,
+.part.sidebar .almostnode-files-tree-host {
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+/* Hide panel composite title and pane headers */
+.part.panel.bottom .composite.title {
+  display: none !important;
+}
+.part.panel.bottom .pane-header {
+  display: none !important;
+}
+.part.panel.bottom .content {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+`;
+
+const LIGHT_MODE_OVERRIDES = `
+.monaco-workbench.vs .chat-input-container {
+  background-color: #ffffff !important;
+}
+.monaco-workbench.vs .chat-input-container .monaco-inputbox {
+  background-color: #ffffff !important;
+}
+.monaco-workbench.vs {
+  background-color: #f0f1f3 !important;
+}
+.monaco-workbench.vs .part.sidebar {
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  border-left: 1px solid rgba(0,0,0,0.04) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .part.sidebar .monaco-list-row.selected,
+.monaco-workbench.vs .part.sidebar .monaco-list-row.focused {
+  background: linear-gradient(135deg, rgba(0,0,0,0.04), rgba(0,0,0,0.02)) !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04) !important;
+}
+.monaco-workbench.vs .part.sidebar .monaco-list-row.focused.selected {
+  background: linear-gradient(135deg, rgba(0,0,0,0.06), rgba(0,0,0,0.03)) !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05) !important;
+}
+.monaco-workbench.vs .part.sidebar .monaco-list:focus .monaco-list-row.selected {
+  background: linear-gradient(135deg, rgba(0,0,0,0.07), rgba(0,0,0,0.04)) !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .part.sidebar .monaco-list:focus .monaco-list-row.focused {
+  background: linear-gradient(135deg, rgba(0,0,0,0.07), rgba(0,0,0,0.04)) !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .part.sidebar .monaco-list-row:hover {
+  background: linear-gradient(135deg, rgba(0,0,0,0.03), rgba(0,0,0,0.015)) !important;
+}
+.monaco-workbench.vs .part.editor {
+  border-top: 1px solid rgba(0,0,0,0.08) !important;
+  border-left: 1px solid rgba(0,0,0,0.05) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .editor-actions {
+  background-image: linear-gradient(to top, #d8d8dc 1px, transparent 1px) !important;
+}
+.monaco-workbench.vs .tabs-container {
+  background-image: linear-gradient(to top, #d8d8dc 1px, transparent 1px) !important;
+}
+.monaco-workbench.vs .tab.active {
+  box-shadow: inset -1px 0 0 0 #d8d8dc, inset 1px 0 0 0 #d8d8dc !important;
+}
+.monaco-workbench.vs .tab:not(.active) {
+  box-shadow: inset 0 -1px 0 0 #d8d8dc !important;
+}
+.monaco-workbench.vs .tab.active:first-child {
+  box-shadow: inset -1px 0 0 0 #d8d8dc !important;
+}
+.monaco-workbench.vs .tab:hover .label-name {
+  text-shadow: 0 0 5px rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .monaco-hover {
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  box-shadow: 0 4px 16px 0 rgba(0,0,0,0.08) !important;
+}
+.monaco-workbench.vs .part.panel.bottom {
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  border-left: 1px solid rgba(0,0,0,0.04) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .part.activitybar {
+  background: #f0f1f3 !important;
+}
+.monaco-workbench.vs .part.activitybar .composite-bar {
+  background: #e4e5e8 !important;
+  box-shadow: inset 0 1px 0 0 rgba(255,255,255,0.7), inset 1px 0 0 0 rgba(255,255,255,0.4), inset 0 -1px 0 0 rgba(0,0,0,0.04), inset -1px 0 0 0 rgba(0,0,0,0.03), inset 0 1px 3px 0 rgba(255,255,255,0.3), 0 1px 4px 0 rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .part.activitybar .action-item .action-label img {
+  filter: invert(1) !important;
+}
+.monaco-workbench.vs .part.activitybar .action-item.checked .action-label {
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(255,255,255,0.6)) !important;
+  box-shadow: inset 0 1px 0 0 rgba(255,255,255,0.8), inset 1px 0 0 0 rgba(255,255,255,0.5), inset 0 -1px 0 0 rgba(0,0,0,0.04), inset -1px 0 0 0 rgba(0,0,0,0.03), inset 0 1px 2px 0 rgba(255,255,255,0.4), 0 1px 3px 0 rgba(0,0,0,0.08) !important;
+}
+.monaco-workbench.vs .part.titlebar {
+  background-color: #f0f1f3 !important;
+}
+.monaco-workbench.vs .part.statusbar {
+  background-color: #f0f1f3 !important;
+}
+.monaco-workbench.vs .part.statusbar:hover .statusbar-item-label {
+  color: #555 !important;
+}
+.monaco-workbench.vs .part.statusbar:hover .codicon {
+  color: #555 !important;
+}
+.monaco-workbench.vs .command-center-center {
+  background: #e4e5e8 !important;
+  box-shadow: inset 0 1px 0 0 rgba(255,255,255,0.7), inset 1px 0 0 0 rgba(255,255,255,0.4), inset 0 -1px 0 0 rgba(0,0,0,0.04), inset -1px 0 0 0 rgba(0,0,0,0.03), inset 0 1px 3px 0 rgba(255,255,255,0.3), 0 1px 4px 0 rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .notification-toast {
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  border-left: 1px solid rgba(0,0,0,0.04) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 4px 12px 0 rgba(0,0,0,0.08) !important;
+}
+.monaco-workbench.vs .notifications-center {
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  border-left: 1px solid rgba(0,0,0,0.04) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 4px 12px 0 rgba(0,0,0,0.08) !important;
+}
+.monaco-workbench.vs .part.auxiliarybar {
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  border-left: 1px solid rgba(0,0,0,0.04) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.06) !important;
+}
+.monaco-workbench.vs .quick-input-widget {
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  border-left: 1px solid rgba(0,0,0,0.04) !important;
+  border-bottom: 1px solid rgba(0,0,0,0.02) !important;
+  border-right: 1px solid rgba(0,0,0,0.02) !important;
+  box-shadow: 0 8px 24px 0 rgba(0,0,0,0.1) !important;
+}
+.monaco-workbench.vs .quick-input-widget .monaco-list-row.focused {
+  background: linear-gradient(135deg, rgba(0,0,0,0.04), rgba(0,0,0,0.02)) !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04) !important;
+}
+.monaco-workbench.vs .letterpress {
+  filter: brightness(1) drop-shadow(2px 2px 1px rgba(0,0,0,0.06)) drop-shadow(-2px -2px 1px rgba(255,255,255,0.4)) !important;
+}
+.monaco-workbench.vs * {
+  border-color: transparent !important;
+}
+`;
+
+function prefersLightMode(): boolean {
+  return typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-color-scheme: light)').matches === true;
+}
+
+function getTerminalTheme(): typeof TERMINAL_THEME_DARK {
+  return prefersLightMode() ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
+}
 
 interface TerminalTabState {
   id: string;
@@ -241,6 +481,10 @@ export class WebIDEHost {
       onSelectTab: (id) => {
         this.setActiveTerminalTab(id);
       },
+      onResize: (id, cols, rows) => {
+        const tab = this.terminalTabs.get(id);
+        tab?.session.resize(cols, rows);
+      },
     });
     this.claudeSurface = new ClaudeTerminalSurface({
       onCreateTab: () => {
@@ -251,6 +495,10 @@ export class WebIDEHost {
       },
       onSelectTab: (id) => {
         this.setActiveClaudeTab(id);
+      },
+      onResize: (id, cols, rows) => {
+        const tab = this.claudeTerminalTabs.get(id);
+        tab?.session.resize(cols, rows);
       },
     });
     this.workbenchSurfaces = registerWorkbenchSurfaces({
@@ -289,7 +537,7 @@ export class WebIDEHost {
       fontFamily: 'IBM Plex Mono, monospace',
       fontSize: 12,
       scrollback: 5000,
-      theme: TERMINAL_THEME,
+      theme: getTerminalTheme(),
     });
     const fitAddon = new FitAddon();
     return { terminal, fitAddon };
@@ -309,7 +557,17 @@ export class WebIDEHost {
 
   private writeTerminal(tab: TerminalTabState, text: string): void {
     if (!text) return;
-    tab.terminal.write(normalizeTerminalOutput(text));
+    if (tab.kind === 'claude') {
+      // Filter out debug and install noise from Claude terminal
+      const filtered = text
+        .split('\n')
+        .filter((line) => !line.startsWith('[almostnode DEBUG]'))
+        .join('\n');
+      if (!filtered) return;
+      tab.terminal.write(normalizeTerminalOutput(filtered));
+    } else {
+      tab.terminal.write(normalizeTerminalOutput(text));
+    }
   }
 
   private updateTerminalStatus(tab: TerminalTabState, text: string): void {
@@ -471,11 +729,10 @@ export class WebIDEHost {
       }
     }
 
-    terminal.write('Preparing Claude Code...\r\n');
     this.updateTerminalStatus(tab, 'Preparing Claude Code...');
     try {
       await this.ensureClaudeCodeInstalled((message) => {
-        terminal.write(`${message}\r\n`);
+        this.updateTerminalStatus(tab, message);
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to install Claude Code';
@@ -486,7 +743,6 @@ export class WebIDEHost {
       return tab;
     }
 
-    terminal.write('Starting Claude Code...\r\n');
     this.updateTerminalStatus(tab, 'Starting Claude Code...');
     void this.runCommand(tab, 'npx @anthropic-ai/claude-code').then(() => {
       this.claudeSurface.hideLoading();
@@ -1186,6 +1442,74 @@ export class WebIDEHost {
     const layoutService = await getService(IWorkbenchLayoutService);
     const currentSize = layoutService.getSize(Parts.SIDEBAR_PART);
     layoutService.setSize(Parts.SIDEBAR_PART, { width: 600, height: currentSize.height });
+
+    // Inject custom-ui-style.stylesheet CSS from workspace settings
+    this.injectCustomUiStylesheet();
+
+    // Apply theme matching system color scheme preference
+    await this.applyColorSchemePreference();
+    this.listenForColorSchemeChanges();
+  }
+
+  private injectCustomUiStylesheet(): void {
+    try {
+      const settingsPath = `${WORKSPACE_ROOT}/.vscode/settings.json`;
+      const raw = this.container.vfs.readFileSync(settingsPath, 'utf8');
+      const settings = JSON.parse(raw as string);
+      const stylesheet = settings['custom-ui-style.stylesheet'];
+      if (!stylesheet || typeof stylesheet !== 'object') return;
+
+      const cssRules: string[] = [];
+      for (const [selector, properties] of Object.entries(stylesheet)) {
+        if (!properties || typeof properties !== 'object') continue;
+        const declarations = Object.entries(properties as Record<string, string>)
+          .map(([prop, value]) => `  ${prop}: ${value};`)
+          .join('\n');
+        cssRules.push(`${selector} {\n${declarations}\n}`);
+      }
+
+      if (cssRules.length === 0) return;
+
+      const style = document.createElement('style');
+      style.id = 'almostnode-custom-ui-style';
+      style.textContent = cssRules.join('\n\n') + '\n\n' + LAYOUT_OVERRIDES + '\n\n' + LIGHT_MODE_OVERRIDES;
+      document.head.appendChild(style);
+    } catch {
+      // Settings file missing or malformed — skip custom UI styling
+    }
+  }
+
+  private async applyColorSchemePreference(): Promise<void> {
+    if (!prefersLightMode()) return;
+
+    try {
+      const themeService = await getService(IWorkbenchThemeService);
+      await themeService.setColorTheme('Islands Light', undefined);
+    } catch {
+      // Theme switch failed — fall back to dark
+    }
+  }
+
+  private listenForColorSchemeChanges(): void {
+    // Listen for Monaco theme changes (user toggling via command palette / settings)
+    // and update terminal themes to match
+    void getService(IWorkbenchThemeService).then((themeService) => {
+      themeService.onDidColorThemeChange((theme) => {
+        const isLight = theme.type === 'light' || theme.type === 'hcLight';
+        const terminalTheme = isLight ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
+
+        for (const tab of this.terminalTabs.values()) {
+          tab.terminal.options.theme = terminalTheme;
+        }
+      });
+    });
+  }
+
+  private async ensureGitInitialized(): Promise<void> {
+    if (this.container.vfs.existsSync('/project/.git')) return;
+    await this.container.run('git init', { cwd: '/project' });
+    await this.container.run('git add -A', { cwd: '/project' });
+    await this.container.run('git commit -m "Initial commit"', { cwd: '/project' });
   }
 
   private async init(): Promise<void> {
@@ -1283,6 +1607,9 @@ export class WebIDEHost {
       // No stored vault or already unlocked — just open the Claude panel
       void this.revealClaudePanel(false);
     }
+
+    // Initialize git repo in the background (non-blocking)
+    void this.ensureGitInitialized();
   }
 
   private async ensureClaudeCodeInstalled(onProgress?: (message: string) => void): Promise<void> {

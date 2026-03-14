@@ -633,6 +633,7 @@ describe('Stream module (Node.js compat)', () => {
         callbackCalled = true;
       });
 
+      readable.push(null);
       await new Promise(resolve => setTimeout(resolve, 10));
       assert.strictEqual(callbackCalled, true);
     });
@@ -655,6 +656,7 @@ describe('Stream module (Node.js compat)', () => {
         callbackCalled = true;
       });
 
+      writable.end();
       await new Promise(resolve => setTimeout(resolve, 10));
       assert.strictEqual(callbackCalled, true);
     });

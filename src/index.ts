@@ -105,6 +105,7 @@ export interface TerminalSessionState {
 export interface TerminalSession {
   run: (command: string, options?: TerminalSessionRunOptions) => Promise<RunResult>;
   sendInput: (data: string) => void;
+  resize: (cols: number, rows: number) => void;
   abort: () => void;
   dispose: () => void;
   getState: () => TerminalSessionState;
@@ -340,6 +341,8 @@ export function createContainer(options?: ContainerOptions): {
           onStderr: sessionRunOptions?.onStderr,
           signal: controller.signal,
           interactive: sessionRunOptions?.interactive,
+          cols: Number(state.env.COLUMNS || 80),
+          rows: Number(state.env.LINES || 24),
         });
 
         state.running = true;
@@ -378,6 +381,18 @@ export function createContainer(options?: ContainerOptions): {
       sendInput: (data: string) => {
         if (!activeExecutionId) return;
         childProcessController.sendInput(activeExecutionId, data);
+      },
+      resize: (cols: number, rows: number) => {
+        const normalizedCols = Number.isFinite(cols) ? Math.max(1, Math.floor(cols)) : 80;
+        const normalizedRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 24;
+        state.env = {
+          ...state.env,
+          COLUMNS: String(normalizedCols),
+          LINES: String(normalizedRows),
+        };
+        if (activeExecutionId) {
+          childProcessController.updateExecutionSize(activeExecutionId, normalizedCols, normalizedRows);
+        }
       },
       abort: () => {
         activeAbortController?.abort();

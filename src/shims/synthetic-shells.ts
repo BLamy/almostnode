@@ -47,6 +47,10 @@ export const SYNTHETIC_EXECUTABLE_PATHS = new Set<string>([
   '/usr/bin/tar',
   '/usr/local/bin/tar',
   '/usr/local/bin/claude-wrapper',
+  '/usr/bin/rec',
+  '/usr/local/bin/rec',
+  '/usr/bin/sox',
+  '/usr/local/bin/sox',
 ]);
 
 export function getSyntheticShellSpec(command: string): SyntheticShellSpec | null {

@@ -422,8 +422,12 @@ export class ViteDevServer extends DevServer {
 
     try {
       const watcher = this.vfs.watch(srcPath, { recursive: true }, (eventType, filename) => {
-        if (eventType === 'change' && filename) {
-          const fullPath = filename.startsWith('/') ? filename : `${srcPath}/${filename}`;
+        if (!filename) return;
+        const fullPath = filename.startsWith('/') ? filename : `${srcPath}/${filename}`;
+        if (eventType === 'change') {
+          this.handleFileChange(fullPath);
+        } else if (eventType === 'rename' && this.vfs.existsSync(fullPath)) {
+          // 'rename' with existing file = creation (e.g. atomic write via rename, new file)
           this.handleFileChange(fullPath);
         }
       });
@@ -438,14 +442,12 @@ export class ViteDevServer extends DevServer {
     // Also watch for CSS files in root
     try {
       const rootWatcher = this.vfs.watch(this.root, { recursive: false }, (eventType, filename) => {
-        const watchedPath = filename
-          ? (this.root === '/' ? `/${filename}` : `${this.root}/${filename}`)
-          : '';
-        if (eventType === 'change' && filename && (
-          filename.endsWith('.css')
+        if (!filename) return;
+        const watchedPath = this.root === '/' ? `/${filename}` : `${this.root}/${filename}`;
+        const isWatchedRootFile = filename.endsWith('.css')
           || /^tailwind\.config\.(ts|js|mjs)$/.test(filename)
-          || filename === 'components.json'
-        )) {
+          || filename === 'components.json';
+        if (isWatchedRootFile && (eventType === 'change' || (eventType === 'rename' && this.vfs.existsSync(watchedPath)))) {
           this.handleFileChange(watchedPath);
         }
         if (filename === 'package.json' || filename === 'node_modules') {

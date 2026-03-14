@@ -1,14 +1,14 @@
 import type { Command, CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import { defineCommand } from 'just-bash';
-import git, { STAGE, TREE, WORKDIR } from 'isomorphic-git';
+import git from 'isomorphic-git';
 import http from 'isomorphic-git/http/web';
 import { structuredPatch } from 'diff';
-import type { ReadCommitResult, WalkerEntry } from 'isomorphic-git';
 import type { VirtualFS } from '../virtual-fs';
 import * as path from './path';
 
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
-const textDecoder = new TextDecoder();
+
+// ── Interfaces ──────────────────────────────────────────────────────────────
 
 interface GitEnv {
   token?: string;
@@ -19,6 +19,18 @@ interface GitEnv {
   authorEmail: string;
 }
 
+interface GitAuthResult {
+  username?: string;
+  password?: string;
+}
+
+interface SimpleCommit {
+  parent: string | null;
+  message: string;
+  author: { name: string; email: string; timestamp: number };
+  tree: Record<string, string>; // filepath -> blob hash
+}
+
 interface DiffEntry {
   filepath: string;
   leftExists: boolean;
@@ -27,21 +39,280 @@ interface DiffEntry {
   rightText: string;
 }
 
-interface GitAuthResult {
-  username?: string;
-  password?: string;
+// ── Hash ────────────────────────────────────────────────────────────────────
+
+function simpleHash(content: string): string {
+  const seeds = [0x811c9dc5, 0x01000193, 0x050c5d1f, 0x1f356823, 0x3f5a1271];
+  let result = '';
+  for (const seed of seeds) {
+    let h = seed;
+    for (let i = 0; i < content.length; i++) {
+      h ^= content.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    result += (h >>> 0).toString(16).padStart(8, '0');
+  }
+  return result;
 }
 
-interface ParsedAuthor {
-  name: string;
-  email: string;
+// ── VFS JSON helpers ────────────────────────────────────────────────────────
+
+function sgDir(dir: string): string {
+  return normalizePath(path.join(dir, '.git/simplegit'));
 }
 
-interface ParsedDiffArgs {
-  staged: boolean;
-  nameOnly: boolean;
-  refs: string[];
+function readJSON<T>(vfs: VirtualFS, filePath: string): T | null {
+  const p = normalizePath(filePath);
+  if (!vfs.existsSync(p)) return null;
+  try {
+    const raw = vfs.readFileSync(p, 'utf8');
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
 }
+
+function writeJSON(vfs: VirtualFS, filePath: string, data: unknown): void {
+  const p = normalizePath(filePath);
+  const parent = path.dirname(p);
+  if (parent && parent !== '/' && !vfs.existsSync(parent)) {
+    vfs.mkdirSync(parent, { recursive: true });
+  }
+  vfs.writeFileSync(p, JSON.stringify(data));
+}
+
+// ── Blob storage ────────────────────────────────────────────────────────────
+
+function readBlob(vfs: VirtualFS, dir: string, hash: string): string {
+  const p = normalizePath(path.join(sgDir(dir), 'blobs', hash));
+  if (!vfs.existsSync(p)) return '';
+  return vfs.readFileSync(p, 'utf8');
+}
+
+function writeBlob(vfs: VirtualFS, dir: string, content: string): string {
+  const hash = simpleHash(content);
+  const p = normalizePath(path.join(sgDir(dir), 'blobs', hash));
+  if (!vfs.existsSync(p)) {
+    const parent = path.dirname(p);
+    if (!vfs.existsSync(parent)) {
+      vfs.mkdirSync(parent, { recursive: true });
+    }
+    vfs.writeFileSync(p, content);
+  }
+  return hash;
+}
+
+// ── Index (staging area) ────────────────────────────────────────────────────
+
+function readIndex(vfs: VirtualFS, dir: string): Record<string, string> {
+  const data = readJSON<{ entries: Record<string, string> }>(
+    vfs,
+    path.join(sgDir(dir), 'index.json')
+  );
+  return data?.entries ?? {};
+}
+
+function writeIndex(vfs: VirtualFS, dir: string, entries: Record<string, string>): void {
+  writeJSON(vfs, path.join(sgDir(dir), 'index.json'), { entries });
+}
+
+// ── Commit storage ──────────────────────────────────────────────────────────
+
+function readCommit(vfs: VirtualFS, dir: string, sha: string): SimpleCommit | null {
+  return readJSON<SimpleCommit>(vfs, path.join(sgDir(dir), 'commits', `${sha}.json`));
+}
+
+function writeCommit(vfs: VirtualFS, dir: string, commit: SimpleCommit): string {
+  const content = JSON.stringify(commit);
+  const sha = simpleHash(content + Date.now() + Math.random());
+  writeJSON(vfs, path.join(sgDir(dir), 'commits', `${sha}.json`), commit);
+  return sha;
+}
+
+// ── Refs ────────────────────────────────────────────────────────────────────
+
+function readHeadRef(vfs: VirtualFS, dir: string): string {
+  const headPath = normalizePath(path.join(dir, '.git/HEAD'));
+  if (!vfs.existsSync(headPath)) return 'main';
+  const raw = vfs.readFileSync(headPath, 'utf8').trim();
+  const match = raw.match(/^ref:\s*refs\/heads\/(.+)$/);
+  return match ? match[1] : 'main';
+}
+
+function writeHeadRef(vfs: VirtualFS, dir: string, branch: string): void {
+  const headPath = normalizePath(path.join(dir, '.git/HEAD'));
+  vfs.writeFileSync(headPath, `ref: refs/heads/${branch}\n`);
+}
+
+function getRefSha(vfs: VirtualFS, dir: string, branch: string): string | null {
+  const refPath = normalizePath(path.join(dir, `.git/refs/heads/${branch}`));
+  if (!vfs.existsSync(refPath)) return null;
+  return vfs.readFileSync(refPath, 'utf8').trim() || null;
+}
+
+function setRefSha(vfs: VirtualFS, dir: string, branch: string, sha: string): void {
+  const refPath = normalizePath(path.join(dir, `.git/refs/heads/${branch}`));
+  const parent = path.dirname(refPath);
+  if (!vfs.existsSync(parent)) {
+    vfs.mkdirSync(parent, { recursive: true });
+  }
+  vfs.writeFileSync(refPath, sha + '\n');
+}
+
+function listBranches(vfs: VirtualFS, dir: string): string[] {
+  const refsDir = normalizePath(path.join(dir, '.git/refs/heads'));
+  if (!vfs.existsSync(refsDir)) return [];
+  return vfs.readdirSync(refsDir).sort();
+}
+
+function getHeadCommitSha(vfs: VirtualFS, dir: string): string | null {
+  const branch = readHeadRef(vfs, dir);
+  return getRefSha(vfs, dir, branch);
+}
+
+function getHeadTree(vfs: VirtualFS, dir: string): Record<string, string> {
+  const sha = getHeadCommitSha(vfs, dir);
+  if (!sha) return {};
+  const commit = readCommit(vfs, dir, sha);
+  return commit?.tree ?? {};
+}
+
+function resolveToSha(vfs: VirtualFS, dir: string, refOrSha: string): string | null {
+  // Try as branch name first
+  const branchSha = getRefSha(vfs, dir, refOrSha);
+  if (branchSha) return branchSha;
+  // Try as raw SHA (check if commit exists)
+  const commit = readCommit(vfs, dir, refOrSha);
+  if (commit) return refOrSha;
+  // Try HEAD
+  if (refOrSha === 'HEAD') return getHeadCommitSha(vfs, dir);
+  return null;
+}
+
+// ── Working tree helpers ────────────────────────────────────────────────────
+
+function collectWorkingTreeFiles(vfs: VirtualFS, dir: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const walk = (current: string, prefix: string) => {
+    if (!vfs.existsSync(current)) return;
+    const entries = vfs.readdirSync(current);
+    for (const entry of entries) {
+      if (entry === '.git') continue;
+      const fullPath = normalizePath(path.join(current, entry));
+      const relativePath = prefix ? `${prefix}/${entry}` : entry;
+      const stat = vfs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        walk(fullPath, relativePath);
+      } else {
+        const content = vfs.readFileSync(fullPath, 'utf8');
+        result[relativePath] = content;
+      }
+    }
+  };
+  walk(dir, '');
+  return result;
+}
+
+function hashWorkingTree(vfs: VirtualFS, dir: string): Record<string, string> {
+  const files = collectWorkingTreeFiles(vfs, dir);
+  const hashed: Record<string, string> = {};
+  for (const [filepath, content] of Object.entries(files)) {
+    hashed[filepath] = simpleHash(content);
+  }
+  return hashed;
+}
+
+// ── Status ──────────────────────────────────────────────────────────────────
+
+const SHORT_STATUS_MAP: Record<string, string> = {
+  '000': '  ',
+  '003': 'AD',
+  '020': '??',
+  '022': 'A ',
+  '023': 'AM',
+  '100': 'D ',
+  '101': ' D',
+  '103': 'MD',
+  '110': 'D ',
+  '111': '  ',
+  '113': 'MM',
+  '120': 'D ',
+  '121': ' M',
+  '122': 'M ',
+  '123': 'MM',
+};
+
+function computeStatusMatrix(
+  headTree: Record<string, string>,
+  index: Record<string, string>,
+  workTree: Record<string, string>
+): Array<[string, string]> {
+  const allPaths = new Set([
+    ...Object.keys(headTree),
+    ...Object.keys(index),
+    ...Object.keys(workTree),
+  ]);
+
+  const result: Array<[string, string]> = [];
+
+  for (const filepath of allPaths) {
+    const headHash = headTree[filepath] ?? null;
+    const indexHash = index[filepath] ?? null;
+    const workHash = workTree[filepath] ?? null;
+
+    const h = headHash !== null ? 1 : 0;
+
+    let w: number;
+    if (workHash === null) {
+      w = 0;
+    } else if (headHash !== null && workHash === headHash) {
+      w = 1;
+    } else {
+      w = 2;
+    }
+
+    let s: number;
+    if (indexHash === null) {
+      s = 0;
+    } else if (headHash !== null && indexHash === headHash) {
+      s = 1;
+    } else if (workHash !== null && indexHash === workHash) {
+      s = 2;
+    } else {
+      s = 3;
+    }
+
+    const key = `${h}${w}${s}`;
+    const code = SHORT_STATUS_MAP[key] ?? computeStatusFallback(h, w, s);
+    if (code && code !== '  ') {
+      result.push([filepath, code]);
+    }
+  }
+
+  return result.sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function computeStatusFallback(head: number, workdir: number, stage: number): string {
+  if (head === 0 && workdir !== 0) return '??';
+
+  let indexChar = ' ';
+  let worktreeChar = ' ';
+
+  if (head !== stage) {
+    if (stage === 0) indexChar = 'D';
+    else if (head === 0) indexChar = 'A';
+    else indexChar = 'M';
+  }
+
+  if (stage !== workdir) {
+    if (workdir === 0) worktreeChar = 'D';
+    else if (workdir === 2) worktreeChar = 'M';
+  }
+
+  return `${indexChar}${worktreeChar}`;
+}
+
+// ── Entry point ─────────────────────────────────────────────────────────────
 
 export function createGitCommand(getVfs: () => VirtualFS | null): Command {
   return defineCommand('git', async (args, ctx) => {
@@ -49,7 +320,6 @@ export function createGitCommand(getVfs: () => VirtualFS | null): Command {
     if (!vfs) {
       return failure('git: VFS not initialized', 1);
     }
-
     return runGitCommand(args, ctx, vfs);
   });
 }
@@ -108,20 +378,13 @@ export async function runGitCommand(
         return failure(`git: unsupported subcommand '${subcommand}'`, 2);
     }
   } catch (error) {
-    if (subcommand === 'add' && isCorruptIndexError(error)) {
-      try {
-        const dir = findGitRootOrThrow(vfs, ctx.cwd);
-        resetGitIndexFiles(vfs, dir);
-        return await handleAdd(args.slice(1), ctx, vfs);
-      } catch (retryError) {
-        return mapGitError(retryError);
-      }
-    }
     return mapGitError(error);
   }
 }
 
-async function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
+// ── Local handlers ──────────────────────────────────────────────────────────
+
+function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
   let initialBranch: string | undefined;
   let targetDir: string | undefined;
 
@@ -150,14 +413,742 @@ async function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): 
     vfs.mkdirSync(dir, { recursive: true });
   }
 
-  await git.init({
-    fs: createGitFs(vfs),
-    dir,
-    defaultBranch: initialBranch,
-  });
+  const branch = initialBranch || 'main';
+  const gitDir = normalizePath(path.join(dir, '.git'));
+  if (!vfs.existsSync(gitDir)) {
+    vfs.mkdirSync(gitDir, { recursive: true });
+  }
+
+  // Standard HEAD format (compatible with isomorphic-git's currentBranch)
+  writeHeadRef(vfs, dir, branch);
+
+  // Create refs/heads directory
+  const refsDir = normalizePath(path.join(dir, '.git/refs/heads'));
+  if (!vfs.existsSync(refsDir)) {
+    vfs.mkdirSync(refsDir, { recursive: true });
+  }
+
+  // Create simplegit directory
+  const sg = sgDir(dir);
+  if (!vfs.existsSync(sg)) {
+    vfs.mkdirSync(sg, { recursive: true });
+  }
+
+  // Initialize empty index
+  writeIndex(vfs, dir, {});
 
   return success(`Initialized empty Git repository in ${normalizePath(path.join(dir, '.git'))}\n`);
 }
+
+function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  let short = false;
+
+  for (const arg of args) {
+    if (arg === '--short' || arg === '--porcelain') {
+      short = true;
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git status: unsupported option '${arg}'`, 2);
+    }
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const headTree = getHeadTree(vfs, dir);
+  const index = readIndex(vfs, dir);
+  const workTree = hashWorkingTree(vfs, dir);
+
+  const entries = computeStatusMatrix(headTree, index, workTree);
+
+  const lines = entries.map(([filepath, code]) => `${code} ${filepath}`);
+
+  if (!short) {
+    return success(lines.length === 0 ? 'nothing to commit, working tree clean\n' : `${lines.join('\n')}\n`);
+  }
+
+  return success(lines.length === 0 ? '' : `${lines.join('\n')}\n`);
+}
+
+function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  if (args.length === 0) {
+    return failure('git add: missing pathspec', 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  let addAll = false;
+  let sawDoubleDash = false;
+  const explicitPaths: string[] = [];
+
+  for (const arg of args) {
+    if (!sawDoubleDash && arg === '--') {
+      sawDoubleDash = true;
+      continue;
+    }
+    if (!sawDoubleDash && (arg === '-A' || arg === '--all')) {
+      addAll = true;
+      continue;
+    }
+    if (!sawDoubleDash && arg.startsWith('-')) {
+      return failure(`git add: unsupported option '${arg}'`, 2);
+    }
+    if (arg === '.') {
+      addAll = true;
+      continue;
+    }
+    explicitPaths.push(arg);
+  }
+
+  if (!addAll && explicitPaths.length === 0) {
+    return failure('git add: missing pathspec', 2);
+  }
+
+  const index = readIndex(vfs, dir);
+  const headTree = getHeadTree(vfs, dir);
+
+  if (addAll) {
+    // Stage everything: add all working tree files, remove deleted files
+    const workFiles = collectWorkingTreeFiles(vfs, dir);
+
+    // Add/update all working tree files
+    for (const [filepath, content] of Object.entries(workFiles)) {
+      const hash = writeBlob(vfs, dir, content);
+      index[filepath] = hash;
+    }
+
+    // Remove files that are tracked (in HEAD or index) but not in working tree
+    const allTracked = new Set([...Object.keys(headTree), ...Object.keys(index)]);
+    for (const filepath of allTracked) {
+      if (!(filepath in workFiles)) {
+        delete index[filepath];
+      }
+    }
+  }
+
+  for (const arg of explicitPaths) {
+    const absPath = resolvePath(ctx.cwd, arg);
+    const filepath = toRepoRelativePath(dir, absPath);
+
+    if (vfs.existsSync(absPath)) {
+      const content = vfs.readFileSync(absPath, 'utf8');
+      const hash = writeBlob(vfs, dir, content);
+      index[filepath] = hash;
+    } else {
+      // File was deleted
+      delete index[filepath];
+    }
+  }
+
+  writeIndex(vfs, dir, index);
+  return success('');
+}
+
+function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  let message: string | undefined;
+  let authorFlag: string | undefined;
+  let amend = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if ((arg === '-m' || arg === '--message') && i + 1 < args.length) {
+      message = args[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--message=')) {
+      message = arg.slice('--message='.length);
+      continue;
+    }
+    if (arg === '--author' && i + 1 < args.length) {
+      authorFlag = args[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--author=')) {
+      authorFlag = arg.slice('--author='.length);
+      continue;
+    }
+    if (arg === '--amend') {
+      amend = true;
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git commit: unsupported option '${arg}'`, 2);
+    }
+  }
+
+  if (!message) {
+    return failure('git commit: missing commit message (use -m)', 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const gitEnv = resolveGitEnv(ctx.env);
+  const parsedAuthor = parseAuthor(authorFlag);
+  const author = parsedAuthor || { name: gitEnv.authorName, email: gitEnv.authorEmail };
+
+  const branch = readHeadRef(vfs, dir);
+  const currentSha = getRefSha(vfs, dir, branch);
+  const index = readIndex(vfs, dir);
+
+  let parentSha: string | null;
+  if (amend && currentSha) {
+    const currentCommit = readCommit(vfs, dir, currentSha);
+    parentSha = currentCommit?.parent ?? null;
+  } else {
+    parentSha = currentSha;
+  }
+
+  const commit: SimpleCommit = {
+    parent: parentSha,
+    message,
+    author: { ...author, timestamp: Math.floor(Date.now() / 1000) },
+    tree: { ...index },
+  };
+
+  const oid = writeCommit(vfs, dir, commit);
+  setRefSha(vfs, dir, branch, oid);
+
+  return success(`[${branch} ${oid.slice(0, 7)}] ${message}\n`);
+}
+
+function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  let depth: number | undefined;
+  let ref: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if ((arg === '-n' || arg === '--depth') && i + 1 < args.length) {
+      depth = Number(args[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--depth=')) {
+      depth = Number(arg.slice('--depth='.length));
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git log: unsupported option '${arg}'`, 2);
+    }
+    if (ref) {
+      return failure('git log: too many revision arguments', 2);
+    }
+    ref = arg;
+  }
+
+  if (depth !== undefined && (!Number.isFinite(depth) || depth <= 0)) {
+    return failure('git log: depth must be a positive number', 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+
+  let startSha: string | null;
+  if (ref && ref !== 'HEAD') {
+    startSha = resolveToSha(vfs, dir, ref);
+    if (!startSha) {
+      return failure(`fatal: unknown revision '${ref}'`, 128);
+    }
+  } else {
+    startSha = getHeadCommitSha(vfs, dir);
+  }
+
+  if (!startSha) {
+    return success('');
+  }
+
+  const entries: Array<{ oid: string; commit: SimpleCommit }> = [];
+  let current: string | null = startSha;
+  const maxDepth = depth ?? 1000;
+
+  while (current && entries.length < maxDepth) {
+    const commit = readCommit(vfs, dir, current);
+    if (!commit) break;
+    entries.push({ oid: current, commit });
+    current = commit.parent;
+  }
+
+  if (entries.length === 0) {
+    return success('');
+  }
+
+  const chunks = entries.map((entry) => {
+    const a = entry.commit.author;
+    const authorLine = `${a.name} <${a.email}>`;
+    const date = new Date(a.timestamp * 1000).toUTCString();
+    const msg = (entry.commit.message || '').trimEnd();
+    return [
+      `commit ${entry.oid}`,
+      `Author: ${authorLine}`,
+      `Date:   ${date}`,
+      '',
+      ...msg.split(/\r?\n/).map((line) => `    ${line}`),
+      '',
+    ].join('\n');
+  });
+
+  return success(chunks.join(''));
+}
+
+function handleBranch(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+
+  if (args.length === 0) {
+    const branches = listBranches(vfs, dir);
+    const current = readHeadRef(vfs, dir);
+    const output = branches
+      .map((branch) => `${branch === current ? '*' : ' '} ${branch}`)
+      .join('\n');
+    return success(output ? `${output}\n` : '');
+  }
+
+  if (args.length > 1) {
+    return failure('git branch: too many arguments', 2);
+  }
+
+  const ref = args[0];
+  if (!ref || ref.startsWith('-')) {
+    return failure(`git branch: unsupported option '${ref || ''}'`, 2);
+  }
+
+  // Create branch pointing to current HEAD
+  const headSha = getHeadCommitSha(vfs, dir);
+  if (!headSha) {
+    return failure('git branch: no commits yet', 1);
+  }
+
+  setRefSha(vfs, dir, ref, headSha);
+  return success('');
+}
+
+function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  let createBranch: string | undefined;
+  let ref: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '-b' && i + 1 < args.length) {
+      createBranch = args[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git checkout: unsupported option '${arg}'`, 2);
+    }
+    if (ref) {
+      return failure('git checkout: too many revision arguments', 2);
+    }
+    ref = arg;
+  }
+
+  if (createBranch) {
+    const headSha = getHeadCommitSha(vfs, dir);
+    if (!headSha) {
+      return failure('git checkout: no commits yet', 1);
+    }
+    setRefSha(vfs, dir, createBranch, headSha);
+    writeHeadRef(vfs, dir, createBranch);
+    return success(`Switched to a new branch '${createBranch}'\n`);
+  }
+
+  if (!ref) {
+    return failure('git checkout: missing branch or commit', 2);
+  }
+
+  const targetSha = resolveToSha(vfs, dir, ref);
+  if (!targetSha) {
+    return failure(`error: pathspec '${ref}' did not match any known refs`, 1);
+  }
+
+  // Get current tree to know what files to potentially remove
+  const oldTree = getHeadTree(vfs, dir);
+  const targetCommit = readCommit(vfs, dir, targetSha);
+  const newTree = targetCommit?.tree ?? {};
+
+  // Remove files that exist in old tree but not in new tree
+  for (const filepath of Object.keys(oldTree)) {
+    if (!(filepath in newTree)) {
+      const absPath = normalizePath(path.join(dir, filepath));
+      if (vfs.existsSync(absPath)) {
+        vfs.unlinkSync(absPath);
+      }
+    }
+  }
+
+  // Write files from new tree
+  for (const [filepath, blobHash] of Object.entries(newTree)) {
+    const content = readBlob(vfs, dir, blobHash);
+    const absPath = normalizePath(path.join(dir, filepath));
+    const parent = path.dirname(absPath);
+    if (parent && parent !== '/' && !vfs.existsSync(parent)) {
+      vfs.mkdirSync(parent, { recursive: true });
+    }
+    vfs.writeFileSync(absPath, content);
+  }
+
+  // Update index to match new tree
+  writeIndex(vfs, dir, { ...newTree });
+
+  // Update HEAD
+  const branchSha = getRefSha(vfs, dir, ref);
+  if (branchSha) {
+    writeHeadRef(vfs, dir, ref);
+  }
+  // If ref is a raw SHA, leave HEAD as-is (detached HEAD not fully supported)
+
+  return success(`Switched to '${ref}'\n`);
+}
+
+function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  let staged = false;
+  let nameOnly = false;
+  const refs: string[] = [];
+
+  for (const arg of args) {
+    if (arg === '--staged' || arg === '--cached') {
+      staged = true;
+      continue;
+    }
+    if (arg === '--name-only') {
+      nameOnly = true;
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git diff: unsupported option '${arg}'`, 2);
+    }
+    refs.push(arg);
+  }
+
+  if (refs.length > 2) {
+    return failure('git diff: too many revision arguments', 2);
+  }
+
+  if (staged && refs.length > 0) {
+    return failure('git diff: --staged cannot be combined with explicit revisions in v1', 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+
+  let entries: DiffEntry[];
+
+  if (refs.length === 2) {
+    entries = collectRefDiff(vfs, dir, refs[0], refs[1]);
+  } else if (staged) {
+    entries = collectStagedDiff(vfs, dir);
+  } else {
+    entries = collectUnstagedDiff(vfs, dir);
+  }
+
+  entries = entries.sort((a, b) => a.filepath.localeCompare(b.filepath));
+
+  if (nameOnly) {
+    return success(entries.length === 0 ? '' : `${entries.map((e) => e.filepath).join('\n')}\n`);
+  }
+
+  const patchText = entries.map((entry) => formatDiffEntry(entry)).join('');
+  return success(patchText);
+}
+
+function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+  if (args.length !== 1 || args[0].startsWith('-')) {
+    return failure('git rebase: only `git rebase <upstream>` is supported in v1', 2);
+  }
+
+  const upstreamRef = args[0];
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+
+  const currentBranch = readHeadRef(vfs, dir);
+  const originalHead = getRefSha(vfs, dir, currentBranch);
+  if (!originalHead) {
+    return failure('git rebase: no commits on current branch', 1);
+  }
+
+  const upstreamSha = resolveToSha(vfs, dir, upstreamRef);
+  if (!upstreamSha) {
+    return failure(`fatal: unknown revision '${upstreamRef}'`, 1);
+  }
+
+  // Find merge base
+  const mergeBase = findMergeBase(vfs, dir, originalHead, upstreamSha);
+  if (!mergeBase) {
+    return failure(`git rebase: unable to find merge base for '${upstreamRef}'`, 1);
+  }
+
+  // Already up to date
+  if (mergeBase === upstreamSha) {
+    return success(`Current branch '${currentBranch}' is already up to date.\n`);
+  }
+
+  // Fast-forward case
+  if (mergeBase === originalHead) {
+    setRefSha(vfs, dir, currentBranch, upstreamSha);
+    restoreTree(vfs, dir, upstreamSha);
+    return success(`Successfully rebased and fast-forwarded '${currentBranch}'.\n`);
+  }
+
+  // Collect commits to replay (from current branch, since merge base)
+  const replay: Array<{ oid: string; commit: SimpleCommit }> = [];
+  let walk: string | null = originalHead;
+  while (walk && walk !== mergeBase) {
+    const commit = readCommit(vfs, dir, walk);
+    if (!commit) break;
+    replay.push({ oid: walk, commit });
+    walk = commit.parent;
+  }
+  replay.reverse();
+
+  if (replay.length === 0) {
+    return success(`Current branch '${currentBranch}' is already up to date.\n`);
+  }
+
+  // Check for conflicts and replay
+  const mergeBaseCommit = readCommit(vfs, dir, mergeBase);
+  const mergeBaseTree = mergeBaseCommit?.tree ?? {};
+  const upstreamCommit = readCommit(vfs, dir, upstreamSha);
+  const upstreamTree = upstreamCommit?.tree ?? {};
+
+  let currentParentSha = upstreamSha;
+  let currentTree = { ...upstreamTree };
+
+  for (const entry of replay) {
+    const parentTree = entry.commit.parent
+      ? (readCommit(vfs, dir, entry.commit.parent)?.tree ?? {})
+      : {};
+    const commitTree = entry.commit.tree;
+
+    // Check for conflicts: files changed in this commit that were also changed in upstream
+    const allPaths = new Set([...Object.keys(commitTree), ...Object.keys(parentTree)]);
+    for (const filepath of allPaths) {
+      const inParent = parentTree[filepath];
+      const inCommit = commitTree[filepath];
+      if (inParent === inCommit) continue; // not changed in this commit
+
+      const inBase = mergeBaseTree[filepath];
+      const inUpstream = upstreamTree[filepath];
+      if (inBase !== inUpstream) {
+        // Conflict! Both branches modified this file — roll back
+        setRefSha(vfs, dir, currentBranch, originalHead);
+        restoreTree(vfs, dir, originalHead);
+        return mapGitError(new Error(`CONFLICT: merge conflict in ${filepath}`));
+      }
+    }
+
+    // Apply changes from this commit onto current tree
+    for (const filepath of allPaths) {
+      const inParent = parentTree[filepath];
+      const inCommit = commitTree[filepath];
+      if (inParent === inCommit) continue;
+
+      if (inCommit === undefined) {
+        delete currentTree[filepath];
+      } else {
+        currentTree[filepath] = inCommit;
+      }
+    }
+
+    // Create new commit
+    const newCommit: SimpleCommit = {
+      parent: currentParentSha,
+      message: entry.commit.message,
+      author: entry.commit.author,
+      tree: { ...currentTree },
+    };
+
+    currentParentSha = writeCommit(vfs, dir, newCommit);
+  }
+
+  // Update branch ref and restore working tree
+  setRefSha(vfs, dir, currentBranch, currentParentSha);
+  restoreTree(vfs, dir, currentParentSha);
+
+  return success(`Successfully rebased '${currentBranch}' onto '${upstreamRef}'.\n`);
+}
+
+function findMergeBase(vfs: VirtualFS, dir: string, oid1: string, oid2: string): string | null {
+  const ancestors1 = new Set<string>();
+  let current: string | null = oid1;
+  while (current) {
+    ancestors1.add(current);
+    const commit = readCommit(vfs, dir, current);
+    if (!commit?.parent) break;
+    current = commit.parent;
+  }
+
+  current = oid2;
+  while (current) {
+    if (ancestors1.has(current)) return current;
+    const commit = readCommit(vfs, dir, current);
+    if (!commit?.parent) break;
+    current = commit.parent;
+  }
+
+  return null;
+}
+
+function restoreTree(vfs: VirtualFS, dir: string, sha: string): void {
+  const commit = readCommit(vfs, dir, sha);
+  const tree = commit?.tree ?? {};
+
+  // Get current HEAD tree to remove stale files
+  const oldTree = getHeadTree(vfs, dir);
+
+  for (const filepath of Object.keys(oldTree)) {
+    if (!(filepath in tree)) {
+      const absPath = normalizePath(path.join(dir, filepath));
+      if (vfs.existsSync(absPath)) {
+        vfs.unlinkSync(absPath);
+      }
+    }
+  }
+
+  for (const [filepath, blobHash] of Object.entries(tree)) {
+    const content = readBlob(vfs, dir, blobHash);
+    const absPath = normalizePath(path.join(dir, filepath));
+    const parent = path.dirname(absPath);
+    if (parent && parent !== '/' && !vfs.existsSync(parent)) {
+      vfs.mkdirSync(parent, { recursive: true });
+    }
+    vfs.writeFileSync(absPath, content);
+  }
+
+  writeIndex(vfs, dir, { ...tree });
+}
+
+// ── Diff helpers ────────────────────────────────────────────────────────────
+
+function collectUnstagedDiff(vfs: VirtualFS, dir: string): DiffEntry[] {
+  const index = readIndex(vfs, dir);
+  const workFiles = collectWorkingTreeFiles(vfs, dir);
+  const entries: DiffEntry[] = [];
+
+  const allPaths = new Set([...Object.keys(index), ...Object.keys(workFiles)]);
+
+  for (const filepath of allPaths) {
+    const indexHash = index[filepath];
+    const workContent = workFiles[filepath];
+
+    if (indexHash === undefined && workContent !== undefined) continue; // untracked
+    if (indexHash !== undefined && workContent === undefined) {
+      // Deleted in working tree
+      entries.push({
+        filepath,
+        leftExists: true,
+        rightExists: false,
+        leftText: readBlob(vfs, dir, indexHash),
+        rightText: '',
+      });
+      continue;
+    }
+
+    if (indexHash !== undefined && workContent !== undefined) {
+      const workHash = simpleHash(workContent);
+      if (workHash !== indexHash) {
+        entries.push({
+          filepath,
+          leftExists: true,
+          rightExists: true,
+          leftText: readBlob(vfs, dir, indexHash),
+          rightText: workContent,
+        });
+      }
+    }
+  }
+
+  return entries;
+}
+
+function collectStagedDiff(vfs: VirtualFS, dir: string): DiffEntry[] {
+  const headTree = getHeadTree(vfs, dir);
+  const index = readIndex(vfs, dir);
+  const entries: DiffEntry[] = [];
+
+  const allPaths = new Set([...Object.keys(headTree), ...Object.keys(index)]);
+
+  for (const filepath of allPaths) {
+    const headHash = headTree[filepath];
+    const indexHash = index[filepath];
+
+    if (headHash === indexHash) continue;
+
+    entries.push({
+      filepath,
+      leftExists: headHash !== undefined,
+      rightExists: indexHash !== undefined,
+      leftText: headHash ? readBlob(vfs, dir, headHash) : '',
+      rightText: indexHash ? readBlob(vfs, dir, indexHash) : '',
+    });
+  }
+
+  return entries;
+}
+
+function collectRefDiff(vfs: VirtualFS, dir: string, leftRef: string, rightRef: string): DiffEntry[] {
+  const leftSha = resolveToSha(vfs, dir, leftRef);
+  const rightSha = resolveToSha(vfs, dir, rightRef);
+
+  const leftTree = leftSha ? (readCommit(vfs, dir, leftSha)?.tree ?? {}) : {};
+  const rightTree = rightSha ? (readCommit(vfs, dir, rightSha)?.tree ?? {}) : {};
+
+  const entries: DiffEntry[] = [];
+  const allPaths = new Set([...Object.keys(leftTree), ...Object.keys(rightTree)]);
+
+  for (const filepath of allPaths) {
+    const leftHash = leftTree[filepath];
+    const rightHash = rightTree[filepath];
+
+    if (leftHash === rightHash) continue;
+
+    entries.push({
+      filepath,
+      leftExists: leftHash !== undefined,
+      rightExists: rightHash !== undefined,
+      leftText: leftHash ? readBlob(vfs, dir, leftHash) : '',
+      rightText: rightHash ? readBlob(vfs, dir, rightHash) : '',
+    });
+  }
+
+  return entries;
+}
+
+function formatDiffEntry(entry: DiffEntry): string {
+  const filepath = entry.filepath;
+  const patch = structuredPatch(
+    `a/${filepath}`,
+    `b/${filepath}`,
+    entry.leftText,
+    entry.rightText,
+    '',
+    '',
+    { context: 3 }
+  );
+
+  let output = `diff --git a/${filepath} b/${filepath}\n`;
+  if (!entry.leftExists) {
+    output += `new file mode 100644\n`;
+    output += `--- /dev/null\n`;
+    output += `+++ b/${filepath}\n`;
+  } else if (!entry.rightExists) {
+    output += `deleted file mode 100644\n`;
+    output += `--- a/${filepath}\n`;
+    output += `+++ /dev/null\n`;
+  } else {
+    output += `--- a/${filepath}\n`;
+    output += `+++ b/${filepath}\n`;
+  }
+
+  if (patch.hunks.length === 0) {
+    return output;
+  }
+
+  for (const hunk of patch.hunks) {
+    output += `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n`;
+    for (const line of hunk.lines) {
+      output += `${line}\n`;
+    }
+  }
+
+  return output;
+}
+
+// ── Remote handlers (still use isomorphic-git) ─────────────────────────────
 
 async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let depth: number | undefined;
@@ -223,436 +1214,6 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
   });
 
   return success(`Cloned ${url} into ${dir}\n`);
-}
-
-async function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  let short = false;
-  let pathspec: string | undefined;
-
-  for (const arg of args) {
-    if (arg === '--short' || arg === '--porcelain') {
-      short = true;
-      continue;
-    }
-    if (arg.startsWith('-')) {
-      return failure(`git status: unsupported option '${arg}'`, 2);
-    }
-    if (pathspec) {
-      return failure('git status: too many path arguments', 2);
-    }
-    pathspec = arg;
-  }
-
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const relativePath = pathspec ? toRepoRelativePath(dir, resolvePath(ctx.cwd, pathspec)) : undefined;
-
-  const matrix = await git.statusMatrix({
-    fs: createGitFs(vfs),
-    dir,
-    filepaths: relativePath ? [relativePath] : ['.'],
-  });
-
-  const lines: string[] = [];
-  for (const row of matrix) {
-    const [filepath, head, workdir, stage] = row;
-    const code = toShortStatusCode(head, workdir, stage);
-    if (!code || code === '  ') continue;
-    lines.push(`${code} ${filepath}`);
-  }
-
-  if (!short) {
-    return success(lines.length === 0 ? 'nothing to commit, working tree clean\n' : `${lines.join('\n')}\n`);
-  }
-
-  return success(lines.length === 0 ? '' : `${lines.join('\n')}\n`);
-}
-
-async function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  if (args.length === 0) {
-    return failure('git add: missing pathspec', 2);
-  }
-
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitFs = createGitFs(vfs);
-  let addAll = false;
-  let sawDoubleDash = false;
-  const explicitPathspecs: string[] = [];
-
-  for (const arg of args) {
-    if (!sawDoubleDash && arg === '--') {
-      sawDoubleDash = true;
-      continue;
-    }
-
-    if (!sawDoubleDash && (arg === '-A' || arg === '--all')) {
-      addAll = true;
-      continue;
-    }
-
-    if (!sawDoubleDash && arg.startsWith('-')) {
-      return failure(`git add: unsupported option '${arg}'`, 2);
-    }
-
-    if (arg === '.') {
-      addAll = true;
-      continue;
-    }
-
-    explicitPathspecs.push(arg);
-  }
-
-  if (!addAll && explicitPathspecs.length === 0) {
-    return failure('git add: missing pathspec', 2);
-  }
-
-  const runAdd = async () => {
-    if (addAll) {
-      await stageAllChanges(gitFs, dir);
-    }
-
-    for (const arg of explicitPathspecs) {
-      const absPath = resolvePath(ctx.cwd, arg);
-      const filepath = toRepoRelativePath(dir, absPath);
-      await git.add({ fs: gitFs, dir, filepath });
-    }
-  };
-
-  try {
-    await runAdd();
-  } catch (error) {
-    if (!isCorruptIndexError(error)) {
-      throw error;
-    }
-
-    // Recover from a corrupted index by recreating it from HEAD/worktree.
-    resetGitIndexFiles(vfs, dir);
-    await runAdd();
-  }
-
-  return success('');
-}
-
-async function stageAllChanges(gitFs: ReturnType<typeof createGitFs>, dir: string): Promise<void> {
-  const matrix = await git.statusMatrix({
-    fs: gitFs,
-    dir,
-    filepaths: ['.'],
-  });
-
-  for (const row of matrix) {
-    const [filepath, head, workdir, stage] = row;
-    if (filepath === '.') continue;
-
-    // No-op if index already matches worktree.
-    if (stage === workdir) continue;
-
-    // Stage deletions when file disappeared from worktree.
-    if (workdir === 0 && (head !== 0 || stage !== 0)) {
-      await git.remove({ fs: gitFs, dir, filepath });
-      continue;
-    }
-
-    await git.add({ fs: gitFs, dir, filepath });
-  }
-}
-
-async function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  let message: string | undefined;
-  let authorFlag: string | undefined;
-  let amend = false;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if ((arg === '-m' || arg === '--message') && i + 1 < args.length) {
-      message = args[i + 1];
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith('--message=')) {
-      message = arg.slice('--message='.length);
-      continue;
-    }
-    if ((arg === '--author') && i + 1 < args.length) {
-      authorFlag = args[i + 1];
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith('--author=')) {
-      authorFlag = arg.slice('--author='.length);
-      continue;
-    }
-    if (arg === '--amend') {
-      amend = true;
-      continue;
-    }
-    if (arg.startsWith('-')) {
-      return failure(`git commit: unsupported option '${arg}'`, 2);
-    }
-  }
-
-  if (!message) {
-    return failure('git commit: missing commit message (use -m)', 2);
-  }
-
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitEnv = resolveGitEnv(ctx.env);
-  const fallbackAuthor = {
-    name: gitEnv.authorName,
-    email: gitEnv.authorEmail,
-  };
-  const parsedAuthor = parseAuthor(authorFlag);
-  const author = parsedAuthor || fallbackAuthor;
-
-  const oid = await git.commit({
-    fs: createGitFs(vfs),
-    dir,
-    message,
-    author,
-    committer: author,
-    amend,
-  });
-
-  const branch = await git.currentBranch({ fs: createGitFs(vfs), dir, fullname: false }) || 'detached';
-  return success(`[${branch} ${oid.slice(0, 7)}] ${message}\n`);
-}
-
-async function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  let depth: number | undefined;
-  let ref: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if ((arg === '-n' || arg === '--depth') && i + 1 < args.length) {
-      depth = Number(args[i + 1]);
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith('--depth=')) {
-      depth = Number(arg.slice('--depth='.length));
-      continue;
-    }
-    if (arg.startsWith('-')) {
-      return failure(`git log: unsupported option '${arg}'`, 2);
-    }
-    if (ref) {
-      return failure('git log: too many revision arguments', 2);
-    }
-    ref = arg;
-  }
-
-  if (depth !== undefined && (!Number.isFinite(depth) || depth <= 0)) {
-    return failure('git log: depth must be a positive number', 2);
-  }
-
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const entries = await git.log({
-    fs: createGitFs(vfs),
-    dir,
-    ref: ref || 'HEAD',
-    depth,
-  });
-
-  if (entries.length === 0) {
-    return success('');
-  }
-
-  const chunks = entries.map((entry) => {
-    const author = entry.commit.author;
-    const authorLine = author ? `${author.name} <${author.email}>` : 'Unknown <unknown@example.com>';
-    const date = author ? new Date(author.timestamp * 1000).toUTCString() : 'Unknown date';
-    const msg = (entry.commit.message || '').trimEnd();
-    return [
-      `commit ${entry.oid}`,
-      `Author: ${authorLine}`,
-      `Date:   ${date}`,
-      '',
-      ...indentMessage(msg),
-      '',
-    ].join('\n');
-  });
-
-  return success(chunks.join(''));
-}
-
-async function handleBranch(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitFs = createGitFs(vfs);
-
-  if (args.length === 0) {
-    const branches = await git.listBranches({ fs: gitFs, dir });
-    const current = await git.currentBranch({ fs: gitFs, dir, fullname: false });
-    const output = branches
-      .map((branch) => `${branch === current ? '*' : ' '} ${branch}`)
-      .join('\n');
-    return success(output ? `${output}\n` : '');
-  }
-
-  if (args.length > 1) {
-    return failure('git branch: too many arguments', 2);
-  }
-
-  const ref = args[0];
-  if (!ref || ref.startsWith('-')) {
-    return failure(`git branch: unsupported option '${ref || ''}'`, 2);
-  }
-
-  await git.branch({ fs: gitFs, dir, ref });
-  return success('');
-}
-
-async function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitFs = createGitFs(vfs);
-  let createBranch: string | undefined;
-  let ref: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === '-b' && i + 1 < args.length) {
-      createBranch = args[i + 1];
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith('-')) {
-      return failure(`git checkout: unsupported option '${arg}'`, 2);
-    }
-    if (ref) {
-      return failure('git checkout: too many revision arguments', 2);
-    }
-    ref = arg;
-  }
-
-  if (createBranch) {
-    await git.branch({ fs: gitFs, dir, ref: createBranch, checkout: true });
-    return success(`Switched to a new branch '${createBranch}'\n`);
-  }
-
-  if (!ref) {
-    return failure('git checkout: missing branch or commit', 2);
-  }
-
-  await git.checkout({ fs: gitFs, dir, ref, force: true });
-  return success(`Switched to '${ref}'\n`);
-}
-
-async function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  const parsed = parseDiffArgs(args);
-  if ('error' in parsed) {
-    return failure(parsed.error, 2);
-  }
-
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitFs = createGitFs(vfs);
-
-  let entries: DiffEntry[] = [];
-
-  if (parsed.refs.length === 2) {
-    entries = await collectRefDiffEntries(gitFs, dir, parsed.refs[0], parsed.refs[1]);
-  } else if (parsed.staged) {
-    entries = await collectStagedDiffEntries(gitFs, dir);
-  } else {
-    entries = await collectUnstagedDiffEntries(gitFs, dir);
-  }
-
-  entries = entries.sort((a, b) => a.filepath.localeCompare(b.filepath));
-
-  if (parsed.nameOnly) {
-    return success(entries.length === 0 ? '' : `${entries.map((entry) => entry.filepath).join('\n')}\n`);
-  }
-
-  const patchText = entries.map((entry) => formatDiffEntry(entry)).join('');
-  return success(patchText);
-}
-
-async function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
-  if (args.length !== 1 || args[0].startsWith('-')) {
-    return failure('git rebase: only `git rebase <upstream>` is supported in v1', 2);
-  }
-
-  const upstreamRef = args[0];
-  const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitFs = createGitFs(vfs);
-
-  const currentRefFull = await git.currentBranch({ fs: gitFs, dir, fullname: true });
-  const currentRefShort = await git.currentBranch({ fs: gitFs, dir, fullname: false });
-  if (!currentRefFull || !currentRefShort) {
-    return failure('git rebase: detached HEAD is not supported', 1);
-  }
-
-  const originalHead = await git.resolveRef({ fs: gitFs, dir, ref: currentRefFull });
-  const upstreamOid = await resolveRefLike(gitFs, dir, upstreamRef);
-
-  const mergeBases = await git.findMergeBase({ fs: gitFs, dir, oids: [originalHead, upstreamOid] });
-  if (mergeBases.length === 0) {
-    return failure(`git rebase: unable to find merge base for '${upstreamRef}'`, 1);
-  }
-  const mergeBase = mergeBases[0];
-
-  if (mergeBase === upstreamOid) {
-    return success(`Current branch '${currentRefShort}' is already up to date.\n`);
-  }
-
-  if (mergeBase === originalHead) {
-    await git.writeRef({ fs: gitFs, dir, ref: currentRefFull, value: upstreamOid, force: true });
-    await git.checkout({ fs: gitFs, dir, ref: currentRefShort, force: true });
-    return success(`Successfully rebased and fast-forwarded '${currentRefShort}'.\n`);
-  }
-
-  const commits = await git.log({ fs: gitFs, dir, ref: currentRefShort, depth: 5000 });
-  const replay: ReadCommitResult[] = [];
-  for (const commit of commits) {
-    if (commit.oid === mergeBase) break;
-    replay.push(commit);
-  }
-
-  if (replay.length === 0) {
-    return success(`Current branch '${currentRefShort}' is already up to date.\n`);
-  }
-
-  replay.reverse();
-
-  const backupRef = `refs/almostnode/rebase-backup/${Date.now()}`;
-  await git.writeRef({ fs: gitFs, dir, ref: backupRef, value: originalHead, force: true });
-
-  const gitEnv = resolveGitEnv(ctx.env);
-  const committer = {
-    name: gitEnv.authorName,
-    email: gitEnv.authorEmail,
-  };
-
-  try {
-    await git.writeRef({ fs: gitFs, dir, ref: currentRefFull, value: upstreamOid, force: true });
-    await git.checkout({ fs: gitFs, dir, ref: currentRefShort, force: true });
-
-    for (const commit of replay) {
-      await git.cherryPick({
-        fs: gitFs,
-        dir,
-        oid: commit.oid,
-        committer,
-        abortOnConflict: true,
-      });
-    }
-
-    try {
-      await git.deleteRef({ fs: gitFs, dir, ref: backupRef });
-    } catch {
-      // best effort cleanup
-    }
-
-    return success(`Successfully rebased '${currentRefShort}' onto '${upstreamRef}'.\n`);
-  } catch (error) {
-    await git.writeRef({ fs: gitFs, dir, ref: currentRefFull, value: originalHead, force: true });
-    await git.checkout({ fs: gitFs, dir, ref: currentRefShort, force: true });
-
-    try {
-      await git.deleteRef({ fs: gitFs, dir, ref: backupRef });
-    } catch {
-      // best effort cleanup
-    }
-
-    return mapGitError(error);
-  }
 }
 
 async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
@@ -802,6 +1363,8 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
   return success(`Pushed ${ref} to ${remote}\n`);
 }
 
+// ── Utilities ───────────────────────────────────────────────────────────────
+
 function resolveGitEnv(env: Record<string, string>): GitEnv {
   const token = env.GIT_TOKEN || env.GITHUB_TOKEN || undefined;
   const username = env.GIT_USERNAME || undefined;
@@ -883,7 +1446,7 @@ function toRepoRelativePath(repoRoot: string, absolutePath: string): string {
   return normalizedPath.slice(normalizedRoot.length + 1);
 }
 
-function parseAuthor(raw?: string): ParsedAuthor | undefined {
+function parseAuthor(raw?: string): { name: string; email: string } | undefined {
   if (!raw) return undefined;
   const match = raw.match(/^(.*)\s+<([^>]+)>$/);
   if (!match) return undefined;
@@ -891,252 +1454,6 @@ function parseAuthor(raw?: string): ParsedAuthor | undefined {
   const email = match[2].trim();
   if (!name || !email) return undefined;
   return { name, email };
-}
-
-function toShortStatusCode(head: number, workdir: number, stage: number): string {
-  const key = `${head}${workdir}${stage}`;
-  const code = SHORT_STATUS_MAP[key];
-  if (code) return code;
-
-  if (head === 0 && workdir !== 0) return '??';
-
-  let index = ' ';
-  let worktree = ' ';
-
-  if (head !== stage) {
-    if (stage === 0) index = 'D';
-    else if (head === 0) index = 'A';
-    else index = 'M';
-  }
-
-  if (stage !== workdir) {
-    if (workdir === 0) worktree = 'D';
-    else if (workdir === 2) worktree = 'M';
-  }
-
-  return `${index}${worktree}`;
-}
-
-const SHORT_STATUS_MAP: Record<string, string> = {
-  '000': '  ',
-  '003': 'AD',
-  '020': '??',
-  '022': 'A ',
-  '023': 'AM',
-  '100': 'D ',
-  '101': ' D',
-  '103': 'MD',
-  '110': 'D ',
-  '111': '  ',
-  '113': 'MM',
-  '120': 'D ',
-  '121': ' M',
-  '122': 'M ',
-  '123': 'MM',
-};
-
-function parseDiffArgs(args: string[]): ParsedDiffArgs | { error: string } {
-  let staged = false;
-  let nameOnly = false;
-  const refs: string[] = [];
-
-  for (const arg of args) {
-    if (arg === '--staged' || arg === '--cached') {
-      staged = true;
-      continue;
-    }
-    if (arg === '--name-only') {
-      nameOnly = true;
-      continue;
-    }
-    if (arg.startsWith('-')) {
-      return { error: `git diff: unsupported option '${arg}'` };
-    }
-    refs.push(arg);
-  }
-
-  if (refs.length > 2) {
-    return { error: 'git diff: too many revision arguments' };
-  }
-
-  if (staged && refs.length > 0) {
-    return { error: 'git diff: --staged cannot be combined with explicit revisions in v1' };
-  }
-
-  return { staged, nameOnly, refs };
-}
-
-async function collectUnstagedDiffEntries(gitFs: ReturnType<typeof createGitFs>, dir: string): Promise<DiffEntry[]> {
-  const rows = await git.walk({
-    fs: gitFs,
-    dir,
-    trees: [STAGE(), WORKDIR()],
-    map: async (filepath: string, entries: Array<WalkerEntry | null>) => {
-      if (filepath === '.') return undefined;
-      const [stageEntry, workdirEntry] = entries;
-      return collectDiffEntryForPair(gitFs, dir, filepath, stageEntry, workdirEntry, 'stage', 'workdir');
-    },
-  }) as Array<DiffEntry | undefined>;
-
-  return rows.filter((entry): entry is DiffEntry => Boolean(entry));
-}
-
-async function collectStagedDiffEntries(gitFs: ReturnType<typeof createGitFs>, dir: string): Promise<DiffEntry[]> {
-  const rows = await git.walk({
-    fs: gitFs,
-    dir,
-    trees: [TREE({ ref: 'HEAD' }), STAGE()],
-    map: async (filepath: string, entries: Array<WalkerEntry | null>) => {
-      if (filepath === '.') return undefined;
-      const [headEntry, stageEntry] = entries;
-      return collectDiffEntryForPair(gitFs, dir, filepath, headEntry, stageEntry, 'tree', 'stage');
-    },
-  }) as Array<DiffEntry | undefined>;
-
-  return rows.filter((entry): entry is DiffEntry => Boolean(entry));
-}
-
-async function collectRefDiffEntries(
-  gitFs: ReturnType<typeof createGitFs>,
-  dir: string,
-  leftRef: string,
-  rightRef: string
-): Promise<DiffEntry[]> {
-  const rows = await git.walk({
-    fs: gitFs,
-    dir,
-    trees: [TREE({ ref: leftRef }), TREE({ ref: rightRef })],
-    map: async (filepath: string, entries: Array<WalkerEntry | null>) => {
-      if (filepath === '.') return undefined;
-      const [leftEntry, rightEntry] = entries;
-      return collectDiffEntryForPair(gitFs, dir, filepath, leftEntry, rightEntry, 'tree', 'tree');
-    },
-  }) as Array<DiffEntry | undefined>;
-
-  return rows.filter((entry): entry is DiffEntry => Boolean(entry));
-}
-
-async function collectDiffEntryForPair(
-  gitFs: ReturnType<typeof createGitFs>,
-  dir: string,
-  filepath: string,
-  leftEntry: WalkerEntry | null,
-  rightEntry: WalkerEntry | null,
-  leftKind: 'tree' | 'stage' | 'workdir',
-  rightKind: 'tree' | 'stage' | 'workdir'
-): Promise<DiffEntry | undefined> {
-  const [leftExists, leftOid] = await getEntryIdentity(leftEntry);
-  const [rightExists, rightOid] = await getEntryIdentity(rightEntry);
-
-  if (!leftExists && !rightExists) return undefined;
-  if (leftExists && rightExists && leftOid && rightOid && leftOid === rightOid) return undefined;
-
-  const leftText = await readEntryText(gitFs, dir, leftEntry, leftKind);
-  const rightText = await readEntryText(gitFs, dir, rightEntry, rightKind);
-
-  if (leftText === rightText && leftExists === rightExists) return undefined;
-
-  return {
-    filepath,
-    leftExists,
-    rightExists,
-    leftText,
-    rightText,
-  };
-}
-
-async function getEntryIdentity(entry: WalkerEntry | null): Promise<[boolean, string | undefined]> {
-  if (!entry) return [false, undefined];
-  const type = await entry.type();
-  if (type !== 'blob') return [false, undefined];
-  const oid = await entry.oid();
-  return [true, oid];
-}
-
-async function readEntryText(
-  gitFs: ReturnType<typeof createGitFs>,
-  dir: string,
-  entry: WalkerEntry | null,
-  kind: 'tree' | 'stage' | 'workdir'
-): Promise<string> {
-  if (!entry) return '';
-
-  const type = await entry.type();
-  if (type !== 'blob') return '';
-
-  if (kind === 'stage') {
-    const oid = await entry.oid();
-    if (!oid) return '';
-    const obj = await git.readObject({
-      fs: gitFs,
-      dir,
-      oid,
-      format: 'content',
-    });
-    if (!('object' in obj) || !(obj.object instanceof Uint8Array)) return '';
-    return decodeBytes(obj.object);
-  }
-
-  const content = await entry.content();
-  if (!content) return '';
-  return decodeBytes(content);
-}
-
-function decodeBytes(data: Uint8Array): string {
-  if (data.length === 0) return '';
-  return textDecoder.decode(data);
-}
-
-function formatDiffEntry(entry: DiffEntry): string {
-  const filepath = entry.filepath;
-  const patch = structuredPatch(
-    `a/${filepath}`,
-    `b/${filepath}`,
-    entry.leftText,
-    entry.rightText,
-    '',
-    '',
-    { context: 3 }
-  );
-
-  let output = `diff --git a/${filepath} b/${filepath}\n`;
-  if (!entry.leftExists) {
-    output += `new file mode 100644\n`;
-    output += `--- /dev/null\n`;
-    output += `+++ b/${filepath}\n`;
-  } else if (!entry.rightExists) {
-    output += `deleted file mode 100644\n`;
-    output += `--- a/${filepath}\n`;
-    output += `+++ /dev/null\n`;
-  } else {
-    output += `--- a/${filepath}\n`;
-    output += `+++ b/${filepath}\n`;
-  }
-
-  if (patch.hunks.length === 0) {
-    return output;
-  }
-
-  for (const hunk of patch.hunks) {
-    output += `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n`;
-    for (const line of hunk.lines) {
-      output += `${line}\n`;
-    }
-  }
-
-  return output;
-}
-
-async function resolveRefLike(gitFs: ReturnType<typeof createGitFs>, dir: string, ref: string): Promise<string> {
-  try {
-    return await git.resolveRef({ fs: gitFs, dir, ref });
-  } catch {
-    try {
-      return await git.expandOid({ fs: gitFs, dir, oid: ref });
-    } catch {
-      throw new Error(`fatal: unknown revision '${ref}'`);
-    }
-  }
 }
 
 function inferCloneTarget(url: string): string {
@@ -1148,11 +1465,6 @@ function inferCloneTarget(url: string): string {
 
 function isUrlLike(value: string): boolean {
   return /^https?:\/\//i.test(value);
-}
-
-function indentMessage(message: string): string[] {
-  if (!message) return ['    (no message)'];
-  return message.split(/\r?\n/).map((line) => `    ${line}`);
 }
 
 function mapGitError(error: unknown): JustBashExecResult {
@@ -1170,33 +1482,6 @@ function mapGitError(error: unknown): JustBashExecResult {
   }
 
   return failure(message, 1);
-}
-
-function isCorruptIndexError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return message.includes('invalid dircache magic file number')
-    || message.includes('invalid checksum in gitindex buffer')
-    || message.includes('offset is out of bounds')
-    || message.includes('corrupt index');
-}
-
-function resetGitIndexFiles(vfs: VirtualFS, dir: string): void {
-  const indexPath = normalizePath(path.join(dir, '.git/index'));
-  const indexLockPath = `${indexPath}.lock`;
-  if (vfs.existsSync(indexLockPath)) {
-    try {
-      vfs.unlinkSync(indexLockPath);
-    } catch {
-      // best effort cleanup
-    }
-  }
-  if (vfs.existsSync(indexPath)) {
-    try {
-      vfs.unlinkSync(indexPath);
-    } catch {
-      // best effort cleanup
-    }
-  }
 }
 
 function createGitFs(vfs: VirtualFS): {

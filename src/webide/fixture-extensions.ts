@@ -107,6 +107,296 @@ function createThemeExtension(): FixtureDefinition {
   };
 }
 
+function createIslandsDarkThemeExtension(): FixtureDefinition {
+  return {
+    namespace: 'almostnode-fixtures',
+    name: 'islands-dark',
+    version: '0.0.1',
+    displayName: 'Islands Dark',
+    description: 'A polished dark theme with deep charcoal backgrounds and soft borders.',
+    categories: ['Themes'],
+    tags: ['__web_extension', 'theme'],
+    manifest: {
+      name: 'islands-dark',
+      publisher: 'almostnode-fixtures',
+      version: '0.0.1',
+      displayName: 'Islands Dark',
+      description: 'A polished dark theme with deep charcoal backgrounds and soft borders.',
+      engines: { vscode: '^1.90.0' },
+      contributes: {
+        themes: [
+          {
+            id: 'islands-dark',
+            label: 'Islands Dark',
+            uiTheme: 'vs-dark',
+            path: './themes/islands-dark-color-theme.json',
+          },
+        ],
+      },
+    },
+    files: {
+      'themes/islands-dark-color-theme.json': JSON.stringify(
+        {
+          name: 'Islands Dark',
+          type: 'dark',
+          colors: {
+            'editor.background': '#191a1c',
+            'editor.foreground': '#d4d4d4',
+            'editorGroupHeader.tabsBackground': '#191a1c',
+            'editorGutter.background': '#191a1c',
+            'tab.activeBackground': '#191a1c',
+            'tab.inactiveBackground': '#17181a',
+            'tab.activeForeground': '#e0e0e0',
+            'tab.inactiveForeground': '#808080',
+            'tab.border': '#121216',
+            'activityBar.background': '#121216',
+            'activityBar.foreground': '#c0c0c0',
+            'activityBar.border': '#121216',
+            'activityBarBadge.background': '#007acc',
+            'sideBar.background': '#17181a',
+            'sideBar.foreground': '#cccccc',
+            'sideBar.border': '#121216',
+            'sideBarTitle.foreground': '#bbbbbb',
+            'sideBarSectionHeader.background': '#17181a',
+            'sideBarSectionHeader.foreground': '#cccccc',
+            'panel.background': '#191a1c',
+            'panel.border': '#121216',
+            'panelTitle.activeBorder': '#007acc',
+            'panelTitle.activeForeground': '#e0e0e0',
+            'panelTitle.inactiveForeground': '#808080',
+            'statusBar.background': '#121216',
+            'statusBar.foreground': '#808080',
+            'statusBar.border': '#121216',
+            'titleBar.activeBackground': '#121216',
+            'titleBar.activeForeground': '#cccccc',
+            'titleBar.border': '#121216',
+            'input.background': '#191a1c',
+            'input.foreground': '#cccccc',
+            'input.border': '#2a2b2e',
+            'dropdown.background': '#191a1c',
+            'dropdown.border': '#2a2b2e',
+            'list.activeSelectionBackground': '#2a2d32',
+            'list.hoverBackground': '#22242a',
+            'list.inactiveSelectionBackground': '#222428',
+            'focusBorder': '#007acc80',
+            'widget.shadow': '#00000040',
+            'editorWidget.background': '#191a1c',
+            'editorWidget.border': '#2a2b2e',
+            'quickInput.background': '#191a1c',
+            'quickInputList.focusBackground': '#2a2d32',
+            'badge.background': '#007acc',
+            'badge.foreground': '#ffffff',
+            'scrollbarSlider.background': '#79797950',
+            'scrollbarSlider.hoverBackground': '#64646480',
+            'scrollbarSlider.activeBackground': '#bfbfbf40',
+            'terminal.background': '#191a1c',
+            'terminal.foreground': '#cccccc',
+            'breadcrumb.background': '#191a1c',
+            'breadcrumb.foreground': '#a0a0a0',
+          },
+          tokenColors: [
+            {
+              scope: ['comment', 'punctuation.definition.comment'],
+              settings: { foreground: '#6A9955' },
+            },
+            {
+              scope: ['string', 'string.quoted'],
+              settings: { foreground: '#CE9178' },
+            },
+            {
+              scope: ['keyword', 'storage.type', 'storage.modifier'],
+              settings: { foreground: '#569CD6' },
+            },
+            {
+              scope: ['entity.name.function', 'support.function'],
+              settings: { foreground: '#DCDCAA' },
+            },
+            {
+              scope: ['entity.name.type', 'support.type'],
+              settings: { foreground: '#4EC9B0' },
+            },
+            {
+              scope: ['variable', 'variable.other'],
+              settings: { foreground: '#9CDCFE' },
+            },
+            {
+              scope: ['constant.numeric'],
+              settings: { foreground: '#B5CEA8' },
+            },
+            {
+              scope: ['constant.language'],
+              settings: { foreground: '#569CD6' },
+            },
+            {
+              scope: ['entity.name.tag'],
+              settings: { foreground: '#569CD6' },
+            },
+            {
+              scope: ['entity.other.attribute-name'],
+              settings: { foreground: '#9CDCFE' },
+            },
+            {
+              scope: ['punctuation'],
+              settings: { foreground: '#d4d4d4' },
+            },
+            {
+              scope: ['meta.jsx.children', 'meta.embedded.expression'],
+              settings: { foreground: '#d4d4d4' },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    },
+  };
+}
+
+function createIslandsLightThemeExtension(): FixtureDefinition {
+  return {
+    namespace: 'almostnode-fixtures',
+    name: 'islands-light',
+    version: '0.0.1',
+    displayName: 'Islands Light',
+    description: 'A polished light theme with warm off-white backgrounds and soft borders.',
+    categories: ['Themes'],
+    tags: ['__web_extension', 'theme'],
+    manifest: {
+      name: 'islands-light',
+      publisher: 'almostnode-fixtures',
+      version: '0.0.1',
+      displayName: 'Islands Light',
+      description: 'A polished light theme with warm off-white backgrounds and soft borders.',
+      engines: { vscode: '^1.90.0' },
+      contributes: {
+        themes: [
+          {
+            id: 'islands-light',
+            label: 'Islands Light',
+            uiTheme: 'vs',
+            path: './themes/islands-light-color-theme.json',
+          },
+        ],
+      },
+    },
+    files: {
+      'themes/islands-light-color-theme.json': JSON.stringify(
+        {
+          name: 'Islands Light',
+          type: 'light',
+          colors: {
+            'editor.background': '#ffffff',
+            'editor.foreground': '#24292f',
+            'editorGroupHeader.tabsBackground': '#f6f7f9',
+            'editorGutter.background': '#ffffff',
+            'tab.activeBackground': '#ffffff',
+            'tab.inactiveBackground': '#f0f1f3',
+            'tab.activeForeground': '#24292f',
+            'tab.inactiveForeground': '#8b949e',
+            'tab.border': '#e8e9eb',
+            'activityBar.background': '#f0f1f3',
+            'activityBar.foreground': '#57606a',
+            'activityBar.border': '#e8e9eb',
+            'activityBarBadge.background': '#0969da',
+            'sideBar.background': '#f6f7f9',
+            'sideBar.foreground': '#24292f',
+            'sideBar.border': '#e8e9eb',
+            'sideBarTitle.foreground': '#57606a',
+            'sideBarSectionHeader.background': '#f6f7f9',
+            'sideBarSectionHeader.foreground': '#24292f',
+            'panel.background': '#ffffff',
+            'panel.border': '#e8e9eb',
+            'panelTitle.activeBorder': '#0969da',
+            'panelTitle.activeForeground': '#24292f',
+            'panelTitle.inactiveForeground': '#8b949e',
+            'statusBar.background': '#f0f1f3',
+            'statusBar.foreground': '#57606a',
+            'statusBar.border': '#e8e9eb',
+            'titleBar.activeBackground': '#f0f1f3',
+            'titleBar.activeForeground': '#24292f',
+            'titleBar.border': '#e8e9eb',
+            'input.background': '#ffffff',
+            'input.foreground': '#24292f',
+            'input.border': '#d0d7de',
+            'dropdown.background': '#ffffff',
+            'dropdown.border': '#d0d7de',
+            'list.activeSelectionBackground': '#ddf4ff',
+            'list.hoverBackground': '#f3f4f6',
+            'list.inactiveSelectionBackground': '#eef1f4',
+            'focusBorder': '#0969da80',
+            'widget.shadow': '#00000018',
+            'editorWidget.background': '#ffffff',
+            'editorWidget.border': '#d0d7de',
+            'quickInput.background': '#ffffff',
+            'quickInputList.focusBackground': '#ddf4ff',
+            'badge.background': '#0969da',
+            'badge.foreground': '#ffffff',
+            'scrollbarSlider.background': '#8b949e30',
+            'scrollbarSlider.hoverBackground': '#8b949e50',
+            'scrollbarSlider.activeBackground': '#8b949e70',
+            'terminal.background': '#ffffff',
+            'terminal.foreground': '#24292f',
+            'breadcrumb.background': '#ffffff',
+            'breadcrumb.foreground': '#57606a',
+          },
+          tokenColors: [
+            {
+              scope: ['comment', 'punctuation.definition.comment'],
+              settings: { foreground: '#6e7781' },
+            },
+            {
+              scope: ['string', 'string.quoted'],
+              settings: { foreground: '#0a3069' },
+            },
+            {
+              scope: ['keyword', 'storage.type', 'storage.modifier'],
+              settings: { foreground: '#cf222e' },
+            },
+            {
+              scope: ['entity.name.function', 'support.function'],
+              settings: { foreground: '#8250df' },
+            },
+            {
+              scope: ['entity.name.type', 'support.type'],
+              settings: { foreground: '#0550ae' },
+            },
+            {
+              scope: ['variable', 'variable.other'],
+              settings: { foreground: '#24292f' },
+            },
+            {
+              scope: ['constant.numeric'],
+              settings: { foreground: '#0550ae' },
+            },
+            {
+              scope: ['constant.language'],
+              settings: { foreground: '#0550ae' },
+            },
+            {
+              scope: ['entity.name.tag'],
+              settings: { foreground: '#116329' },
+            },
+            {
+              scope: ['entity.other.attribute-name'],
+              settings: { foreground: '#0550ae' },
+            },
+            {
+              scope: ['punctuation'],
+              settings: { foreground: '#24292f' },
+            },
+            {
+              scope: ['meta.jsx.children', 'meta.embedded.expression'],
+              settings: { foreground: '#24292f' },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    },
+  };
+}
+
 function createSnippetsExtension(): FixtureDefinition {
   return {
     namespace: 'almostnode-fixtures',
@@ -223,6 +513,8 @@ function createNodeOnlyExtension(): FixtureDefinition {
 
 const FIXTURES = [
   createThemeExtension(),
+  createIslandsDarkThemeExtension(),
+  createIslandsLightThemeExtension(),
   createSnippetsExtension(),
   createBrowserCommandExtension(),
   createNodeOnlyExtension(),
