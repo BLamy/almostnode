@@ -5,48 +5,69 @@
  * with virtual file system and CommonJS module support
  */
 
-export { VirtualFS } from './virtual-fs';
-export type { FSNode, Stats, FSWatcher, WatchListener, WatchEventType } from './virtual-fs';
-export { Runtime, execute } from './runtime';
-export type { Module, RuntimeOptions, RequireFunction } from './runtime';
-export { createRuntime, WorkerRuntime, SandboxRuntime } from './create-runtime';
-export type { IRuntime, IExecuteResult, CreateRuntimeOptions, IRuntimeOptions, VFSSnapshot } from './runtime-interface';
-export { generateSandboxFiles, getSandboxHtml, getSandboxVercelConfig, SANDBOX_SETUP_INSTRUCTIONS } from './sandbox-helpers';
-export { createFsShim } from './shims/fs';
-export type { FsShim } from './shims/fs';
-export { createProcess } from './shims/process';
-export type { Process, ProcessEnv } from './shims/process';
-export * as path from './shims/path';
-export * as http from './shims/http';
-export * as net from './shims/net';
-export * as events from './shims/events';
-export * as stream from './shims/stream';
-export * as url from './shims/url';
-export * as querystring from './shims/querystring';
-export * as util from './shims/util';
-export * as npm from './npm';
-export { PackageManager, install } from './npm';
-export type { InstallMode } from './npm';
-export { ServerBridge, getServerBridge, resetServerBridge } from './server-bridge';
-export type { InitServiceWorkerOptions } from './server-bridge';
+export { VirtualFS } from "./virtual-fs";
+export type {
+  FSNode,
+  Stats,
+  FSWatcher,
+  WatchListener,
+  WatchEventType,
+} from "./virtual-fs";
+export { Runtime, execute } from "./runtime";
+export type { Module, RuntimeOptions, RequireFunction } from "./runtime";
+export { createRuntime, WorkerRuntime, SandboxRuntime } from "./create-runtime";
+export type {
+  IRuntime,
+  IExecuteResult,
+  CreateRuntimeOptions,
+  IRuntimeOptions,
+  VFSSnapshot,
+} from "./runtime-interface";
+export {
+  generateSandboxFiles,
+  getSandboxHtml,
+  getSandboxVercelConfig,
+  SANDBOX_SETUP_INSTRUCTIONS,
+} from "./sandbox-helpers";
+export { createFsShim } from "./shims/fs";
+export type { FsShim } from "./shims/fs";
+export { createProcess } from "./shims/process";
+export type { Process, ProcessEnv } from "./shims/process";
+export * as path from "./shims/path";
+export * as http from "./shims/http";
+export * as net from "./shims/net";
+export * as events from "./shims/events";
+export * as stream from "./shims/stream";
+export * as url from "./shims/url";
+export * as querystring from "./shims/querystring";
+export * as util from "./shims/util";
+export * as npm from "./npm";
+export { PackageManager, install } from "./npm";
+export type { InstallMode } from "./npm";
+export {
+  ServerBridge,
+  getServerBridge,
+  resetServerBridge,
+} from "./server-bridge";
+export type { InitServiceWorkerOptions } from "./server-bridge";
 // Dev servers
-export { DevServer } from './dev-server';
-export type { DevServerOptions, ResponseData, HMRUpdate } from './dev-server';
-export { ViteDevServer } from './frameworks/vite-dev-server';
-export type { ViteDevServerOptions } from './frameworks/vite-dev-server';
-export { NextDevServer } from './frameworks/next-dev-server';
-export type { NextDevServerOptions } from './frameworks/next-dev-server';
+export { DevServer } from "./dev-server";
+export type { DevServerOptions, ResponseData, HMRUpdate } from "./dev-server";
+export { ViteDevServer } from "./frameworks/vite-dev-server";
+export type { ViteDevServerOptions } from "./frameworks/vite-dev-server";
+export { NextDevServer } from "./frameworks/next-dev-server";
+export type { NextDevServerOptions } from "./frameworks/next-dev-server";
 // New shims for Vite support
-export * as chokidar from './shims/chokidar';
-export * as ws from './shims/ws';
-export * as fsevents from './shims/fsevents';
-export * as readdirp from './shims/readdirp';
-export * as module from './shims/module';
-export * as perf_hooks from './shims/perf_hooks';
-export * as worker_threads from './shims/worker_threads';
-export * as esbuild from './shims/esbuild';
-export * as rollup from './shims/rollup';
-export * as assert from './shims/assert';
+export * as chokidar from "./shims/chokidar";
+export * as ws from "./shims/ws";
+export * as fsevents from "./shims/fsevents";
+export * as readdirp from "./shims/readdirp";
+export * as module from "./shims/module";
+export * as perf_hooks from "./shims/perf_hooks";
+export * as worker_threads from "./shims/worker_threads";
+export * as esbuild from "./shims/esbuild";
+export * as rollup from "./shims/rollup";
+export * as assert from "./shims/assert";
 
 // Demo exports
 export {
@@ -55,15 +76,18 @@ export {
   startConvexAppDevServer,
   PACKAGE_JSON as CONVEX_APP_PACKAGE_JSON,
   DEMO_PACKAGES as CONVEX_APP_DEMO_PACKAGES,
-} from './convex-app-demo';
+} from "./convex-app-demo";
 
-import { VirtualFS } from './virtual-fs';
-import { Runtime, RuntimeOptions } from './runtime';
-import { PackageManager } from './npm';
-import type { InstallMode, PackageManagerMutationSummary } from './npm';
-import { ServerBridge, getServerBridge } from './server-bridge';
-import { initChildProcess, stripInternalChildProcessEnv } from './shims/child_process';
-import type { IExecuteResult } from './runtime-interface';
+import { VirtualFS } from "./virtual-fs";
+import { Runtime, RuntimeOptions } from "./runtime";
+import { PackageManager } from "./npm";
+import type { InstallMode, PackageManagerMutationSummary } from "./npm";
+import { ServerBridge, getServerBridge } from "./server-bridge";
+import {
+  initChildProcess,
+  stripInternalChildProcessEnv,
+} from "./shims/child_process";
+import type { IExecuteResult } from "./runtime-interface";
 
 export interface RunResult {
   stdout: string;
@@ -81,6 +105,8 @@ export interface RunOptions {
   onStderr?: (data: string) => void;
   /** AbortSignal to cancel long-running commands */
   signal?: AbortSignal;
+  /** Keep the command alive while it has active stdin listeners (for interactive CLI prompts) */
+  interactive?: boolean;
 }
 
 export interface TerminalSessionOptions {
@@ -103,7 +129,10 @@ export interface TerminalSessionState {
 }
 
 export interface TerminalSession {
-  run: (command: string, options?: TerminalSessionRunOptions) => Promise<RunResult>;
+  run: (
+    command: string,
+    options?: TerminalSessionRunOptions,
+  ) => Promise<RunResult>;
   sendInput: (data: string) => void;
   resize: (cols: number, rows: number) => void;
   abort: () => void;
@@ -139,12 +168,12 @@ export interface ContainerOptions extends RuntimeOptions {
 }
 
 const GIT_ENV_KEYS = [
-  'GIT_TOKEN',
-  'GIT_USERNAME',
-  'GIT_PASSWORD',
-  'GIT_CORS_PROXY',
-  'GIT_AUTHOR_NAME',
-  'GIT_AUTHOR_EMAIL',
+  "GIT_TOKEN",
+  "GIT_USERNAME",
+  "GIT_PASSWORD",
+  "GIT_CORS_PROXY",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
 ] as const;
 
 function sanitizeGitAuth(input?: GitAuthOptions): GitAuthOptions {
@@ -200,7 +229,7 @@ export function createContainer(options?: ContainerOptions): {
     installMode: options?.installMode,
     onInstallMutation: async (summary: PackageManagerMutationSummary) => {
       if (summary.touchesNodeModules) {
-        const { clearNpmBundleCache } = await import('./frameworks/npm-serve');
+        const { clearNpmBundleCache } = await import("./frameworks/npm-serve");
         clearNpmBundleCache();
       }
 
@@ -214,7 +243,9 @@ export function createContainer(options?: ContainerOptions): {
     },
   });
 
-  const resolveCommandEnv = (runEnv?: Record<string, string>): Record<string, string> => ({
+  const resolveCommandEnv = (
+    runEnv?: Record<string, string>,
+  ): Record<string, string> => ({
     ...baseEnv,
     ...gitAuthToEnv(gitAuth),
     ...(runEnv || {}),
@@ -249,7 +280,9 @@ export function createContainer(options?: ContainerOptions): {
 
   let legacyActiveExecutionId: string | null = null;
 
-  const sanitizeSessionEnv = (env: Record<string, string>): Record<string, string> => {
+  const sanitizeSessionEnv = (
+    env: Record<string, string>,
+  ): Record<string, string> => {
     const next = stripInternalChildProcessEnv(env);
     for (const key of GIT_ENV_KEYS) {
       delete next[key];
@@ -257,7 +290,9 @@ export function createContainer(options?: ContainerOptions): {
     return next;
   };
 
-  const createLinkedAbortController = (signal?: AbortSignal): {
+  const createLinkedAbortController = (
+    signal?: AbortSignal,
+  ): {
     controller: AbortController;
     cleanup: () => void;
   } => {
@@ -272,36 +307,51 @@ export function createContainer(options?: ContainerOptions): {
     }
 
     const onAbort = () => controller.abort();
-    signal.addEventListener('abort', onAbort, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
     return {
       controller,
-      cleanup: () => signal.removeEventListener('abort', onAbort),
+      cleanup: () => signal.removeEventListener("abort", onAbort),
     };
   };
 
-  const toRunResult = (result: { stdout?: string; stderr?: string; exitCode: number }): RunResult => ({
-    stdout: String(result.stdout || ''),
-    stderr: String(result.stderr || ''),
+  const toRunResult = (result: {
+    stdout?: string;
+    stderr?: string;
+    exitCode: number;
+  }): RunResult => ({
+    stdout: String(result.stdout || ""),
+    stderr: String(result.stderr || ""),
     exitCode: result.exitCode,
   });
 
-  const runLegacyCommand = async (command: string, runOptions?: RunOptions): Promise<RunResult> => {
+  const runLegacyCommand = async (
+    command: string,
+    runOptions?: RunOptions,
+  ): Promise<RunResult> => {
+    console.log(`runLegacyCommand(${command} ${runOptions}`);
     if (runOptions?.signal?.aborted) {
-      return { stdout: '', stderr: '', exitCode: 130 };
+      return { stdout: "", stderr: "", exitCode: 130 };
     }
 
     const resolvedCwd = runOptions?.cwd ?? runtime.getProcess().cwd();
     const env = resolveCommandEnv(runOptions?.env);
-    const { controller, cleanup } = createLinkedAbortController(runOptions?.signal);
+    const { controller, cleanup } = createLinkedAbortController(
+      runOptions?.signal,
+    );
     const execution = childProcessController.createExecution({
       onStdout: runOptions?.onStdout,
       onStderr: runOptions?.onStderr,
       signal: controller.signal,
+      interactive: runOptions?.interactive,
     });
     legacyActiveExecutionId = execution.id;
 
     try {
-      const result = await childProcessController.runCommand(command, { cwd: resolvedCwd, env }, execution.id);
+      const result = await childProcessController.runCommand(
+        command,
+        { cwd: resolvedCwd, env },
+        execution.id,
+      );
       return toRunResult({
         stdout: result.stdout,
         stderr: result.stderr,
@@ -316,7 +366,9 @@ export function createContainer(options?: ContainerOptions): {
     }
   };
 
-  const createTerminalSession = (sessionOptions?: TerminalSessionOptions): TerminalSession => {
+  const createTerminalSession = (
+    sessionOptions?: TerminalSessionOptions,
+  ): TerminalSession => {
     let disposed = false;
     let activeExecutionId: string | null = null;
     let activeAbortController: AbortController | null = null;
@@ -327,18 +379,23 @@ export function createContainer(options?: ContainerOptions): {
     };
 
     return {
-      run: async (command: string, sessionRunOptions?: TerminalSessionRunOptions): Promise<RunResult> => {
+      run: async (
+        command: string,
+        sessionRunOptions?: TerminalSessionRunOptions,
+      ): Promise<RunResult> => {
         if (disposed) {
-          throw new Error('Terminal session has been disposed');
+          throw new Error("Terminal session has been disposed");
         }
         if (state.running) {
-          throw new Error('Terminal session is already running a command');
+          throw new Error("Terminal session is already running a command");
         }
         if (sessionRunOptions?.signal?.aborted) {
-          return { stdout: '', stderr: '', exitCode: 130 };
+          return { stdout: "", stderr: "", exitCode: 130 };
         }
 
-        const { controller, cleanup } = createLinkedAbortController(sessionRunOptions?.signal);
+        const { controller, cleanup } = createLinkedAbortController(
+          sessionRunOptions?.signal,
+        );
         const execution = childProcessController.createExecution({
           onStdout: sessionRunOptions?.onStdout,
           onStderr: sessionRunOptions?.onStderr,
@@ -386,15 +443,23 @@ export function createContainer(options?: ContainerOptions): {
         childProcessController.sendInput(activeExecutionId, data);
       },
       resize: (cols: number, rows: number) => {
-        const normalizedCols = Number.isFinite(cols) ? Math.max(1, Math.floor(cols)) : 80;
-        const normalizedRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 24;
+        const normalizedCols = Number.isFinite(cols)
+          ? Math.max(1, Math.floor(cols))
+          : 80;
+        const normalizedRows = Number.isFinite(rows)
+          ? Math.max(1, Math.floor(rows))
+          : 24;
         state.env = {
           ...state.env,
           COLUMNS: String(normalizedCols),
           LINES: String(normalizedRows),
         };
         if (activeExecutionId) {
-          childProcessController.updateExecutionSize(activeExecutionId, normalizedCols, normalizedRows);
+          childProcessController.updateExecutionSize(
+            activeExecutionId,
+            normalizedCols,
+            normalizedRows,
+          );
         }
       },
       abort: () => {
@@ -417,9 +482,11 @@ export function createContainer(options?: ContainerOptions): {
     runtime,
     npm: npmManager,
     serverBridge,
-    execute: (code: string, filename?: string) => runtime.execute(code, filename),
+    execute: (code: string, filename?: string) =>
+      runtime.execute(code, filename),
     runFile: (filename: string) => runtime.runFile(filename),
-    run: (command: string, runOptions?: RunOptions) => runLegacyCommand(command, runOptions),
+    run: (command: string, runOptions?: RunOptions) =>
+      runLegacyCommand(command, runOptions),
     createTerminalSession,
     setGitAuth: (updates: Partial<MutableGitAuth>) => {
       const next: GitAuthOptions = { ...gitAuth };
@@ -430,7 +497,7 @@ export function createContainer(options?: ContainerOptions): {
           delete (next as Record<string, unknown>)[key];
           continue;
         }
-        if (typeof value === 'string') {
+        if (typeof value === "string") {
           const trimmed = value.trim();
           if (trimmed) {
             (next as Record<string, unknown>)[key] = trimmed;

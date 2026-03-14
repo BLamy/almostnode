@@ -423,6 +423,7 @@ async function executeCommand(command: string) {
         write(text);
       },
       signal: activeRunController.signal,
+      interactive: true,
     });
 
     if (result.exitCode !== 0) {

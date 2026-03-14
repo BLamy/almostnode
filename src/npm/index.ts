@@ -163,6 +163,9 @@ export class PackageManager {
       touchesPackageJson: response.patch.touchesPackageJson,
     });
 
+    this.workerClient?.terminate?.();
+    this.workerClient = null;
+
     return deserializeInstallResult(response.result);
   }
 
@@ -172,6 +175,11 @@ export class PackageManager {
       registry: this.registryOptions.registry,
       cache: this.registryOptions.cache,
     };
+  }
+
+  dispose(): void {
+    this.workerClient?.terminate?.();
+    this.workerClient = null;
   }
 
   private async notifyMutation(summary: PackageManagerMutationSummary): Promise<void> {

@@ -162,24 +162,34 @@ export class ModuleGraphLoader {
     const cached = this.urlCache.get(cacheKey);
     if (cached) return cached;
 
-    const pending = (async () => {
-      const registry = getInteropRegistry();
-      if (this.transportMode === 'service-worker') {
-        await this.ensureBridgeReady();
-        const hash = this.getModuleSourceHash(descriptor);
-        const url = this.createServiceWorkerUrl(descriptor, hash);
-        registry.moduleUrls.get(this.runtimeId)?.set(url, descriptor.resolvedPath);
-        return url;
-      }
+    let resolve!: (value: string) => void;
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<string>((res, rej) => { resolve = res; reject = rej; });
+    this.urlCache.set(cacheKey, pending);
 
-      const source = await this.buildModuleSource(descriptor);
-      const encoded = uint8ToBase64(new TextEncoder().encode(source));
-      const url = `data:text/javascript;base64,${encoded}`;
-      registry.moduleUrls.get(this.runtimeId)?.set(url, descriptor.resolvedPath);
-      return url;
+    (async () => {
+      try {
+        const registry = getInteropRegistry();
+        if (this.transportMode === 'service-worker') {
+          await this.ensureBridgeReady();
+          const hash = this.getModuleSourceHash(descriptor);
+          const url = this.createServiceWorkerUrl(descriptor, hash);
+          registry.moduleUrls.get(this.runtimeId)?.set(url, descriptor.resolvedPath);
+          resolve(url);
+          return;
+        }
+
+        const source = await this.buildModuleSource(descriptor);
+        const encoded = uint8ToBase64(new TextEncoder().encode(source));
+        const url = `data:text/javascript;base64,${encoded}`;
+        registry.moduleUrls.get(this.runtimeId)?.set(url, descriptor.resolvedPath);
+        resolve(url);
+      } catch (e) {
+        this.urlCache.delete(cacheKey);
+        reject(e);
+      }
     })();
 
-    this.urlCache.set(cacheKey, pending);
     return pending;
   }
 
@@ -188,21 +198,36 @@ export class ModuleGraphLoader {
     const cached = this.sourceCache.get(cacheKey);
     if (cached) return cached;
 
-    const pending = (async () => {
-      switch (descriptor.format) {
-        case 'builtin':
-          return this.buildBuiltinModuleSource(descriptor);
-        case 'json':
-          return this.buildJsonModuleSource(descriptor);
-        case 'cjs':
-          return this.buildCjsModuleSource(descriptor);
-        case 'esm':
-        default:
-          return this.buildEsmModuleSource(descriptor);
+    let resolve!: (value: string) => void;
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<string>((res, rej) => { resolve = res; reject = rej; });
+    this.sourceCache.set(cacheKey, pending);
+
+    (async () => {
+      try {
+        let result: string;
+        switch (descriptor.format) {
+          case 'builtin':
+            result = this.buildBuiltinModuleSource(descriptor);
+            break;
+          case 'json':
+            result = this.buildJsonModuleSource(descriptor);
+            break;
+          case 'cjs':
+            result = this.buildCjsModuleSource(descriptor);
+            break;
+          case 'esm':
+          default:
+            result = await this.buildEsmModuleSource(descriptor);
+            break;
+        }
+        resolve(result);
+      } catch (e) {
+        this.sourceCache.delete(cacheKey);
+        reject(e);
       }
     })();
 
-    this.sourceCache.set(cacheKey, pending);
     return pending;
   }
 
@@ -446,11 +471,10 @@ export class ModuleGraphLoader {
   }
 
   private detectTransportMode(): TransportMode {
-    const isNodeLike = typeof process !== 'undefined' && Boolean((process as { versions?: { node?: string } }).versions?.node);
     const isLikelyJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
-    const isWindow = typeof window !== 'undefined' && typeof document !== 'undefined';
+    const hasSW = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
 
-    if (isWindow && !isNodeLike && !isLikelyJsdom) {
+    if (hasSW && !isLikelyJsdom) {
       return 'service-worker';
     }
 

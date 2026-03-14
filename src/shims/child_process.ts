@@ -944,6 +944,9 @@ module.exports = (async () => {
       const aborted = execution.signal?.aborted;
       return { stdout, stderr, exitCode: exitCalled ? exitCode : (aborted ? 130 : 0) };
     } finally {
+      // Free all cached module data (parsed ASTs, transformed code, resolver caches)
+      // to avoid accumulating memory across consecutive node command invocations.
+      runtime.clearCache();
       execution.activeProcessStdin = null;
       execution.onForkedChildExit = prevChildExitHandler;
       if (hasGlobalRejectionEvents) {
@@ -1093,7 +1096,11 @@ module.exports = (async () => {
 
     const installPackage = async (installCwd: string) => {
       const pm = await createPackageManager(controller, installCwd || '/');
-      await pm.install(installSpec, { onProgress: emitInstallProgress });
+      try {
+        await pm.install(installSpec, { onProgress: emitInstallProgress });
+      } finally {
+        pm.dispose();
+      }
     };
 
     let { binPath, resolvedBinTarget } = resolveBin(ctx.cwd);
@@ -1103,7 +1110,14 @@ module.exports = (async () => {
       `[almostnode DEBUG] npx resolve before install: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} mode=${controller.installMode}`,
     );
 
-    if (forceLatestInstall || (!binPath && !resolvedBinTarget)) {
+    if (forceLatestInstall && (binPath || resolvedBinTarget)) {
+      almostnodeDebugLog(
+        'npx',
+        `[almostnode DEBUG] npx skipping @latest reinstall: already resolved binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'}`,
+      );
+    }
+
+    if (!binPath && !resolvedBinTarget) {
       useExtendedNodeIdle = true;
       try {
         almostnodeDebugLog(
@@ -3223,6 +3237,8 @@ function forkWithBinding(
       child.emit('error', error);
       child.emit('exit', 1, null);
       child.emit('close', 1, null);
+    }).finally(() => {
+      childRuntime.clearCache();
     });
   }, 0);
 

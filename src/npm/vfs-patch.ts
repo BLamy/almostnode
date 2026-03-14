@@ -60,7 +60,7 @@ export function createInstallSnapshot(vfs: VirtualFS, cwd: string): VFSSnapshot 
 
   const nodeModulesPath = joinPath(cwd, 'node_modules');
   if (vfs.existsSync(nodeModulesPath)) {
-    addSubtree(vfs, nodeModulesPath, files, seen);
+    addNodeModulesSnapshot(vfs, nodeModulesPath, files, seen);
   }
 
   return { files };
@@ -190,22 +190,66 @@ function addDirectoryChain(
   }
 }
 
-function addSubtree(
+/**
+ * Snapshot only what the install worker needs from node_modules:
+ * - Directory entries for each package (so existsSync/readdirSync works)
+ * - package.json files with content (for version checks)
+ * - Nested node_modules (recurse)
+ *
+ * Skips all other files (source code, compiled output, etc.) entirely.
+ * This reduces snapshot entries from ~5000-20000 to ~200-400 for large installs,
+ * preventing tab crashes from postMessage/structured-clone overhead.
+ */
+function addNodeModulesSnapshot(
   vfs: VirtualFS,
-  targetPath: string,
+  nodeModulesPath: string,
   files: VFSFileEntry[],
   seen: Set<string>,
 ): void {
-  addDirectoryChain(vfs, targetPath, files, seen);
-  const stats = vfs.statSync(targetPath);
-  if (!stats.isDirectory()) {
-    addFileEntry(vfs, targetPath, files, seen);
+  addDirectoryEntry(nodeModulesPath, files, seen);
+
+  for (const entry of vfs.readdirSync(nodeModulesPath)) {
+    if (entry.startsWith('.')) continue;
+
+    const childPath = joinPath(nodeModulesPath, entry);
+
+    if (entry.startsWith('@')) {
+      // Scoped packages: add scope dir, then snapshot each package inside
+      addDirectoryEntry(childPath, files, seen);
+      for (const scopedEntry of vfs.readdirSync(childPath)) {
+        addPackageSnapshot(vfs, joinPath(childPath, scopedEntry), files, seen);
+      }
+    } else {
+      addPackageSnapshot(vfs, childPath, files, seen);
+    }
+  }
+}
+
+function addPackageSnapshot(
+  vfs: VirtualFS,
+  pkgPath: string,
+  files: VFSFileEntry[],
+  seen: Set<string>,
+): void {
+  try {
+    const stats = vfs.statSync(pkgPath);
+    if (!stats.isDirectory()) return;
+  } catch {
     return;
   }
 
-  addDirectoryEntry(targetPath, files, seen);
-  for (const entry of vfs.readdirSync(targetPath)) {
-    addSubtree(vfs, joinPath(targetPath, entry), files, seen);
+  addDirectoryEntry(pkgPath, files, seen);
+
+  // Include package.json with full content
+  const pkgJsonPath = joinPath(pkgPath, 'package.json');
+  if (vfs.existsSync(pkgJsonPath)) {
+    addFileEntry(vfs, pkgJsonPath, files, seen);
+  }
+
+  // Recurse into nested node_modules
+  const nestedNm = joinPath(pkgPath, 'node_modules');
+  if (vfs.existsSync(nestedNm)) {
+    addNodeModulesSnapshot(vfs, nestedNm, files, seen);
   }
 }
 
@@ -228,12 +272,16 @@ function addFileEntry(
   if (seen.has(normalized)) {
     return;
   }
-  const content = vfs.readFileSync(normalized);
   seen.add(normalized);
+
+  // Only include content for package.json files — the install worker only reads
+  // these (version checks). All other files are stubs (exist but empty).
+  // This reduces snapshot size from ~100MB to ~500KB for large node_modules.
+  const isEssential = normalized.endsWith('/package.json') || normalized === 'package.json';
   files.push({
     path: normalized,
     type: 'file',
-    content: uint8ToBase64(content),
+    content: isEssential ? uint8ToBase64(vfs.readFileSync(normalized)) : '',
   });
 }
 
