@@ -1430,6 +1430,9 @@ module.exports = (async () => {
           aliases = { '~/': 'src/', '@/': 'src/' };
           tanstackRouter = true;
           console.log('[vite] Detected TanStack Router — enabling SPA fallback and route tree generation');
+        } else if (allDeps['react-router-dom'] || allDeps['react-router']) {
+          spaFallback = true;
+          console.log('[vite] Detected React Router — enabling SPA fallback');
         }
       } catch {
         // No package.json or parse error, skip detection
