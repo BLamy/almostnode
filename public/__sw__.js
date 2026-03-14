@@ -353,7 +353,7 @@ self.addEventListener('fetch', (event) => {
     // This is the "coi-serviceworker" pattern — without it, Worker scripts and other
     // subresources lack the headers needed for a cross-origin-isolated page.
     event.respondWith(
-      fetch(event.request.mode === 'navigate' ? event.request : event.request.url).then(response => {
+      fetch(event.request).then(response => {
         // Only modify same-origin responses (cross-origin opaque responses can't be read)
         if (response.type === 'opaque' || response.type === 'opaqueredirect') {
           return response;
