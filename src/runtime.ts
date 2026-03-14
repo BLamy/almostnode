@@ -1501,6 +1501,12 @@ export class Runtime {
     // Initialize esbuild shim with VFS for file access
     esbuildShim.setVFS(vfs);
 
+    // Polyfill Node.js `global` (alias for globalThis) so ESM modules served via
+    // /_npm/ that reference `global` don't throw ReferenceError in browsers.
+    if (typeof (globalThis as any).global === 'undefined') {
+      (globalThis as any).global = globalThis;
+    }
+
     // Polyfill setImmediate/clearImmediate (Node.js globals not available in browsers)
     if (typeof globalThis.setImmediate === 'undefined') {
       (globalThis as any).setImmediate = (fn: (...args: unknown[]) => void, ...args: unknown[]) => setTimeout(fn, 0, ...args);
