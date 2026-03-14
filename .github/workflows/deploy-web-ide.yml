@@ -45,6 +45,9 @@ jobs:
           cp dist-site/examples/web-ide-demo.html deploy/index.html
           # Copy all shared assets (JS chunks, CSS, wasm, etc.)
           cp -r dist-site/assets deploy/assets
+          # Copy service worker and other root-level files needed at runtime
+          cp dist-site/__sw__.js deploy/__sw__.js
+          cp dist-site/favicon.svg deploy/favicon.svg
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
