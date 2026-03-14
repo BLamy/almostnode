@@ -348,25 +348,27 @@ self.addEventListener('fetch', (event) => {
       }
     }
 
-    // Inject COOP/COEP headers on navigation responses so cross-origin isolation
-    // works on static hosts (e.g. GitHub Pages) that can't set custom headers
-    if (event.request.mode === 'navigate') {
-      event.respondWith(
-        fetch(event.request).then(response => {
-          const newHeaders = new Headers(response.headers);
-          newHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
-          newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
-          return new Response(response.body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: newHeaders,
-          });
-        }).catch(() => fetch(event.request))
-      );
-      return;
-    }
-
-    // Not a virtual request, let it pass through
+    // Inject COOP/COEP/CORP headers on ALL pass-through responses so cross-origin
+    // isolation works on static hosts (e.g. GitHub Pages) that can't set custom headers.
+    // This is the "coi-serviceworker" pattern — without it, Worker scripts and other
+    // subresources lack the headers needed for a cross-origin-isolated page.
+    event.respondWith(
+      fetch(event.request.mode === 'navigate' ? event.request : event.request.url).then(response => {
+        // Only modify same-origin responses (cross-origin opaque responses can't be read)
+        if (response.type === 'opaque' || response.type === 'opaqueredirect') {
+          return response;
+        }
+        const newHeaders = new Headers(response.headers);
+        newHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
+        newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+        newHeaders.set('Cross-Origin-Resource-Policy', 'cross-origin');
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: newHeaders,
+        });
+      }).catch(() => fetch(event.request))
+    );
     return;
   }
 

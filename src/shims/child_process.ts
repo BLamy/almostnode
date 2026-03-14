@@ -897,7 +897,7 @@ module.exports = (async () => {
           pendingTimerIdleMs += CHECK_MS;
         }
 
-        const keepAliveForInteractiveInput = execution.interactive && (
+        const keepAliveForInteractiveInput = execution.interactive || (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
         );
