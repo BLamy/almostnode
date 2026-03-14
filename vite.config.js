@@ -120,6 +120,9 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
+    // Prevent inlining JS/TS worker files as data: URLs — relative imports
+    // inside data: URLs cannot resolve (breaks Monaco extension host worker).
+    assetsInlineLimit: 0,
     commonjsOptions: {
       transformMixedEsModules: true,
     },

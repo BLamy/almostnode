@@ -46,6 +46,11 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 
+// Worker URLs via ?worker&url — Vite bundles these as self-contained worker files
+import editorWorkerUrl from 'monaco-editor/esm/vs/editor/editor.worker.js?worker&url';
+import textMateWorkerUrl from '@codingame/monaco-vscode-textmate-service-override/worker?worker&url';
+import extensionHostWorkerUrl from '@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url';
+
 export type ReturnTypeOfCreateContainer = ReturnType<typeof createContainer>;
 
 declare global {
@@ -64,15 +69,15 @@ type MarketplaceMode = 'open-vsx' | 'fixtures';
 const WORKBENCH_WORKERS = {
   editorWorkerService: {
     options: { type: 'module' as const, name: 'editorWorkerService' },
-    url: new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url).href,
+    url: editorWorkerUrl,
   },
   TextMateWorker: {
     options: { type: 'module' as const, name: 'TextMateWorker' },
-    url: new URL('@codingame/monaco-vscode-textmate-service-override/worker', import.meta.url).href,
+    url: textMateWorkerUrl,
   },
   extensionHostWorkerMain: {
     options: { type: 'module' as const, name: 'extensionHostWorkerMain' },
-    url: new URL('@codingame/monaco-vscode-api/workers/extensionHost.worker', import.meta.url).href,
+    url: extensionHostWorkerUrl,
   },
 } satisfies Record<string, { options: WorkerOptions; url: string }>;
 
