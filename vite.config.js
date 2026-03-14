@@ -23,7 +23,7 @@ const monacoVscodePackages = [
 
 const isTest = process.env.VITEST === 'true';
 export default defineConfig({
-  base: '/',
+  base: process.env.GITHUB_PAGES ? '/almostnode/' : '/',
   test: {
     // Exclude e2e tests - they should be run with `npm run test:e2e`
     exclude: [
