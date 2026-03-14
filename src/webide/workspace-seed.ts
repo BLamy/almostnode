@@ -1455,9 +1455,18 @@ createRoot(document.getElementById('root')!).render(
   [`${WORKSPACE_ROOT}/src/router.tsx`]: `import { createRouter } from '@tanstack/react-router';
 import { routeTree } from './routeTree.gen';
 
+// Auto-detect basepath when running inside almostnode's virtual server.
+// The iframe URL is /__virtual__/{port}/ — TanStack Router needs to know
+// this prefix so it can match routes correctly.
+const basepath = typeof window !== 'undefined'
+  && window.location.pathname.startsWith('/__virtual__/')
+  ? (window.location.pathname.match(/^\\/(__virtual__\\/\\d+)/)?.[0] || '')
+  : '';
+
 export function getRouter() {
   const router = createRouter({
     routeTree,
+    basepath,
     defaultPreload: 'intent',
   });
   return router;

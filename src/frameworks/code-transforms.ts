@@ -256,7 +256,7 @@ function resolveNpmPackage(
   }
 
   const depsParam = esmShDeps ? `&deps=${esmShDeps}` : '';
-  return `https://esm.sh/${esmPkg}?external=react${depsParam}`;
+  return `https://esm.sh/${esmPkg}?external=react,react-dom${depsParam}`;
 }
 
 /**
