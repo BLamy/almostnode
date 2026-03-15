@@ -10,6 +10,7 @@ import { Buffer } from '../shims/stream';
 const DB_PREFIX = '/__db__/';
 
 export function createPGliteMiddleware(): RequestMiddleware {
+  return async (_port, _method, url, _headers, body) => {
     // Parse URL to check path
     const questionMark = url.indexOf('?');
     const pathname = questionMark >= 0 ? url.slice(0, questionMark) : url;
