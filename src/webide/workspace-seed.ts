@@ -99,6 +99,15 @@ playwright-cli console
 playwright-cli console error
 \`\`\`
 
+## Taking screenshots
+
+\`\`\`bash
+playwright-cli screenshot
+\`\`\`
+
+Captures the preview as PNG at \`/tmp/screenshot.png\`. Read the file to see the page visually.
+Custom path: \`playwright-cli screenshot /project/debug.png\`
+
 ## References
 
 - CLI command reference: \`references/cli.md\`
@@ -129,6 +138,7 @@ playwright-cli console
 playwright-cli console warning
 playwright-cli resize 1920 1080
 playwright-cli screenshot
+playwright-cli screenshot /project/debug.png
 playwright-cli close
 \`\`\`
 
@@ -179,6 +189,9 @@ Resizes the preview iframe to the given pixel dimensions.
 ### open <url>
 Navigates the preview iframe to the given URL and waits for load.
 
+### screenshot [path]
+Captures the preview iframe as a PNG image. Default path: \`/tmp/screenshot.png\`. Read the file to see the page visually.
+
 ### close
 Clears element ref map and captured console messages.
 `;
@@ -220,6 +233,13 @@ Capture console messages after reproducing an issue:
 \`\`\`bash
 playwright-cli console warning
 playwright-cli console error
+\`\`\`
+
+## Visual inspection
+
+\`\`\`bash
+playwright-cli screenshot
+# Then read /tmp/screenshot.png to see the page
 \`\`\`
 
 ## Troubleshooting

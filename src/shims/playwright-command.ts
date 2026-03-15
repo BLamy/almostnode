@@ -578,8 +578,46 @@ async function cmdResize(args: string[]): Promise<JustBashExecResult> {
   return ok(`Resized preview to ${w}x${h}\n`);
 }
 
-async function cmdScreenshot(): Promise<JustBashExecResult> {
-  return ok('screenshot: terminal cannot display images. Use the preview pane to view the page visually.\n');
+async function cmdScreenshot(args: string[], vfs: VirtualFS): Promise<JustBashExecResult> {
+  const iframe = getPreviewIframe();
+  if (!iframe) return err('no preview iframe found. Run your dev server first.\n');
+
+  const doc = getIframeDoc(iframe);
+  if (!doc || !doc.body) return err('preview iframe has no document. Wait for the page to load.\n');
+
+  const outputPath = args[0] || '/tmp/screenshot.png';
+
+  // Ensure parent directory exists
+  const parentDir = outputPath.substring(0, outputPath.lastIndexOf('/')) || '/';
+  if (!vfs.existsSync(parentDir)) {
+    vfs.mkdirSync(parentDir, { recursive: true });
+  }
+
+  try {
+    const html2canvas = (await import('html2canvas')).default;
+
+    const canvas = await html2canvas(doc.body, {
+      windowWidth: iframe.clientWidth || doc.documentElement.scrollWidth,
+      windowHeight: iframe.clientHeight || doc.documentElement.scrollHeight,
+      width: iframe.clientWidth || doc.documentElement.scrollWidth,
+      height: iframe.clientHeight || doc.documentElement.scrollHeight,
+      useCORS: true,
+      allowTaint: true,
+      foreignObjectRendering: false,
+      logging: false,
+    });
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png');
+    });
+
+    const pngData = new Uint8Array(await blob.arrayBuffer());
+    vfs.writeFileSync(outputPath, pngData);
+
+    return ok(`Screenshot saved to ${outputPath} (${pngData.length} bytes)\n`);
+  } catch (e) {
+    return err(`screenshot failed: ${e instanceof Error ? e.message : String(e)}\n`);
+  }
 }
 
 // ── Help ────────────────────────────────────────────────────────────────────
@@ -599,7 +637,7 @@ Commands:
   eval <expression>       Evaluate JS in the preview iframe
   console [level]         Show captured console messages
   resize <width> <height> Resize the preview iframe
-  screenshot              (stub) Note about screenshot limitations
+  screenshot [path]       Capture preview as PNG (default: /tmp/screenshot.png)
   close                   Clear element refs and console state
   help                    Show this help message
 
@@ -649,7 +687,7 @@ export async function runPlaywrightCommand(
     case 'resize':
       return cmdResize(args.slice(1));
     case 'screenshot':
-      return cmdScreenshot();
+      return cmdScreenshot(args.slice(1), _vfs);
     default:
       return err(`unknown command: ${subcommand}. Run 'playwright-cli help' for usage.\n`);
   }
