@@ -47,6 +47,23 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Cross-iframe safe element type checks.
+ * `el instanceof HTMLInputElement` fails when `el` comes from an iframe
+ * because each frame has its own set of constructors.
+ */
+function isInputElement(el: Element): boolean {
+  return el.tagName === 'INPUT';
+}
+
+function isTextAreaElement(el: Element): boolean {
+  return el.tagName === 'TEXTAREA';
+}
+
+function isInputOrTextArea(el: Element): boolean {
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+}
+
 // ── Console hook ────────────────────────────────────────────────────────────
 
 function installConsoleHook(iframe: HTMLIFrameElement): void {
@@ -114,12 +131,13 @@ const IMPLICIT_ROLES: Record<string, string> = {
 const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'HEAD', 'META', 'LINK', 'BR', 'HR']);
 
 function isVisible(el: Element): boolean {
-  if (!(el instanceof HTMLElement)) return true;
-  const style = el.style;
+  const htmlEl = el as HTMLElement;
+  if (!htmlEl.style) return true;
+  const style = htmlEl.style;
   if (style.display === 'none' || style.visibility === 'hidden') return false;
-  if (el.hidden) return false;
+  if (htmlEl.hidden) return false;
   // Check offsetParent for non-fixed elements
-  if (el.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') {
+  if (htmlEl.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') {
     // Could be invisible, but give benefit of doubt for body children
     if (el.parentElement && el.parentElement.tagName !== 'BODY') return false;
   }
@@ -147,7 +165,7 @@ function getAccessibleName(el: Element): string {
   }
 
   // For inputs, check associated label
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+  if (isInputOrTextArea(el) || el.tagName === 'SELECT') {
     if (el.id) {
       const label = el.ownerDocument.querySelector(`label[for="${el.id}"]`);
       if (label) return label.textContent?.trim() || '';
@@ -219,10 +237,11 @@ function buildSnapshotTree(root: Element): SnapshotNode[] {
     }
 
     // Checkbox/radio state
-    if (el instanceof HTMLInputElement) {
-      const type = el.type.toLowerCase();
+    if (isInputElement(el)) {
+      const inputEl = el as HTMLInputElement;
+      const type = inputEl.type.toLowerCase();
       if (type === 'checkbox' || type === 'radio') {
-        attrs.push(el.checked ? 'checked' : 'unchecked');
+        attrs.push(inputEl.checked ? 'checked' : 'unchecked');
       }
       if (type !== 'text' && type !== 'search' && type !== 'password' && type !== 'email' && type !== 'url' && type !== 'tel' && type !== 'number') {
         attrs.push(`type=${type}`);
@@ -236,10 +255,11 @@ function buildSnapshotTree(root: Element): SnapshotNode[] {
 
     // Value for inputs
     if (
-      (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) &&
-      el.value
+      isInputOrTextArea(el) &&
+      (el as any).value
     ) {
-      const truncated = el.value.length > 40 ? el.value.slice(0, 40) + '...' : el.value;
+      const val = (el as any).value as string;
+      const truncated = val.length > 40 ? val.slice(0, 40) + '...' : val;
       attrs.push(`value="${truncated}"`);
     }
 
@@ -287,6 +307,54 @@ function renderTree(nodes: SnapshotNode[], indent = 0): string {
   return lines.join('\n');
 }
 
+// ── URL resolution ──────────────────────────────────────────────────────────
+
+/**
+ * Convert localhost URLs to /__virtual__/{port}/ URLs so the service worker
+ * intercepts them and the iframe stays same-origin with the host page.
+ */
+async function resolvePreviewUrl(url: string): Promise<string> {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+      const port = parseInt(parsed.port || (parsed.protocol === 'https:' ? '443' : '80'), 10);
+      const { getServerBridge } = await import('../server-bridge');
+      const bridge = getServerBridge();
+      const virtualBase = bridge.getServerUrl(port);
+      return `${virtualBase}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+  } catch {
+    // Not a valid URL or bridge not available, return as-is
+  }
+  return url;
+}
+
+/**
+ * Show the preview iframe and hide the empty-state placeholder.
+ */
+function revealPreviewIframe(iframe: HTMLIFrameElement, url: string): void {
+  // Hide empty state sibling
+  const emptyState = iframe.parentElement?.querySelector(
+    '.almostnode-preview-surface__empty'
+  ) as HTMLElement | null;
+  if (emptyState) {
+    emptyState.hidden = true;
+    emptyState.style.display = 'none';
+  }
+
+  // Show iframe
+  iframe.hidden = false;
+  iframe.style.display = 'block';
+
+  // Update status bar
+  const status = iframe.closest('.almostnode-preview-surface')?.querySelector(
+    '.almostnode-preview-surface__status'
+  ) as HTMLElement | null;
+  if (status) {
+    status.textContent = url;
+  }
+}
+
 // ── Commands ────────────────────────────────────────────────────────────────
 
 async function cmdOpen(args: string[]): Promise<JustBashExecResult> {
@@ -296,7 +364,10 @@ async function cmdOpen(args: string[]): Promise<JustBashExecResult> {
   const iframe = getPreviewIframe();
   if (!iframe) return err('no preview iframe found. Run your dev server first.\n');
 
-  iframe.src = url;
+  const resolvedUrl = await resolvePreviewUrl(url);
+  revealPreviewIframe(iframe, resolvedUrl);
+
+  iframe.src = resolvedUrl;
   await new Promise<void>((resolve) => {
     const onLoad = () => {
       iframe.removeEventListener('load', onLoad);
@@ -307,7 +378,7 @@ async function cmdOpen(args: string[]): Promise<JustBashExecResult> {
   });
   await delay(100);
   installConsoleHook(iframe);
-  return ok(`Navigated to ${url}\n`);
+  return ok(`Navigated to ${resolvedUrl}\n`);
 }
 
 async function cmdSnapshot(): Promise<JustBashExecResult> {
@@ -369,8 +440,7 @@ async function cmdFill(args: string[]): Promise<JustBashExecResult> {
   if (!el.isConnected) return err(`element '${refId}' is no longer in the document.\n`);
 
   if (
-    !(el instanceof HTMLInputElement) &&
-    !(el instanceof HTMLTextAreaElement) &&
+    !isInputOrTextArea(el) &&
     !el.hasAttribute('contenteditable')
   ) {
     return err(`element '${refId}' cannot be filled (not an input/textarea).\n`);
@@ -382,19 +452,26 @@ async function cmdFill(args: string[]): Promise<JustBashExecResult> {
 
   if (typeof (el as HTMLElement).focus === 'function') (el as HTMLElement).focus();
 
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+  if (isInputOrTextArea(el)) {
     // React-compatible fill using native setter
-    const nativeInputValueSetter = (win as any)?.HTMLInputElement?.prototype
-      ? Object.getOwnPropertyDescriptor(
-          (win as any).HTMLInputElement.prototype,
-          'value'
-        )?.set
+    const isTextarea = isTextAreaElement(el);
+    const proto = isTextarea
+      ? (win as any)?.HTMLTextAreaElement?.prototype
+      : (win as any)?.HTMLInputElement?.prototype;
+    const nativeSetter = proto
+      ? Object.getOwnPropertyDescriptor(proto, 'value')?.set
       : null;
 
-    if (nativeInputValueSetter) {
-      nativeInputValueSetter.call(el, value);
+    if (nativeSetter) {
+      nativeSetter.call(el, value);
     } else {
-      el.value = value;
+      (el as any).value = value;
+    }
+
+    // Reset React's _valueTracker so it detects the change
+    const tracker = (el as any)._valueTracker;
+    if (tracker) {
+      tracker.setValue('');
     }
 
     const InputEventCtor = (win as any).InputEvent || InputEvent;
@@ -440,13 +517,44 @@ async function cmdType(args: string[]): Promise<JustBashExecResult> {
   const win = doc.defaultView || getIframeWindow(iframe) || window;
   const KE = (win as any).KeyboardEvent || KeyboardEvent;
 
+  const isTextarea = isTextAreaElement(el);
+  const proto = isTextarea
+    ? (win as any)?.HTMLTextAreaElement?.prototype
+    : (win as any)?.HTMLInputElement?.prototype;
+  const nativeSetter = isInputOrTextArea(el) && proto
+    ? Object.getOwnPropertyDescriptor(proto, 'value')?.set
+    : null;
+
   for (const char of text) {
     el.dispatchEvent(new KE('keydown', { key: char, bubbles: true, cancelable: true }));
-    el.dispatchEvent(new KE('keypress', { key: char, bubbles: true, cancelable: true }));
 
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      el.value += char;
+    if (isInputOrTextArea(el)) {
       const InputEventCtor = (win as any).InputEvent || InputEvent;
+
+      // Dispatch beforeinput
+      try {
+        el.dispatchEvent(
+          new InputEventCtor('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: char,
+          })
+        );
+      } catch { /* beforeinput not supported */ }
+
+      // Insert character using native setter for React compatibility
+      const newValue = ((el as any).value || '') + char;
+      if (nativeSetter) {
+        nativeSetter.call(el, newValue);
+      } else {
+        (el as any).value = newValue;
+      }
+
+      // Reset React's _valueTracker
+      const tracker = (el as any)._valueTracker;
+      if (tracker) tracker.setValue('');
+
       try {
         el.dispatchEvent(
           new InputEventCtor('input', {
@@ -485,7 +593,55 @@ async function cmdPress(args: string[]): Promise<JustBashExecResult> {
   if (typeof (el as HTMLElement).focus === 'function') (el as HTMLElement).focus();
 
   el.dispatchEvent(new KE('keydown', { key, bubbles: true, cancelable: true }));
-  el.dispatchEvent(new KE('keypress', { key, bubbles: true, cancelable: true }));
+
+  // For printable single characters, insert into focused input
+  if (key.length === 1 && isInputOrTextArea(el)) {
+    const InputEventCtor = (win as any).InputEvent || InputEvent;
+    const isTextarea = isTextAreaElement(el);
+    const proto = isTextarea
+      ? (win as any)?.HTMLTextAreaElement?.prototype
+      : (win as any)?.HTMLInputElement?.prototype;
+    const nativeSetter = proto
+      ? Object.getOwnPropertyDescriptor(proto, 'value')?.set
+      : null;
+
+    try {
+      el.dispatchEvent(
+        new InputEventCtor('beforeinput', {
+          bubbles: true, cancelable: true, inputType: 'insertText', data: key,
+        })
+      );
+    } catch { /* beforeinput not supported */ }
+
+    const newValue = ((el as any).value || '') + key;
+    if (nativeSetter) {
+      nativeSetter.call(el, newValue);
+    } else {
+      (el as any).value = newValue;
+    }
+
+    const tracker = (el as any)._valueTracker;
+    if (tracker) tracker.setValue('');
+
+    try {
+      el.dispatchEvent(
+        new InputEventCtor('input', {
+          bubbles: true, cancelable: true, inputType: 'insertText', data: key,
+        })
+      );
+    } catch {
+      el.dispatchEvent(new ((win as any).Event || Event)('input', { bubbles: true }));
+    }
+  } else if (key === 'Enter') {
+    el.dispatchEvent(new KE('keypress', { key, bubbles: true, cancelable: true }));
+    // Submit form on Enter if applicable
+    if (isInputElement(el) && (el as any).form && typeof (el as any).form.requestSubmit === 'function') {
+      try { (el as any).form.requestSubmit(); } catch { /* ignore */ }
+    }
+  } else {
+    el.dispatchEvent(new KE('keypress', { key, bubbles: true, cancelable: true }));
+  }
+
   el.dispatchEvent(new KE('keyup', { key, bubbles: true, cancelable: true }));
 
   await delay(50);

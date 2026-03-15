@@ -119,7 +119,7 @@
     "fflate": "^0.8.2",
     "html2canvas": "^1.4.1",
     "isomorphic-git": "^1.37.2",
-    "just-bash": "^2.7.0",
+    "just-bash": "^2.13.1",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^27.0.0",
     "pako": "^2.1.0",
     "resolve.exports": "^2.0.3",

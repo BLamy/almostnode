@@ -1,0 +1,4 @@
+{
+  "defaultFile": "app/page.jsx",
+  "runCommand": "npm run dev"
+}

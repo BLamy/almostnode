@@ -120,7 +120,7 @@ export async function runPGliteCommand(
   }
 }
 
-function formatTable(rows: any[]): string {
+export function formatTable(rows: any[]): string {
   if (rows.length === 0) return '(empty)';
   const keys = Object.keys(rows[0]);
   const widths = keys.map((k) =>

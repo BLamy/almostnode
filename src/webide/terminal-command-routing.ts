@@ -37,7 +37,7 @@ function matchesSegment(command: string, patterns: RegExp[]): boolean {
 export function matchesClaudeLaunchCommand(command: string): boolean {
   const patterns = [
     /^(?:\.\/)?(?:node_modules\/\.bin\/)?claude(?:\s|$)/,
-    /^npx(?:\s+[-\w=]+)*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/,
+    /^npx(?:\s+[-\w=]+)*(?:\s+@anthropic-ai\/claude-code(?:\s+--dangerous-skip-permissions-check)?|\s+claude)(?:\s|$)/,
     /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/,
   ];
 

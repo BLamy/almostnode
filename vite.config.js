@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import wasm from 'vite-plugin-wasm';
+import { workspaceTemplatesPlugin } from './src/webide/vite-plugin-workspace-templates';
 
 const monacoVscodePackages = [
   '@codingame/monaco-vscode-api',
@@ -33,8 +34,9 @@ export default defineConfig({
       '**/examples/**/e2e/**',
     ],
   },
-  plugins: isTest ? [] : [
-    wasm(),
+  plugins: [
+    workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, 'src/webide/templates') }),
+    ...(isTest ? [] : [wasm(),
     {
       name: 'browser-shims',
       enforce: 'pre',
@@ -56,7 +58,7 @@ export default defineConfig({
         }
         return null;
       },
-    },
+    }]),
   ],
   define: isTest ? {} : {
     'process.env': {},

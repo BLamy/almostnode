@@ -338,8 +338,9 @@ async function runCommandInController(
   execution.activeShellChildren++;
   try {
     const result = await (
-      maybeRunSyntheticShellCommand(controller, command, resolvedCwd, envWithContext)
-      ?? controller.bashInstance.exec(command, {
+      maybeRunCustomCommandDirect(controller, command, resolvedCwd, envWithContext)
+      ?? maybeRunSyntheticShellCommand(controller, command, resolvedCwd, envWithContext)
+      ?? controller.bashInstance.exec(stripQuotesForBash(normalizeQuotes(command)), {
         cwd: resolvedCwd,
         env: envWithContext,
       })
@@ -365,6 +366,86 @@ async function runCommandInController(
 
 function shellQuote(value: string): string {
   return JSON.stringify(value);
+}
+
+/**
+ * Replace Unicode curly/smart quotes with ASCII equivalents.
+ * AI-generated commands may use \u201C \u201D (double) or \u2018 \u2019 (single)
+ * which confuse bash lexers.
+ */
+function normalizeQuotes(s: string): string {
+  return s
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'");
+}
+
+/**
+ * Intercept known custom commands and dispatch them directly, bypassing
+ * just-bash's lexer which fails on quoted arguments (e.g.
+ * `playwright-cli fill e3 "Buy groceries"`, `pg "SELECT 1 as test"`).
+ * Uses splitCommandArgs for proper quote-aware tokenization.
+ */
+function maybeRunCustomCommandDirect(
+  controller: ChildProcessController,
+  command: string,
+  _cwd: string,
+  _env: Record<string, string>
+): Promise<JustBashExecResult> | null {
+  const normalized = normalizeQuotes(command.trim());
+  const tokens = splitCommandArgs(normalized);
+  if (tokens.length === 0) return null;
+
+  // Don't intercept compound commands (pipes, chains, semicolons).
+  // Strip quoted content first so operators inside quotes are ignored.
+  const withoutQuoted = normalized.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '');
+  if (/[|;&]/.test(withoutQuoted)) return null;
+
+  const cmd = tokens[0];
+  const args = tokens.slice(1);
+  const vfs = controller.vfs;
+
+  switch (cmd) {
+    case 'playwright-cli':
+      return (async () => {
+        const { runPlaywrightCommand } = await import('./playwright-command');
+        return runPlaywrightCommand(args, {} as any, vfs);
+      })();
+    case 'pg':
+      return (async () => {
+        const { runPgCommand } = await import('./pg-command');
+        return runPgCommand(args, {} as any, vfs);
+      })();
+    case 'pglite':
+      return (async () => {
+        const { runPGliteCommand } = await import('./pglite-command');
+        return runPGliteCommand(args, {} as any, vfs);
+      })();
+    case 'curl':
+      return (async () => {
+        const { runCurlCommand } = await import('./curl-command');
+        return runCurlCommand(args, {} as any, vfs);
+      })();
+    case 'git':
+      return (async () => {
+        const { runGitCommand } = await import('./git-command');
+        return runGitCommand(args, {} as any, vfs);
+      })();
+    default:
+      return null;
+  }
+}
+
+/**
+ * Strip quotes from a command string so just-bash's broken lexer won't crash.
+ * Tokenizes properly with splitCommandArgs, then rejoins without quotes.
+ * Arguments with spaces will lose their grouping, but at least the command
+ * won't error out with "unexpected EOF while looking for matching quote".
+ */
+function stripQuotesForBash(command: string): string {
+  if (!command.includes('"') && !command.includes("'")) return command;
+  const tokens = splitCommandArgs(command);
+  if (tokens.length === 0) return command;
+  return tokens.join(' ');
 }
 
 function normalizeCommandCwd(cwd?: string): string {
@@ -1542,6 +1623,16 @@ module.exports = (async () => {
     return runPGliteCommand(args, ctx, controller.vfs);
   });
 
+  const pgCommand = defineCommand('pg', async (args, ctx) => {
+    const { runPgCommand } = await import('./pg-command');
+    return runPgCommand(args, ctx, controller.vfs);
+  });
+
+  const curlCommand = defineCommand('curl', async (args, ctx) => {
+    const { runCurlCommand } = await import('./curl-command');
+    return runCurlCommand(args, ctx, controller.vfs);
+  });
+
   const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
     return defineCommand(commandName, async (args, ctx) => {
       const shell = getSyntheticShellSpec(commandName);
@@ -1587,8 +1678,34 @@ module.exports = (async () => {
       info: emitBashLog,
       debug: emitBashLog,
     },
-    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand],
   });
+
+  // Wrap bashInstance.exec to:
+  // 1. Intercept playwright-cli commands before just-bash's lexer (which
+  //    fails on quoted arguments like `playwright-cli fill e4 "Buy groceries"`)
+  // 2. Normalize Unicode curly quotes to ASCII quotes for all commands
+  const originalBashExec = bashInstance.exec.bind(bashInstance);
+  (bashInstance as any).exec = async (commandLine: string, options?: any) => {
+    const normalized = normalizeQuotes(commandLine.trim());
+    if (normalized.startsWith('playwright-cli')) {
+      const tokens = splitCommandArgs(normalized);
+      if (tokens.length > 0 && tokens[0] === 'playwright-cli') {
+        const { runPlaywrightCommand } = await import('./playwright-command');
+        const result = await runPlaywrightCommand(tokens.slice(1), {} as any, vfs);
+        return { ...result, env: options?.env ?? {} };
+      }
+    }
+    if (normalized === 'pg' || normalized.startsWith('pg ')) {
+      const tokens = splitCommandArgs(normalized);
+      if (tokens[0] === 'pg') {
+        const { runPgCommand } = await import('./pg-command');
+        const result = await runPgCommand(tokens.slice(1), {} as any, vfs);
+        return { ...result, env: options?.env ?? {} };
+      }
+    }
+    return originalBashExec(normalized, options);
+  };
 
   controller = {
     id: controllerId,
@@ -2573,7 +2690,9 @@ function maybeRunSyntheticShellCommand(
     return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 });
   }
 
-  return controller.bashInstance.exec(parsed.script, { cwd, env });
+  // Intercept custom commands before just-bash's broken lexer
+  return maybeRunCustomCommandDirect(controller, parsed.script, cwd, env)
+    ?? controller.bashInstance.exec(stripQuotesForBash(normalizeQuotes(parsed.script)), { cwd, env });
 }
 
 function execWithBinding(
@@ -2895,10 +3014,12 @@ function spawnWithBinding(
     return child;
   }
 
-  // Build the full command
+  // Build the full command — use shellQuote for args containing spaces or
+  // quotes so inner double quotes are properly escaped (e.g. spawn('bash',
+  // ['-c', 'echo "hello world"']) must NOT produce `bash -c "echo "hello world""`)
   const fullCommand = spawnArgs.length > 0
     ? `${command} ${spawnArgs.map(arg =>
-        arg.includes(' ') ? `"${arg}"` : arg
+        /[\s"'\\]/.test(arg) ? shellQuote(arg) : arg
       ).join(' ')}`
     : command;
 

@@ -187,6 +187,21 @@ process.stdin.on('data', (chunk) => {
     expect(outputB.join('')).toContain('got:alive');
   });
 
+  it('handles double-quoted arguments without crashing', async () => {
+    const container = createContainer();
+    const session = container.createTerminalSession({ cwd: '/' });
+
+    // echo with double quotes — just-bash's lexer historically chokes on these
+    const echoResult = await session.run('echo "hello world"');
+    expect(echoResult.exitCode).toBe(0);
+    expect(echoResult.stdout).toContain('hello world');
+
+    // echo with single quotes
+    const singleResult = await session.run("echo 'hello world'");
+    expect(singleResult.exitCode).toBe(0);
+    expect(singleResult.stdout).toContain('hello world');
+  });
+
   it('streams onStdout for bash built-in commands (ls, echo, cat)', async () => {
     const container = createContainer();
     container.vfs.writeFileSync('/project/hello.txt', 'world');

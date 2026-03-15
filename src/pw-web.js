@@ -43,7 +43,8 @@
  *  - .getByRole(role,opts) - Find nested by ARIA role
  *  - .getByLabel(label)    - Find nested by label
  *  - .click()              - Click the element
- *  - .fill(value)          - Fill input with value
+ *  - .fill(value)          - Fill input with value (atomic, fires input+change)
+ *  - .type(text, opts?)    - Type text char-by-char (opts.delay default 50ms)
  *  - .textContent()        - Get text content
  *  - .innerText()          - Get inner text
  *  - .isVisible()          - Check visibility
@@ -494,10 +495,26 @@
               "value",
             )?.set
           : null;
-        if (nativeInputValueSetter) {
-          nativeInputValueSetter.call(el, "");
+        const nativeTextareaValueSetter = localDocWindow?.HTMLTextAreaElement
+          ?.prototype
+          ? Object.getOwnPropertyDescriptor(
+              localDocWindow.HTMLTextAreaElement.prototype,
+              "value",
+            )?.set
+          : null;
+        const clearSetter =
+          el.tagName === "TEXTAREA"
+            ? nativeTextareaValueSetter || nativeInputValueSetter
+            : nativeInputValueSetter;
+        if (clearSetter) {
+          clearSetter.call(el, "");
         } else {
           el.value = "";
+        }
+        // Reset React's _valueTracker so it detects the change
+        const clearTracker = el._valueTracker;
+        if (clearTracker) {
+          clearTracker.setValue(el.value || "x");
         }
         const EventCtor = localDocWindow?.Event || Event;
         el.dispatchEvent(
@@ -577,7 +594,6 @@
         }
 
         if (typeof el.focus === "function") el.focus();
-        el.value = "";
 
         const localDocWindow = doc.defaultView || doc.parentWindow || window;
         const nativeInputValueSetter = localDocWindow?.HTMLInputElement
@@ -587,11 +603,29 @@
               "value",
             )?.set
           : null;
+        const nativeTextareaValueSetter = localDocWindow?.HTMLTextAreaElement
+          ?.prototype
+          ? Object.getOwnPropertyDescriptor(
+              localDocWindow.HTMLTextAreaElement.prototype,
+              "value",
+            )?.set
+          : null;
 
-        if (nativeInputValueSetter) {
-          nativeInputValueSetter.call(el, value);
+        const setter =
+          el.tagName === "TEXTAREA"
+            ? nativeTextareaValueSetter || nativeInputValueSetter
+            : nativeInputValueSetter;
+
+        if (setter) {
+          setter.call(el, value);
         } else {
           el.value = value;
+        }
+
+        // Reset React's _valueTracker so it detects the change
+        const tracker = el._valueTracker;
+        if (tracker) {
+          tracker.setValue("");
         }
 
         const InputEventCtor = localDocWindow?.InputEvent || InputEvent;
@@ -616,6 +650,140 @@
           new EventCtor("change", { bubbles: true, cancelable: true }),
         );
         await delay(150);
+      },
+
+      type: async (text, opts) => {
+        stepTracker?.checkStop?.();
+        const el = getTargetElement();
+        const desc = getLocatorDescription();
+        if (!el) {
+          const error = new Error(`${desc}.type(): element not found`);
+          try {
+            stepTracker?.addStep({
+              type: "action",
+              action: "type",
+              selector,
+              value: text,
+              status: "failed",
+              error: error.message,
+            });
+          } catch (e) {
+            if (e instanceof StopExecutionError) throw e;
+          }
+          throw error;
+        }
+        if (!("value" in el)) {
+          const error = new Error(
+            `${desc}.type(): element does not support .value`,
+          );
+          try {
+            stepTracker?.addStep({
+              type: "action",
+              action: "type",
+              selector,
+              value: text,
+              status: "failed",
+              error: error.message,
+            });
+          } catch (e) {
+            if (e instanceof StopExecutionError) throw e;
+          }
+          throw error;
+        }
+
+        const position = getElementPosition(el, doc);
+
+        if (cursorAnimationCallback && position) {
+          try {
+            await cursorAnimationCallback({
+              action: "type",
+              position,
+              selector,
+              description: `page.${desc}.type('${text}')`,
+              value: text,
+            });
+          } catch (e) {
+            console.warn("Cursor animation failed:", e);
+          }
+        }
+
+        if (typeof el.focus === "function") el.focus();
+        const localDocWindow = doc.defaultView || doc.parentWindow || window;
+        const KE = localDocWindow?.KeyboardEvent || KeyboardEvent;
+        const InputEventCtor = localDocWindow?.InputEvent || InputEvent;
+        const EventCtor = localDocWindow?.Event || Event;
+        const charDelay = (opts && opts.delay) || 50;
+
+        const nativeSetter =
+          el.tagName === "TEXTAREA"
+            ? Object.getOwnPropertyDescriptor(
+                localDocWindow?.HTMLTextAreaElement?.prototype || {},
+                "value",
+              )?.set
+            : Object.getOwnPropertyDescriptor(
+                localDocWindow?.HTMLInputElement?.prototype || {},
+                "value",
+              )?.set;
+
+        for (const char of text) {
+          stepTracker?.checkStop?.();
+          el.dispatchEvent(
+            new KE("keydown", { key: char, bubbles: true, cancelable: true }),
+          );
+          try {
+            el.dispatchEvent(
+              new InputEventCtor("beforeinput", {
+                bubbles: true,
+                cancelable: true,
+                inputType: "insertText",
+                data: char,
+              }),
+            );
+          } catch (e) {
+            /* beforeinput not supported */
+          }
+          const newValue = (el.value || "") + char;
+          if (nativeSetter) {
+            nativeSetter.call(el, newValue);
+          } else {
+            el.value = newValue;
+          }
+          const tracker = el._valueTracker;
+          if (tracker) tracker.setValue("");
+          let inputEvent;
+          try {
+            inputEvent = new InputEventCtor("input", {
+              bubbles: true,
+              cancelable: true,
+              inputType: "insertText",
+              data: char,
+            });
+          } catch (e) {
+            inputEvent = new EventCtor("input", {
+              bubbles: true,
+              cancelable: true,
+            });
+          }
+          el.dispatchEvent(inputEvent);
+          el.dispatchEvent(
+            new KE("keyup", { key: char, bubbles: true, cancelable: true }),
+          );
+          await delay(charDelay);
+        }
+
+        try {
+          stepTracker?.addStep({
+            type: "action",
+            action: "type",
+            selector,
+            value: text,
+            status: "passed",
+            description: `page.${desc}.type('${text}')`,
+            position,
+          });
+        } catch (e) {
+          if (e instanceof StopExecutionError) throw e;
+        }
       },
 
       textContent: async () => {
@@ -831,12 +999,75 @@
         if (typeof el.focus === "function") el.focus();
         const localDocWindow = doc.defaultView || doc.parentWindow || window;
         const KE = localDocWindow?.KeyboardEvent || KeyboardEvent;
+        const EventCtor = localDocWindow?.Event || Event;
         el.dispatchEvent(
           new KE("keydown", { key, bubbles: true, cancelable: true }),
         );
-        el.dispatchEvent(
-          new KE("keypress", { key, bubbles: true, cancelable: true }),
-        );
+        // For printable single characters, insert into the input value
+        if (key.length === 1 && "value" in el) {
+          const InputEventCtor = localDocWindow?.InputEvent || InputEvent;
+          try {
+            el.dispatchEvent(
+              new InputEventCtor("beforeinput", {
+                bubbles: true,
+                cancelable: true,
+                inputType: "insertText",
+                data: key,
+              }),
+            );
+          } catch (e) {
+            /* beforeinput not supported */
+          }
+          const nativeSetter =
+            el.tagName === "TEXTAREA"
+              ? Object.getOwnPropertyDescriptor(
+                  localDocWindow?.HTMLTextAreaElement?.prototype || {},
+                  "value",
+                )?.set
+              : Object.getOwnPropertyDescriptor(
+                  localDocWindow?.HTMLInputElement?.prototype || {},
+                  "value",
+                )?.set;
+          const newValue = (el.value || "") + key;
+          if (nativeSetter) {
+            nativeSetter.call(el, newValue);
+          } else {
+            el.value = newValue;
+          }
+          const tracker = el._valueTracker;
+          if (tracker) tracker.setValue("");
+          let inputEvent;
+          try {
+            inputEvent = new InputEventCtor("input", {
+              bubbles: true,
+              cancelable: true,
+              inputType: "insertText",
+              data: key,
+            });
+          } catch (e) {
+            inputEvent = new EventCtor("input", {
+              bubbles: true,
+              cancelable: true,
+            });
+          }
+          el.dispatchEvent(inputEvent);
+        } else if (key === "Enter") {
+          // Submit forms on Enter
+          el.dispatchEvent(
+            new KE("keypress", { key, bubbles: true, cancelable: true }),
+          );
+          if (el.form && typeof el.form.requestSubmit === "function") {
+            try {
+              el.form.requestSubmit();
+            } catch (e) {
+              /* ignore */
+            }
+          }
+        } else {
+          el.dispatchEvent(
+            new KE("keypress", { key, bubbles: true, cancelable: true }),
+          );
+        }
         el.dispatchEvent(
           new KE("keyup", { key, bubbles: true, cancelable: true }),
         );
