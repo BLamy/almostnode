@@ -5,6 +5,7 @@ import httpClient from 'isomorphic-git/http/web';
 import { structuredPatch } from 'diff';
 import type { VirtualFS } from '../virtual-fs';
 import * as path from './path';
+import { readGhToken } from './gh-auth';
 
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
 
@@ -595,7 +596,7 @@ function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   }
 
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const gitEnv = resolveGitEnv(ctx.env);
+  const gitEnv = resolveGitEnv(ctx.env, vfs);
   const parsedAuthor = parseAuthor(authorFlag);
   const author = parsedAuthor || { name: gitEnv.authorName, email: gitEnv.authorEmail };
 
@@ -1214,7 +1215,7 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
     return failure('git clone: --depth must be a positive number', 2);
   }
 
-  const gitEnv = resolveGitEnv(ctx.env);
+  const gitEnv = resolveGitEnv(ctx.env, vfs);
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.clone({
     fs: createGitFs(vfs),
@@ -1262,7 +1263,7 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
 
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
   const gitFs = createGitFs(vfs);
-  const gitEnv = resolveGitEnv(ctx.env);
+  const gitEnv = resolveGitEnv(ctx.env, vfs);
 
   const remote = positionals[0] || 'origin';
   const ref = positionals[1];
@@ -1301,7 +1302,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
 
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
   const gitFs = createGitFs(vfs);
-  const gitEnv = resolveGitEnv(ctx.env);
+  const gitEnv = resolveGitEnv(ctx.env, vfs);
   const localRef = await git.currentBranch({ fs: gitFs, dir, fullname: false });
 
   if (!localRef) {
@@ -1352,7 +1353,7 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
 
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
   const gitFs = createGitFs(vfs);
-  const gitEnv = resolveGitEnv(ctx.env);
+  const gitEnv = resolveGitEnv(ctx.env, vfs);
 
   const current = await git.currentBranch({ fs: gitFs, dir, fullname: false });
   if (!current) {
@@ -1379,8 +1380,16 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
 
 // ── Utilities ───────────────────────────────────────────────────────────────
 
-function resolveGitEnv(env: Record<string, string>): GitEnv {
-  const token = env.GIT_TOKEN || env.GITHUB_TOKEN || undefined;
+function resolveGitEnv(env: Record<string, string>, vfs?: VirtualFS): GitEnv {
+  let token = env.GIT_TOKEN || env.GITHUB_TOKEN || undefined;
+
+  // Fall back to stored gh auth token
+  if (!token && vfs) {
+    const ghConfig = readGhToken(vfs);
+    if (ghConfig?.oauth_token) {
+      token = ghConfig.oauth_token;
+    }
+  }
   const username = env.GIT_USERNAME || undefined;
   const password = env.GIT_PASSWORD || undefined;
 

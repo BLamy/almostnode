@@ -19,6 +19,7 @@ import {
 } from '../config/cdn';
 import { loadTailwindConfig } from './tailwind-config-loader';
 import { generateAndWriteRouteTree } from './tanstack-route-tree';
+import { almostnodeDebugLog, almostnodeDebugWarn, almostnodeDebugError } from '../utils/debug';
 
 // Check if we're in a real browser environment (not jsdom or Node.js)
 // jsdom has window but doesn't have ServiceWorker or SharedArrayBuffer
@@ -63,12 +64,12 @@ async function initEsbuild(): Promise<void> {
         await esbuildMod.initialize({
           wasmURL: ESBUILD_WASM_BINARY_CDN,
         });
-        console.log('[ViteDevServer] esbuild-wasm initialized');
+        almostnodeDebugLog('vite', '[ViteDevServer] esbuild-wasm initialized');
       } catch (initError) {
         // If esbuild is already initialized (e.g., from a previous HMR cycle),
         // the WASM is still loaded and the module is usable
         if (initError instanceof Error && initError.message.includes('Cannot call "initialize" more than once')) {
-          console.log('[ViteDevServer] esbuild-wasm already initialized, reusing');
+          almostnodeDebugLog('vite', '[ViteDevServer] esbuild-wasm already initialized, reusing');
         } else {
           throw initError;
         }
@@ -76,7 +77,7 @@ async function initEsbuild(): Promise<void> {
 
       window.__esbuild = esbuildMod;
     } catch (error) {
-      console.error('[ViteDevServer] Failed to initialize esbuild:', error);
+      almostnodeDebugError('vite', '[ViteDevServer] Failed to initialize esbuild:', error);
       (window as any).__esbuildInitFailed = true;
       window.__esbuildInitPromise = undefined;
       throw error;
@@ -514,7 +515,7 @@ export class ViteDevServer extends DevServer {
         watcher.close();
       };
     } catch (error) {
-      console.warn('[ViteDevServer] Could not watch /src directory:', error);
+      almostnodeDebugWarn('vite', '[ViteDevServer] Could not watch /src directory:', error);
     }
 
     // Also watch for CSS files in root
@@ -695,7 +696,7 @@ export class ViteDevServer extends DevServer {
         body: buffer,
       };
     } catch (error) {
-      console.error('[ViteDevServer] Transform error:', error);
+      almostnodeDebugError('vite', '[ViteDevServer] Transform error:', error);
       const message = error instanceof Error ? error.message : 'Transform failed';
       const body = `// Transform Error: ${message}\nconsole.error(${JSON.stringify(message)});`;
       return {
@@ -831,10 +832,10 @@ export class ViteDevServer extends DevServer {
       try {
         const changed = generateAndWriteRouteTree(this.vfs, this.root);
         if (changed) {
-          console.log('[ViteDevServer] Regenerated routeTree.gen.ts');
+          almostnodeDebugLog('vite', '[ViteDevServer] Regenerated routeTree.gen.ts');
         }
       } catch (error) {
-        console.warn('[ViteDevServer] Failed to regenerate route tree:', error);
+        almostnodeDebugWarn('vite', '[ViteDevServer] Failed to regenerate route tree:', error);
       }
     }, 100);
   }
@@ -902,7 +903,10 @@ export class ViteDevServer extends DevServer {
     }
 
     try {
-      const code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      let code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      // Rewrite any bare specifiers that esbuild left external (e.g., unresolved
+      // transitive deps converted to ESM imports by patchExternalRequires)
+      code = this.redirectNpmImports(code);
       return {
         statusCode: 200,
         statusMessage: 'OK',
@@ -914,12 +918,14 @@ export class ViteDevServer extends DevServer {
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.error(`[ViteDevServer] Failed to bundle npm module '${specifier}':`, msg);
+      almostnodeDebugError('vite', `[ViteDevServer] Failed to bundle npm module '${specifier}':`, msg);
+      // Return a valid JS module so browsers don't reject it due to MIME type
+      const errorJs = `console.error(${JSON.stringify(`[almostnode] Failed to bundle '${specifier}': ${msg}`)});\nthrow new Error(${JSON.stringify(`Failed to bundle '${specifier}': ${msg}`)});\nexport default undefined;\n`;
       return {
-        statusCode: 500,
-        statusMessage: 'Internal Server Error',
-        headers: { 'Content-Type': 'text/plain' },
-        body: Buffer.from(`Failed to bundle '${specifier}': ${msg}`),
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: { 'Content-Type': 'application/javascript; charset=utf-8' },
+        body: Buffer.from(errorJs),
       };
     }
   }
@@ -1064,11 +1070,11 @@ export default css;
       if (result.success) {
         this.tailwindConfigScript = result.configScript;
       } else if (result.error) {
-        console.warn('[ViteDevServer] Tailwind config warning:', result.error);
+        almostnodeDebugWarn('vite', '[ViteDevServer] Tailwind config warning:', result.error);
         this.tailwindConfigScript = '';
       }
     } catch (error) {
-      console.warn('[ViteDevServer] Failed to load tailwind.config:', error);
+      almostnodeDebugWarn('vite', '[ViteDevServer] Failed to load tailwind.config:', error);
       this.tailwindConfigScript = '';
     }
 

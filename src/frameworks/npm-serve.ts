@@ -101,12 +101,35 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
 
       if (exports && typeof exports === 'object') {
         const key = subPath ? './' + subPath : '.';
-        const entry = (exports as Record<string, unknown>)[key];
+        const exportsMap = exports as Record<string, unknown>;
+        const entry = exportsMap[key];
         if (entry) {
           const resolved = resolveExportEntry(entry);
           if (resolved) {
             const fullPath = pkgDir + '/' + resolved.replace(/^\.\//, '');
             if (isFile(fullPath)) return fullPath;
+          }
+        }
+
+        // Try wildcard export patterns (e.g., "./*": "./dist/es5/*.js")
+        if (subPath) {
+          for (const expKey of Object.keys(exportsMap)) {
+            const starIdx = expKey.indexOf('*');
+            if (starIdx === -1) continue;
+            const prefix = expKey.slice(0, starIdx);
+            const suffix = expKey.slice(starIdx + 1);
+            if (key.startsWith(prefix) && (suffix === '' || key.endsWith(suffix))) {
+              const matched = suffix
+                ? key.slice(prefix.length, key.length - suffix.length)
+                : key.slice(prefix.length);
+              const target = exportsMap[expKey];
+              const targetPath = resolveExportEntry(target);
+              if (targetPath) {
+                const expanded = targetPath.replace('*', matched);
+                const fullPath = pkgDir + '/' + expanded.replace(/^\.\//, '');
+                if (isFile(fullPath)) return fullPath;
+              }
+            }
           }
         }
       }

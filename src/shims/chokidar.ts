@@ -5,6 +5,7 @@
 
 import { EventEmitter } from './events';
 import type { VirtualFS, FSWatcher as VFSWatcher, Stats } from '../virtual-fs';
+import { almostnodeDebugLog, almostnodeDebugWarn } from '../utils/debug';
 
 // Global reference to VFS - set by runtime
 let globalVFS: VirtualFS | null = null;
@@ -83,7 +84,7 @@ export class FSWatcher extends EventEmitter {
 
     const pathArray = Array.isArray(paths) ? paths : [paths];
     const pendingEmits: Array<() => void> = [];
-    console.log('[chokidar] add:', pathArray);
+    almostnodeDebugLog('chokidar', '[chokidar] add:', pathArray);
 
     for (const p of pathArray) {
       const normalized = this.normalizePath(p);
@@ -179,10 +180,10 @@ export class FSWatcher extends EventEmitter {
       const count = (this._eventCounts.get(eventKey) || 0) + 1;
       this._eventCounts.set(eventKey, count);
       if (count === 5) {
-        console.warn(`[chokidar] Repeated event: ${eventType} on ${fullPath} (${count}+ times)`);
+        almostnodeDebugWarn('chokidar', `[chokidar] Repeated event: ${eventType} on ${fullPath} (${count}+ times)`);
       }
 
-      console.log('[chokidar] event:', eventType, fullPath);
+      almostnodeDebugLog('chokidar', '[chokidar] event:', eventType, fullPath);
 
       // If we're watching for a specific path, only emit for that
       if (watchFor && fullPath !== watchFor && !fullPath.startsWith(watchFor + '/')) {
@@ -190,7 +191,7 @@ export class FSWatcher extends EventEmitter {
       }
 
       if (this.shouldIgnore(fullPath)) {
-        console.log('[chokidar] ignored:', fullPath);
+        almostnodeDebugLog('chokidar', '[chokidar] ignored:', fullPath);
         return;
       }
 
@@ -200,24 +201,24 @@ export class FSWatcher extends EventEmitter {
           try {
             const stats = this.vfs.statSync(fullPath);
             if (stats.isDirectory()) {
-              console.log('[chokidar] emit addDir:', fullPath);
+              almostnodeDebugLog('chokidar', '[chokidar] emit addDir:', fullPath);
               this.emit('addDir', fullPath, stats);
             } else {
-              console.log('[chokidar] emit add:', fullPath);
+              almostnodeDebugLog('chokidar', '[chokidar] emit add:', fullPath);
               this.emit('add', fullPath, stats);
             }
           } catch {
             // Race condition - file may have been deleted
           }
         } else {
-          console.log('[chokidar] emit unlink:', fullPath);
+          almostnodeDebugLog('chokidar', '[chokidar] emit unlink:', fullPath);
           this.emit('unlink', fullPath);
         }
       } else if (eventType === 'change') {
         // File was modified
         try {
           const stats = this.vfs.statSync(fullPath);
-          console.log('[chokidar] emit change:', fullPath);
+          almostnodeDebugLog('chokidar', '[chokidar] emit change:', fullPath);
           this.emit('change', fullPath, stats);
         } catch {
           // File may have been deleted

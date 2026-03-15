@@ -56,6 +56,11 @@ export function almostnodeDebugLog(section: string, ...args: unknown[]): void {
   console.log(...args);
 }
 
+export function almostnodeDebugWarn(section: string, ...args: unknown[]): void {
+  if (!isAlmostnodeDebugEnabled(section)) return;
+  console.warn(...args);
+}
+
 export function almostnodeDebugError(section: string, ...args: unknown[]): void {
   if (!isAlmostnodeDebugEnabled(section)) return;
   console.error(...args);

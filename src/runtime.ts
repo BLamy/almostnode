@@ -1314,11 +1314,11 @@ function createRequire(
     // Intercept rollup and esbuild - always use our shims
     // These packages have native binaries that don't work in browser
     if (id === 'rollup' || id.startsWith('rollup/') || id.startsWith('@rollup/')) {
-      console.log('[runtime] Intercepted rollup:', id);
+      almostnodeDebugLog('runtime', '[runtime] Intercepted rollup:', id);
       return builtinModules['rollup'];
     }
     if (id === 'esbuild' || id.startsWith('esbuild/') || id.startsWith('@esbuild/')) {
-      console.log('[runtime] Intercepted esbuild:', id);
+      almostnodeDebugLog('runtime', '[runtime] Intercepted esbuild:', id);
       return builtinModules['esbuild'];
     }
     // Intercept prettier - uses createRequire which doesn't work in our runtime

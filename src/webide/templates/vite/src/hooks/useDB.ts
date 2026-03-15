@@ -1,4 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
+import { dbQuery, dbExec } from '@/db';
+
+export { dbQuery, dbExec };
 
 interface QueryResult<T> {
   rows: T[];
@@ -7,7 +10,10 @@ interface QueryResult<T> {
   refetch: () => void;
 }
 
-export function useDBQuery<T = any>(sql: string, params: any[] = []): QueryResult<T> {
+export function useDBQuery<T = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = [],
+): QueryResult<T> {
   const [rows, setRows] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -18,15 +24,10 @@ export function useDBQuery<T = any>(sql: string, params: any[] = []): QueryResul
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch('/__db__/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql, params }),
-    })
-      .then((r) => r.json())
+    dbQuery<T>(sql, params)
       .then((data) => {
         if (!cancelled) {
-          setRows(data.rows || []);
+          setRows(data);
           setError(null);
         }
       })
@@ -40,24 +41,4 @@ export function useDBQuery<T = any>(sql: string, params: any[] = []): QueryResul
   }, [sql, JSON.stringify(params), tick]);
 
   return { rows, loading, error, refetch };
-}
-
-export async function dbExec(sql: string): Promise<void> {
-  const res = await fetch('/__db__/exec', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql }),
-  });
-  if (!res.ok) throw new Error((await res.json()).error);
-}
-
-export async function dbQuery<T = any>(sql: string, params: any[] = []): Promise<T[]> {
-  const res = await fetch('/__db__/query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql, params }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error);
-  return data.rows;
 }

@@ -1,4 +1,5 @@
--- PGlite schema: runs automatically on database init
+-- Auto-applied by PGlite on database init.
+-- Keep in sync with the Drizzle schema in src/db/schema.ts.
 CREATE TABLE IF NOT EXISTS todos (
   id SERIAL PRIMARY KEY,
   title TEXT NOT NULL,

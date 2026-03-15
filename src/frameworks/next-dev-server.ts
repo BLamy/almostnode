@@ -52,6 +52,7 @@ import {
 import { createVfsRequire, type VfsModule } from './vfs-require';
 import { bundleNpmModuleForBrowser, clearNpmBundleCache, initNpmServe } from './npm-serve';
 import { ESBUILD_WASM_ESM_CDN, ESBUILD_WASM_BINARY_CDN } from '../config/cdn';
+import { almostnodeDebugLog, almostnodeDebugWarn, almostnodeDebugError } from '../utils/debug';
 
 // Check if we're in a real browser environment (not jsdom or Node.js)
 const isBrowser = typeof window !== 'undefined' &&
@@ -92,10 +93,10 @@ async function initEsbuild(): Promise<void> {
         await esbuildMod.initialize({
           wasmURL: ESBUILD_WASM_BINARY_CDN,
         });
-        console.log('[NextDevServer] esbuild-wasm initialized');
+        almostnodeDebugLog('next', '[NextDevServer] esbuild-wasm initialized');
       } catch (initError) {
         if (initError instanceof Error && initError.message.includes('Cannot call "initialize" more than once')) {
-          console.log('[NextDevServer] esbuild-wasm already initialized, reusing');
+          almostnodeDebugLog('next', '[NextDevServer] esbuild-wasm already initialized, reusing');
         } else {
           throw initError;
         }
@@ -103,7 +104,7 @@ async function initEsbuild(): Promise<void> {
 
       window.__esbuild = esbuildMod;
     } catch (error) {
-      console.error('[NextDevServer] Failed to initialize esbuild:', error);
+      almostnodeDebugError('next', '[NextDevServer] Failed to initialize esbuild:', error);
       (window as any).__esbuildInitFailed = true;
       window.__esbuildInitPromise = undefined;
       throw error;
@@ -495,11 +496,11 @@ export class NextDevServer extends DevServer {
       if (result.success) {
         this.tailwindConfigScript = result.configScript;
       } else if (result.error) {
-        console.warn('[NextDevServer] Tailwind config warning:', result.error);
+        almostnodeDebugWarn('next', '[NextDevServer] Tailwind config warning:', result.error);
         this.tailwindConfigScript = '';
       }
     } catch (error) {
-      console.warn('[NextDevServer] Failed to load tailwind.config:', error);
+      almostnodeDebugWarn('next', '[NextDevServer] Failed to load tailwind.config:', error);
       this.tailwindConfigScript = '';
     }
 
@@ -964,7 +965,7 @@ export class NextDevServer extends DevServer {
 
       return res.toResponse();
     } catch (error) {
-      console.error('[NextDevServer] API error:', error);
+      almostnodeDebugError('next', '[NextDevServer] API error:', error);
       return {
         statusCode: 500,
         statusMessage: 'Internal Server Error',
@@ -1062,7 +1063,7 @@ export class NextDevServer extends DevServer {
         body: Buffer.from(String(response || '')),
       };
     } catch (error) {
-      console.error('[NextDevServer] App Route handler error:', error);
+      almostnodeDebugError('next', '[NextDevServer] App Route handler error:', error);
       return {
         statusCode: 500,
         statusMessage: 'Internal Server Error',
@@ -1175,7 +1176,7 @@ export class NextDevServer extends DevServer {
         await Promise.race([res.waitForEnd(), timeout]);
       }
     } catch (error) {
-      console.error('[NextDevServer] Streaming API error:', error);
+      almostnodeDebugError('next', '[NextDevServer] Streaming API error:', error);
       onStart(500, 'Internal Server Error', { 'Content-Type': 'application/json' });
       onChunk(JSON.stringify({ error: error instanceof Error ? error.message : 'Internal Server Error' }));
       onEnd();
@@ -1270,7 +1271,7 @@ export class NextDevServer extends DevServer {
         onEnd();
       }
     } catch (error) {
-      console.error('[NextDevServer] App Route streaming error:', error);
+      almostnodeDebugError('next', '[NextDevServer] App Route streaming error:', error);
       onStart(500, 'Internal Server Error', { 'Content-Type': 'application/json' });
       onChunk(JSON.stringify({ error: error instanceof Error ? error.message : 'Internal Server Error' }));
       onEnd();
@@ -1450,7 +1451,7 @@ export class NextDevServer extends DevServer {
         body: buffer,
       };
     } catch (error) {
-      console.error('[NextDevServer] Transform error:', error);
+      almostnodeDebugError('next', '[NextDevServer] Transform error:', error);
       const message = error instanceof Error ? error.message : 'Transform failed';
       const body = `// Transform Error: ${message}\nconsole.error(${JSON.stringify(message)});`;
       return {
@@ -1595,7 +1596,10 @@ export class NextDevServer extends DevServer {
     }
 
     try {
-      const code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      let code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      // Rewrite any bare specifiers that esbuild left external (e.g., unresolved
+      // transitive deps converted to ESM imports by patchExternalRequires)
+      code = this.redirectNpmImports(code);
       return {
         statusCode: 200,
         statusMessage: 'OK',
@@ -1607,12 +1611,14 @@ export class NextDevServer extends DevServer {
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.error(`[NextDevServer] Failed to bundle npm module '${specifier}':`, msg);
+      almostnodeDebugError('next', `[NextDevServer] Failed to bundle npm module '${specifier}':`, msg);
+      // Return a valid JS module so browsers don't reject it due to MIME type
+      const errorJs = `console.error(${JSON.stringify(`[almostnode] Failed to bundle '${specifier}': ${msg}`)});\nthrow new Error(${JSON.stringify(`Failed to bundle '${specifier}': ${msg}`)});\nexport default undefined;\n`;
       return {
-        statusCode: 500,
-        statusMessage: 'Internal Server Error',
-        headers: { 'Content-Type': 'text/plain' },
-        body: Buffer.from(`Failed to bundle '${specifier}': ${msg}`),
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: { 'Content-Type': 'application/javascript; charset=utf-8' },
+        body: Buffer.from(errorJs),
       };
     }
   }
@@ -1703,7 +1709,7 @@ export class NextDevServer extends DevServer {
       });
       watchers.push(pagesWatcher);
     } catch (error) {
-      console.warn('[NextDevServer] Could not watch pages directory:', error);
+      almostnodeDebugWarn('next', '[NextDevServer] Could not watch pages directory:', error);
     }
 
     // Watch /app directory for App Router
@@ -1718,7 +1724,7 @@ export class NextDevServer extends DevServer {
         });
         watchers.push(appWatcher);
       } catch (error) {
-        console.warn('[NextDevServer] Could not watch app directory:', error);
+        almostnodeDebugWarn('next', '[NextDevServer] Could not watch app directory:', error);
       }
     }
 

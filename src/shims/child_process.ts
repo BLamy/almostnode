@@ -430,6 +430,11 @@ function maybeRunCustomCommandDirect(
         const { runGitCommand } = await import('./git-command');
         return runGitCommand(args, {} as any, vfs);
       })();
+    case 'gh':
+      return (async () => {
+        const { runGhCommand } = await import('./gh-command');
+        return runGhCommand(args, {} as any, vfs);
+      })();
     default:
       return null;
   }
@@ -1117,6 +1122,10 @@ module.exports = (async () => {
       return { stdout: '', stderr: 'npx: missing command\nUsage: npx [options] <command> [args...]\n', exitCode: 1 };
     }
 
+    const LONG_RUNNING_NPX_COMMANDS = new Set([
+      'shadcn', 'npm', 'npx'
+    ]);
+
     const commandName = cmdArgs[0];
     const commandArgs = cmdArgs.slice(1);
     const installSpec = packageSpec || commandName;
@@ -1262,7 +1271,7 @@ module.exports = (async () => {
 
     const execEnv = {
       ...env,
-      ...(useExtendedNodeIdle ? { ALMOSTNODE_LONG_NODE_IDLE: '1' } : {}),
+      ...((useExtendedNodeIdle || LONG_RUNNING_NPX_COMMANDS.has(commandName)) ? { ALMOSTNODE_LONG_NODE_IDLE: '1' } : {}),
       ALMOSTNODE_NPX_EXEC: '1',
     };
 
@@ -1633,6 +1642,11 @@ module.exports = (async () => {
     return runCurlCommand(args, ctx, controller.vfs);
   });
 
+  const ghCommand = defineCommand('gh', async (args, ctx) => {
+    const { runGhCommand } = await import('./gh-command');
+    return runGhCommand(args, ctx, controller.vfs);
+  });
+
   const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
     return defineCommand(commandName, async (args, ctx) => {
       const shell = getSyntheticShellSpec(commandName);
@@ -1678,7 +1692,7 @@ module.exports = (async () => {
       info: emitBashLog,
       debug: emitBashLog,
     },
-    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand, ghCommand],
   });
 
   // Wrap bashInstance.exec to:

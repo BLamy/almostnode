@@ -81,6 +81,7 @@ export {
 import { VirtualFS } from "./virtual-fs";
 import { Runtime, RuntimeOptions } from "./runtime";
 import { PackageManager } from "./npm";
+import { almostnodeDebugLog } from "./utils/debug";
 import type { InstallMode, PackageManagerMutationSummary } from "./npm";
 import { ServerBridge, getServerBridge } from "./server-bridge";
 import {
@@ -328,7 +329,7 @@ export function createContainer(options?: ContainerOptions): {
     command: string,
     runOptions?: RunOptions,
   ): Promise<RunResult> => {
-    console.log(`runLegacyCommand(${command} ${runOptions}`);
+    almostnodeDebugLog('commands', `runLegacyCommand(${command} ${runOptions}`);
     if (runOptions?.signal?.aborted) {
       return { stdout: "", stderr: "", exitCode: 130 };
     }

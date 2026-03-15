@@ -7,6 +7,7 @@
 import { EventEmitter, EventListener } from './events';
 import { homedir, userInfo } from './os';
 import { DEFAULT_POSIX_SHELL } from './synthetic-shells';
+import { almostnodeDebugWarn } from '../utils/debug';
 
 export interface ProcessEnv {
   [key: string]: string | undefined;
@@ -448,7 +449,7 @@ export function createProcess(options?: {
       const type = typeof typeOrOptions === 'string' ? typeOrOptions : typeOrOptions?.type || 'Warning';
       const warnCode = code || (typeof typeOrOptions === 'object' ? typeOrOptions?.code : undefined);
       const prefix = warnCode ? `[${warnCode}] ` : '';
-      console.warn(`(node:${proc.pid}) ${type}: ${prefix}${msg}`);
+      almostnodeDebugWarn('process', `(node:${proc.pid}) ${type}: ${prefix}${msg}`);
       emitter.emit('warning', warning instanceof Error ? warning : new Error(msg));
     },
 

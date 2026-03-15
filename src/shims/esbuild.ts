@@ -353,6 +353,29 @@ function resolveSubpathImport(
         }
       }
     }
+
+    // Try wildcard export patterns (e.g., "./*": "./dist/es5/*.js")
+    for (const key of Object.keys(exportsMap)) {
+      const starIdx = key.indexOf('*');
+      if (starIdx === -1) continue;
+      const prefix = key.slice(0, starIdx);
+      const suffix = key.slice(starIdx + 1);
+      if (exportKey.startsWith(prefix) && (suffix === '' || exportKey.endsWith(suffix))) {
+        const matched = suffix
+          ? exportKey.slice(prefix.length, exportKey.length - suffix.length)
+          : exportKey.slice(prefix.length);
+        const target = exportsMap[key];
+        const targetPath = resolveExportConditions(target);
+        if (targetPath) {
+          const expanded = targetPath.replace('*', matched);
+          const resolvedPath = nodeModulesBase + '/' + expanded.replace(/^\.\//, '');
+          const foundPath = findVFSFile(vfs, resolvedPath, ['', '.js', '.ts', '.mjs']);
+          if (foundPath) {
+            return foundPath;
+          }
+        }
+      }
+    }
   }
 
   // Fall back to direct path resolution
@@ -680,6 +703,11 @@ function createVFSPlugin(externals?: string[]): unknown {
               return vfsResolved(foundIndex);
             }
           }
+
+          // Relative import couldn't be resolved — stub as empty module
+          // instead of falling through to bare import handling which would
+          // externalize it (producing broken imports like /_npm/constants)
+          return { path: `/__rel_stub__/${resolved}`, namespace: 'node-stub' };
         }
 
         // Bare imports (no ./ or ../ or /) - resolve from node_modules in VFS

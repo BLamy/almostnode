@@ -6,6 +6,7 @@ import type { VFSSnapshot, VFSFileEntry } from './runtime-interface';
 import { uint8ToBase64, base64ToUint8 } from './utils/binary-encoding';
 import { EventEmitter, EventListener } from './shims/events';
 import { isSyntheticExecutablePath } from './shims/synthetic-shells';
+import { almostnodeDebugError } from './utils/debug';
 
 export interface FSNode {
   type: 'file' | 'directory';
@@ -244,7 +245,7 @@ export class VirtualFS {
         try {
           (listener as (...args: unknown[]) => void)(...args);
         } catch (err) {
-          console.error('Error in VFS event listener:', err);
+          almostnodeDebugError('vfs', 'Error in VFS event listener:', err);
         }
       }
     }
@@ -883,7 +884,7 @@ export class VirtualFS {
             entry.listener(eventType, basename);
             entry.watcher.emit('change', eventType, basename);
           } catch (err) {
-            console.error('Error in file watcher:', err);
+            almostnodeDebugError('vfs', 'Error in file watcher:', err);
           }
         }
       }
@@ -905,7 +906,7 @@ export class VirtualFS {
                 entry.listener(eventType, relativePath);
                 entry.watcher.emit('change', eventType, relativePath);
               } catch (err) {
-                console.error('Error in file watcher:', err);
+                almostnodeDebugError('vfs', 'Error in file watcher:', err);
               }
             }
           }
