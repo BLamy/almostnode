@@ -45,6 +45,14 @@ export interface BridgeOptions {
 
 type ModuleRequestHandler = (url: string) => Promise<ResponseData>;
 
+export type RequestMiddleware = (
+  port: number,
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body?: ArrayBuffer,
+) => Promise<ResponseData | null>;
+
 export interface InitServiceWorkerOptions {
   /**
    * The URL path to the service worker file
@@ -63,6 +71,7 @@ export class ServerBridge extends EventEmitter {
   private baseUrl: string;
   private basePath: string;
   private options: BridgeOptions;
+  private middlewares: RequestMiddleware[] = [];
   private messageChannel: MessageChannel | null = null;
   private serviceWorkerReady: boolean = false;
   private keepaliveInterval: ReturnType<typeof setInterval> | null = null;
@@ -138,6 +147,21 @@ export class ServerBridge extends EventEmitter {
   }
 
   /**
+   * Register a request middleware that can intercept requests before the virtual server
+   */
+  registerMiddleware(mw: RequestMiddleware): void {
+    this.middlewares.push(mw);
+  }
+
+  /**
+   * Unregister a previously registered middleware
+   */
+  unregisterMiddleware(mw: RequestMiddleware): void {
+    const idx = this.middlewares.indexOf(mw);
+    if (idx >= 0) this.middlewares.splice(idx, 1);
+  }
+
+  /**
    * Handle an incoming request from Service Worker
    */
   async handleRequest(
@@ -147,6 +171,12 @@ export class ServerBridge extends EventEmitter {
     headers: Record<string, string>,
     body?: ArrayBuffer
   ): Promise<ResponseData> {
+    // Run middlewares first — if one returns non-null, short-circuit
+    for (const mw of this.middlewares) {
+      const result = await mw(port, method, url, headers, body);
+      if (result) return result;
+    }
+
     const virtualServer = this.servers.get(port);
 
     if (!virtualServer) {

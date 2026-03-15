@@ -1537,6 +1537,11 @@ module.exports = (async () => {
     return runPlaywrightCommand(args, ctx, controller.vfs);
   });
 
+  const pgliteCommand = defineCommand('pglite', async (args, ctx) => {
+    const { runPGliteCommand } = await import('./pglite-command');
+    return runPGliteCommand(args, ctx, controller.vfs);
+  });
+
   const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
     return defineCommand(commandName, async (args, ctx) => {
       const shell = getSyntheticShellSpec(commandName);
@@ -1582,7 +1587,7 @@ module.exports = (async () => {
       info: emitBashLog,
       debug: emitBashLog,
     },
-    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand],
   });
 
   controller = {

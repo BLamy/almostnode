@@ -18,9 +18,15 @@ const PREVIEW_EDITOR_RESOURCE = URI.from({
   scheme: 'almostnode-preview',
   path: '/workspace',
 });
+const DATABASE_EDITOR_TYPE_ID = 'almostnode.editor.database';
+const DATABASE_EDITOR_RESOURCE = URI.from({
+  scheme: 'almostnode-database',
+  path: '/browser',
+});
 const FILES_VIEW_ID = 'almostnode.sidebar.files';
 const TERMINAL_VIEW_ID = 'almostnode.panel.terminal';
 const CLAUDE_VIEW_ID = 'almostnode.sidebar.claude';
+const DATABASE_VIEW_ID = 'almostnode.sidebar.database';
 const NODE_MODULES_REFRESH_DELAY_MS = 48;
 
 function scheduleUiFrame(callback: () => void): { cancel: () => void } {
@@ -83,9 +89,11 @@ interface PreviewSurfaceCommands {
 
 export interface RegisteredWorkbenchSurfaces {
   previewInput: SimpleEditorInput;
+  databaseInput: SimpleEditorInput;
   filesViewId: string;
   terminalViewId: string;
   claudeViewId: string;
+  databaseViewId: string;
   dispose(): void;
 }
 
@@ -776,6 +784,7 @@ export class PreviewSurface {
   private readonly emptyState = document.createElement('div');
   private readonly iframe = document.createElement('iframe');
   private currentUrl: string | null = null;
+  private activeDbName: string | null = null;
   private erudaVisible = false;
 
   constructor(commands: PreviewSurfaceCommands) {
@@ -851,12 +860,22 @@ export class PreviewSurface {
 
   setUrl(url: string): void {
     this.currentUrl = url;
-    this.status.textContent = url;
+    const displayUrl = this.activeDbName ? `${url}?db=${this.activeDbName}` : url;
+    this.status.textContent = displayUrl;
     this.emptyState.hidden = true;
     this.emptyState.style.display = 'none';
     this.iframe.hidden = false;
     this.iframe.style.display = 'block';
-    this.iframe.src = url;
+    this.iframe.src = displayUrl;
+  }
+
+  setActiveDb(name: string | null): void {
+    this.activeDbName = name;
+    if (this.currentUrl) {
+      const displayUrl = name ? `${this.currentUrl}?db=${name}` : this.currentUrl;
+      this.status.textContent = displayUrl;
+      this.iframe.src = displayUrl;
+    }
   }
 
   clear(text: string): void {
@@ -875,7 +894,8 @@ export class PreviewSurface {
       return;
     }
 
-    this.iframe.src = this.currentUrl;
+    const url = this.activeDbName ? `${this.currentUrl}?db=${this.activeDbName}` : this.currentUrl;
+    this.iframe.src = url;
   }
 
   focus(): void {
@@ -1489,11 +1509,351 @@ export class ClaudeTerminalSurface {
   }
 }
 
+export interface DatabaseSidebarCallbacks {
+  onOpen(name: string): void;
+  onSwitch(name: string): void;
+  onCreate(name: string): void;
+  onDelete(name: string): void;
+}
+
+export class DatabaseSidebarSurface {
+  private readonly root = document.createElement('div');
+  private readonly listEl = document.createElement('div');
+  private readonly formEl = document.createElement('div');
+  private readonly input = document.createElement('input');
+  private activeName: string | null = null;
+  private databases: { name: string; createdAt: string }[] = [];
+  private callbacks: DatabaseSidebarCallbacks | null = null;
+
+  constructor() {
+    this.root.className = 'almostnode-db-sidebar';
+    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:#ccc;font-size:13px;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight:600;margin-bottom:4px;';
+    header.textContent = 'Databases';
+
+    this.listEl.style.cssText = 'flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;';
+
+    this.formEl.style.cssText = 'display:flex;gap:4px;';
+    this.input.type = 'text';
+    this.input.placeholder = 'New database name';
+    this.input.style.cssText = 'flex:1;background:#1e1e1e;border:1px solid #444;color:#ccc;padding:4px 8px;border-radius:3px;font-size:12px;';
+
+    const createBtn = document.createElement('button');
+    createBtn.textContent = 'Create';
+    createBtn.style.cssText = 'background:#0e639c;color:#fff;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
+    createBtn.addEventListener('click', () => {
+      const name = this.input.value.trim();
+      if (name && this.callbacks) {
+        this.callbacks.onCreate(name);
+        this.input.value = '';
+      }
+    });
+    this.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') createBtn.click();
+    });
+
+    this.formEl.append(this.input, createBtn);
+    this.root.append(header, this.listEl, this.formEl);
+  }
+
+  setCallbacks(callbacks: DatabaseSidebarCallbacks): void {
+    this.callbacks = callbacks;
+  }
+
+  update(databases: { name: string; createdAt: string }[], activeName: string | null): void {
+    this.databases = databases;
+    this.activeName = activeName;
+    this.render();
+  }
+
+  attach(container: HTMLElement): IDisposable {
+    container.appendChild(this.root);
+    return {
+      dispose: () => {
+        if (this.root.parentElement === container) {
+          container.removeChild(this.root);
+        }
+      },
+    };
+  }
+
+  private render(): void {
+    this.listEl.innerHTML = '';
+    for (const db of this.databases) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;';
+      const isActive = db.name === this.activeName;
+      if (isActive) {
+        row.style.background = '#094771';
+      }
+      row.addEventListener('mouseenter', () => { if (!isActive) row.style.background = '#2a2d2e'; });
+      row.addEventListener('mouseleave', () => { if (!isActive) row.style.background = 'transparent'; });
+
+      const indicator = document.createElement('span');
+      indicator.style.cssText = `width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${isActive ? '#4ec9b0' : '#555'};`;
+
+      const label = document.createElement('span');
+      label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      label.textContent = db.name;
+
+      row.addEventListener('click', () => {
+        if (this.callbacks) {
+          this.callbacks.onOpen(db.name);
+        }
+      });
+
+      row.append(indicator, label);
+
+      // Delete button (disabled when only 1 database)
+      if (this.databases.length > 1) {
+        const delBtn = document.createElement('button');
+        delBtn.textContent = '\u00d7';
+        delBtn.title = `Delete ${db.name}`;
+        delBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:16px;padding:0 2px;line-height:1;';
+        delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#e06c75'; });
+        delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#888'; });
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (this.callbacks) this.callbacks.onDelete(db.name);
+        });
+        row.append(delBtn);
+      }
+
+      this.listEl.appendChild(row);
+    }
+  }
+}
+
+export type DatabaseQueryHandler = (operation: string, body: any, dbName?: string) => Promise<{ statusCode: number; body: string }>;
+
+export class DatabaseBrowserSurface {
+  private readonly root = document.createElement('div');
+  private readonly tableList = document.createElement('div');
+  private readonly sqlTextarea = document.createElement('textarea');
+  private readonly resultsArea = document.createElement('div');
+  private readonly statusBar = document.createElement('div');
+  private readonly dbLabel = document.createElement('span');
+  private dbName: string = '';
+  private queryHandler: DatabaseQueryHandler | null = null;
+
+  constructor() {
+    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;background:#1e1e1e;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;';
+
+    // Header bar
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #333;flex-shrink:0;';
+    this.dbLabel.style.cssText = 'font-weight:600;flex:1;';
+    const refreshBtn = document.createElement('button');
+    refreshBtn.textContent = 'Refresh';
+    refreshBtn.style.cssText = 'background:#333;border:1px solid #555;color:#ccc;padding:3px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
+    refreshBtn.addEventListener('click', () => this.refreshTables());
+    header.append(this.dbLabel, refreshBtn);
+
+    // Body: left panel (table list) + right panel (SQL + results)
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex:1;overflow:hidden;';
+
+    // Left panel — table list
+    const leftPanel = document.createElement('div');
+    leftPanel.style.cssText = 'width:25%;min-width:140px;border-right:1px solid #333;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:2px;';
+    const tableHeader = document.createElement('div');
+    tableHeader.textContent = 'Tables';
+    tableHeader.style.cssText = 'font-weight:600;margin-bottom:4px;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px;';
+    leftPanel.append(tableHeader, this.tableList);
+
+    // Right panel — SQL editor + results
+    const rightPanel = document.createElement('div');
+    rightPanel.style.cssText = 'flex:1;display:flex;flex-direction:column;overflow:hidden;';
+
+    // SQL editor area
+    const sqlArea = document.createElement('div');
+    sqlArea.style.cssText = 'display:flex;flex-direction:column;border-bottom:1px solid #333;flex-shrink:0;';
+    const sqlHeader = document.createElement('div');
+    sqlHeader.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:4px 8px;background:#252526;';
+    const sqlLabel = document.createElement('span');
+    sqlLabel.textContent = 'SQL Query';
+    sqlLabel.style.cssText = 'font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;';
+    const runBtn = document.createElement('button');
+    runBtn.textContent = 'Run';
+    runBtn.style.cssText = 'background:#0e639c;border:none;color:#fff;padding:3px 14px;border-radius:3px;cursor:pointer;font-size:12px;';
+    runBtn.addEventListener('click', () => this.runQuery());
+    sqlHeader.append(sqlLabel, runBtn);
+
+    this.sqlTextarea.style.cssText = 'width:100%;height:80px;background:#1e1e1e;color:#d4d4d4;border:none;padding:8px;font-family:"Cascadia Code","Fira Code",Consolas,monospace;font-size:13px;resize:vertical;outline:none;box-sizing:border-box;';
+    this.sqlTextarea.placeholder = 'Enter SQL query...';
+    this.sqlTextarea.spellcheck = false;
+    this.sqlTextarea.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        this.runQuery();
+      }
+    });
+    sqlArea.append(sqlHeader, this.sqlTextarea);
+
+    // Results area
+    this.resultsArea.style.cssText = 'flex:1;overflow:auto;padding:0;';
+
+    // Status bar
+    this.statusBar.style.cssText = 'padding:4px 8px;border-top:1px solid #333;font-size:11px;color:#888;flex-shrink:0;';
+    this.statusBar.textContent = 'Ready';
+
+    rightPanel.append(sqlArea, this.resultsArea, this.statusBar);
+    body.append(leftPanel, rightPanel);
+    this.root.append(header, body);
+  }
+
+  setQueryHandler(handler: DatabaseQueryHandler): void {
+    this.queryHandler = handler;
+  }
+
+  setDatabase(name: string): void {
+    this.dbName = name;
+    this.dbLabel.textContent = `Database: ${name}`;
+    this.refreshTables();
+  }
+
+  focus(): void {
+    this.sqlTextarea.focus();
+  }
+
+  attach(container: HTMLElement): IDisposable {
+    container.style.overflow = 'hidden';
+    container.appendChild(this.root);
+    return {
+      dispose: () => {
+        if (this.root.parentElement === container) {
+          container.removeChild(this.root);
+        }
+      },
+    };
+  }
+
+  private async refreshTables(): Promise<void> {
+    if (!this.queryHandler || !this.dbName) return;
+    this.tableList.innerHTML = '';
+    try {
+      const result = await this.queryHandler('tables', {}, this.dbName);
+      const data = JSON.parse(result.body);
+      if (data.tables && data.tables.length > 0) {
+        for (const tableName of data.tables) {
+          const row = document.createElement('div');
+          row.style.cssText = 'padding:4px 8px;cursor:pointer;border-radius:3px;display:flex;align-items:center;gap:6px;';
+          row.addEventListener('mouseenter', () => { row.style.background = '#2a2d2e'; });
+          row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+          const icon = document.createElement('span');
+          icon.textContent = '\u{1f4cb}';
+          icon.style.cssText = 'font-size:11px;';
+          const label = document.createElement('span');
+          label.textContent = tableName;
+          row.append(icon, label);
+          row.addEventListener('click', () => this.loadTable(tableName));
+          this.tableList.appendChild(row);
+        }
+      } else {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'color:#666;font-style:italic;padding:4px 8px;';
+        empty.textContent = 'No tables';
+        this.tableList.appendChild(empty);
+      }
+    } catch (err: any) {
+      this.statusBar.textContent = `Error loading tables: ${err.message}`;
+    }
+  }
+
+  private async loadTable(tableName: string): Promise<void> {
+    if (!this.queryHandler || !this.dbName) return;
+    this.statusBar.textContent = `Loading ${tableName}...`;
+    try {
+      const result = await this.queryHandler('query', { sql: `SELECT * FROM "${tableName}" LIMIT 100` }, this.dbName);
+      const data = JSON.parse(result.body);
+      if (data.error) {
+        this.statusBar.textContent = `Error: ${data.error}`;
+        return;
+      }
+      this.sqlTextarea.value = `SELECT * FROM "${tableName}" LIMIT 100`;
+      this.renderResults(data.fields, data.rows);
+      this.statusBar.textContent = `${data.rows.length} row(s) returned`;
+    } catch (err: any) {
+      this.statusBar.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  private async runQuery(): Promise<void> {
+    const sql = this.sqlTextarea.value.trim();
+    if (!sql || !this.queryHandler || !this.dbName) return;
+    this.statusBar.textContent = 'Running query...';
+    const start = performance.now();
+    try {
+      const result = await this.queryHandler('query', { sql }, this.dbName);
+      const elapsed = Math.round(performance.now() - start);
+      const data = JSON.parse(result.body);
+      if (data.error) {
+        this.resultsArea.innerHTML = '';
+        this.statusBar.textContent = `Error: ${data.error}`;
+        this.statusBar.style.color = '#e06c75';
+        return;
+      }
+      this.statusBar.style.color = '#888';
+      this.renderResults(data.fields, data.rows);
+      this.statusBar.textContent = `${data.rows.length} row(s) returned in ${elapsed}ms`;
+    } catch (err: any) {
+      this.statusBar.style.color = '#e06c75';
+      this.statusBar.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  private renderResults(fields: any[] | undefined, rows: any[]): void {
+    this.resultsArea.innerHTML = '';
+    if (!fields || fields.length === 0) {
+      const msg = document.createElement('div');
+      msg.style.cssText = 'padding:12px;color:#888;';
+      msg.textContent = rows.length > 0 ? 'Query executed successfully.' : 'No results.';
+      this.resultsArea.appendChild(msg);
+      return;
+    }
+
+    const table = document.createElement('table');
+    table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;';
+
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    for (const field of fields) {
+      const th = document.createElement('th');
+      th.textContent = field.name;
+      th.style.cssText = 'text-align:left;padding:6px 10px;background:#252526;border-bottom:1px solid #333;position:sticky;top:0;white-space:nowrap;font-weight:600;color:#4ec9b0;';
+      headerRow.appendChild(th);
+    }
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      tr.addEventListener('mouseenter', () => { tr.style.background = '#2a2d2e'; });
+      tr.addEventListener('mouseleave', () => { tr.style.background = 'transparent'; });
+      for (const field of fields) {
+        const td = document.createElement('td');
+        const val = row[field.name];
+        td.textContent = val === null ? 'NULL' : String(val);
+        td.style.cssText = 'padding:4px 10px;border-bottom:1px solid #2a2d2e;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis;';
+        if (val === null) td.style.color = '#666';
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    this.resultsArea.appendChild(table);
+  }
+}
+
 export function registerWorkbenchSurfaces(options: {
   filesSurface: FilesSidebarSurface;
   previewSurface: PreviewSurface;
   terminalSurface: TerminalPanelSurface;
   claudeSurface: ClaudeTerminalSurface;
+  databaseBrowserSurface: DatabaseBrowserSurface;
 }): RegisteredWorkbenchSurfaces {
   class PreviewEditorInput extends SimpleEditorInput {
     readonly typeId = PREVIEW_EDITOR_TYPE_ID;
@@ -1531,10 +1891,44 @@ export function registerWorkbenchSurfaces(options: {
     }
   }
 
+  class DatabaseEditorInput extends SimpleEditorInput {
+    readonly typeId = DATABASE_EDITOR_TYPE_ID;
+
+    constructor() {
+      super(DATABASE_EDITOR_RESOURCE);
+      this.setName('Database');
+      this.setTitle({ short: 'Database', medium: 'Database Browser', long: 'Database Browser' });
+      this.setDescription('Browse and query PGlite databases');
+      this.addCapability(EditorInputCapabilities.Singleton);
+    }
+  }
+
+  class DatabaseEditorPane extends SimpleEditorPane {
+    constructor(group: IEditorGroup) {
+      super(DATABASE_EDITOR_TYPE_ID, group);
+    }
+
+    initialize(): HTMLElement {
+      const el = document.createElement('div');
+      el.className = 'almostnode-database-editor-pane';
+      return el;
+    }
+
+    override focus(): void {
+      options.databaseBrowserSurface.focus();
+    }
+
+    async renderInput(): Promise<IDisposable> {
+      return options.databaseBrowserSurface.attach(this.container);
+    }
+  }
+
   const previewInput = new PreviewEditorInput();
+  const databaseInput = new DatabaseEditorInput();
   const disposables = new DisposableStore();
 
   disposables.add(registerEditorPane(PREVIEW_EDITOR_TYPE_ID, 'Preview', PreviewEditorPane, [PreviewEditorInput]));
+  disposables.add(registerEditorPane(DATABASE_EDITOR_TYPE_ID, 'Database', DatabaseEditorPane, [DatabaseEditorInput]));
   disposables.add(
     registerCustomView({
       id: FILES_VIEW_ID,
@@ -1565,12 +1959,13 @@ export function registerWorkbenchSurfaces(options: {
       renderBody: (container) => options.claudeSurface.attach(container),
     }),
   );
-
   return {
     previewInput,
+    databaseInput,
     filesViewId: FILES_VIEW_ID,
     terminalViewId: TERMINAL_VIEW_ID,
     claudeViewId: CLAUDE_VIEW_ID,
+    databaseViewId: DATABASE_VIEW_ID,
     dispose: () => disposables.dispose(),
   };
 }

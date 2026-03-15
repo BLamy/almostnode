@@ -6,7 +6,7 @@ import { prunePersistedWorkbenchExtensions } from './persisted-extensions';
 import { shouldRunWorkbenchCommandInteractively } from './terminal-command-routing';
 import { VfsFileSystemProvider } from './vfs-file-system-provider';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from './extension-services';
-import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
+import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
 import { ClaudeAuthVault, type ClaudeAuthVaultState } from './claude-auth-vault';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
 import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
@@ -467,6 +467,9 @@ export class WebIDEHost {
   private claudeAuthStatusEntry: IStatusbarEntryAccessor | null = null;
   private claudeCodeInstallPromise: Promise<void> | null = null;
   private readonly templateId: TemplateId;
+  private readonly databaseSurface: DatabaseSidebarSurface;
+  private readonly databaseBrowserSurface: DatabaseBrowserSurface;
+  private pgliteMiddleware: import('../server-bridge').RequestMiddleware | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
     this.templateId = options.template || 'vite';
@@ -511,11 +514,14 @@ export class WebIDEHost {
         tab?.session.resize(cols, rows);
       },
     });
+    this.databaseSurface = new DatabaseSidebarSurface();
+    this.databaseBrowserSurface = new DatabaseBrowserSurface();
     this.workbenchSurfaces = registerWorkbenchSurfaces({
       filesSurface: this.filesSurface,
       previewSurface: this.previewSurface,
       terminalSurface: this.terminalSurface,
       claudeSurface: this.claudeSurface,
+      databaseBrowserSurface: this.databaseBrowserSurface,
     });
     this.claudeAuthVault = new ClaudeAuthVault({
       vfs: this.container.vfs,
@@ -912,6 +918,23 @@ export class WebIDEHost {
         pinned: true,
       },
       existing?.groupId ?? SIDE_GROUP,
+    );
+  }
+
+  private async revealDatabaseEditor(): Promise<void> {
+    const editorService = await getService(IEditorService);
+    const existing = this.workbenchSurfaces.databaseInput.resource
+      ? editorService.findEditors(this.workbenchSurfaces.databaseInput.resource).find((identifier) => {
+          return identifier.editor.matches(this.workbenchSurfaces.databaseInput);
+        })
+      : undefined;
+
+    await editorService.openEditor(
+      this.workbenchSurfaces.databaseInput,
+      {
+        pinned: true,
+      },
+      existing?.groupId,
     );
   }
 
@@ -1515,6 +1538,130 @@ export class WebIDEHost {
     });
   }
 
+  private async initPGliteIfNeeded(): Promise<void> {
+    const schemaPath = `${WORKSPACE_ROOT}/schema.sql`;
+    const hasSchema = this.container.vfs.existsSync(schemaPath);
+
+    // Import db-manager lazily
+    const { listDatabases, ensureDefaultDatabase, getIdbPath, getActiveDatabase, setActiveDatabase, createDatabase, deleteDatabase } = await import('../pglite/db-manager');
+    const hasExistingDbs = listDatabases().length > 0;
+
+    if (!hasSchema && !hasExistingDbs) {
+      // No database needed
+      return;
+    }
+
+    try {
+      // Register database sidebar view (workbench is already initialized at this point)
+      const { registerCustomView } = await import('@codingame/monaco-vscode-workbench-service-override');
+      registerCustomView({
+        id: 'almostnode.sidebar.database',
+        name: 'Database',
+        location: ViewContainerLocation.Sidebar,
+        order: 1,
+        icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>'),
+        renderBody: (container) => this.databaseSurface.attach(container),
+      });
+
+      const activeName = ensureDefaultDatabase();
+      const schemaSQL = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
+
+      // Load PGlite and init instance
+      const { initPGliteInstance } = await import('../pglite/pglite-database');
+      await initPGliteInstance(activeName, schemaSQL, getIdbPath(activeName));
+      console.log(`[pglite] Database "${activeName}" ready`);
+
+      // Register middleware
+      const { createPGliteMiddleware } = await import('../pglite/bridge-middleware');
+      this.pgliteMiddleware = createPGliteMiddleware();
+      this.container.serverBridge.registerMiddleware(this.pgliteMiddleware);
+
+      // Set active DB on preview surface
+      this.previewSurface.setActiveDb(activeName);
+
+      // Update database panel
+      this.databaseSurface.update(listDatabases(), activeName);
+
+      // Set up database browser query handler
+      this.databaseBrowserSurface.setQueryHandler(async (operation, body, dbName) => {
+        const { handleDatabaseRequest } = await import('../pglite/pglite-database');
+        return handleDatabaseRequest(operation, body, dbName);
+      });
+
+      // Wire database panel callbacks
+      this.databaseSurface.setCallbacks({
+        onOpen: async (name: string) => {
+          try {
+            // Switch active database if different
+            const currentActive = getActiveDatabase();
+            if (currentActive !== name) {
+              const { closePGliteInstance, initPGliteInstance: initInst } = await import('../pglite/pglite-database');
+              if (currentActive) await closePGliteInstance(currentActive);
+              setActiveDatabase(name);
+              const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
+              await initInst(name, sql, getIdbPath(name));
+              this.previewSurface.setActiveDb(name);
+              this.databaseSurface.update(listDatabases(), name);
+            }
+            // Update browser surface and open tab
+            this.databaseBrowserSurface.setDatabase(name);
+            await this.revealDatabaseEditor();
+          } catch (err) {
+            console.error('[pglite] Open database browser failed:', err);
+          }
+        },
+        onSwitch: async (name: string) => {
+          try {
+            const { closePGliteInstance, initPGliteInstance: initInst } = await import('../pglite/pglite-database');
+            const oldActive = getActiveDatabase();
+            if (oldActive) await closePGliteInstance(oldActive);
+            setActiveDatabase(name);
+            const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
+            await initInst(name, sql, getIdbPath(name));
+            this.previewSurface.setActiveDb(name);
+            this.databaseSurface.update(listDatabases(), name);
+            console.log(`[pglite] Switched to database "${name}"`);
+          } catch (err) {
+            console.error('[pglite] Switch failed:', err);
+          }
+        },
+        onCreate: async (name: string) => {
+          try {
+            createDatabase(name);
+            const { initPGliteInstance: initInst } = await import('../pglite/pglite-database');
+            const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
+            await initInst(name, sql, getIdbPath(name));
+            this.databaseSurface.update(listDatabases(), getActiveDatabase());
+            console.log(`[pglite] Created database "${name}"`);
+          } catch (err) {
+            console.error('[pglite] Create failed:', err);
+          }
+        },
+        onDelete: async (name: string) => {
+          try {
+            const { closePGliteInstance: closeInst } = await import('../pglite/pglite-database');
+            await closeInst(name);
+            deleteDatabase(name);
+            const active = getActiveDatabase();
+            if (!active || active === name) {
+              const newActive = ensureDefaultDatabase();
+              const { initPGliteInstance: initInst } = await import('../pglite/pglite-database');
+              const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
+              await initInst(newActive, sql, getIdbPath(newActive));
+              this.previewSurface.setActiveDb(newActive);
+            }
+            this.databaseSurface.update(listDatabases(), getActiveDatabase());
+            console.log(`[pglite] Deleted database "${name}"`);
+          } catch (err) {
+            console.error('[pglite] Delete failed:', err);
+          }
+        },
+      });
+    } catch (err) {
+      console.error('[pglite] Init failed:', err);
+    }
+  }
+
   private async ensureGitInitialized(): Promise<void> {
     if (this.container.vfs.existsSync('/project/.git')) return;
     await this.container.run('git init', { cwd: '/project' });
@@ -1608,6 +1755,10 @@ export class WebIDEHost {
     logMemory('before workbench init');
     await this.initWorkbench();
     logMemory('after workbench init');
+
+    // ── PGlite database initialization (after workbench is ready) ──
+    void this.initPGliteIfNeeded();
+
     this.ensurePreviewServerRunning();
     window.__almostnodeWebIDE = this;
 

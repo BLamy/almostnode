@@ -480,6 +480,49 @@ function getErudaInjectionScript() {
       else eruda.show();
     }
   });
+
+  // ── Database fetch interceptor ──
+  // Reads ?db= from the iframe URL and appends __db={name} to /__db__/ fetch calls
+  (function() {
+    var urlParams = new URLSearchParams(window.location.search);
+    var dbName = urlParams.get('db');
+    if (!dbName) return;
+
+    var origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
+      if (url.indexOf('/__db__/') !== -1) {
+        var separator = url.indexOf('?') !== -1 ? '&' : '?';
+        var newUrl = url + separator + '__db=' + encodeURIComponent(dbName);
+        if (typeof input === 'string') {
+          return origFetch.call(this, newUrl, init);
+        } else {
+          return origFetch.call(this, new Request(newUrl, input), init);
+        }
+      }
+      return origFetch.apply(this, arguments);
+    };
+
+    // Preserve ?db= across history.pushState/replaceState for SPA navigation
+    var origPushState = history.pushState;
+    var origReplaceState = history.replaceState;
+    function preserveDbParam(orig) {
+      return function(state, title, url) {
+        if (url && typeof url === 'string') {
+          try {
+            var u = new URL(url, window.location.href);
+            if (!u.searchParams.has('db')) {
+              u.searchParams.set('db', dbName);
+              url = u.toString();
+            }
+          } catch(e) { /* invalid URL, pass through */ }
+        }
+        return orig.call(this, state, title, url);
+      };
+    }
+    history.pushState = preserveDbParam(origPushState);
+    history.replaceState = preserveDbParam(origReplaceState);
+  })();
 })();
 </` + `script>`;
 }

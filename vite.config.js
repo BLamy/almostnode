@@ -111,6 +111,7 @@ export default defineConfig({
     exclude: [
       'brotli-wasm',
       'convex',
+      '@electric-sql/pglite',
       ...monacoVscodePackages,
     ],
     esbuildOptions: { target: 'esnext' },
