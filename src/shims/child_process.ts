@@ -1532,6 +1532,11 @@ module.exports = (async () => {
     return runGitCommand(args, ctx, controller.vfs);
   });
 
+  const playwrightCliCommand = defineCommand('playwright-cli', async (args, ctx) => {
+    const { runPlaywrightCommand } = await import('./playwright-command');
+    return runPlaywrightCommand(args, ctx, controller.vfs);
+  });
+
   const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
     return defineCommand(commandName, async (args, ctx) => {
       const shell = getSyntheticShellSpec(commandName);
@@ -1577,7 +1582,7 @@ module.exports = (async () => {
       info: emitBashLog,
       debug: emitBashLog,
     },
-    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand],
   });
 
   controller = {

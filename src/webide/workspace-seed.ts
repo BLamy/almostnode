@@ -4,7 +4,7 @@ export const WORKSPACE_ROOT = "/project";
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
-export type TemplateId = 'vite' | 'nextjs' | 'tanstack';
+export type TemplateId = "vite" | "nextjs" | "tanstack";
 
 export interface TemplateDefinition {
   id: TemplateId;
@@ -16,6 +16,10 @@ export interface TemplateDefinition {
 
 const VITE_DIRECTORIES = [
   `${WORKSPACE_ROOT}/.vscode`,
+  `${WORKSPACE_ROOT}/.claude`,
+  `${WORKSPACE_ROOT}/.claude/skills`,
+  `${WORKSPACE_ROOT}/.claude/skills/playwright`,
+  `${WORKSPACE_ROOT}/.claude/skills/playwright/references`,
   `${WORKSPACE_ROOT}/src`,
   `${WORKSPACE_ROOT}/src/components`,
   `${WORKSPACE_ROOT}/src/components/ui`,
@@ -24,7 +28,213 @@ const VITE_DIRECTORIES = [
   `${WORKSPACE_ROOT}/src/pages`,
 ];
 
+// ── Playwright CLI skill files (seeded into the workspace for Claude Code discovery) ──
+
+const PLAYWRIGHT_SKILL_MD = `---
+name: "playwright"
+description: "Use when the task requires interacting with the preview iframe (navigation, form filling, snapshots, clicking, data extraction, UI-flow debugging) via the \`playwright-cli\` command."
+---
+
+# Playwright CLI Skill
+
+Drive the preview iframe from the terminal using \`playwright-cli\`. This is a built-in command — no installation needed.
+
+## Quick start
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli click e3
+playwright-cli fill e5 "hello world"
+playwright-cli press Enter
+playwright-cli eval "document.title"
+\`\`\`
+
+## Core workflow
+
+1. Start your dev server (\`npm run dev\`).
+2. \`playwright-cli snapshot\` — get an accessibility tree with element refs.
+3. Interact using refs from the latest snapshot.
+4. Re-snapshot after navigation or significant DOM changes.
+
+Minimal loop:
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli click e3
+playwright-cli snapshot
+\`\`\`
+
+## When to snapshot again
+
+Snapshot again after:
+- Clicking elements that change the UI substantially
+- Filling forms and submitting
+- Any navigation
+
+Refs can go stale. When a command fails due to a missing ref, snapshot again.
+
+## Recommended patterns
+
+### Form fill and submit
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli fill e1 "user@example.com"
+playwright-cli fill e2 "password123"
+playwright-cli click e3
+playwright-cli snapshot
+\`\`\`
+
+### Evaluate page state
+
+\`\`\`bash
+playwright-cli eval "document.title"
+playwright-cli eval "document.querySelectorAll('li').length"
+\`\`\`
+
+### Check console output
+
+\`\`\`bash
+playwright-cli console
+playwright-cli console error
+\`\`\`
+
+## References
+
+- CLI command reference: \`references/cli.md\`
+- Practical workflows: \`references/workflows.md\`
+
+## Guardrails
+
+- Always snapshot before referencing element refs like \`e12\`.
+- Re-snapshot when refs seem stale.
+- Prefer explicit commands over \`eval\` unless needed.
+`;
+
+const PLAYWRIGHT_CLI_MD = `# Playwright CLI Reference
+
+Built-in command for interacting with the preview iframe. No installation needed.
+
+## Core
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli click e3
+playwright-cli fill e5 "user@example.com"
+playwright-cli type "search terms"
+playwright-cli press Enter
+playwright-cli hover e4
+playwright-cli eval "document.title"
+playwright-cli console
+playwright-cli console warning
+playwright-cli resize 1920 1080
+playwright-cli screenshot
+playwright-cli close
+\`\`\`
+
+## Navigation
+
+\`\`\`bash
+playwright-cli open https://example.com
+\`\`\`
+
+## Keyboard
+
+\`\`\`bash
+playwright-cli press Enter
+playwright-cli press ArrowDown
+playwright-cli press Tab
+playwright-cli press Escape
+\`\`\`
+
+## Commands in detail
+
+### snapshot
+Builds an accessibility tree of the preview iframe. Assigns refs (e1, e2, ...) to interactive and text elements.
+
+### click <ref>
+Clicks an element by its ref. Scrolls into view first.
+
+### fill <ref> <text>
+Fills an input or textarea. Uses React-compatible native setter for controlled inputs.
+
+### type <text>
+Types text character-by-character into the currently focused element.
+
+### press <key>
+Dispatches keydown/keypress/keyup for the given key name.
+
+### hover <ref>
+Dispatches mouseover + mouseenter on the element.
+
+### eval <expression>
+Evaluates a JavaScript expression in the preview iframe's window context.
+
+### console [level]
+Shows captured console messages. Optional level filter: error, warning, info, debug.
+
+### resize <width> <height>
+Resizes the preview iframe to the given pixel dimensions.
+
+### open <url>
+Navigates the preview iframe to the given URL and waits for load.
+
+### close
+Clears element ref map and captured console messages.
+`;
+
+const PLAYWRIGHT_WORKFLOWS_MD = `# Playwright CLI Workflows
+
+Use \`playwright-cli\` to interact with the preview iframe. Snapshot often.
+
+## Standard interaction loop
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli click e3
+playwright-cli snapshot
+\`\`\`
+
+## Form submission
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli fill e1 "user@example.com"
+playwright-cli fill e2 "password123"
+playwright-cli click e3
+playwright-cli snapshot
+\`\`\`
+
+## Data extraction
+
+\`\`\`bash
+playwright-cli snapshot
+playwright-cli eval "document.title"
+playwright-cli eval "document.querySelector('h1').textContent"
+\`\`\`
+
+## Debugging and inspection
+
+Capture console messages after reproducing an issue:
+
+\`\`\`bash
+playwright-cli console warning
+playwright-cli console error
+\`\`\`
+
+## Troubleshooting
+
+- If an element ref fails, run \`playwright-cli snapshot\` again and retry.
+- If the preview is blank, make sure your dev server is running (\`npm run dev\`).
+- Use \`playwright-cli eval "location.href"\` to check the current URL.
+`;
+
 const VITE_FILES: Record<string, string> = {
+  [`${WORKSPACE_ROOT}/.claude/skills/playwright/SKILL.md`]: PLAYWRIGHT_SKILL_MD,
+  [`${WORKSPACE_ROOT}/.claude/skills/playwright/references/cli.md`]:
+    PLAYWRIGHT_CLI_MD,
+  [`${WORKSPACE_ROOT}/.claude/skills/playwright/references/workflows.md`]:
+    PLAYWRIGHT_WORKFLOWS_MD,
   [`${WORKSPACE_ROOT}/package.json`]: JSON.stringify(
     {
       name: "almostnode-webide-tailwind-starter",
@@ -129,7 +339,7 @@ const VITE_FILES: Record<string, string> = {
       "claudeCode.claudeProcessWrapper": "/usr/local/bin/claude-wrapper",
       "terminal.integrated.profiles.osx": {
         "zsh (login)": {
-          "path": "zsh",
+          path: "zsh",
         },
       },
       "terminal.integrated.fontFamily": "SauceCodePro Nerd Font Mono",
@@ -170,10 +380,7 @@ const VITE_FILES: Record<string, string> = {
       "editor.cursorBlinking": "phase",
       "editor.tabSize": 2,
       "editor.detectIndentation": false,
-      "emmet.excludeLanguages": [
-        "[typescriptreact]",
-        "markdown",
-      ],
+      "emmet.excludeLanguages": ["[typescriptreact]", "markdown"],
       "workbench.colorCustomizations": {
         "[Islands Dark]": {
           "input.background": "#191a1c",
@@ -215,13 +422,13 @@ const VITE_FILES: Record<string, string> = {
       "typescript.disableAutomaticTypeAcquisition": true,
       "json.schemas": [],
       "terminal.integrated.env.osx": {
-        "FIG_NEW_SESSION": "1",
-        "Q_NEW_SESSION": "1",
+        FIG_NEW_SESSION: "1",
+        Q_NEW_SESSION: "1",
       },
       "vim.insertModeKeyBindings": [
         {
-          "before": ["j", "k"],
-          "after": ["<Esc>"],
+          before: ["j", "k"],
+          after: ["<Esc>"],
         },
       ],
       "editor.accessibilitySupport": "off",
@@ -249,9 +456,9 @@ const VITE_FILES: Record<string, string> = {
         },
         ".part.sidebar": {
           "font-family": "'Bear Sans UI', sans-serif !important",
-          "margin": "8px 8px 4px 24px",
+          margin: "8px 8px 4px 24px",
           "border-radius": "18px 8px 8px 18px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "border-top": "1px solid rgba(255,255,255,0.1) !important",
           "border-left": "1px solid rgba(255,255,255,0.06) !important",
           "border-bottom": "1px solid rgba(255,255,255,0.02) !important",
@@ -259,22 +466,22 @@ const VITE_FILES: Record<string, string> = {
           "box-shadow": "0 2px 8px 0 rgba(0,0,0,0.3) !important",
         },
         ".part.sidebar .composite.title": {
-          "display": "none !important",
+          display: "none !important",
         },
         ".part.sidebar .content": {
-          "width": "100% !important",
-          "padding": "0 !important",
-          "margin": "0 !important",
+          width: "100% !important",
+          padding: "0 !important",
+          margin: "0 !important",
         },
         ".part.sidebar .welcome-view-content": {
           "max-width": "100% !important",
           "box-sizing": "border-box !important",
         },
         ".part.sidebar .pane-header": {
-          "display": "none !important",
+          display: "none !important",
         },
         ".explorer-viewlet .split-view-container": {
-          "transform": "translateY(-22px) !important",
+          transform: "translateY(-22px) !important",
         },
         ".part.sidebar .header": {
           "padding-right": "20px !important",
@@ -286,49 +493,56 @@ const VITE_FILES: Record<string, string> = {
           "font-size": "10px !important",
         },
         ".explorer-folders-view .monaco-list-rows": {
-          "transform": "translate3d(0px, 0px, 0px) scaleY(1.15) !important",
+          transform: "translate3d(0px, 0px, 0px) scaleY(1.15) !important",
           "transform-origin": "top left !important",
         },
         ".explorer-folders-view .monaco-tl-row": {
-          "transform": "scaleY(0.87) !important",
+          transform: "scaleY(0.87) !important",
           "transform-origin": "top left !important",
         },
         ".part.sidebar .monaco-list-row": {
           "border-radius": "6px !important",
           "margin-left": "4px !important",
           "margin-right": "4px !important",
-          "width": "calc(100% - 8px) !important",
-          "transition": "background 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important",
+          width: "calc(100% - 8px) !important",
+          transition:
+            "background 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important",
         },
-        ".part.sidebar .monaco-list-row.selected, .part.sidebar .monaco-list-row.focused": {
-          "background": "linear-gradient(135deg, rgba(49,50,56,0.6), rgba(37,38,44,0.4)) !important",
-          "box-shadow": "inset 0 0 0 1px rgba(255,255,255,0.05) !important",
-          "outline": "none !important",
-        },
+        ".part.sidebar .monaco-list-row.selected, .part.sidebar .monaco-list-row.focused":
+          {
+            background:
+              "linear-gradient(135deg, rgba(49,50,56,0.6), rgba(37,38,44,0.4)) !important",
+            "box-shadow": "inset 0 0 0 1px rgba(255,255,255,0.05) !important",
+            outline: "none !important",
+          },
         ".part.sidebar .monaco-list-row.focused.selected": {
-          "background": "linear-gradient(135deg, rgba(49,50,56,0.7), rgba(37,38,44,0.5)) !important",
+          background:
+            "linear-gradient(135deg, rgba(49,50,56,0.7), rgba(37,38,44,0.5)) !important",
           "box-shadow": "inset 0 0 0 1px rgba(255,255,255,0.07) !important",
-          "outline": "none !important",
+          outline: "none !important",
         },
         ".part.sidebar .monaco-list:focus .monaco-list-row.selected": {
-          "background": "linear-gradient(135deg, rgba(49,50,56,0.8), rgba(37,38,44,0.6)) !important",
+          background:
+            "linear-gradient(135deg, rgba(49,50,56,0.8), rgba(37,38,44,0.6)) !important",
           "box-shadow": "inset 0 0 0 1px rgba(255,255,255,0.08) !important",
-          "outline": "none !important",
+          outline: "none !important",
         },
         ".part.sidebar .monaco-list:focus .monaco-list-row.focused": {
-          "background": "linear-gradient(135deg, rgba(49,50,56,0.8), rgba(37,38,44,0.6)) !important",
+          background:
+            "linear-gradient(135deg, rgba(49,50,56,0.8), rgba(37,38,44,0.6)) !important",
           "box-shadow": "inset 0 0 0 1px rgba(255,255,255,0.08) !important",
-          "outline": "none !important",
+          outline: "none !important",
         },
         ".part.sidebar .monaco-list-row:hover": {
-          "background": "linear-gradient(135deg, rgba(49,50,56,0.3), rgba(37,38,44,0.2)) !important",
+          background:
+            "linear-gradient(135deg, rgba(49,50,56,0.3), rgba(37,38,44,0.2)) !important",
           "border-radius": "6px !important",
-          "outline": "none !important",
+          outline: "none !important",
         },
         ".part.editor": {
-          "margin": "8px 0 4px 0",
+          margin: "8px 0 4px 0",
           "border-radius": "8px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "max-height": "calc(100% - 12px) !important",
           "border-top": "1px solid rgba(255,255,255,0.12) !important",
           "border-left": "1px solid rgba(255,255,255,0.08) !important",
@@ -338,17 +552,19 @@ const VITE_FILES: Record<string, string> = {
         },
         ".editor-actions": {
           "padding-right": "20px !important",
-          "background-image": "linear-gradient(to top, #25262a 1px, transparent 1px) !important",
+          "background-image":
+            "linear-gradient(to top, #25262a 1px, transparent 1px) !important",
           "background-repeat": "no-repeat !important",
           "background-position": "bottom !important",
         },
         ".tabs-container": {
-          "background-image": "linear-gradient(to top, #25262a 1px, transparent 1px) !important",
+          "background-image":
+            "linear-gradient(to top, #25262a 1px, transparent 1px) !important",
           "background-repeat": "no-repeat !important",
           "background-position": "bottom !important",
         },
         ".tab": {
-          "margin": "0 !important",
+          margin: "0 !important",
           "border-right": "none !important",
           "border-radius": "0px 0px 0 0 !important",
           "font-family": "'Bear Sans UI', sans-serif !important",
@@ -357,7 +573,8 @@ const VITE_FILES: Record<string, string> = {
           "border-radius": "50% !important",
         },
         ".tab.active": {
-          "box-shadow": "inset -1px 0 0 0 #25262a, inset 1px 0 0 0 #25262a !important",
+          "box-shadow":
+            "inset -1px 0 0 0 #25262a, inset 1px 0 0 0 #25262a !important",
           "border-right": "none !important",
         },
         ".tab:not(.active)": {
@@ -368,30 +585,30 @@ const VITE_FILES: Record<string, string> = {
         },
         ".tab:hover .label-name": {
           "text-shadow": "0 0 5px rgba(255,255,255,0.15) !important",
-          "transition": "text-shadow 0.3s ease !important",
+          transition: "text-shadow 0.3s ease !important",
         },
         ".minimap canvas": {
-          "opacity": "0.6 !important",
-          "transition": "opacity 0.4s ease !important",
+          opacity: "0.6 !important",
+          transition: "opacity 0.4s ease !important",
         },
         ".minimap:hover canvas": {
-          "opacity": "1 !important",
+          opacity: "1 !important",
         },
         ".monaco-hover": {
           "border-radius": "12px !important",
-          "border": "1px solid rgba(255,255,255,0.08) !important",
+          border: "1px solid rgba(255,255,255,0.08) !important",
           "box-shadow": "0 4px 16px 0 rgba(0,0,0,0.4) !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
         },
         ".monaco-breadcrumbs": {
           "border-top": "none !important",
         },
         ".monaco-breadcrumbs *": {
-          "opacity": "0 !important",
-          "transition": "opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
+          opacity: "0 !important",
+          transition: "opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
         },
         ".monaco-breadcrumbs:hover *": {
-          "opacity": "1 !important",
+          opacity: "1 !important",
         },
         ".split-view-view:has(.terminal-tabs-entry)": {
           "min-width": "220px !important",
@@ -399,7 +616,7 @@ const VITE_FILES: Record<string, string> = {
         ".split-view-view:has(.terminal-tabs-entry) .monaco-list-row": {
           "border-radius": "6px !important",
           "margin-right": "20px !important",
-          "width": "calc(100% - 20px) !important",
+          width: "calc(100% - 20px) !important",
         },
         ".viewpane-filter .monaco-inputbox": {
           "border-radius": "9999px !important",
@@ -408,22 +625,22 @@ const VITE_FILES: Record<string, string> = {
           "border-radius": "9999px !important",
         },
         ".search-widget .replace-input .monaco-findInput": {
-          "width": "228px !important",
-          "height": "26px !important",
+          width: "228px !important",
+          height: "26px !important",
         },
         ".search-widget .search-container .monaco-findInput": {
-          "width": "228px !important",
-          "height": "26px !important",
+          width: "228px !important",
+          height: "26px !important",
         },
         ".results.show-file-icons": {
           "margin-bottom": "22px !important",
         },
         ".extensions-search-container": {
-          "transform": "translateX(-6px) !important",
+          transform: "translateX(-6px) !important",
         },
         ".extensions-search-container .suggest-input-container": {
           "border-radius": "9999px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "font-size": "11px !important",
           "--editor-font-size": "11px !important",
         },
@@ -432,11 +649,11 @@ const VITE_FILES: Record<string, string> = {
         },
         ".scm-editor": {
           "border-radius": "9999px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
         },
         ".scm-input": {
           "border-radius": "9999px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
         },
         ".scm-input + .scm-editor-toolbar + .monaco-button": {
           "border-radius": "9999px !important",
@@ -445,7 +662,7 @@ const VITE_FILES: Record<string, string> = {
           "border-radius": "9999px !important",
         },
         ".part.panel.bottom": {
-          "margin": "3px 1px 0px 1px",
+          margin: "3px 1px 0px 1px",
           "border-radius": "10px",
           "border-top": "1px solid rgba(255,255,255,0.1) !important",
           "border-left": "1px solid rgba(255,255,255,0.06) !important",
@@ -454,59 +671,60 @@ const VITE_FILES: Record<string, string> = {
           "box-shadow": "0 2px 8px 0 rgba(0,0,0,0.3) !important",
         },
         ".part.panel.bottom .composite.title": {
-          "display": "none !important",
+          display: "none !important",
         },
         ".part.panel.bottom .content": {
-          "padding": "0 !important",
-          "margin": "0 !important",
+          padding: "0 !important",
+          margin: "0 !important",
         },
         ".part.panel.bottom .pane-header": {
-          "display": "none !important",
+          display: "none !important",
         },
         ".part.panel.bottom .message-box-container": {
           "border-radius": "10px !important",
-          "margin": "4px !important",
-          "width": "calc(100% - 34px) !important",
+          margin: "4px !important",
+          width: "calc(100% - 34px) !important",
           "box-sizing": "border-box !important",
         },
         ".part.panel.bottom .welcome-view-content": {
           "border-radius": "10px !important",
-          "margin": "4px !important",
-          "width": "calc(100% - 34px) !important",
+          margin: "4px !important",
+          width: "calc(100% - 34px) !important",
           "box-sizing": "border-box !important",
         },
         ".part.panel.bottom .monaco-table": {
           "border-radius": "10px !important",
-          "width": "calc(100% - 14px) !important",
+          width: "calc(100% - 14px) !important",
         },
         ".part.activitybar": {
-          "background": "#121216 !important",
-          "margin": "8px 20px 30px 12px",
-          "width": "48px !important",
+          background: "#121216 !important",
+          margin: "8px 20px 30px 12px",
+          width: "48px !important",
           "min-width": "48px !important",
         },
         ".part.activitybar .composite-bar": {
-          "background": "#151518 !important",
+          background: "#151518 !important",
           "border-radius": "9999px",
-          "overflow": "visible !important",
-          "padding": "8px 0",
-          "display": "flex !important",
+          overflow: "visible !important",
+          padding: "8px 0",
+          display: "flex !important",
           "flex-direction": "column !important",
           "align-items": "center !important",
-          "box-shadow": "inset 0 1px 0 0 rgba(255,255,255,0.1), inset 1px 0 0 0 rgba(255,255,255,0.05), inset 0 -1px 0 0 rgba(255,255,255,0.02), inset -1px 0 0 0 rgba(255,255,255,0.02), inset 0 1px 3px 0 rgba(255,255,255,0.04), 0 1px 4px 0 rgba(0,0,0,0.25) !important",
+          "box-shadow":
+            "inset 0 1px 0 0 rgba(255,255,255,0.1), inset 1px 0 0 0 rgba(255,255,255,0.05), inset 0 -1px 0 0 rgba(255,255,255,0.02), inset -1px 0 0 0 rgba(255,255,255,0.02), inset 0 1px 3px 0 rgba(255,255,255,0.04), 0 1px 4px 0 rgba(0,0,0,0.25) !important",
         },
         ".part.activitybar .content > div:last-child": {
-          "transform": "translateY(-10px) !important",
+          transform: "translateY(-10px) !important",
         },
         ".part.activitybar .action-item .action-label": {
           "font-size": "18px !important",
-          "width": "30px !important",
-          "height": "30px !important",
+          width: "30px !important",
+          height: "30px !important",
           "line-height": "30px !important",
-          "display": "flex !important",
+          display: "flex !important",
           "align-items": "center !important",
           "justify-content": "center !important",
-          "overflow": "visible !important",
+          overflow: "visible !important",
         },
         ".part.activitybar .action-item .action-label .codicon": {
           "font-size": "18px !important",
@@ -516,35 +734,37 @@ const VITE_FILES: Record<string, string> = {
           "max-height": "18px !important",
         },
         ".part.activitybar .action-item .active-item-indicator": {
-          "display": "none !important",
+          display: "none !important",
         },
         ".part.activitybar .action-item.checked .action-label": {
-          "background": "linear-gradient(180deg, rgba(55,56,62,0.9), rgba(40,41,46,0.7)) !important",
+          background:
+            "linear-gradient(180deg, rgba(55,56,62,0.9), rgba(40,41,46,0.7)) !important",
           "border-radius": "50% !important",
-          "width": "30px !important",
-          "height": "30px !important",
-          "box-shadow": "inset 0 1px 0 0 rgba(255,255,255,0.12), inset 1px 0 0 0 rgba(255,255,255,0.06), inset 0 -1px 0 0 rgba(255,255,255,0.02), inset -1px 0 0 0 rgba(255,255,255,0.02), inset 0 1px 2px 0 rgba(255,255,255,0.05), 0 1px 3px 0 rgba(0,0,0,0.3) !important",
+          width: "30px !important",
+          height: "30px !important",
+          "box-shadow":
+            "inset 0 1px 0 0 rgba(255,255,255,0.12), inset 1px 0 0 0 rgba(255,255,255,0.06), inset 0 -1px 0 0 rgba(255,255,255,0.02), inset -1px 0 0 0 rgba(255,255,255,0.02), inset 0 1px 2px 0 rgba(255,255,255,0.05), 0 1px 3px 0 rgba(0,0,0,0.3) !important",
         },
         ".part.activitybar .actions-container": {
           "align-items": "center !important",
           "justify-content": "center !important",
-          "width": "100% !important",
-          "overflow": "visible !important",
+          width: "100% !important",
+          overflow: "visible !important",
         },
         ".part.activitybar .action-item": {
-          "display": "flex !important",
+          display: "flex !important",
           "justify-content": "center !important",
-          "width": "100% !important",
-          "overflow": "visible !important",
+          width: "100% !important",
+          overflow: "visible !important",
         },
         ".part.activitybar .badge": {
           "z-index": "10 !important",
-          "overflow": "visible !important",
-          "transform": "scale(0.8) !important",
+          overflow: "visible !important",
+          transform: "scale(0.8) !important",
           "transform-origin": "top right !important",
         },
         ".part.titlebar": {
-          "height": "40px !important",
+          height: "40px !important",
           "background-color": "#121216 !important",
         },
         ".part.statusbar": {
@@ -555,31 +775,32 @@ const VITE_FILES: Record<string, string> = {
           "border-top": "0 !important",
         },
         ".part.statusbar .statusbar-item-label": {
-          "transition": "color 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
+          transition: "color 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
         },
         ".part.statusbar .codicon": {
-          "transition": "color 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
+          transition: "color 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
         },
         ".part.statusbar:hover .statusbar-item-label": {
-          "color": "#9a9ea5 !important",
+          color: "#9a9ea5 !important",
         },
         ".part.statusbar:hover .codicon": {
-          "color": "#9a9ea5 !important",
+          color: "#9a9ea5 !important",
         },
         ".part.statusbar .items-container": {
           "margin-top": "-2px !important",
         },
         ".monaco-icon-label.file-icon::before": {
-          "filter": "drop-shadow(0 0 2.5px currentColor)",
-          "opacity": "1 !important",
+          filter: "drop-shadow(0 0 2.5px currentColor)",
+          opacity: "1 !important",
         },
         ".tab .monaco-icon-label.file-icon::before": {
-          "filter": "drop-shadow(0 0 2.5px currentColor)",
-          "opacity": "1 !important",
+          filter: "drop-shadow(0 0 2.5px currentColor)",
+          opacity: "1 !important",
         },
         ".letterpress": {
-          "opacity": "0.4 !important",
-          "filter": "brightness(0) drop-shadow(2px 2px 1px rgba(255,255,255,0.12)) drop-shadow(-2px -2px 1px rgba(0,0,0,1)) !important",
+          opacity: "0.4 !important",
+          filter:
+            "brightness(0) drop-shadow(2px 2px 1px rgba(255,255,255,0.12)) drop-shadow(-2px -2px 1px rgba(0,0,0,1)) !important",
         },
         ".part.titlebar .action-label": {
           "border-radius": "50% !important",
@@ -587,11 +808,12 @@ const VITE_FILES: Record<string, string> = {
         ".command-center-center": {
           "font-family": "'Bear Sans UI', sans-serif !important",
           "border-radius": "9999px !important",
-          "height": "32px !important",
-          "overflow": "hidden !important",
-          "border": "none !important",
-          "background": "#151518 !important",
-          "box-shadow": "inset 0 1px 0 0 rgba(255,255,255,0.1), inset 1px 0 0 0 rgba(255,255,255,0.05), inset 0 -1px 0 0 rgba(255,255,255,0.02), inset -1px 0 0 0 rgba(255,255,255,0.02), inset 0 1px 3px 0 rgba(255,255,255,0.04), 0 1px 4px 0 rgba(0,0,0,0.25) !important",
+          height: "32px !important",
+          overflow: "hidden !important",
+          border: "none !important",
+          background: "#151518 !important",
+          "box-shadow":
+            "inset 0 1px 0 0 rgba(255,255,255,0.1), inset 1px 0 0 0 rgba(255,255,255,0.05), inset 0 -1px 0 0 rgba(255,255,255,0.02), inset -1px 0 0 0 rgba(255,255,255,0.02), inset 0 1px 3px 0 rgba(255,255,255,0.04), 0 1px 4px 0 rgba(0,0,0,0.25) !important",
         },
         ".command-center-center *": {
           "border-radius": "9999px !important",
@@ -602,7 +824,7 @@ const VITE_FILES: Record<string, string> = {
         },
         ".notification-toast": {
           "border-radius": "14px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "border-top": "1px solid rgba(255,255,255,0.1) !important",
           "border-left": "1px solid rgba(255,255,255,0.06) !important",
           "border-bottom": "1px solid rgba(255,255,255,0.02) !important",
@@ -611,7 +833,7 @@ const VITE_FILES: Record<string, string> = {
         },
         ".notifications-center": {
           "border-radius": "14px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "border-top": "1px solid rgba(255,255,255,0.1) !important",
           "border-left": "1px solid rgba(255,255,255,0.06) !important",
           "border-bottom": "1px solid rgba(255,255,255,0.02) !important",
@@ -623,7 +845,7 @@ const VITE_FILES: Record<string, string> = {
         },
         ".notification-list-item": {
           "border-radius": "14px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
         },
         ".notification-list-item.focused": {
           "border-radius": "14px !important",
@@ -631,12 +853,12 @@ const VITE_FILES: Record<string, string> = {
         },
         ".monaco-list-row:has(.notification-list-item)": {
           "border-radius": "14px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
         },
         ".part.auxiliarybar": {
-          "margin": "8px 20px 0 8px",
+          margin: "8px 20px 0 8px",
           "border-radius": "10px 18px 18px 10px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "max-height": "calc(100% - 12px) !important",
           "border-top": "1px solid rgba(255,255,255,0.1) !important",
           "border-left": "1px solid rgba(255,255,255,0.06) !important",
@@ -645,10 +867,10 @@ const VITE_FILES: Record<string, string> = {
           "box-shadow": "0 2px 8px 0 rgba(0,0,0,0.3) !important",
         },
         ".part.auxiliarybar .composite.title": {
-          "padding": "8px 0 0 20px !important",
+          padding: "8px 0 0 20px !important",
         },
         ".part.auxiliarybar .content": {
-          "width": "calc(100% - 20px) !important",
+          width: "calc(100% - 20px) !important",
         },
         ".part.auxiliarybar .split-view-view": {
           "max-height": "calc(100% - 24px) !important",
@@ -658,7 +880,7 @@ const VITE_FILES: Record<string, string> = {
         },
         ".quick-input-widget": {
           "border-radius": "16px !important",
-          "overflow": "hidden !important",
+          overflow: "hidden !important",
           "border-top": "1px solid rgba(255,255,255,0.1) !important",
           "border-left": "1px solid rgba(255,255,255,0.06) !important",
           "border-bottom": "1px solid rgba(255,255,255,0.02) !important",
@@ -669,34 +891,36 @@ const VITE_FILES: Record<string, string> = {
           "border-radius": "6px !important",
           "margin-left": "4px !important",
           "margin-right": "4px !important",
-          "width": "calc(100% - 8px) !important",
-          "transition": "background 0.15s cubic-bezier(0.4, 0, 0.2, 1) !important",
+          width: "calc(100% - 8px) !important",
+          transition:
+            "background 0.15s cubic-bezier(0.4, 0, 0.2, 1) !important",
         },
         ".quick-input-widget .monaco-list-row.focused": {
-          "background": "linear-gradient(135deg, rgba(49,50,56,0.7), rgba(37,38,44,0.5)) !important",
+          background:
+            "linear-gradient(135deg, rgba(49,50,56,0.7), rgba(37,38,44,0.5)) !important",
           "box-shadow": "inset 0 0 0 1px rgba(255,255,255,0.06) !important",
         },
         ".scrollbar .slider": {
           "border-radius": "9999px !important",
-          "transition": "opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important",
+          transition: "opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important",
         },
         ".monaco-count-badge": {
           "border-radius": "9999px !important",
           "font-size": "12px !important",
-          "padding": "0 6px !important",
+          padding: "0 6px !important",
           "min-height": "16px !important",
           "line-height": "16px !important",
-          "transform": "scale(0.85) !important",
+          transform: "scale(0.85) !important",
         },
         ".tab .tab-actions": {
-          "opacity": "0 !important",
-          "transition": "opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important",
+          opacity: "0 !important",
+          transition: "opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important",
         },
         ".tab:hover .tab-actions": {
-          "opacity": "1 !important",
+          opacity: "1 !important",
         },
         ".tab.active .tab-actions": {
-          "opacity": "1 !important",
+          opacity: "1 !important",
         },
         ".monaco-workbench *": {
           "border-color": "transparent !important",
@@ -720,7 +944,7 @@ Tailwind is served through the Vite preview via the CDN plus \`tailwind.config.t
 `,
   [`${WORKSPACE_ROOT}/components.json`]: JSON.stringify(
     {
-      "$schema": "https://ui.shadcn.com/schema.json",
+      $schema: "https://ui.shadcn.com/schema.json",
       style: "new-york",
       rsc: false,
       tsx: true,
@@ -1429,21 +1653,22 @@ export default function AboutPage() {
 };
 
 const VITE_TEMPLATE: TemplateDefinition = {
-  id: 'vite',
+  id: "vite",
   defaultFile: `${WORKSPACE_ROOT}/src/App.tsx`,
-  runCommand: 'npm run dev',
+  runCommand: "npm run dev",
   directories: VITE_DIRECTORIES,
   files: VITE_FILES,
 };
 
 const NEXTJS_TEMPLATE: TemplateDefinition = {
-  id: 'nextjs',
+  id: "nextjs",
   defaultFile: `${WORKSPACE_ROOT}/app/page.jsx`,
-  runCommand: 'npm run dev',
+  runCommand: "npm run dev",
   directories: NEXTJS_DIRECTORIES,
   files: {
     ...NEXTJS_FILES,
-    [`${WORKSPACE_ROOT}/.vscode/settings.json`]: VITE_FILES[`${WORKSPACE_ROOT}/.vscode/settings.json`],
+    [`${WORKSPACE_ROOT}/.vscode/settings.json`]:
+      VITE_FILES[`${WORKSPACE_ROOT}/.vscode/settings.json`],
   },
 };
 
@@ -1697,13 +1922,14 @@ code {
 };
 
 const TANSTACK_TEMPLATE: TemplateDefinition = {
-  id: 'tanstack',
+  id: "tanstack",
   defaultFile: `${WORKSPACE_ROOT}/src/routes/index.tsx`,
-  runCommand: 'npm run dev',
+  runCommand: "npm run dev",
   directories: TANSTACK_DIRECTORIES,
   files: {
     ...TANSTACK_FILES,
-    [`${WORKSPACE_ROOT}/.vscode/settings.json`]: VITE_FILES[`${WORKSPACE_ROOT}/.vscode/settings.json`],
+    [`${WORKSPACE_ROOT}/.vscode/settings.json`]:
+      VITE_FILES[`${WORKSPACE_ROOT}/.vscode/settings.json`],
   },
 };
 
@@ -1713,12 +1939,15 @@ const TEMPLATES: Record<TemplateId, TemplateDefinition> = {
   tanstack: TANSTACK_TEMPLATE,
 };
 
-export function getTemplateDefaults(id: TemplateId): { defaultFile: string; runCommand: string } {
+export function getTemplateDefaults(id: TemplateId): {
+  defaultFile: string;
+  runCommand: string;
+} {
   const template = TEMPLATES[id];
   return { defaultFile: template.defaultFile, runCommand: template.runCommand };
 }
 
-const CLAUDE_WRAPPER_PATH = '/usr/local/bin/claude-wrapper';
+const CLAUDE_WRAPPER_PATH = "/usr/local/bin/claude-wrapper";
 const CLAUDE_WRAPPER_SCRIPT = '#!/bin/sh\nexec claude "$@"\n';
 const SETTINGS_PATH = `${WORKSPACE_ROOT}/.vscode/settings.json`;
 
@@ -1731,7 +1960,10 @@ function ensureDirectory(
   }
 }
 
-export function seedWorkspace(container: ReturnTypeOfCreateContainer, templateId: TemplateId = 'vite'): void {
+export function seedWorkspace(
+  container: ReturnTypeOfCreateContainer,
+  templateId: TemplateId = "vite",
+): void {
   const template = TEMPLATES[templateId];
 
   for (const directory of template.directories) {
@@ -1747,6 +1979,6 @@ export function seedWorkspace(container: ReturnTypeOfCreateContainer, templateId
   }
 
   // Write Claude wrapper executable
-  ensureDirectory(container, '/usr/local/bin');
+  ensureDirectory(container, "/usr/local/bin");
   container.vfs.writeFileSync(CLAUDE_WRAPPER_PATH, CLAUDE_WRAPPER_SCRIPT);
 }
