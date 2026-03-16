@@ -48,6 +48,9 @@ jobs:
           # Copy service worker and other root-level files needed at runtime
           cp dist-site/__sw__.js deploy/__sw__.js
           cp dist-site/favicon.svg deploy/favicon.svg
+          # Copy PGlite WASM assets needed at runtime
+          cp dist-site/pglite.wasm deploy/pglite.wasm
+          cp dist-site/pglite.data deploy/pglite.data
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

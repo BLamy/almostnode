@@ -10,9 +10,10 @@ let cachedAssets: { wasmModule: WebAssembly.Module; fsBundle: Blob } | null = nu
 
 export async function loadPGliteAssets(): Promise<{ wasmModule: WebAssembly.Module; fsBundle: Blob }> {
   if (cachedAssets) return cachedAssets;
+  const base = import.meta.env.BASE_URL || '/';
   const [wasmResp, dataResp] = await Promise.all([
-    fetch('/pglite.wasm'),
-    fetch('/pglite.data'),
+    fetch(`${base}pglite.wasm`),
+    fetch(`${base}pglite.data`),
   ]);
   const [wasmModule, fsBundle] = await Promise.all([
     WebAssembly.compileStreaming(wasmResp),

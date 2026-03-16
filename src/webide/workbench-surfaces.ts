@@ -1271,7 +1271,6 @@ export class ClaudeTerminalSurface {
   private readonly root = document.createElement('div');
   private readonly statusRow = document.createElement('div');
   private readonly tabs = document.createElement('div');
-  private readonly status = document.createElement('div');
   private readonly actions = document.createElement('div');
   private readonly newTabButton = document.createElement('button');
   private readonly body = document.createElement('div');
@@ -1297,9 +1296,6 @@ export class ClaudeTerminalSurface {
     this.tabs.className = 'almostnode-claude-surface__tabs';
     this.actions.className = 'almostnode-claude-surface__actions';
 
-    this.status.className = 'almostnode-claude-surface__status';
-    this.status.textContent = 'Idle';
-
     this.newTabButton.type = 'button';
     this.newTabButton.className = 'almostnode-claude-surface__new-tab';
     this.newTabButton.textContent = '+';
@@ -1320,7 +1316,7 @@ export class ClaudeTerminalSurface {
     this.loading.style.display = 'none';
 
     this.actions.append(this.newTabButton);
-    this.statusRow.append(this.tabs, this.status, this.actions);
+    this.statusRow.append(this.tabs, this.actions);
     this.root.append(this.statusRow, this.body, this.loading);
 
     this.resizeObserver = new ResizeObserver(() => {
@@ -1376,7 +1372,6 @@ export class ClaudeTerminalSurface {
 
   updateStatus(text: string): void {
     if (!this.activeTabId) {
-      this.status.textContent = text;
       return;
     }
     this.updateTabStatus(this.activeTabId, text);
@@ -1457,7 +1452,6 @@ export class ClaudeTerminalSurface {
 
     if (this.activeTabId === id) {
       this.activeTabId = null;
-      this.status.textContent = 'Idle';
     }
   }
 
@@ -1471,9 +1465,6 @@ export class ClaudeTerminalSurface {
 
   updateTabStatus(id: string, text: string): void {
     this.tabStatuses.set(id, text);
-    if (this.activeTabId === id) {
-      this.status.textContent = text;
-    }
   }
 
   setActiveTab(id: string): void {
@@ -1486,7 +1477,6 @@ export class ClaudeTerminalSurface {
       body.hidden = !isActive;
       body.style.display = isActive ? 'block' : 'none';
     }
-    this.status.textContent = this.tabStatuses.get(id) || 'Idle';
     this.fit();
     queueTerminalFit(() => this.fit());
   }
