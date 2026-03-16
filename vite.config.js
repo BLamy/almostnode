@@ -59,7 +59,19 @@ export default defineConfig({
         }
         return null;
       },
-    }]),
+      transform(code, id) {
+        // PGlite's Emscripten code detects Node.js via process.versions.node,
+        // which is true in almostnode because the runtime shims process globally.
+        // Force ENVIRONMENT_IS_NODE=false so Emscripten uses browser paths.
+        if (code.includes('ENVIRONMENT_IS_NODE')) {
+          return code.replace(
+            /ENVIRONMENT_IS_NODE\s*=\s*typeof process[^;]+;/g,
+            'ENVIRONMENT_IS_NODE=false;'
+          );
+        }
+      },
+    },
+    ]),
   ],
   define: isTest ? {} : {
     'process.env': {},
@@ -132,6 +144,23 @@ export default defineConfig({
       transformMixedEsModules: true,
     },
     rollupOptions: {
+      plugins: [
+        {
+          // PGlite embeds Emscripten code that detects Node.js via process.versions.node.
+          // Because almostnode shims process globally, this falsely triggers the Node.js
+          // code path which calls createRequire (unavailable in browser). Patch all output
+          // chunks to force ENVIRONMENT_IS_NODE=false.
+          name: 'pglite-emscripten-fix',
+          renderChunk(code) {
+            if (code.includes('ENVIRONMENT_IS_NODE')) {
+              return code.replace(
+                /ENVIRONMENT_IS_NODE\s*=\s*typeof process[^;]+;/g,
+                'ENVIRONMENT_IS_NODE=false;'
+              );
+            }
+          },
+        },
+      ],
       input: {
         main: resolve(__dirname, 'index.html'),
         'examples/index': resolve(__dirname, 'examples/index.html'),
