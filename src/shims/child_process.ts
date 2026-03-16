@@ -115,6 +115,7 @@ export interface ChildProcessController {
   onInstallMutation: ((summary: PackageManagerMutationSummary) => void | Promise<void>) | null;
   frameworkDevServers: Map<string, ManagedFrameworkDevServer>;
   executions: Map<string, ChildProcessExecutionContext>;
+  keychain?: { persistCurrentState(): Promise<void> } | null;
   createExecution: (opts?: {
     onStdout?: (data: string) => void;
     onStderr?: (data: string) => void;
@@ -396,12 +397,16 @@ function maybeRunCustomCommandDirect(
   if (tokens.length === 0) return null;
 
   // Don't intercept compound commands (pipes, chains, semicolons).
-  // Strip quoted content first so operators inside quotes are ignored.
-  const withoutQuoted = normalized.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '');
+  // Strip quoted content and shell redirections (e.g. 2>&1) first so
+  // operators inside quotes or redirections are ignored.
+  const withoutQuoted = normalized
+    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '')
+    .replace(/\d*>&\d+/g, '');
   if (/[|;&]/.test(withoutQuoted)) return null;
 
   const cmd = tokens[0];
-  const args = tokens.slice(1);
+  // Filter out shell redirections like 2>&1 that splitCommandArgs picks up as tokens
+  const args = tokens.slice(1).filter(t => !/^\d*>&\d+$/.test(t));
   const vfs = controller.vfs;
 
   switch (cmd) {
@@ -435,6 +440,11 @@ function maybeRunCustomCommandDirect(
         const { runGhCommand } = await import('./gh-command');
         return runGhCommand(args, {} as any, vfs);
       })();
+    case 'tsc':
+      return (async () => {
+        const { runTscCommand } = await import('./tsc-command');
+        return runTscCommand(args, {} as any, vfs);
+      })();
     default:
       return null;
   }
@@ -442,15 +452,43 @@ function maybeRunCustomCommandDirect(
 
 /**
  * Strip quotes from a command string so just-bash's broken lexer won't crash.
- * Tokenizes properly with splitCommandArgs, then rejoins without quotes.
- * Arguments with spaces will lose their grouping, but at least the command
- * won't error out with "unexpected EOF while looking for matching quote".
+ * Tokenizes properly, then rejoins — but re-wraps originally-quoted tokens
+ * in double quotes when they contain shell metacharacters like `(` or `)`.
+ * This prevents just-bash's lexer from treating parentheses in SQL statements
+ * (e.g. `INSERT INTO users (col) VALUES ('x')`) as subshell operators.
  */
 function stripQuotesForBash(command: string): string {
   if (!command.includes('"') && !command.includes("'")) return command;
-  const tokens = splitCommandArgs(command);
-  if (tokens.length === 0) return command;
-  return tokens.join(' ');
+
+  const result: string[] = [];
+  const matcher = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s]+)/g;
+  let match: RegExpExecArray | null = null;
+
+  while ((match = matcher.exec(command)) !== null) {
+    if (match[1] !== undefined) {
+      // Was double-quoted — unescape, then re-quote if it contains
+      // characters that would confuse just-bash's lexer.
+      const content = match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      if (/[()$`]/.test(content) || /\s/.test(content)) {
+        result.push('"' + content.replace(/["\\$`]/g, '\\$&') + '"');
+      } else {
+        result.push(content);
+      }
+    } else if (match[2] !== undefined) {
+      // Was single-quoted — unescape, then re-quote if needed.
+      const content = match[2].replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+      if (/[()$`]/.test(content) || /\s/.test(content)) {
+        result.push('"' + content.replace(/["\\$`]/g, '\\$&') + '"');
+      } else {
+        result.push(content);
+      }
+    } else if (match[3] !== undefined) {
+      // Was unquoted — pass through as-is (preserves legit shell syntax)
+      result.push(match[3]);
+    }
+  }
+
+  return result.join(' ');
 }
 
 function normalizeCommandCwd(cwd?: string): string {
@@ -1128,6 +1166,18 @@ module.exports = (async () => {
 
     const commandName = cmdArgs[0];
     const commandArgs = cmdArgs.slice(1);
+
+    // Intercept commands that have custom shim implementations — skip npm resolution
+    if (commandName === 'drizzle-kit') {
+      const { runDrizzleKitCommand } = await import('./drizzle-kit-command');
+      return runDrizzleKitCommand(commandArgs, ctx, controller.vfs);
+    }
+
+    if (commandName === 'tsc') {
+      const { runTscCommand } = await import('./tsc-command');
+      return runTscCommand(commandArgs, ctx, controller.vfs);
+    }
+
     const installSpec = packageSpec || commandName;
 
     const { parsePackageSpec } = await import('../npm/index');
@@ -1552,6 +1602,7 @@ module.exports = (async () => {
           console.log('[vite] Detected TanStack Router — enabling SPA fallback and route tree generation');
         } else if (allDeps['react-router-dom'] || allDeps['react-router']) {
           spaFallback = true;
+          aliases = { '@/': 'src/' };
           console.log('[vite] Detected React Router — enabling SPA fallback');
         }
       } catch {
@@ -1642,9 +1693,19 @@ module.exports = (async () => {
     return runCurlCommand(args, ctx, controller.vfs);
   });
 
+  const drizzleKitCommand = defineCommand('drizzle-kit', async (args, ctx) => {
+    const { runDrizzleKitCommand } = await import('./drizzle-kit-command');
+    return runDrizzleKitCommand(args, ctx, controller.vfs);
+  });
+
+  const tscCommand = defineCommand('tsc', async (args, ctx) => {
+    const { runTscCommand } = await import('./tsc-command');
+    return runTscCommand(args, ctx, controller.vfs);
+  });
+
   const ghCommand = defineCommand('gh', async (args, ctx) => {
     const { runGhCommand } = await import('./gh-command');
-    return runGhCommand(args, ctx, controller.vfs);
+    return runGhCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
   const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
@@ -1692,7 +1753,7 @@ module.exports = (async () => {
       info: emitBashLog,
       debug: emitBashLog,
     },
-    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand, ghCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand, drizzleKitCommand, tscCommand, ghCommand],
   });
 
   // Wrap bashInstance.exec to:
@@ -1706,7 +1767,7 @@ module.exports = (async () => {
       const tokens = splitCommandArgs(normalized);
       if (tokens.length > 0 && tokens[0] === 'playwright-cli') {
         const { runPlaywrightCommand } = await import('./playwright-command');
-        const result = await runPlaywrightCommand(tokens.slice(1), {} as any, vfs);
+        const result = await runPlaywrightCommand(filterRedirections(tokens.slice(1)), {} as any, vfs);
         return { ...result, env: options?.env ?? {} };
       }
     }
@@ -1714,7 +1775,15 @@ module.exports = (async () => {
       const tokens = splitCommandArgs(normalized);
       if (tokens[0] === 'pg') {
         const { runPgCommand } = await import('./pg-command');
-        const result = await runPgCommand(tokens.slice(1), {} as any, vfs);
+        const result = await runPgCommand(filterRedirections(tokens.slice(1)), {} as any, vfs);
+        return { ...result, env: options?.env ?? {} };
+      }
+    }
+    if (normalized === 'drizzle-kit' || normalized.startsWith('drizzle-kit ')) {
+      const tokens = splitCommandArgs(normalized);
+      if (tokens[0] === 'drizzle-kit') {
+        const { runDrizzleKitCommand } = await import('./drizzle-kit-command');
+        const result = await runDrizzleKitCommand(filterRedirections(tokens.slice(1)), {} as any, vfs);
         return { ...result, env: options?.env ?? {} };
       }
     }
@@ -1730,6 +1799,7 @@ module.exports = (async () => {
     onInstallMutation: options.onInstallMutation || null,
     frameworkDevServers: new Map(),
     executions: new Map(),
+    keychain: null,
     createExecution: (opts) => createExecutionContext(controller, opts),
     destroyExecution: (executionId) => destroyExecutionContext(controller, executionId),
     runCommand: (command, options, executionId) => runCommandInController(controller, command, options, executionId),
@@ -2653,6 +2723,11 @@ function splitCommandArgs(command: string): string[] {
   }
 
   return tokens;
+}
+
+/** Filter out shell redirection tokens like `2>&1` from parsed args. */
+function filterRedirections(args: string[]): string[] {
+  return args.filter(t => !/^\d*>&\d+$/.test(t));
 }
 
 function getBindingDefaultEnv(binding?: ChildProcessModuleBinding): Record<string, string> {

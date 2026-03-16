@@ -142,7 +142,8 @@ async function fetchGitHubUser(token: string): Promise<{ login: string }> {
 async function authLogin(
   _args: string[],
   _ctx: CommandContext,
-  vfs: VirtualFS
+  vfs: VirtualFS,
+  keychain?: { persistCurrentState(): Promise<void> } | null,
 ): Promise<JustBashExecResult> {
   const host = 'github.com';
 
@@ -218,6 +219,8 @@ async function authLogin(
     git_protocol: 'https',
   }, host);
 
+  await keychain?.persistCurrentState().catch(() => {});
+
   return ok(
     output +
       `\u2713 Authentication complete.\n` +
@@ -264,7 +267,8 @@ async function authStatus(
 async function authLogout(
   _args: string[],
   _ctx: CommandContext,
-  vfs: VirtualFS
+  vfs: VirtualFS,
+  keychain?: { persistCurrentState(): Promise<void> } | null,
 ): Promise<JustBashExecResult> {
   const host = 'github.com';
   const config = readGhToken(vfs, host);
@@ -275,6 +279,8 @@ async function authLogout(
 
   const username = config.user;
   deleteGhToken(vfs, host);
+
+  await keychain?.persistCurrentState().catch(() => {});
 
   return ok(`\u2713 Logged out of ${host} account ${username}\n`);
 }
@@ -297,17 +303,18 @@ async function authToken(
 async function runAuth(
   args: string[],
   ctx: CommandContext,
-  vfs: VirtualFS
+  vfs: VirtualFS,
+  keychain?: { persistCurrentState(): Promise<void> } | null,
 ): Promise<JustBashExecResult> {
   const sub = args[0];
 
   switch (sub) {
     case 'login':
-      return authLogin(args.slice(1), ctx, vfs);
+      return authLogin(args.slice(1), ctx, vfs, keychain);
     case 'status':
       return authStatus(args.slice(1), ctx, vfs);
     case 'logout':
-      return authLogout(args.slice(1), ctx, vfs);
+      return authLogout(args.slice(1), ctx, vfs, keychain);
     case 'token':
       return authToken(args.slice(1), ctx, vfs);
     default:
@@ -403,12 +410,194 @@ async function runApi(
   }
 }
 
+// ── Repo subcommands ────────────────────────────────────────────────────────
+
+function timeAgo(date: Date): string {
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `about ${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `about ${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `about ${days} day${days === 1 ? '' : 's'} ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `about ${months} month${months === 1 ? '' : 's'} ago`;
+  const years = Math.floor(months / 12);
+  return `about ${years} year${years === 1 ? '' : 's'} ago`;
+}
+
+async function repoList(
+  args: string[],
+  _ctx: CommandContext,
+  vfs: VirtualFS
+): Promise<JustBashExecResult> {
+  const host = 'github.com';
+  const config = readGhToken(vfs, host);
+  if (!config || !config.oauth_token) {
+    return err('gh: not logged in. Run `gh auth login` first.\n');
+  }
+
+  let owner: string | null = null;
+  let limit = 30;
+  let visibility: string | null = null;
+  let language: string | null = null;
+  let showForks: boolean | null = null;
+  let showArchived: boolean | null = null;
+  let jsonFields: string[] | null = null;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if ((arg === '-L' || arg === '--limit') && i + 1 < args.length) {
+      limit = parseInt(args[++i], 10) || 30;
+    } else if (arg === '--visibility' && i + 1 < args.length) {
+      visibility = args[++i];
+    } else if ((arg === '-l' || arg === '--language') && i + 1 < args.length) {
+      language = args[++i];
+    } else if (arg === '--fork') {
+      showForks = true;
+    } else if (arg === '--source') {
+      showForks = false;
+    } else if (arg === '--archived') {
+      showArchived = true;
+    } else if (arg === '--no-archived') {
+      showArchived = false;
+    } else if (arg === '--json' && i + 1 < args.length) {
+      jsonFields = args[++i].split(',');
+    } else if (!arg.startsWith('-')) {
+      owner = arg;
+    }
+  }
+
+  // Build API URL
+  let apiUrl: string;
+  if (owner) {
+    apiUrl = `https://api.github.com/users/${encodeURIComponent(owner)}/repos`;
+  } else {
+    apiUrl = 'https://api.github.com/user/repos';
+  }
+
+  const perPage = Math.min(Math.max(limit, 30), 100);
+  apiUrl += `?per_page=${perPage}&sort=pushed&direction=desc`;
+
+  if (visibility && !owner) {
+    apiUrl += `&visibility=${visibility}`;
+  }
+
+  try {
+    const res = await fetchViaProxy(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${config.oauth_token}`,
+        Accept: 'application/vnd.github+json',
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      return err(`gh: API error (${res.status}): ${text}\n`);
+    }
+
+    let repos: any[] = await res.json();
+
+    // Client-side filtering
+    if (showForks === true) repos = repos.filter((r: any) => r.fork);
+    if (showForks === false) repos = repos.filter((r: any) => !r.fork);
+    if (showArchived === true) repos = repos.filter((r: any) => r.archived);
+    if (showArchived === false) repos = repos.filter((r: any) => !r.archived);
+    if (language) {
+      const lang = language.toLowerCase();
+      repos = repos.filter((r: any) => r.language?.toLowerCase() === lang);
+    }
+    if (visibility && owner) {
+      repos = repos.filter((r: any) => {
+        if (visibility === 'public') return !r.private;
+        if (visibility === 'private') return r.private;
+        return true;
+      });
+    }
+
+    repos = repos.slice(0, limit);
+
+    // JSON output
+    if (jsonFields) {
+      const fieldMap: Record<string, (r: any) => any> = {
+        name: (r) => r.name,
+        nameWithOwner: (r) => r.full_name,
+        description: (r) => r.description || '',
+        visibility: (r) => (r.private ? 'PRIVATE' : 'PUBLIC'),
+        isPrivate: (r) => r.private,
+        isFork: (r) => r.fork,
+        isArchived: (r) => r.archived,
+        primaryLanguage: (r) => (r.language ? { name: r.language } : null),
+        stargazerCount: (r) => r.stargazers_count,
+        forkCount: (r) => r.forks_count,
+        url: (r) => r.html_url,
+        sshUrl: (r) => r.ssh_url,
+        createdAt: (r) => r.created_at,
+        updatedAt: (r) => r.updated_at,
+        pushedAt: (r) => r.pushed_at,
+        owner: (r) => ({ login: r.owner?.login }),
+      };
+
+      const output = repos.map((r: any) => {
+        const obj: Record<string, any> = {};
+        for (const field of jsonFields!) {
+          obj[field] = fieldMap[field] ? fieldMap[field](r) : (r[field] ?? null);
+        }
+        return obj;
+      });
+
+      return ok(JSON.stringify(output, null, 2) + '\n');
+    }
+
+    // Default table output
+    if (repos.length === 0) {
+      return ok('No repositories match your search\n');
+    }
+
+    const lines = repos.map((r: any) => {
+      const name: string = r.full_name;
+      const desc: string = r.description || '';
+      const vis = r.private ? 'private' : 'public';
+      const lang: string = r.language || '';
+      const updated = timeAgo(new Date(r.pushed_at));
+      const truncDesc = desc.length > 50 ? desc.slice(0, 47) + '...' : desc;
+      return `${name}\t${truncDesc}\t${vis}\t${lang}\t${updated}`;
+    });
+
+    return ok(lines.join('\n') + '\n');
+  } catch (e) {
+    return err(`gh: ${e instanceof Error ? e.message : String(e)}\n`);
+  }
+}
+
+async function runRepo(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS
+): Promise<JustBashExecResult> {
+  const sub = args[0];
+
+  switch (sub) {
+    case 'list':
+    case 'ls':
+      return repoList(args.slice(1), ctx, vfs);
+    default:
+      return err(
+        `Usage: gh repo <command>\n\n` +
+          `Available commands:\n` +
+          `  list, ls    List repositories owned by user or organization\n`
+      );
+  }
+}
+
 // ── Main dispatcher ─────────────────────────────────────────────────────────
 
 export async function runGhCommand(
   args: string[],
   ctx: CommandContext,
-  vfs: VirtualFS
+  vfs: VirtualFS,
+  keychain?: { persistCurrentState(): Promise<void> } | null,
 ): Promise<JustBashExecResult> {
   const sub = args[0];
 
@@ -417,7 +606,8 @@ export async function runGhCommand(
       `Usage: gh <command> <subcommand> [flags]\n\n` +
         `Available commands:\n` +
         `  auth        Authenticate gh and git with GitHub\n` +
-        `  api         Make an authenticated GitHub API request\n\n` +
+        `  api         Make an authenticated GitHub API request\n` +
+        `  repo        Manage repositories\n\n` +
         `Run 'gh <command> --help' for more information about a command.\n`
     );
   }
@@ -428,9 +618,11 @@ export async function runGhCommand(
 
   switch (sub) {
     case 'auth':
-      return runAuth(args.slice(1), ctx, vfs);
+      return runAuth(args.slice(1), ctx, vfs, keychain);
     case 'api':
       return runApi(args.slice(1), ctx, vfs);
+    case 'repo':
+      return runRepo(args.slice(1), ctx, vfs);
     default:
       return err(`gh: '${sub}' is not a gh command. See 'gh --help'.\n`);
   }

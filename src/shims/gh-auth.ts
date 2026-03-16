@@ -44,7 +44,7 @@ function parseHostsYml(content: string): Record<string, GhHostConfig> {
 
     // Indented key-value pair
     if (currentHost) {
-      const match = trimmed.match(/^(\w+):\s*(.*)$/);
+      const match = line.trim().match(/^(\w+):\s*(.*)$/);
       if (match) {
         const [, key, value] = match;
         if (key === 'oauth_token' || key === 'user' || key === 'git_protocol') {

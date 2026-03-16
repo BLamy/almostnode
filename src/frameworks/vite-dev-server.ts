@@ -784,13 +784,26 @@ export class ViteDevServer extends DevServer {
         for (const [alias, target] of Object.entries(aliases)) {
           if (specifier.startsWith(alias)) {
             // Replace alias with target path, then compute relative from current file
-            const resolved = specifier.replace(alias, target);
+            let resolved = specifier.replace(alias, target);
             const fromDir = filename.replace(/\/[^/]+$/, '');
             // Strip root prefix from fromDir for relative computation
             const rootPrefix = this.root === '/' ? '' : this.root;
             const fromDirRel = rootPrefix && fromDir.startsWith(rootPrefix)
               ? fromDir.slice(rootPrefix.length)
               : fromDir;
+
+            // If the resolved path points to a directory with an index file,
+            // append the index filename so the browser URL has the correct
+            // directory context for resolving relative imports within that module.
+            const resolvedFsPath = this.root + '/' + resolved;
+            const indexExts = ['.tsx', '.ts', '.jsx', '.js', '.mjs'];
+            for (const ext of indexExts) {
+              if (this.exists(resolvedFsPath + '/index' + ext)) {
+                resolved = resolved + '/index' + ext;
+                break;
+              }
+            }
+
             const targetFull = '/' + resolved;
 
             // Compute relative path

@@ -77,15 +77,13 @@ export async function runPGliteCommand(
         const { listDatabases, setActiveDatabase, getIdbPath } = await import('../pglite/db-manager');
         const dbs = listDatabases();
         if (!dbs.some((d) => d.name === name)) return err(`Database "${name}" not found`);
-        const { closePGliteInstance, initPGliteInstance } = await import('../pglite/pglite-database');
+        const { closePGliteInstance } = await import('../pglite/pglite-database');
         const { getActiveDatabase } = await import('../pglite/db-manager');
         const oldActive = getActiveDatabase();
         if (oldActive) await closePGliteInstance(oldActive);
         setActiveDatabase(name);
-        // Try to read schema.sql if it exists
-        let schemaSQL: string | null = null;
-        try { const raw = _vfs.readFileSync('/project/schema.sql'); schemaSQL = typeof raw === 'string' ? raw : new TextDecoder().decode(raw); } catch { /* no schema */ }
-        await initPGliteInstance(name, schemaSQL, getIdbPath(name));
+        const { initAndMigrate } = await import('../pglite/pglite-database');
+        await initAndMigrate(name, _vfs, getIdbPath(name));
         return ok(`Switched to database "${name}"`);
       }
 
@@ -94,10 +92,8 @@ export async function runPGliteCommand(
         if (!name) return err('Usage: pglite create <name>');
         const { createDatabase, getIdbPath } = await import('../pglite/db-manager');
         createDatabase(name);
-        const { initPGliteInstance } = await import('../pglite/pglite-database');
-        let schemaSQL: string | null = null;
-        try { const raw = _vfs.readFileSync('/project/schema.sql'); schemaSQL = typeof raw === 'string' ? raw : new TextDecoder().decode(raw); } catch { /* no schema */ }
-        await initPGliteInstance(name, schemaSQL, getIdbPath(name));
+        const { initAndMigrate } = await import('../pglite/pglite-database');
+        await initAndMigrate(name, _vfs, getIdbPath(name));
         return ok(`Created database "${name}"`);
       }
 

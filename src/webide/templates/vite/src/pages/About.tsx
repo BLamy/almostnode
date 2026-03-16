@@ -6,6 +6,7 @@ function About() {
       <nav className="mx-auto flex w-full max-w-6xl items-center gap-4 px-4 py-3 sm:px-6 lg:px-8">
         <Link to="/" className="text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors">Home</Link>
         <Link to="/about" className="text-sm font-semibold text-foreground hover:text-foreground/80 transition-colors">About</Link>
+        <Link to="/todos" className="text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors">Todos</Link>
       </nav>
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
         <section className="rounded-[2rem] border border-border/60 bg-background/82 p-6 shadow-[0_40px_120px_-40px_rgba(15,23,42,0.65)] backdrop-blur-xl sm:p-8">

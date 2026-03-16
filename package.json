@@ -100,6 +100,7 @@
     "@codingame/monaco-vscode-keybindings-service-override": "^27.0.0",
     "@codingame/monaco-vscode-languages-service-override": "^27.0.0",
     "@codingame/monaco-vscode-search-service-override": "^27.0.0",
+    "@codingame/monaco-vscode-sql-default-extension": "27.0.0",
     "@codingame/monaco-vscode-textmate-service-override": "^27.0.0",
     "@codingame/monaco-vscode-theme-defaults-default-extension": "^27.0.0",
     "@codingame/monaco-vscode-theme-service-override": "^27.0.0",

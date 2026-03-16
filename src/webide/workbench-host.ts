@@ -6,8 +6,8 @@ import { prunePersistedWorkbenchExtensions } from './persisted-extensions';
 import { shouldRunWorkbenchCommandInteractively } from './terminal-command-routing';
 import { VfsFileSystemProvider } from './vfs-file-system-provider';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from './extension-services';
-import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
-import { ClaudeAuthVault, type ClaudeAuthVaultState } from './claude-auth-vault';
+import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
+import { Keychain, type KeychainState, CLAUDE_AUTH_CREDENTIALS_PATH, CLAUDE_AUTH_CONFIG_PATH, CLAUDE_LEGACY_CONFIG_PATH } from './keychain';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
 import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
@@ -36,6 +36,7 @@ import '@codingame/monaco-vscode-json-default-extension';
 import '@codingame/monaco-vscode-typescript-basics-default-extension';
 import '@codingame/monaco-vscode-html-default-extension';
 import '@codingame/monaco-vscode-css-default-extension';
+import '@codingame/monaco-vscode-sql-default-extension';
 import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._configuration';
 import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._editorPane';
 import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._fileEditorFactory';
@@ -50,6 +51,12 @@ import '@xterm/xterm/css/xterm.css';
 import editorWorkerUrl from 'monaco-editor/esm/vs/editor/editor.worker.js?worker&url';
 import textMateWorkerUrl from '@codingame/monaco-vscode-textmate-service-override/worker?worker&url';
 import extensionHostWorkerUrl from '@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url';
+
+// Force full page reload on change — the Monaco workbench cannot be safely
+// hot-reloaded because module-identity-dependent instanceof checks break.
+if (import.meta.hot) {
+  import.meta.hot.decline();
+}
 
 export type ReturnTypeOfCreateContainer = ReturnType<typeof createContainer>;
 
@@ -155,6 +162,7 @@ function inferWorkbenchLanguageId(path: string): string | null {
   if (normalized.endsWith('.jsonc')) return 'jsonc';
   if (normalized.endsWith('.html') || normalized.endsWith('.htm') || normalized.endsWith('.xhtml')) return 'html';
   if (normalized.endsWith('.css')) return 'css';
+  if (normalized.endsWith('.sql')) return 'sql';
 
   return null;
 }
@@ -463,12 +471,13 @@ export class WebIDEHost {
   private readonly consoleTabId = 'console-panel';
   private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
-  private readonly claudeAuthVault: ClaudeAuthVault;
-  private claudeAuthStatusEntry: IStatusbarEntryAccessor | null = null;
+  private readonly keychain: Keychain;
+  private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
   private claudeCodeInstallPromise: Promise<void> | null = null;
   private readonly templateId: TemplateId;
   private readonly databaseSurface: DatabaseSidebarSurface;
   private readonly databaseBrowserSurface: DatabaseBrowserSurface;
+  private readonly keychainSurface: KeychainSidebarSurface;
   private pgliteMiddleware: import('../server-bridge').RequestMiddleware | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
@@ -516,20 +525,38 @@ export class WebIDEHost {
     });
     this.databaseSurface = new DatabaseSidebarSurface();
     this.databaseBrowserSurface = new DatabaseBrowserSurface();
+    this.keychainSurface = new KeychainSidebarSurface();
     this.workbenchSurfaces = registerWorkbenchSurfaces({
       filesSurface: this.filesSurface,
       previewSurface: this.previewSurface,
       terminalSurface: this.terminalSurface,
       claudeSurface: this.claudeSurface,
       databaseBrowserSurface: this.databaseBrowserSurface,
+      keychainSurface: this.keychainSurface,
     });
-    this.claudeAuthVault = new ClaudeAuthVault({
+    this.keychain = new Keychain({
       vfs: this.container.vfs,
       overlayRoot: options.elements.workbench.parentElement ?? options.elements.workbench,
       onStateChange: (state) => {
-        this.updateClaudeAuthStatusEntry(state);
+        this.updateKeychainStatusEntry(state);
+        this.updateKeychainSurface(state);
       },
     });
+    this.keychainSurface.setActionHandler((action) => {
+      switch (action) {
+        case 'unlock': void this.unlockKeychain(); break;
+        case 'save': void this.unlockKeychain(); break;
+        case 'forget': void this.forgetKeychain(); break;
+      }
+    });
+    this.keychain.registerSlot('claude', [
+      CLAUDE_AUTH_CREDENTIALS_PATH,
+      CLAUDE_AUTH_CONFIG_PATH,
+      CLAUDE_LEGACY_CONFIG_PATH,
+    ]);
+    this.keychain.registerSlot('github', [
+      '/home/user/.config/gh/hosts.yml',
+    ]);
   }
 
   static async bootstrap(options: WebIDEHostOptions): Promise<WebIDEHost> {
@@ -733,12 +760,12 @@ export class WebIDEHost {
     }
 
     this.claudeSurface.showLoading();
-    const state = this.claudeAuthVault.getState();
+    const state = this.keychain.getState();
     if (state.hasStoredVault && !state.hasLiveCredentials) {
       try {
-        await this.claudeAuthVault.handlePrimaryAction();
+        await this.keychain.handlePrimaryAction();
       } catch {
-        terminal.write('Claude auth unlock failed. You can retry from the status bar.\r\n');
+        terminal.write('Keychain unlock failed. You can retry from the status bar.\r\n');
         this.claudeSurface.hideLoading();
         this.printPrompt(tab);
         return tab;
@@ -801,6 +828,23 @@ export class WebIDEHost {
     }
   }
 
+  async revealKeychainPanel(): Promise<void> {
+    const paneCompositeService = await getService(IPaneCompositePartService);
+    setPartVisibility(Parts.SIDEBAR_PART, true);
+    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.keychainViewId, ViewContainerLocation.Sidebar, true);
+    this.updateKeychainSurface();
+  }
+
+  private updateKeychainSurface(state = this.keychain.getState()): void {
+    this.keychainSurface.update(
+      [
+        { name: 'claude', label: 'Claude Code', active: this.keychain.hasSlotData('claude') },
+        { name: 'github', label: 'GitHub Auth', active: this.keychain.hasSlotData('github') },
+      ],
+      { hasStoredVault: state.hasStoredVault, supported: state.supported },
+    );
+  }
+
   async revealClaudePanel(focus: boolean): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
     setPartVisibility(Parts.SIDEBAR_PART, true);
@@ -829,9 +873,9 @@ export class WebIDEHost {
       tab.terminal.write('\r\n');
     }
 
-    if (!await this.claudeAuthVault.prepareForCommand(trimmed)) {
-      this.updateTerminalStatus(tab, 'Claude auth unlock required');
-      this.writeTerminal(tab, 'Claude auth unlock is required before running this command.\n');
+    if (!await this.keychain.prepareForCommand(trimmed)) {
+      this.updateTerminalStatus(tab, 'Keychain unlock required');
+      this.writeTerminal(tab, 'Keychain unlock is required before running this command.\n');
       this.printPrompt(tab);
       return;
     }
@@ -866,28 +910,44 @@ export class WebIDEHost {
     await this.runCommand(this.getPreviewTerminalTab(), command);
   }
 
-  async unlockClaudeAuth(): Promise<void> {
-    await this.claudeAuthVault.handlePrimaryAction();
+  async unlockKeychain(): Promise<void> {
+    await this.keychain.handlePrimaryAction();
   }
 
-  forgetClaudeAuth(): void {
-    this.claudeAuthVault.forgetSavedVault();
+  forgetKeychain(): void {
+    this.keychain.forgetSavedVault();
   }
 
-  getClaudeAuthState(): ClaudeAuthVaultState {
-    return this.claudeAuthVault.getState();
+  getKeychainState(): KeychainState {
+    return this.keychain.getState();
   }
 
   private async openWorkspaceFile(path: string): Promise<void> {
     const editorService = await getService(IEditorService);
     const languageId = inferWorkbenchLanguageId(path);
 
-    await editorService.openEditor({
-      resource: URI.file(path),
-      options: {
-        pinned: true,
-      },
-    });
+    try {
+      await editorService.openEditor({
+        resource: URI.file(path),
+        options: {
+          pinned: true,
+        },
+      });
+    } catch {
+      // Fallback: if instanceof URI fails due to Vite module identity mismatch,
+      // dynamically import the URI class from the internal source path (bypassing
+      // the resolve alias) to get the same module instance that Monaco uses internally.
+      const { URI: InternalURI } = await import(
+        /* @vite-ignore */
+        '/node_modules/@codingame/monaco-vscode-api/vscode/src/vs/base/common/uri.js'
+      );
+      await editorService.openEditor({
+        resource: InternalURI.file(path),
+        options: {
+          pinned: true,
+        },
+      });
+    }
 
     if (!languageId) {
       return;
@@ -1205,59 +1265,60 @@ export class WebIDEHost {
     };
   }
 
-  private buildClaudeAuthStatusEntry(state = this.claudeAuthVault.getState()): IStatusbarEntry {
+  private buildKeychainStatusEntry(state = this.keychain.getState()): IStatusbarEntry {
     if (state.busy) {
       return {
-        name: 'Claude Auth',
-        text: '$(sync~spin) Claude Auth',
-        ariaLabel: 'Claude auth action in progress',
-        tooltip: 'Claude auth vault action in progress',
-        command: 'almostnode.claudeAuth.primary',
+        name: 'Keychain',
+        text: '$(sync~spin) Keychain',
+        ariaLabel: 'Keychain action in progress',
+        tooltip: 'Keychain action in progress',
+        command: 'almostnode.keychain.primary',
       };
     }
 
     if (!state.supported) {
       return {
-        name: 'Claude Auth',
-        text: '$(shield) Claude Auth',
-        ariaLabel: 'Claude auth vault unavailable',
-        tooltip: 'Passkey-backed Claude auth vault is unavailable in this browser.',
+        name: 'Keychain',
+        text: '$(shield) Keychain',
+        ariaLabel: 'Keychain unavailable',
+        tooltip: 'Passkey-backed keychain is unavailable in this browser.',
+        command: 'almostnode.keychain.primary',
       };
     }
 
     if (state.hasStoredVault && !state.hasLiveCredentials) {
       return {
-        name: 'Claude Auth',
-        text: '$(lock) Claude Auth',
-        ariaLabel: 'Unlock saved Claude auth',
-        tooltip: 'Unlock the saved Claude auth vault for this browser.',
-        command: 'almostnode.claudeAuth.primary',
+        name: 'Keychain',
+        text: '$(lock) Keychain',
+        ariaLabel: 'Unlock saved keychain',
+        tooltip: 'Unlock the saved keychain for this browser.',
+        command: 'almostnode.keychain.primary',
       };
     }
 
     if (state.hasLiveCredentials && !state.hasStoredVault) {
       return {
-        name: 'Claude Auth',
-        text: '$(key) Save Claude',
-        ariaLabel: 'Save Claude auth',
-        tooltip: 'Save the current Claude auth file for this browser with a passkey.',
-        command: 'almostnode.claudeAuth.primary',
+        name: 'Keychain',
+        text: '$(key) Save Keychain',
+        ariaLabel: 'Save keychain',
+        tooltip: 'Save credentials for this browser with a passkey.',
+        command: 'almostnode.keychain.primary',
       };
     }
 
     return {
-      name: 'Claude Auth',
-      text: state.hasStoredVault ? '$(shield) Claude Saved' : '$(shield) Claude Auth',
-      ariaLabel: state.hasStoredVault ? 'Claude auth is saved for this browser' : 'Claude auth vault',
+      name: 'Keychain',
+      text: state.hasStoredVault ? '$(shield) Keychain Saved' : '$(shield) Keychain',
+      ariaLabel: state.hasStoredVault ? 'Keychain is saved for this browser' : 'Keychain',
       tooltip: state.hasStoredVault
-        ? 'Claude auth is available for this browser.'
-        : 'No Claude auth has been saved for this browser.',
-      command: state.hasStoredVault ? 'almostnode.claudeAuth.primary' : undefined,
+        ? 'Keychain is available for this browser.'
+        : 'No keychain has been saved for this browser.',
+      command: 'almostnode.keychain.primary',
     };
   }
 
-  private updateClaudeAuthStatusEntry(state = this.claudeAuthVault.getState()): void {
-    this.claudeAuthStatusEntry?.update(this.buildClaudeAuthStatusEntry(state));
+  private updateKeychainStatusEntry(state = this.keychain.getState()): void {
+    this.keychainStatusEntry?.update(this.buildKeychainStatusEntry(state));
   }
 
   private async registerStatusbarEntries(): Promise<void> {
@@ -1314,9 +1375,9 @@ export class WebIDEHost {
       { primary: 997, secondary: 997 },
     );
 
-    this.claudeAuthStatusEntry = statusbarService.addEntry(
-      this.buildClaudeAuthStatusEntry(),
-      'almostnode.status.claudeAuth',
+    this.keychainStatusEntry = statusbarService.addEntry(
+      this.buildKeychainStatusEntry(),
+      'almostnode.status.keychain',
       StatusbarAlignment.LEFT,
       { primary: 996, secondary: 996 },
     );
@@ -1430,21 +1491,21 @@ export class WebIDEHost {
             handler: () => this.revealClaudePanel(true),
           },
           {
-            id: 'almostnode.claudeAuth.primary',
-            label: 'Almostnode: Unlock Claude Auth',
-            handler: () => this.unlockClaudeAuth(),
+            id: 'almostnode.keychain.primary',
+            label: 'Almostnode: Open Keychain',
+            handler: () => this.revealKeychainPanel(),
           },
           {
-            id: 'almostnode.claudeAuth.unlock',
-            label: 'Almostnode: Unlock Claude Auth',
+            id: 'almostnode.keychain.unlock',
+            label: 'Almostnode: Unlock Keychain',
             menu: Menu.CommandPalette,
-            handler: () => this.unlockClaudeAuth(),
+            handler: () => this.unlockKeychain(),
           },
           {
-            id: 'almostnode.claudeAuth.forget',
-            label: 'Almostnode: Forget Claude Auth',
+            id: 'almostnode.keychain.forget',
+            label: 'Almostnode: Forget Keychain',
             menu: Menu.CommandPalette,
-            handler: () => this.forgetClaudeAuth(),
+            handler: () => this.forgetKeychain(),
           },
         ],
       },
@@ -1541,12 +1602,13 @@ export class WebIDEHost {
   private async initPGliteIfNeeded(): Promise<void> {
     const schemaPath = `${WORKSPACE_ROOT}/schema.sql`;
     const hasSchema = this.container.vfs.existsSync(schemaPath);
+    const hasDrizzleDir = (() => { try { return this.container.vfs.statSync(`${WORKSPACE_ROOT}/drizzle`).isDirectory(); } catch { return false; } })();
 
     // Import db-manager lazily
     const { listDatabases, ensureDefaultDatabase, getIdbPath, getActiveDatabase, setActiveDatabase, createDatabase, deleteDatabase } = await import('../pglite/db-manager');
     const hasExistingDbs = listDatabases().length > 0;
 
-    if (!hasSchema && !hasExistingDbs) {
+    if (!hasSchema && !hasDrizzleDir && !hasExistingDbs) {
       // No database needed
       return;
     }
@@ -1564,11 +1626,10 @@ export class WebIDEHost {
       });
 
       const activeName = ensureDefaultDatabase();
-      const schemaSQL = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
 
-      // Load PGlite and init instance
-      const { initPGliteInstance } = await import('../pglite/pglite-database');
-      await initPGliteInstance(activeName, schemaSQL, getIdbPath(activeName));
+      // Load PGlite and init instance (with migration support)
+      const { initAndMigrate } = await import('../pglite/pglite-database');
+      await initAndMigrate(activeName, this.container.vfs, getIdbPath(activeName));
       console.log(`[pglite] Database "${activeName}" ready`);
 
       // Register middleware
@@ -1595,11 +1656,10 @@ export class WebIDEHost {
             // Switch active database if different
             const currentActive = getActiveDatabase();
             if (currentActive !== name) {
-              const { closePGliteInstance, initPGliteInstance: initInst } = await import('../pglite/pglite-database');
+              const { closePGliteInstance, initAndMigrate: initMigrate } = await import('../pglite/pglite-database');
               if (currentActive) await closePGliteInstance(currentActive);
               setActiveDatabase(name);
-              const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
-              await initInst(name, sql, getIdbPath(name));
+              await initMigrate(name, this.container.vfs, getIdbPath(name));
               this.previewSurface.setActiveDb(name);
               this.databaseSurface.update(listDatabases(), name);
             }
@@ -1612,12 +1672,11 @@ export class WebIDEHost {
         },
         onSwitch: async (name: string) => {
           try {
-            const { closePGliteInstance, initPGliteInstance: initInst } = await import('../pglite/pglite-database');
+            const { closePGliteInstance, initAndMigrate: initMigrate } = await import('../pglite/pglite-database');
             const oldActive = getActiveDatabase();
             if (oldActive) await closePGliteInstance(oldActive);
             setActiveDatabase(name);
-            const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
-            await initInst(name, sql, getIdbPath(name));
+            await initMigrate(name, this.container.vfs, getIdbPath(name));
             this.previewSurface.setActiveDb(name);
             this.databaseSurface.update(listDatabases(), name);
             console.log(`[pglite] Switched to database "${name}"`);
@@ -1628,9 +1687,8 @@ export class WebIDEHost {
         onCreate: async (name: string) => {
           try {
             createDatabase(name);
-            const { initPGliteInstance: initInst } = await import('../pglite/pglite-database');
-            const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
-            await initInst(name, sql, getIdbPath(name));
+            const { initAndMigrate: initMigrate } = await import('../pglite/pglite-database');
+            await initMigrate(name, this.container.vfs, getIdbPath(name));
             this.databaseSurface.update(listDatabases(), getActiveDatabase());
             console.log(`[pglite] Created database "${name}"`);
           } catch (err) {
@@ -1645,9 +1703,8 @@ export class WebIDEHost {
             const active = getActiveDatabase();
             if (!active || active === name) {
               const newActive = ensureDefaultDatabase();
-              const { initPGliteInstance: initInst } = await import('../pglite/pglite-database');
-              const sql = hasSchema ? this.container.vfs.readFileSync(schemaPath, 'utf-8') : null;
-              await initInst(newActive, sql, getIdbPath(newActive));
+              const { initAndMigrate: initMigrate } = await import('../pglite/pglite-database');
+              await initMigrate(newActive, this.container.vfs, getIdbPath(newActive));
               this.previewSurface.setActiveDb(newActive);
             }
             this.databaseSurface.update(listDatabases(), getActiveDatabase());
@@ -1682,7 +1739,8 @@ export class WebIDEHost {
 
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
-    await this.claudeAuthVault.init();
+    await this.keychain.init();
+    this.container.setKeychain(this.keychain);
     this.updatePreviewStatus('Waiting for a preview server');
     this.updateTerminalStatus(initialTab, 'Idle');
 
@@ -1771,9 +1829,9 @@ export class WebIDEHost {
 
       // Auto-start Claude Code: if there's a stored API key, prompt WebAuthn
       // to unlock it, then start a Claude Code session
-      const claudeState = this.claudeAuthVault.getState();
+      const claudeState = this.keychain.getState();
       if (claudeState.hasStoredVault && !claudeState.hasLiveCredentials) {
-        this.claudeAuthVault.handlePrimaryAction().then(() => {
+        this.keychain.handlePrimaryAction().then(() => {
           void this.revealClaudePanel(false);
         }).catch(() => {
           // Auth unlock declined/failed — still reveal the panel so user can retry

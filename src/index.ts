@@ -221,6 +221,7 @@ export function createContainer(options?: ContainerOptions): {
   sendInput: (data: string) => void;
   createREPL: () => { eval: (code: string) => Promise<unknown> };
   on: (event: string, listener: (...args: unknown[]) => void) => void;
+  setKeychain: (kc: { persistCurrentState(): Promise<void> }) => void;
   setHMRTargetForPort: (port: number, targetWindow: Window) => void;
 } {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
@@ -518,6 +519,9 @@ export function createContainer(options?: ContainerOptions): {
     createREPL: () => runtime.createREPL(),
     on: (event: string, listener: (...args: unknown[]) => void) => {
       serverBridge.on(event, listener);
+    },
+    setKeychain: (kc: { persistCurrentState(): Promise<void> }) => {
+      childProcessController.keychain = kc;
     },
     setHMRTargetForPort: (port: number, targetWindow: Window) => {
       for (const server of childProcessController.frameworkDevServers.values()) {

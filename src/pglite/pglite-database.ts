@@ -72,6 +72,97 @@ export function getInstance(name: string): PGlite | undefined {
   return instances.get(name);
 }
 
+// ── Migration support ──
+
+export async function applyPendingMigrations(
+  vfs: import('../virtual-fs').VirtualFS,
+  dbName: string,
+): Promise<{ applied: string[]; errors: string[] }> {
+  const db = instances.get(dbName);
+  if (!db) return { applied: [], errors: ['Database not initialized'] };
+
+  // Ensure migrations table exists
+  await db.exec(`CREATE TABLE IF NOT EXISTS _drizzle_migrations (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+
+  // Get already-applied migrations
+  const appliedResult = await db.query('SELECT name FROM _drizzle_migrations ORDER BY name');
+  const appliedSet = new Set((appliedResult.rows as any[]).map((r) => r.name));
+
+  // Read migration files from VFS
+  let files: string[];
+  try {
+    files = vfs.readdirSync('/project/drizzle').filter((f: string) => f.endsWith('.sql')).sort();
+  } catch {
+    return { applied: [], errors: [] }; // No drizzle/ directory
+  }
+
+  const pending = files.filter((f) => !appliedSet.has(f));
+  const applied: string[] = [];
+  const errors: string[] = [];
+
+  for (const file of pending) {
+    try {
+      const raw = vfs.readFileSync(`/project/drizzle/${file}`);
+      const sql = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
+      await db.exec(sql);
+      await db.exec(`INSERT INTO _drizzle_migrations (name) VALUES ('${file}')`);
+      applied.push(file);
+    } catch (e: any) {
+      errors.push(`${file}: ${e.message || String(e)}`);
+      break; // Stop on first error
+    }
+  }
+
+  return { applied, errors };
+}
+
+export async function initAndMigrate(
+  name: string,
+  vfs: import('../virtual-fs').VirtualFS,
+  idbPath?: string,
+): Promise<void> {
+  // Init with no schema SQL — migrations will handle it
+  await initPGliteInstance(name, null, idbPath);
+
+  // Check for drizzle/ migrations first
+  const hasDrizzleDir = (() => {
+    try {
+      const stat = vfs.statSync('/project/drizzle');
+      return stat.isDirectory();
+    } catch {
+      return false;
+    }
+  })();
+
+  if (hasDrizzleDir) {
+    const { applied, errors } = await applyPendingMigrations(vfs, name);
+    if (applied.length > 0) {
+      console.log(`[pglite] Applied ${applied.length} migration(s) for "${name}"`);
+    }
+    if (errors.length > 0) {
+      console.error(`[pglite] Migration errors for "${name}":`, errors);
+    }
+    return;
+  }
+
+  // Fallback: legacy schema.sql
+  try {
+    const raw = vfs.readFileSync('/project/schema.sql');
+    const schemaSQL = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
+    const db = instances.get(name);
+    if (db && schemaSQL) {
+      await db.exec(schemaSQL);
+      console.log(`[pglite] Schema applied for "${name}" (legacy schema.sql)`);
+    }
+  } catch {
+    // No schema.sql — empty database is fine
+  }
+}
+
 // ── Request handler ──
 
 export interface DatabaseRequestResult {

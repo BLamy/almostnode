@@ -6,7 +6,6 @@
  * needing a direct PGlite connection.
  */
 
-export { todos } from './schema';
 export type { Todo, NewTodo } from './types';
 
 export async function dbQuery<T = Record<string, unknown>>(

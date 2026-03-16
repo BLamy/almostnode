@@ -60,8 +60,9 @@ export async function runPgCommand(
   const { sql, json: jsonOutput, db } = parsed;
 
   try {
-    // psql shortcuts
-    if (sql === '\\dt') {
+    // psql shortcuts — also handle variants where just-bash's lexer has
+    // stripped the leading backslash (e.g. \d → d, \dt → dt, \l → l).
+    if (sql === '\\dt' || sql === 'dt') {
       const { handleDatabaseRequest } = await import('../pglite/pglite-database');
       const result = await handleDatabaseRequest('tables', {}, db);
       if (result.statusCode !== 200) return err(result.body);
@@ -71,8 +72,8 @@ export async function runPgCommand(
       return ok(data.tables.join('\n'));
     }
 
-    if (sql.startsWith('\\d ')) {
-      const table = sql.slice(3).trim();
+    if (sql.startsWith('\\d ') || (sql.startsWith('d ') && !QUERY_KEYWORDS.test(sql))) {
+      const table = sql.replace(/^\\?d\s+/, '').trim();
       if (!table) return err('Usage: pg "\\d <table>"');
       const { handleDatabaseRequest } = await import('../pglite/pglite-database');
       const result = await handleDatabaseRequest(`schema/${table}`, {}, db);
@@ -83,7 +84,7 @@ export async function runPgCommand(
       return ok(formatTable(data.columns));
     }
 
-    if (sql === '\\l') {
+    if (sql === '\\l' || sql === 'l') {
       const { listDatabases, getActiveDatabase } = await import('../pglite/db-manager');
       const dbs = listDatabases();
       const active = getActiveDatabase();

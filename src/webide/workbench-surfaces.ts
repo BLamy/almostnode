@@ -94,6 +94,7 @@ export interface RegisteredWorkbenchSurfaces {
   terminalViewId: string;
   claudeViewId: string;
   databaseViewId: string;
+  keychainViewId: string;
   dispose(): void;
 }
 
@@ -1848,12 +1849,122 @@ export class DatabaseBrowserSurface {
   }
 }
 
+// ── Keychain Sidebar ────────────────────────────────────────────────────────
+
+const KEYCHAIN_VIEW_ID = 'almostnode.sidebar.keychain';
+
+export interface KeychainSlotStatus {
+  name: string;
+  label: string;
+  active: boolean;
+}
+
+export class KeychainSidebarSurface {
+  private readonly root = document.createElement('div');
+  private readonly listEl = document.createElement('div');
+  private readonly footerEl = document.createElement('div');
+  private slots: KeychainSlotStatus[] = [];
+  private onAction: ((action: string) => void) | null = null;
+
+  constructor() {
+    this.root.className = 'almostnode-keychain-sidebar';
+    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:#ccc;font-size:13px;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight:600;margin-bottom:4px;';
+    header.textContent = 'Keychain';
+
+    this.listEl.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:2px;';
+
+    this.footerEl.style.cssText = 'display:flex;gap:6px;padding-top:8px;border-top:1px solid #333;';
+
+    this.root.append(header, this.listEl, this.footerEl);
+  }
+
+  setActionHandler(handler: (action: string) => void): void {
+    this.onAction = handler;
+  }
+
+  update(slots: KeychainSlotStatus[], options?: { hasStoredVault: boolean; supported: boolean }): void {
+    this.slots = slots;
+    this.render();
+    this.renderFooter(options);
+  }
+
+  attach(container: HTMLElement): IDisposable {
+    container.appendChild(this.root);
+    return {
+      dispose: () => {
+        if (this.root.parentElement === container) {
+          container.removeChild(this.root);
+        }
+      },
+    };
+  }
+
+  private render(): void {
+    this.listEl.innerHTML = '';
+    for (const slot of this.slots) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:3px;';
+
+      const dot = document.createElement('span');
+      dot.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${slot.active ? '#4ec9b0' : '#e06c75'};`;
+      dot.title = slot.active ? 'Authenticated' : 'Not authenticated';
+
+      const label = document.createElement('span');
+      label.style.cssText = 'flex:1;';
+      label.textContent = slot.label;
+
+      const status = document.createElement('span');
+      status.style.cssText = `font-size:11px;color:${slot.active ? '#4ec9b0' : '#666'};`;
+      status.textContent = slot.active ? 'Active' : 'None';
+
+      row.append(dot, label, status);
+      this.listEl.appendChild(row);
+    }
+  }
+
+  private renderFooter(options?: { hasStoredVault: boolean; supported: boolean }): void {
+    this.footerEl.innerHTML = '';
+    if (!options?.supported) {
+      const note = document.createElement('span');
+      note.style.cssText = 'font-size:11px;color:#666;';
+      note.textContent = 'Passkey not supported in this browser';
+      this.footerEl.appendChild(note);
+      return;
+    }
+
+    if (options.hasStoredVault) {
+      const unlockBtn = this.createFooterButton('Unlock', 'unlock');
+      const forgetBtn = this.createFooterButton('Forget', 'forget');
+      this.footerEl.append(unlockBtn, forgetBtn);
+    } else {
+      const saveBtn = this.createFooterButton('Save with passkey', 'save');
+      this.footerEl.appendChild(saveBtn);
+    }
+  }
+
+  private createFooterButton(text: string, action: string): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.textContent = text;
+    btn.style.cssText = 'background:#0e639c;color:#fff;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
+    btn.addEventListener('mouseenter', () => { btn.style.background = '#1177bb'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = '#0e639c'; });
+    btn.addEventListener('click', () => {
+      this.onAction?.(action);
+    });
+    return btn;
+  }
+}
+
 export function registerWorkbenchSurfaces(options: {
   filesSurface: FilesSidebarSurface;
   previewSurface: PreviewSurface;
   terminalSurface: TerminalPanelSurface;
   claudeSurface: ClaudeTerminalSurface;
   databaseBrowserSurface: DatabaseBrowserSurface;
+  keychainSurface: KeychainSidebarSurface;
 }): RegisteredWorkbenchSurfaces {
   class PreviewEditorInput extends SimpleEditorInput {
     readonly typeId = PREVIEW_EDITOR_TYPE_ID;
@@ -1959,6 +2070,16 @@ export function registerWorkbenchSurfaces(options: {
       renderBody: (container) => options.claudeSurface.attach(container),
     }),
   );
+  disposables.add(
+    registerCustomView({
+      id: KEYCHAIN_VIEW_ID,
+      name: 'Keychain',
+      location: ViewContainerLocation.AuxiliaryBar,
+      order: 2,
+      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'),
+      renderBody: (container) => options.keychainSurface.attach(container),
+    }),
+  );
   return {
     previewInput,
     databaseInput,
@@ -1966,6 +2087,7 @@ export function registerWorkbenchSurfaces(options: {
     terminalViewId: TERMINAL_VIEW_ID,
     claudeViewId: CLAUDE_VIEW_ID,
     databaseViewId: DATABASE_VIEW_ID,
+    keychainViewId: KEYCHAIN_VIEW_ID,
     dispose: () => disposables.dispose(),
   };
 }

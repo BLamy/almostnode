@@ -315,6 +315,35 @@ self.addEventListener('fetch', (event) => {
   const match = pathname.match(/^\/__virtual__\/(\d+)(\/.*)?$/);
 
   if (!match) {
+    // /_npm/ requests are almostnode-specific and should always be routed to a
+    // virtual server, even when the Referer chain has lost the /__virtual__/ context
+    // (e.g. /_npm/foo imports /_npm/foo/constants — the Referer is /_npm/foo, not /__virtual__/).
+    if (pathname.startsWith('/_npm/')) {
+      let virtualPort = null;
+      const npmReferer = event.request.referrer;
+      if (npmReferer) {
+        try {
+          const refererUrl = new URL(npmReferer);
+          const refererPathname = basePath && refererUrl.pathname.startsWith(basePath)
+            ? refererUrl.pathname.slice(basePath.length) || '/'
+            : refererUrl.pathname;
+          const refererMatch = refererPathname.match(/^\/__virtual__\/(\d+)/);
+          if (refererMatch) {
+            virtualPort = parseInt(refererMatch[1], 10);
+          }
+        } catch (e) {}
+      }
+      // Fall back to first registered port if Referer doesn't have virtual context
+      if (!virtualPort && registeredPorts.size > 0) {
+        virtualPort = registeredPorts.values().next().value;
+      }
+      if (virtualPort) {
+        DEBUG && console.log('[SW] Routing /_npm/ request to virtual server:', pathname, 'port:', virtualPort);
+        event.respondWith(handleVirtualRequest(event.request, virtualPort, pathname + url.search));
+        return;
+      }
+    }
+
     // Not a virtual request - but check if it's from a virtual context
     // This handles plain <a href="/about"> links and asset requests (images, scripts)
     // that should stay within the virtual server

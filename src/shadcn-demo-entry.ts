@@ -407,7 +407,7 @@ async function executeCommand(command: string) {
 
   skipPrompt = true;
   isRunning = true;
-  setStatus(`Running: ${trimmed}`, true);
+  setStatus(``, true);
   write(`\x1b[2m[${trimmed}]\x1b[0m\r\n`);
   commandReadout.textContent = trimmed;
   activeRunController = new AbortController();
