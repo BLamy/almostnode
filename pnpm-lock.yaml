@@ -47,6 +47,9 @@ importers:
       '@codingame/monaco-vscode-search-service-override':
         specifier: ^27.0.0
         version: 27.0.0
+      '@codingame/monaco-vscode-sql-default-extension':
+        specifier: 27.0.0
+        version: 27.0.0
       '@codingame/monaco-vscode-textmate-service-override':
         specifier: ^27.0.0
         version: 27.0.0
@@ -270,6 +273,9 @@ packages:
 
   '@codingame/monaco-vscode-search-service-override@27.0.0':
     resolution: {integrity: sha512-xd1CzoBPlnbKq7Nwf49xqifikGPGl749akk9PP2rqmuG4jkO+pajgmDRQ1G9Deon2965gluJu5XTNuoJEP1tNA==}
+
+  '@codingame/monaco-vscode-sql-default-extension@27.0.0':
+    resolution: {integrity: sha512-JkMi++uHINP5/AGlAmYi2IcjailiEJ9HOjtJq57J0GKjZeAcOp+2F3/RhLQfFYCUsCpauvnsEYEhpqOGJnraXw==}
 
   '@codingame/monaco-vscode-textmate-service-override@27.0.0':
     resolution: {integrity: sha512-JsmOhotK3z5WH9bREXYR/agseXoF36yfclVgTJ6TStVOwMOrSsQrsq1ziobeMaUZlj6lfXV0zks7uDYQAaYzEA==}
@@ -1972,6 +1978,10 @@ snapshots:
       '@codingame/monaco-vscode-api': 27.0.0
 
   '@codingame/monaco-vscode-search-service-override@27.0.0':
+    dependencies:
+      '@codingame/monaco-vscode-api': 27.0.0
+
+  '@codingame/monaco-vscode-sql-default-extension@27.0.0':
     dependencies:
       '@codingame/monaco-vscode-api': 27.0.0
 
