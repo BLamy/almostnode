@@ -195,10 +195,18 @@ const LOCAL_PACKAGES = new Set([
 ]);
 
 /**
- * Extract the major version from a semver range string.
- * e.g., "^4.0.0" → "4", "~1.2.3" → "1", ">=2.0.0" → "2", "3.1.0" → "3"
+ * Extract the version to use on esm.sh from a semver range string.
+ * For stable versions returns the major: "^4.0.0" → "4", "~1.2.3" → "1".
+ * For pre-release versions (e.g. "2.0.0-alpha.4") returns the full version
+ * because esm.sh can't resolve bare majors for unreleased versions.
  */
 function extractMajorVersion(range: string): string | null {
+  // Strip leading range chars (^, ~, >=, etc.)
+  const stripped = range.replace(/^[^0-9]*/, '');
+  // If it's a pre-release version, use the full version
+  if (/-/.test(stripped)) {
+    return stripped || null;
+  }
   const match = range.match(/(\d+)\.\d+/);
   return match ? match[1] : null;
 }

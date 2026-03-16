@@ -44,6 +44,26 @@ playwright-cli screenshot
 # Then read /tmp/screenshot.png to see the page
 ```
 
+## Quick smoke test after changes
+
+Run these after any code change to catch obvious breakage:
+
+```bash
+playwright-cli console error
+playwright-cli network
+playwright-cli snapshot
+```
+
+If console errors appear or the snapshot is empty, something broke — delegate to the Debugging Engineer.
+
+## Checking app state (cookies & storage)
+
+```bash
+playwright-cli cookie-list
+playwright-cli localstorage-list
+playwright-cli sessionstorage-list
+```
+
 ## Troubleshooting
 
 - If an element ref fails, run `playwright-cli snapshot` again and retry.

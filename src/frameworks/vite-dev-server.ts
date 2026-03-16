@@ -310,6 +310,190 @@ const HMR_CLIENT_SCRIPT = `
 </script>
 `;
 
+/**
+ * Replay recording capture script — @@replay-nut protocol handler.
+ * Produces simulationData packets matching Replay's expected format
+ * (see vendor/builder-assets/appTemplate/src/messages/simulationData.ts).
+ * Loads rrweb for DOM snapshots, captures interactions, network, and errors.
+ */
+const REPLAY_CAPTURE_SCRIPT = `
+<script>
+(function() {
+  var simulationData = [];
+  var startTime = Date.now();
+  var nextRequestIndex = 0;
+
+  function ts() { return new Date().toISOString(); }
+  function relMs() { return Date.now() - startTime; }
+
+  // ── Initial packets (matching simulationState.ts:initSimulationState) ──
+  simulationData.push({ kind: 'version', version: '0.2.0', time: ts() });
+  simulationData.push({ kind: 'viewport', size: { width: window.innerWidth, height: window.innerHeight }, time: ts() });
+  simulationData.push({ kind: 'locationHref', href: location.href, time: ts() });
+  simulationData.push({ kind: 'documentURL', url: location.href, time: ts() });
+  simulationData.push({ kind: 'colorScheme', scheme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light', time: ts() });
+
+  // ── rrweb DOM recording (loaded from CDN) ──
+  import('https://esm.sh/rrweb@2.0.0-alpha.4').then(function(mod) {
+    var record = mod.record || (mod.default && mod.default.record);
+    if (!record) { console.warn('[Replay] rrweb record() not found in module'); return; }
+    record({
+      emit: function(event) {
+        simulationData.push({ kind: 'rrweb', event: event, time: ts() });
+      },
+      checkoutEveryNms: 10000,
+    });
+    console.log('[Replay] rrweb recording started');
+  }).catch(function(err) {
+    console.warn('[Replay] Failed to load rrweb:', err.message || err);
+  });
+
+  // ── Selector builder ──
+  function buildSelector(el) {
+    if (!el || !el.tagName) return '';
+    var parts = [];
+    var cur = el;
+    for (var i = 0; i < 5 && cur && cur.tagName; i++) {
+      var s = cur.tagName.toLowerCase();
+      if (cur.id) { parts.unshift(s + '#' + cur.id); break; }
+      if (cur.className && typeof cur.className === 'string') {
+        s += '.' + cur.className.trim().split(/\\s+/).join('.');
+      }
+      parts.unshift(s);
+      cur = cur.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  // ── Interaction capture (matching eventListeners.ts format) ──
+  document.addEventListener('click', function(e) {
+    var target = e.target;
+    var rect = target && target.getBoundingClientRect ? target.getBoundingClientRect() : null;
+    simulationData.push({
+      kind: 'interaction',
+      interaction: {
+        kind: 'click',
+        time: relMs(),
+        selector: buildSelector(target),
+        width: rect ? rect.width : 0,
+        height: rect ? rect.height : 0,
+        x: rect ? e.clientX - rect.x : e.clientX,
+        y: rect ? e.clientY - rect.y : e.clientY,
+      },
+      time: ts(),
+    });
+  }, { capture: true, passive: true });
+
+  document.addEventListener('keydown', function(e) {
+    simulationData.push({
+      kind: 'interaction',
+      interaction: { kind: 'keydown', time: relMs(), key: e.key, selector: buildSelector(e.target) },
+      time: ts(),
+    });
+  }, { capture: true, passive: true });
+
+  document.addEventListener('scroll', function() {
+    simulationData.push({
+      kind: 'interaction',
+      interaction: {
+        kind: 'scroll',
+        time: relMs(),
+        windowScrollX: window.scrollX,
+        windowScrollY: window.scrollY,
+      },
+      time: ts(),
+    });
+  }, { capture: true, passive: true });
+
+  document.addEventListener('input', function(e) {
+    var target = e.target;
+    simulationData.push({
+      kind: 'interaction',
+      interaction: {
+        kind: 'input',
+        time: relMs(),
+        selector: buildSelector(target),
+        value: target && target.value ? target.value.slice(0, 200) : '',
+      },
+      time: ts(),
+    });
+  }, { capture: true, passive: true });
+
+  // ── Network capture (matching networkCapture.ts format) ──
+  var origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    var url = typeof input === 'string' ? input : (input && input.url ? input.url : String(input));
+    var idx = nextRequestIndex++;
+    var reqTime = ts();
+
+    simulationData.push({
+      kind: 'networkRequest',
+      request: { requestIndex: idx, url: url, time: reqTime },
+      time: reqTime,
+    });
+
+    return origFetch.apply(this, arguments).then(function(response) {
+      simulationData.push({
+        kind: 'networkResponse',
+        response: { requestIndex: idx, responseStatus: response.status },
+        time: ts(),
+      });
+      return response;
+    }).catch(function(err) {
+      simulationData.push({
+        kind: 'networkResponse',
+        response: { requestIndex: idx, error: err.message || String(err) },
+        time: ts(),
+      });
+      throw err;
+    });
+  };
+
+  // ── Error capture (matching detectedError.ts format) ──
+  window.addEventListener('error', function(e) {
+    simulationData.push({
+      kind: 'detectedError',
+      detectedError: {
+        time: ts(),
+        message: e.message || String(e),
+        details: (e.filename || '') + ':' + (e.lineno || 0) + ':' + (e.colno || 0),
+      },
+      time: ts(),
+    });
+  });
+
+  window.addEventListener('unhandledrejection', function(e) {
+    simulationData.push({
+      kind: 'detectedError',
+      detectedError: {
+        time: ts(),
+        message: e.reason ? (e.reason.message || String(e.reason)) : 'Unhandled rejection',
+      },
+      time: ts(),
+    });
+  });
+
+  // ── @@replay-nut message handler (matching messageHandler.ts) ──
+  window.addEventListener('message', function(event) {
+    if (!event.data || event.data.source !== '@@replay-nut' || !event.data.request) return;
+
+    var request = event.data.request;
+    if (request.request === 'recording-data') {
+      var json = JSON.stringify(simulationData);
+      var buffer = new TextEncoder().encode(json).buffer;
+      window.parent.postMessage(
+        { id: event.data.id, response: buffer, source: '@@replay-nut' },
+        '*',
+        [buffer]
+      );
+    }
+  });
+
+  console.log('[Replay] Recording capture initialized (' + simulationData.length + ' initial packets)');
+})();
+</script>
+`;
+
 export class ViteDevServer extends DevServer {
   private watcherCleanup: (() => void) | null = null;
   private options: ViteDevServerOptions;
@@ -418,6 +602,25 @@ export class ViteDevServer extends DevServer {
     // Resolve the full path
     const filePath = this.resolveModulePath(pathname);
 
+    // If the resolved path is a directory index file (e.g. foo/index.ts) but the
+    // request URL doesn't end with '/', the browser will resolve relative imports
+    // from the wrong base path.  Redirect to pathname + '/' so that './bar'
+    // inside the index module resolves to foo/bar instead of ../bar.
+    // Use a relative redirect (just the basename + /) so the /__virtual__/PORT/
+    // prefix is preserved by the browser.
+    if (!pathname.endsWith('/') && filePath !== this.resolvePath(pathname)) {
+      const basePath = this.resolvePath(pathname);
+      if (this.isDirectory(basePath) && filePath.startsWith(basePath + '/index.')) {
+        const lastSegment = pathname.split('/').pop() || '';
+        return {
+          statusCode: 301,
+          statusMessage: 'Moved Permanently',
+          headers: { Location: lastSegment + '/' },
+          body: Buffer.from(''),
+        };
+      }
+    }
+
     // Check if file exists
     if (!this.exists(filePath)) {
       // Try with .html extension
@@ -477,6 +680,38 @@ export class ViteDevServer extends DevServer {
     // Check if it's HTML that needs HMR client injection
     if (pathname.endsWith('.html')) {
       return this.serveHtmlWithHMR(filePath);
+    }
+
+    // Serve JSON as ES module when imported from JS (like real Vite does)
+    if (pathname.endsWith('.json')) {
+      const secFetchDest =
+        headers['sec-fetch-dest'] ||
+        headers['Sec-Fetch-Dest'] ||
+        headers['SEC-FETCH-DEST'] ||
+        '';
+      const isModuleImport =
+        secFetchDest === 'script' ||
+        secFetchDest === 'empty' ||
+        (isBrowser && secFetchDest === '');
+      if (isModuleImport) {
+        try {
+          const content = this.vfs.readFileSync(filePath, 'utf8');
+          const js = `export default ${content};`;
+          const buf = Buffer.from(js);
+          return {
+            statusCode: 200,
+            statusMessage: 'OK',
+            headers: {
+              'Content-Type': 'application/javascript; charset=utf-8',
+              'Content-Length': String(buf.length),
+              'Cache-Control': 'no-cache',
+            },
+            body: buf,
+          };
+        } catch {
+          // Fall through to serveFile
+        }
+      }
     }
 
     // Serve static file
@@ -1054,6 +1289,13 @@ export default css;
       } else {
         // Append at the end if no closing tag found
         content += HMR_CLIENT_SCRIPT;
+      }
+
+      // Inject Replay recording capture script (before </body> so DOM is ready)
+      if (content.includes('</body>')) {
+        content = content.replace('</body>', `${REPLAY_CAPTURE_SCRIPT}</body>`);
+      } else {
+        content += REPLAY_CAPTURE_SCRIPT;
       }
 
       const buffer = Buffer.from(content);

@@ -194,13 +194,28 @@ export function extractConfigObject(content: string): string | null {
 }
 
 /**
+ * Strip require() calls from config — they are Node.js-only and cause
+ * "require is not defined" when the config is injected into the browser.
+ * Tailwind CDN plugins must be loaded via <script> tags, not require().
+ */
+function stripRequireCalls(configObject: string): string {
+  // Remove entire array entries that are require() calls (with optional trailing comma)
+  // e.g. `require("tailwindcss-animate"),` → removed entirely
+  let result = configObject.replace(/\s*require\s*\(\s*['"][^'"]*['"]\s*\)\s*,?/g, '');
+  // Clean up dangling commas before closing bracket: `[,]` → `[]`
+  result = result.replace(/,(\s*\])/g, '$1');
+  return result;
+}
+
+/**
  * Generate the script to inject the Tailwind config
  */
 export function generateConfigScript(configObject: string): string {
+  const sanitized = stripRequireCalls(configObject);
   // Wrap in a script that sets tailwind.config
   // This must run AFTER the Tailwind CDN script loads
   // The CDN creates the global `tailwind` object, then we configure it
   return `<script>
-  tailwind.config = ${configObject};
+  tailwind.config = ${sanitized};
 </script>`;
 }

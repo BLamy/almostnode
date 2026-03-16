@@ -1,4 +1,6 @@
 import type { ReturnTypeOfCreateContainer } from "./workbench-host";
+import { convertDatabaseXmlToDrizzle } from "./database-xml-to-drizzle";
+import type { ReferenceAppFiles } from "./reference-app-loader";
 import templates from "virtual:workspace-templates";
 
 export const WORKSPACE_ROOT = "/project";
@@ -74,6 +76,176 @@ export function seedWorkspace(
       continue;
     }
     container.vfs.writeFileSync(path, content);
+  }
+
+  // Write Claude wrapper executable
+  ensureDirectory(container, "/usr/local/bin");
+  container.vfs.writeFileSync(CLAUDE_WRAPPER_PATH, CLAUDE_WRAPPER_SCRIPT);
+
+  // Seed demo test for vite template
+  if (templateId === "vite") {
+    seedDemoTests(container);
+  }
+}
+
+const DEMO_TEST_SPEC = `import { test, expect } from '@playwright/test';
+
+test('todo-crud', async ({ page }) => {
+  await page.goto('/todos');
+
+  // Empty state
+  await expect(page.getByText('No todos yet. Add one above.')).toBeVisible();
+
+  // Add first todo
+  await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('Buy groceries');
+  await page.getByRole('button', { name: 'Add' }).click();
+  await expect(page.getByText('Buy groceries')).toBeVisible();
+  await expect(page.getByText('1 remaining')).toBeVisible();
+
+  // Add second todo
+  await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('Walk the dog');
+  await page.getByRole('button', { name: 'Add' }).click();
+  await expect(page.getByText('Walk the dog')).toBeVisible();
+  await expect(page.getByText('2 remaining')).toBeVisible();
+
+  // Input should clear after adding
+  await expect(page.getByRole('textbox', { name: 'What needs to be done?' })).toHaveValue('');
+
+  // Toggle first todo as completed
+  await page.getByRole('listitem').filter({ hasText: 'Buy groceries' }).getByRole('button').first().click();
+  await expect(page.getByText('1 remaining')).toBeVisible();
+  await expect(page.getByText('1 completed')).toBeVisible();
+
+  // Delete completed todo
+  await page.getByRole('listitem').filter({ hasText: 'Buy groceries' }).getByRole('button', { name: 'Delete' }).click();
+  await expect(page.getByText('Buy groceries')).not.toBeVisible();
+  await expect(page.getByRole('listitem')).toHaveCount(1);
+  await expect(page.getByText('1 remaining')).toBeVisible();
+  await expect(page.getByText('0 completed')).toBeVisible();
+});
+`;
+
+const DEMO_TEST_METADATA = JSON.stringify({
+  tests: [
+    {
+      id: "test-seed-todo-crud",
+      name: "todo-crud",
+      specPath: "/tests/e2e/todo-crud.spec.ts",
+      createdAt: "2026-03-16T00:00:00.000Z",
+      status: "pending",
+    },
+  ],
+}, null, 2);
+
+function seedDemoTests(container: ReturnTypeOfCreateContainer): void {
+  // Tests live at /tests/ (outside /project/) — matching loadTestMetadata/saveTestMetadata paths
+  ensureDirectory(container, "/tests/e2e");
+  container.vfs.writeFileSync("/tests/e2e/todo-crud.spec.ts", DEMO_TEST_SPEC);
+  if (!container.vfs.existsSync("/tests/.almostnode-tests.json")) {
+    container.vfs.writeFileSync("/tests/.almostnode-tests.json", DEMO_TEST_METADATA);
+  }
+}
+
+// ── DB helper file contents (reused from vite template, without template-specific type exports) ──
+
+const DB_INDEX_TS = `/**
+ * Typed database helpers over the PGlite HTTP bridge (/__db__/).
+ */
+
+export async function dbQuery<T = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = [],
+): Promise<T[]> {
+  const res = await fetch('/__db__/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data.rows;
+}
+
+export async function dbExec(sql: string): Promise<void> {
+  const res = await fetch('/__db__/exec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql }),
+  });
+  if (!res.ok) throw new Error((await res.json()).error);
+}
+`;
+
+const DRIZZLE_CONFIG_TS = `import { defineConfig } from 'drizzle-kit';
+
+export default defineConfig({
+  schema: './src/db/schema.ts',
+  out: './drizzle',
+  dialect: 'postgresql',
+});
+`;
+
+/**
+ * Seed the workspace with a reference app's files.
+ * Detects database.xml and generates Drizzle schema + migration.
+ */
+export function seedReferenceApp(
+  container: ReturnTypeOfCreateContainer,
+  app: ReferenceAppFiles,
+): void {
+  const databaseXml = app.files['database.xml'] || null;
+
+  // Collect all directories needed
+  const dirs = new Set<string>();
+  for (const relPath of Object.keys(app.files)) {
+    const parts = relPath.split('/');
+    for (let i = 1; i <= parts.length - 1; i++) {
+      dirs.add(`${WORKSPACE_ROOT}/${parts.slice(0, i).join('/')}`);
+    }
+  }
+
+  // Add db/drizzle directories if we have a database
+  if (databaseXml) {
+    dirs.add(`${WORKSPACE_ROOT}/src/db`);
+    dirs.add(`${WORKSPACE_ROOT}/drizzle`);
+  }
+
+  for (const dir of Array.from(dirs).sort()) {
+    ensureDirectory(container, dir);
+  }
+
+  // Write all app files (skip database.xml — we convert it instead)
+  for (const [relPath, content] of Object.entries(app.files)) {
+    if (relPath === 'database.xml') continue;
+    const absPath = `${WORKSPACE_ROOT}/${relPath}`;
+    if (absPath === SETTINGS_PATH && container.vfs.existsSync(absPath)) continue;
+
+    // Rewrite index.html: absolute paths like src="/src/main.tsx" must become
+    // relative (src="./src/main.tsx") so module loads stay within the service
+    // worker's /__virtual__/{port}/ scope.
+    if (relPath === 'index.html') {
+      const rewritten = content
+        .replace(/\bsrc="\/(?!\/)/g, 'src="./')
+        .replace(/\bhref="\/(?!\/)/g, 'href="./');
+      container.vfs.writeFileSync(absPath, rewritten);
+      continue;
+    }
+
+    container.vfs.writeFileSync(absPath, content);
+  }
+
+  // Convert database.xml → Drizzle schema + migration
+  if (databaseXml) {
+    const { schemaTs, migrationSql } = convertDatabaseXmlToDrizzle(databaseXml);
+
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/src/db/schema.ts`, schemaTs);
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/drizzle/0000_initial.sql`, migrationSql);
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/drizzle.config.ts`, DRIZZLE_CONFIG_TS);
+
+    // Write generic db helpers (no template-specific types)
+    if (!container.vfs.existsSync(`${WORKSPACE_ROOT}/src/db/index.ts`)) {
+      container.vfs.writeFileSync(`${WORKSPACE_ROOT}/src/db/index.ts`, DB_INDEX_TS);
+    }
   }
 
   // Write Claude wrapper executable

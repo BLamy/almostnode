@@ -172,8 +172,8 @@ export abstract class DevServer extends EventEmitter {
       path = '/' + path;
     }
 
-    // Join with root
-    if (this.root !== '/') {
+    // Join with root (skip if already rooted to avoid double-prefixing)
+    if (this.root !== '/' && !path.startsWith(this.root + '/')) {
       path = this.root + path;
     }
 

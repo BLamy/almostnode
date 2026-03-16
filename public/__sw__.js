@@ -485,6 +485,76 @@ function getErudaInjectionScript() {
     forward('error', ['Unhandled rejection: ' + (e.reason && e.reason.message || e.reason || '')]);
   });
 
+  // ── Network bridge ──
+  (function() {
+    var origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      var method = (init && init.method) || 'GET';
+      var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
+      if (typeof input === 'object' && input instanceof Request && !init) {
+        method = input.method || 'GET';
+      }
+      method = method.toUpperCase();
+      var start = Date.now();
+      var p = origFetch.apply(this, arguments);
+      p.then(function(resp) {
+        try {
+          var cl = resp.headers.get('content-length');
+          window.parent.postMessage({
+            type: 'almostnode-network',
+            method: method,
+            url: url,
+            status: resp.status,
+            statusText: resp.statusText,
+            duration: Date.now() - start,
+            size: cl ? parseInt(cl, 10) : 0
+          }, '*');
+        } catch(e) { /* ignore */ }
+      }).catch(function(err) {
+        try {
+          window.parent.postMessage({
+            type: 'almostnode-network',
+            method: method,
+            url: url,
+            status: 0,
+            statusText: err.message || 'Failed',
+            duration: Date.now() - start,
+            size: 0
+          }, '*');
+        } catch(e) { /* ignore */ }
+      });
+      return p;
+    };
+
+    var xhrProto = XMLHttpRequest.prototype;
+    var origOpen = xhrProto.open;
+    var origSend = xhrProto.send;
+    xhrProto.open = function(method, url) {
+      this._anMethod = (method || 'GET').toUpperCase();
+      this._anUrl = url;
+      return origOpen.apply(this, arguments);
+    };
+    xhrProto.send = function() {
+      var xhr = this;
+      var start = Date.now();
+      xhr.addEventListener('loadend', function() {
+        try {
+          var cl = xhr.getResponseHeader('content-length');
+          window.parent.postMessage({
+            type: 'almostnode-network',
+            method: xhr._anMethod || 'GET',
+            url: xhr._anUrl || '',
+            status: xhr.status,
+            statusText: xhr.statusText,
+            duration: Date.now() - start,
+            size: cl ? parseInt(cl, 10) : 0
+          }, '*');
+        } catch(e) { /* ignore */ }
+      });
+      return origSend.apply(this, arguments);
+    };
+  })();
+
   // ── Eruda devtools ──
   var script = document.createElement('script');
   script.src = 'https://cdn.jsdelivr.net/npm/eruda@3.4.0/eruda.min.js';

@@ -69,6 +69,32 @@ playwright-cli console
 playwright-cli console error
 ```
 
+### Check network requests
+
+```bash
+playwright-cli network
+```
+
+### Inspect cookies
+
+```bash
+playwright-cli cookie-list
+playwright-cli cookie-get session_id
+playwright-cli cookie-set theme dark
+playwright-cli cookie-delete session_id
+playwright-cli cookie-clear
+```
+
+### Inspect storage
+
+```bash
+playwright-cli localstorage-list
+playwright-cli localstorage-get user_prefs
+playwright-cli localstorage-set key value
+playwright-cli sessionstorage-list
+playwright-cli sessionstorage-get tab_state
+```
+
 ## Taking screenshots
 
 ```bash

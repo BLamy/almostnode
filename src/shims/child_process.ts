@@ -59,6 +59,43 @@ type ManagedFrameworkDevServer = {
   setHMRTarget?: (targetWindow: Window) => void;
 };
 
+// ---------------------------------------------------------------------------
+// Workspace search provider — used by grep/rg to delegate to VS Code search
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceSearchMatch {
+  lineNumber: number;
+  lineText: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface WorkspaceSearchFileResult {
+  filePath: string;
+  matches: WorkspaceSearchMatch[];
+}
+
+export interface WorkspaceSearchResult {
+  files: WorkspaceSearchFileResult[];
+  limitHit: boolean;
+}
+
+export interface WorkspaceSearchOptions {
+  pattern: string;
+  isRegExp: boolean;
+  isCaseSensitive: boolean;
+  isWordMatch: boolean;
+  folderPath: string;
+  includePattern?: string;
+  excludePattern?: string;
+  maxResults?: number;
+  surroundingContext?: number;
+}
+
+export interface WorkspaceSearchProvider {
+  search(options: WorkspaceSearchOptions): Promise<WorkspaceSearchResult>;
+}
+
 const CONTROLLER_ID_ENV_KEY = '__ALMOSTNODE_CONTROLLER_ID';
 const EXECUTION_ID_ENV_KEY = '__ALMOSTNODE_EXECUTION_ID';
 const INTERNAL_ENV_KEYS = [CONTROLLER_ID_ENV_KEY, EXECUTION_ID_ENV_KEY] as const;
@@ -116,6 +153,7 @@ export interface ChildProcessController {
   frameworkDevServers: Map<string, ManagedFrameworkDevServer>;
   executions: Map<string, ChildProcessExecutionContext>;
   keychain?: { persistCurrentState(): Promise<void> } | null;
+  searchProvider?: WorkspaceSearchProvider | null;
   createExecution: (opts?: {
     onStdout?: (data: string) => void;
     onStderr?: (data: string) => void;
@@ -1161,7 +1199,7 @@ module.exports = (async () => {
     }
 
     const LONG_RUNNING_NPX_COMMANDS = new Set([
-      'shadcn', 'npm', 'npx'
+      // 'shadcn', 'npm', 'npx'
     ]);
 
     const commandName = cmdArgs[0];
@@ -1195,8 +1233,17 @@ module.exports = (async () => {
       `[almostnode DEBUG] npx parsed: command=${commandName} installSpec=${installSpec} package=${pkgName} version=${requestedVersion || 'latest'} bin=${binName} cwd=${ctx.cwd} mode=${controller.installMode} decision=${installDecision}`,
     );
 
+    let npxSuppressedCount = 0;
     const emitInstallProgress = (message: string) => {
-      emitStreamData(execution, `${message}\n`, 'stdout');
+      // Suppress per-dep spam (same logic as handleNpmInstall)
+      if ((/^Resolving\s+/.test(message) && !message.endsWith('...')) ||
+          /^\s+Downloading\s+/.test(message) ||
+          /^Skipping\s+/.test(message)) {
+        npxSuppressedCount++;
+        return;
+      }
+      // Don't stream — let output return in the final result to avoid
+      // interleaving with Claude Code's UI rendering.
     };
 
     const formatOutputTail = (output: string, maxLines = 20, maxChars = 2000): string => {
@@ -1251,6 +1298,7 @@ module.exports = (async () => {
       const pm = await createPackageManager(controller, installCwd || '/');
       try {
         await pm.install(installSpec, { onProgress: emitInstallProgress });
+        npxSuppressedCount = 0;
       } finally {
         pm.dispose();
       }
@@ -1325,6 +1373,11 @@ module.exports = (async () => {
       ALMOSTNODE_NPX_EXEC: '1',
     };
 
+    // Suppress streaming during ctx.exec so child output is captured in the result
+    // rather than streamed to the terminal (which interleaves with Claude Code's UI).
+    const savedCallbacks = { ...legacyStreamingCallbacks };
+    legacyStreamingCallbacks = { onStdout: null, onStderr: null, signal: null };
+
     if (resolvedBinTarget) {
       const fullCommand = ['node', resolvedBinTarget, ...commandArgs].map((value) => quoteArg(value)).join(' ');
       almostnodeDebugLog(
@@ -1332,10 +1385,12 @@ module.exports = (async () => {
         `[almostnode DEBUG] npx exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
       );
       const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
+      Object.assign(legacyStreamingCallbacks, savedCallbacks);
       return withNpxExecDiagnostics(result, `node ${resolvedBinTarget}`);
     }
 
     if (!binPath) {
+      Object.assign(legacyStreamingCallbacks, savedCallbacks);
       return { stdout: '', stderr: `npx: command not found: ${binName}\n`, exitCode: 1 };
     }
 
@@ -1345,6 +1400,7 @@ module.exports = (async () => {
       `[almostnode DEBUG] npx exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
     );
     const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
+    Object.assign(legacyStreamingCallbacks, savedCallbacks);
     return withNpxExecDiagnostics(result, binPath);
   });
 
@@ -1708,6 +1764,58 @@ module.exports = (async () => {
     return runGhCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
+  const replayioCommand = defineCommand('replayio', async (args, ctx) => {
+    const { runReplayioCommand } = await import('./replayio-command');
+    return runReplayioCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  // --- grep / egrep / fgrep / rg commands (delegate to search provider) ---
+
+  const grepCommand = defineCommand('grep', async (args, ctx) => {
+    return executeGrepCommand(args, ctx, controller, false, false);
+  });
+
+  const egrepCommand = defineCommand('egrep', async (args, ctx) => {
+    return executeGrepCommand(args, ctx, controller, true, false);
+  });
+
+  const fgrepCommand = defineCommand('fgrep', async (args, ctx) => {
+    return executeGrepCommand(args, ctx, controller, false, true);
+  });
+
+  const rgCommand = defineCommand('rg', async (args, ctx) => {
+    return executeRgCommand(args, ctx, controller);
+  });
+
+  const psCommand = defineCommand('ps', async (args, _ctx) => {
+    const lines: string[] = [];
+    lines.push('  PID TTY      STAT  COMMAND');
+    lines.push('    1 ?        Ss    bash');
+
+    let pid = 3001;
+    for (const [, server] of controller.frameworkDevServers) {
+      const cmd = server.framework === 'next'
+        ? `next dev (port ${server.port})`
+        : `vite (port ${server.port})`;
+      lines.push(`${String(pid).padStart(5)} ?        Sl    ${cmd}`);
+      pid += 1000;
+    }
+
+    for (const [id, exec] of controller.executions) {
+      if (exec.activeProcessStdin) {
+        lines.push(`${String(pid).padStart(5)} ?        S+    node [interactive] (${id})`);
+        pid += 1;
+      }
+    }
+
+    return { stdout: lines.join('\n') + '\n', stderr: '', exitCode: 0 };
+  });
+
+  const jinaCommand = defineCommand('jina', async (args, ctx) => {
+    const { runJinaCommand } = await import('./jina-command');
+    return runJinaCommand(args, ctx, controller.vfs);
+  });
+
   const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
     return defineCommand(commandName, async (args, ctx) => {
       const shell = getSyntheticShellSpec(commandName);
@@ -1753,7 +1861,7 @@ module.exports = (async () => {
       info: emitBashLog,
       debug: emitBashLog,
     },
-    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand, drizzleKitCommand, tscCommand, ghCommand],
+    customCommands: [...syntheticShellCommands, nodeCommand, npmCommand, npxCommand, tarCommand, nextCommand, viteCommand, gitCommand, playwrightCliCommand, pgliteCommand, pgCommand, curlCommand, drizzleKitCommand, tscCommand, ghCommand, replayioCommand, grepCommand, egrepCommand, fgrepCommand, rgCommand, psCommand, jinaCommand],
   });
 
   // Wrap bashInstance.exec to:
@@ -1787,6 +1895,14 @@ module.exports = (async () => {
         return { ...result, env: options?.env ?? {} };
       }
     }
+    if (normalized === 'replayio' || normalized.startsWith('replayio ')) {
+      const tokens = splitCommandArgs(normalized);
+      if (tokens[0] === 'replayio') {
+        const { runReplayioCommand } = await import('./replayio-command');
+        const result = await runReplayioCommand(filterRedirections(tokens.slice(1)), {} as any, vfs, controller.keychain);
+        return { ...result, env: options?.env ?? {} };
+      }
+    }
     return originalBashExec(normalized, options);
   };
 
@@ -1800,6 +1916,7 @@ module.exports = (async () => {
     frameworkDevServers: new Map(),
     executions: new Map(),
     keychain: null,
+    searchProvider: null,
     createExecution: (opts) => createExecutionContext(controller, opts),
     destroyExecution: (executionId) => destroyExecutionContext(controller, executionId),
     runCommand: (command, options, executionId) => runCommandInController(controller, command, options, executionId),
@@ -2220,10 +2337,22 @@ async function handleNpmInstall(
 
   let stdout = '';
   const execution = getExecutionContextFromEnv(controller, envToRecord(ctx.env));
+  let suppressedDepCount = 0;
   const emitProgress = (message: string) => {
-    const line = `${message}\n`;
-    stdout += line;
-    emitStreamData(execution, line, 'stdout');
+    // Suppress per-dep spam from resolver/installer:
+    // - "Resolving X@range" (no trailing "...") from resolver.ts
+    // - "  Downloading X@Y..." from core.ts installResolved
+    // - "Skipping X@Y (already installed)" from core.ts
+    // Keep top-level: "Resolving X@latest...", "Resolving dependencies...", "Installing N packages..."
+    if ((/^Resolving\s+/.test(message) && !message.endsWith('...')) ||
+        /^\s+Downloading\s+/.test(message) ||
+        /^Skipping\s+/.test(message)) {
+      suppressedDepCount++;
+      return;
+    }
+    stdout += `${message}\n`;
+    // Don't call emitStreamData — accumulate and return in result.
+    // Streaming interleaves with Claude Code's UI rendering and garbles output.
   };
 
   try {
@@ -2233,6 +2362,9 @@ async function handleNpmInstall(
       const installResult = await pm.installFromPackageJson({
         onProgress: emitProgress,
       });
+      if (suppressedDepCount > 0) {
+        stdout += `Resolved ${suppressedDepCount} dependencies\n`;
+      }
       stdout += `added ${installResult.added.length} packages\n`;
     } else {
       // npm install <pkg> [<pkg> ...]
@@ -2241,6 +2373,10 @@ async function handleNpmInstall(
           save: true,
           onProgress: emitProgress,
         });
+        if (suppressedDepCount > 0) {
+          stdout += `Resolved ${suppressedDepCount} dependencies\n`;
+          suppressedDepCount = 0;
+        }
         stdout += `added ${installResult.added.length} packages\n`;
       }
     }
@@ -3579,6 +3715,906 @@ export function createChildProcessModule(binding?: ChildProcessModuleBinding) {
     clearStreamingCallbacks,
     sendStdin,
   };
+}
+
+// ---------------------------------------------------------------------------
+// grep / egrep / fgrep / rg implementation
+// ---------------------------------------------------------------------------
+
+interface ParsedGrepArgs {
+  pattern: string | null;
+  files: string[];
+  recursive: boolean;
+  caseInsensitive: boolean;
+  lineNumbers: boolean;
+  filesOnly: boolean;
+  countOnly: boolean;
+  invert: boolean;
+  wordMatch: boolean;
+  extendedRegex: boolean;
+  fixedStrings: boolean;
+  afterContext: number;
+  beforeContext: number;
+  maxCount: number;
+  quiet: boolean;
+  onlyMatching: boolean;
+  includeGlob: string | null;
+  excludeGlob: string | null;
+}
+
+function parseGrepArgs(args: string[], isEgrep: boolean, isFgrep: boolean): ParsedGrepArgs {
+  const parsed: ParsedGrepArgs = {
+    pattern: null,
+    files: [],
+    recursive: false,
+    caseInsensitive: false,
+    lineNumbers: false,
+    filesOnly: false,
+    countOnly: false,
+    invert: false,
+    wordMatch: false,
+    extendedRegex: isEgrep,
+    fixedStrings: isFgrep,
+    afterContext: 0,
+    beforeContext: 0,
+    maxCount: 0,
+    quiet: false,
+    onlyMatching: false,
+    includeGlob: null,
+    excludeGlob: null,
+  };
+
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === '--' ) { i++; break; }
+    if (arg === '-e' || arg === '--regexp') {
+      parsed.pattern = args[++i] ?? '';
+      i++; continue;
+    }
+    if (arg.startsWith('--include=')) { parsed.includeGlob = arg.slice('--include='.length); i++; continue; }
+    if (arg === '--include') { parsed.includeGlob = args[++i] ?? ''; i++; continue; }
+    if (arg.startsWith('--exclude=')) { parsed.excludeGlob = arg.slice('--exclude='.length); i++; continue; }
+    if (arg === '--exclude') { parsed.excludeGlob = args[++i] ?? ''; i++; continue; }
+    if (arg === '-A' || arg === '--after-context') { parsed.afterContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('-A') && arg.length > 2) { parsed.afterContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+    if (arg === '-B' || arg === '--before-context') { parsed.beforeContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('-B') && arg.length > 2) { parsed.beforeContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+    if (arg === '-C' || arg === '--context') { const n = parseInt(args[++i] ?? '0', 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
+    if (arg.startsWith('-C') && arg.length > 2) { const n = parseInt(arg.slice(2), 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
+    if (arg === '-m' || arg === '--max-count') { parsed.maxCount = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('-m') && arg.length > 2 && /^\d/.test(arg.slice(2))) { parsed.maxCount = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+
+    if (arg.startsWith('-') && !arg.startsWith('--') && arg.length > 1) {
+      // combined short flags like -rin
+      for (let j = 1; j < arg.length; j++) {
+        const ch = arg[j];
+        switch (ch) {
+          case 'i': parsed.caseInsensitive = true; break;
+          case 'r': case 'R': parsed.recursive = true; break;
+          case 'n': parsed.lineNumbers = true; break;
+          case 'l': parsed.filesOnly = true; break;
+          case 'c': parsed.countOnly = true; break;
+          case 'v': parsed.invert = true; break;
+          case 'w': parsed.wordMatch = true; break;
+          case 'E': parsed.extendedRegex = true; break;
+          case 'F': parsed.fixedStrings = true; break;
+          case 'q': parsed.quiet = true; break;
+          case 'o': parsed.onlyMatching = true; break;
+          case 'H': break; // with-filename (default for multi-file)
+          case 'h': break; // no-filename
+          default: break;
+        }
+      }
+      i++; continue;
+    }
+
+    if (arg.startsWith('--')) {
+      // long flags
+      switch (arg) {
+        case '--recursive': parsed.recursive = true; break;
+        case '--ignore-case': parsed.caseInsensitive = true; break;
+        case '--line-number': parsed.lineNumbers = true; break;
+        case '--files-with-matches': parsed.filesOnly = true; break;
+        case '--count': parsed.countOnly = true; break;
+        case '--invert-match': parsed.invert = true; break;
+        case '--word-regexp': parsed.wordMatch = true; break;
+        case '--extended-regexp': parsed.extendedRegex = true; break;
+        case '--fixed-strings': parsed.fixedStrings = true; break;
+        case '--quiet': case '--silent': parsed.quiet = true; break;
+        case '--only-matching': parsed.onlyMatching = true; break;
+        case '--color': case '--colour': break; // ignore
+        default:
+          if (arg.startsWith('--color=') || arg.startsWith('--colour=')) break;
+          break;
+      }
+      i++; continue;
+    }
+
+    // Positional args: first is pattern, rest are files
+    if (parsed.pattern === null) {
+      parsed.pattern = arg;
+    } else {
+      parsed.files.push(arg);
+    }
+    i++;
+  }
+
+  // Remaining args after -- are files
+  while (i < args.length) {
+    if (parsed.pattern === null) {
+      parsed.pattern = args[i];
+    } else {
+      parsed.files.push(args[i]);
+    }
+    i++;
+  }
+
+  return parsed;
+}
+
+interface ParsedRgArgs {
+  pattern: string | null;
+  paths: string[];
+  caseInsensitive: boolean;
+  caseSensitive: boolean;
+  smartCase: boolean;
+  fixedStrings: boolean;
+  wordMatch: boolean;
+  lineNumbers: boolean;
+  noLineNumbers: boolean;
+  filesOnly: boolean;
+  countOnly: boolean;
+  invert: boolean;
+  afterContext: number;
+  beforeContext: number;
+  maxCount: number;
+  quiet: boolean;
+  onlyMatching: boolean;
+  hidden: boolean;
+  globs: string[];
+  typeFilters: string[];
+  maxDepth: number;
+}
+
+function parseRgArgs(args: string[]): ParsedRgArgs {
+  const parsed: ParsedRgArgs = {
+    pattern: null,
+    paths: [],
+    caseInsensitive: false,
+    caseSensitive: false,
+    smartCase: true,
+    fixedStrings: false,
+    wordMatch: false,
+    lineNumbers: true, // rg defaults to line numbers
+    noLineNumbers: false,
+    filesOnly: false,
+    countOnly: false,
+    invert: false,
+    afterContext: 0,
+    beforeContext: 0,
+    maxCount: 0,
+    quiet: false,
+    onlyMatching: false,
+    hidden: false,
+    globs: [],
+    typeFilters: [],
+    maxDepth: 0,
+  };
+
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === '--') { i++; break; }
+
+    if (arg === '-e' || arg === '--regexp') { parsed.pattern = args[++i] ?? ''; i++; continue; }
+    if (arg === '-g' || arg === '--glob') { parsed.globs.push(args[++i] ?? ''); i++; continue; }
+    if (arg.startsWith('--glob=')) { parsed.globs.push(arg.slice('--glob='.length)); i++; continue; }
+    if (arg === '-t' || arg === '--type') { parsed.typeFilters.push(args[++i] ?? ''); i++; continue; }
+    if (arg.startsWith('--type=')) { parsed.typeFilters.push(arg.slice('--type='.length)); i++; continue; }
+    if (arg === '-A' || arg === '--after-context') { parsed.afterContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('-A') && arg.length > 2) { parsed.afterContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+    if (arg === '-B' || arg === '--before-context') { parsed.beforeContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('-B') && arg.length > 2) { parsed.beforeContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+    if (arg === '-C' || arg === '--context') { const n = parseInt(args[++i] ?? '0', 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
+    if (arg.startsWith('-C') && arg.length > 2) { const n = parseInt(arg.slice(2), 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
+    if (arg === '-m' || arg === '--max-count') { parsed.maxCount = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('-m') && arg.length > 2 && /^\d/.test(arg.slice(2))) { parsed.maxCount = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+    if (arg === '--max-depth' || arg === '--maxdepth') { parsed.maxDepth = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
+    if (arg.startsWith('--max-depth=')) { parsed.maxDepth = parseInt(arg.slice('--max-depth='.length), 10) || 0; i++; continue; }
+
+    if (arg.startsWith('-') && !arg.startsWith('--') && arg.length > 1) {
+      for (let j = 1; j < arg.length; j++) {
+        switch (arg[j]) {
+          case 'i': parsed.caseInsensitive = true; parsed.smartCase = false; break;
+          case 's': parsed.caseSensitive = true; parsed.smartCase = false; break;
+          case 'S': parsed.smartCase = true; break;
+          case 'F': parsed.fixedStrings = true; break;
+          case 'w': parsed.wordMatch = true; break;
+          case 'n': parsed.lineNumbers = true; parsed.noLineNumbers = false; break;
+          case 'N': parsed.noLineNumbers = true; parsed.lineNumbers = false; break;
+          case 'l': parsed.filesOnly = true; break;
+          case 'c': parsed.countOnly = true; break;
+          case 'v': parsed.invert = true; break;
+          case 'q': parsed.quiet = true; break;
+          case 'o': parsed.onlyMatching = true; break;
+          default: break;
+        }
+      }
+      i++; continue;
+    }
+
+    if (arg.startsWith('--')) {
+      switch (arg) {
+        case '--ignore-case': parsed.caseInsensitive = true; parsed.smartCase = false; break;
+        case '--case-sensitive': parsed.caseSensitive = true; parsed.smartCase = false; break;
+        case '--smart-case': parsed.smartCase = true; break;
+        case '--fixed-strings': parsed.fixedStrings = true; break;
+        case '--word-regexp': parsed.wordMatch = true; break;
+        case '--line-number': parsed.lineNumbers = true; parsed.noLineNumbers = false; break;
+        case '--no-line-number': parsed.noLineNumbers = true; parsed.lineNumbers = false; break;
+        case '--files-with-matches': parsed.filesOnly = true; break;
+        case '--count': parsed.countOnly = true; break;
+        case '--invert-match': parsed.invert = true; break;
+        case '--quiet': parsed.quiet = true; break;
+        case '--only-matching': parsed.onlyMatching = true; break;
+        case '--hidden': parsed.hidden = true; break;
+        case '--no-ignore': break; // ignore
+        case '--color': case '--colour': break;
+        default:
+          if (arg.startsWith('--color=') || arg.startsWith('--colour=')) break;
+          break;
+      }
+      i++; continue;
+    }
+
+    if (parsed.pattern === null) {
+      parsed.pattern = arg;
+    } else {
+      parsed.paths.push(arg);
+    }
+    i++;
+  }
+
+  while (i < args.length) {
+    if (parsed.pattern === null) {
+      parsed.pattern = args[i];
+    } else {
+      parsed.paths.push(args[i]);
+    }
+    i++;
+  }
+
+  return parsed;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildRegex(pattern: string, flags: { caseInsensitive: boolean; wordMatch: boolean; fixedStrings: boolean; extendedRegex?: boolean }): RegExp | null {
+  try {
+    let src = flags.fixedStrings ? escapeRegExp(pattern) : pattern;
+    if (flags.wordMatch) src = `\\b${src}\\b`;
+    const regexFlags = flags.caseInsensitive ? 'gi' : 'g';
+    return new RegExp(src, regexFlags);
+  } catch {
+    return null;
+  }
+}
+
+function isBinaryContent(content: string): boolean {
+  // Check first 8KB for null bytes
+  const len = Math.min(content.length, 8192);
+  for (let i = 0; i < len; i++) {
+    if (content.charCodeAt(i) === 0) return true;
+  }
+  return false;
+}
+
+function resolvePath(base: string, p: string): string {
+  if (p.startsWith('/')) return p;
+  return `${base}/${p}`.replace(/\/+/g, '/');
+}
+
+function relativizePath(absPath: string, cwd: string): string {
+  if (absPath.startsWith(cwd + '/')) {
+    return absPath.slice(cwd.length + 1);
+  }
+  if (absPath === cwd) return '.';
+  return absPath;
+}
+
+function simpleGlobMatch(pattern: string, name: string): boolean {
+  // Convert simple glob pattern to regex (supports * and ?)
+  const src = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^${src}$`).test(name);
+}
+
+async function collectFiles(
+  fs: import('just-bash').CommandContext['fs'],
+  dir: string,
+  recursive: boolean,
+  includeGlob: string | null,
+  excludeGlob: string | null,
+): Promise<string[]> {
+  const result: string[] = [];
+
+  async function walk(dirPath: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dirPath);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (name === '.' || name === '..') continue;
+      // skip hidden dirs and node_modules by default in recursive mode
+      if (recursive && (name === 'node_modules' || name === '.git')) continue;
+      const fullPath = `${dirPath}/${name}`.replace(/\/+/g, '/');
+      let stat;
+      try {
+        stat = await fs.stat(fullPath);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory) {
+        if (recursive) await walk(fullPath);
+      } else if (stat.isFile) {
+        if (includeGlob && !simpleGlobMatch(includeGlob, name)) continue;
+        if (excludeGlob && simpleGlobMatch(excludeGlob, name)) continue;
+        result.push(fullPath);
+      }
+    }
+  }
+
+  await walk(dir);
+  return result;
+}
+
+async function grepViaVfs(
+  parsed: ParsedGrepArgs,
+  ctx: CommandContext,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const regex = buildRegex(parsed.pattern!, {
+    caseInsensitive: parsed.caseInsensitive,
+    wordMatch: parsed.wordMatch,
+    fixedStrings: parsed.fixedStrings,
+    extendedRegex: parsed.extendedRegex,
+  });
+  if (!regex) {
+    return { stdout: '', stderr: `grep: Invalid regular expression: '${parsed.pattern}'\n`, exitCode: 2 };
+  }
+
+  // Determine files to search
+  let filePaths: string[] = [];
+  if (parsed.files.length === 0 && !parsed.recursive) {
+    // read from stdin
+    return grepStdin(parsed, regex, ctx.stdin);
+  }
+
+  if (parsed.files.length === 0 && parsed.recursive) {
+    filePaths = await collectFiles(ctx.fs, ctx.cwd, true, parsed.includeGlob, parsed.excludeGlob);
+  } else {
+    for (const f of parsed.files) {
+      const abs = resolvePath(ctx.cwd, f);
+      let stat;
+      try {
+        stat = await ctx.fs.stat(abs);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory) {
+        if (parsed.recursive) {
+          const subFiles = await collectFiles(ctx.fs, abs, true, parsed.includeGlob, parsed.excludeGlob);
+          filePaths.push(...subFiles);
+        }
+      } else {
+        filePaths.push(abs);
+      }
+    }
+  }
+
+  const multiFile = filePaths.length > 1 || parsed.recursive;
+  const outputLines: string[] = [];
+  let anyMatch = false;
+
+  for (const fp of filePaths) {
+    let content: string;
+    try {
+      content = await ctx.fs.readFile(fp);
+    } catch {
+      continue;
+    }
+
+    if (isBinaryContent(content)) {
+      // Check if it matches at all
+      regex.lastIndex = 0;
+      if (regex.test(content) !== parsed.invert) {
+        const display = relativizePath(fp, ctx.cwd);
+        outputLines.push(`Binary file ${display} matches`);
+        anyMatch = true;
+      }
+      continue;
+    }
+
+    const lines = content.split('\n');
+    // Remove trailing empty line from split
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+
+    const display = relativizePath(fp, ctx.cwd);
+    let fileMatchCount = 0;
+    const matchedLineIndices: Set<number> = new Set();
+    const contextLineIndices: Set<number> = new Set();
+
+    // First pass: find matching lines
+    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+      const line = lines[lineIdx];
+      regex.lastIndex = 0;
+      const matches = regex.test(line);
+      const isMatch = parsed.invert ? !matches : matches;
+      if (isMatch) {
+        matchedLineIndices.add(lineIdx);
+        fileMatchCount++;
+        if (parsed.maxCount > 0 && fileMatchCount >= parsed.maxCount) break;
+      }
+    }
+
+    if (fileMatchCount === 0) continue;
+    anyMatch = true;
+
+    if (parsed.quiet) return { stdout: '', stderr: '', exitCode: 0 };
+    if (parsed.filesOnly) { outputLines.push(display); continue; }
+    if (parsed.countOnly) { outputLines.push(multiFile ? `${display}:${fileMatchCount}` : `${fileMatchCount}`); continue; }
+
+    // Compute context lines
+    for (const idx of matchedLineIndices) {
+      for (let b = Math.max(0, idx - parsed.beforeContext); b < idx; b++) contextLineIndices.add(b);
+      for (let a = idx + 1; a <= Math.min(lines.length - 1, idx + parsed.afterContext); a++) contextLineIndices.add(a);
+    }
+
+    // Output
+    let lastPrintedIdx = -2;
+    const allIndices = [...matchedLineIndices, ...contextLineIndices].sort((a, b) => a - b);
+    const uniqueIndices = [...new Set(allIndices)];
+    for (const idx of uniqueIndices) {
+      if (lastPrintedIdx >= 0 && idx > lastPrintedIdx + 1) {
+        outputLines.push('--');
+      }
+      const line = lines[idx];
+      const lineNum = idx + 1;
+      const isMatch = matchedLineIndices.has(idx);
+      const sep = isMatch ? ':' : '-';
+
+      let text: string;
+      if (parsed.onlyMatching && isMatch) {
+        regex.lastIndex = 0;
+        const allMatches: string[] = [];
+        let m: RegExpExecArray | null;
+        while ((m = regex.exec(line)) !== null) {
+          allMatches.push(m[0]);
+          if (!regex.global) break;
+        }
+        text = allMatches.join('\n');
+      } else {
+        text = line;
+      }
+
+      if (multiFile && (parsed.lineNumbers || parsed.beforeContext > 0 || parsed.afterContext > 0)) {
+        outputLines.push(`${display}${sep}${lineNum}${sep}${text}`);
+      } else if (multiFile) {
+        outputLines.push(`${display}${sep}${text}`);
+      } else if (parsed.lineNumbers || parsed.beforeContext > 0 || parsed.afterContext > 0) {
+        outputLines.push(`${lineNum}${sep}${text}`);
+      } else {
+        outputLines.push(text);
+      }
+      lastPrintedIdx = idx;
+    }
+  }
+
+  if (parsed.quiet) return { stdout: '', stderr: '', exitCode: anyMatch ? 0 : 1 };
+  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
+  return { stdout, stderr: '', exitCode: anyMatch ? 0 : 1 };
+}
+
+function grepStdin(
+  parsed: ParsedGrepArgs,
+  regex: RegExp,
+  stdin: string,
+): { stdout: string; stderr: string; exitCode: number } {
+  const lines = stdin.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const outputLines: string[] = [];
+  let matchCount = 0;
+
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx];
+    regex.lastIndex = 0;
+    const matches = regex.test(line);
+    const isMatch = parsed.invert ? !matches : matches;
+    if (!isMatch) continue;
+    matchCount++;
+    if (parsed.quiet) return { stdout: '', stderr: '', exitCode: 0 };
+    if (parsed.countOnly) { /* count at end */ }
+    else if (parsed.onlyMatching) {
+      regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(line)) !== null) {
+        outputLines.push(parsed.lineNumbers ? `${lineIdx + 1}:${m[0]}` : m[0]);
+        if (!regex.global) break;
+      }
+    } else {
+      outputLines.push(parsed.lineNumbers ? `${lineIdx + 1}:${line}` : line);
+    }
+    if (parsed.maxCount > 0 && matchCount >= parsed.maxCount) break;
+  }
+
+  if (parsed.quiet) return { stdout: '', stderr: '', exitCode: matchCount > 0 ? 0 : 1 };
+  if (parsed.countOnly) return { stdout: `${matchCount}\n`, stderr: '', exitCode: matchCount > 0 ? 0 : 1 };
+  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
+  return { stdout, stderr: '', exitCode: matchCount > 0 ? 0 : 1 };
+}
+
+async function executeGrepCommand(
+  args: string[],
+  ctx: CommandContext,
+  controller: ChildProcessController,
+  isEgrep: boolean,
+  isFgrep: boolean,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const parsed = parseGrepArgs(args, isEgrep, isFgrep);
+
+  if (parsed.pattern === null) {
+    const cmd = isFgrep ? 'fgrep' : isEgrep ? 'egrep' : 'grep';
+    return { stdout: '', stderr: `Usage: ${cmd} [OPTION]... PATTERN [FILE]...\n`, exitCode: 2 };
+  }
+
+  // Stdin mode — always handle locally
+  if (ctx.stdin && parsed.files.length === 0 && !parsed.recursive) {
+    const regex = buildRegex(parsed.pattern, {
+      caseInsensitive: parsed.caseInsensitive,
+      wordMatch: parsed.wordMatch,
+      fixedStrings: parsed.fixedStrings,
+      extendedRegex: parsed.extendedRegex,
+    });
+    if (!regex) {
+      return { stdout: '', stderr: `grep: Invalid regular expression: '${parsed.pattern}'\n`, exitCode: 2 };
+    }
+    return grepStdin(parsed, regex, ctx.stdin);
+  }
+
+  // Invert mode — search provider can't handle this, fall back
+  if (parsed.invert) {
+    return grepViaVfs(parsed, ctx);
+  }
+
+  // Try search provider
+  if (controller.searchProvider) {
+    try {
+      return await grepViaSearchProvider(parsed, ctx, controller.searchProvider);
+    } catch {
+      // Fall back to VFS
+    }
+  }
+
+  return grepViaVfs(parsed, ctx);
+}
+
+async function grepViaSearchProvider(
+  parsed: ParsedGrepArgs,
+  ctx: CommandContext,
+  provider: WorkspaceSearchProvider,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  // Determine search folder
+  let searchFolder = ctx.cwd;
+  if (parsed.files.length === 1 && parsed.recursive) {
+    const abs = resolvePath(ctx.cwd, parsed.files[0]);
+    try {
+      const stat = await ctx.fs.stat(abs);
+      if (stat.isDirectory) searchFolder = abs;
+    } catch {
+      // use cwd
+    }
+  }
+
+  const contextLines = Math.max(parsed.afterContext, parsed.beforeContext);
+
+  const result = await provider.search({
+    pattern: parsed.pattern!,
+    isRegExp: !parsed.fixedStrings,
+    isCaseSensitive: !parsed.caseInsensitive,
+    isWordMatch: parsed.wordMatch,
+    folderPath: searchFolder,
+    includePattern: parsed.includeGlob ?? undefined,
+    excludePattern: parsed.excludeGlob ?? undefined,
+    maxResults: parsed.maxCount > 0 ? parsed.maxCount : undefined,
+    surroundingContext: contextLines > 0 ? contextLines : undefined,
+  });
+
+  if (parsed.quiet) {
+    return { stdout: '', stderr: '', exitCode: result.files.length > 0 ? 0 : 1 };
+  }
+
+  const multiFile = parsed.files.length !== 1 || parsed.recursive || result.files.length > 1;
+  const outputLines: string[] = [];
+
+  // If specific non-directory files were given, filter results to those
+  let allowedPaths: Set<string> | null = null;
+  if (parsed.files.length > 0 && !parsed.recursive) {
+    allowedPaths = new Set(parsed.files.map(f => resolvePath(ctx.cwd, f)));
+  }
+
+  for (const fileResult of result.files) {
+    if (allowedPaths && !allowedPaths.has(fileResult.filePath)) continue;
+    const display = relativizePath(fileResult.filePath, ctx.cwd);
+
+    if (parsed.filesOnly) {
+      outputLines.push(display);
+      continue;
+    }
+
+    if (parsed.countOnly) {
+      const count = fileResult.matches.length;
+      outputLines.push(multiFile ? `${display}:${count}` : `${count}`);
+      continue;
+    }
+
+    let fileMatchCount = 0;
+    for (const match of fileResult.matches) {
+      const lineNum = match.lineNumber + 1; // 0-based → 1-based
+
+      let text: string;
+      if (parsed.onlyMatching) {
+        text = match.lineText.substring(match.matchStart, match.matchEnd);
+      } else {
+        text = match.lineText;
+      }
+
+      if (multiFile && (parsed.lineNumbers || contextLines > 0)) {
+        outputLines.push(`${display}:${lineNum}:${text}`);
+      } else if (multiFile) {
+        outputLines.push(`${display}:${text}`);
+      } else if (parsed.lineNumbers || contextLines > 0) {
+        outputLines.push(`${lineNum}:${text}`);
+      } else {
+        outputLines.push(text);
+      }
+
+      fileMatchCount++;
+      if (parsed.maxCount > 0 && fileMatchCount >= parsed.maxCount) break;
+    }
+  }
+
+  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
+  return { stdout, stderr: '', exitCode: outputLines.length > 0 ? 0 : 1 };
+}
+
+async function executeRgCommand(
+  args: string[],
+  ctx: CommandContext,
+  controller: ChildProcessController,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const parsed = parseRgArgs(args);
+
+  if (parsed.pattern === null) {
+    return { stdout: '', stderr: 'error: The following required arguments were not provided:\n  <PATTERN>\n\nUsage:\n  rg <PATTERN> [PATH ...]\n', exitCode: 2 };
+  }
+
+  // Stdin mode
+  if (ctx.stdin && parsed.paths.length === 0) {
+    // Determine case sensitivity
+    let caseInsensitive = parsed.caseInsensitive;
+    if (parsed.smartCase && !parsed.caseSensitive && !parsed.caseInsensitive) {
+      caseInsensitive = parsed.pattern === parsed.pattern.toLowerCase();
+    }
+    const regex = buildRegex(parsed.pattern, {
+      caseInsensitive,
+      wordMatch: parsed.wordMatch,
+      fixedStrings: parsed.fixedStrings,
+    });
+    if (!regex) {
+      return { stdout: '', stderr: `rg: regex parse error\n`, exitCode: 2 };
+    }
+    const grepParsed: ParsedGrepArgs = {
+      pattern: parsed.pattern,
+      files: [],
+      recursive: false,
+      caseInsensitive,
+      lineNumbers: parsed.lineNumbers && !parsed.noLineNumbers,
+      filesOnly: parsed.filesOnly,
+      countOnly: parsed.countOnly,
+      invert: parsed.invert,
+      wordMatch: parsed.wordMatch,
+      extendedRegex: true,
+      fixedStrings: parsed.fixedStrings,
+      afterContext: parsed.afterContext,
+      beforeContext: parsed.beforeContext,
+      maxCount: parsed.maxCount,
+      quiet: parsed.quiet,
+      onlyMatching: parsed.onlyMatching,
+      includeGlob: null,
+      excludeGlob: null,
+    };
+    return grepStdin(grepParsed, regex, ctx.stdin);
+  }
+
+  // Invert mode — fall back to VFS
+  if (parsed.invert) {
+    return rgViaVfs(parsed, ctx);
+  }
+
+  // Try search provider
+  if (controller.searchProvider) {
+    try {
+      return await rgViaSearchProvider(parsed, ctx, controller.searchProvider);
+    } catch {
+      // Fall back
+    }
+  }
+
+  return rgViaVfs(parsed, ctx);
+}
+
+function rgSmartCaseSensitive(parsed: ParsedRgArgs): boolean {
+  if (parsed.caseSensitive) return true;
+  if (parsed.caseInsensitive) return false;
+  if (parsed.smartCase) {
+    // smart case: case sensitive if pattern has uppercase
+    return parsed.pattern !== parsed.pattern!.toLowerCase();
+  }
+  return true;
+}
+
+function rgTypeToGlob(typeFilter: string): string | null {
+  const typeMap: Record<string, string> = {
+    js: '*.js', ts: '*.ts', tsx: '*.tsx', jsx: '*.jsx',
+    py: '*.py', rust: '*.rs', go: '*.go', java: '*.java',
+    html: '*.html', css: '*.css', json: '*.json', md: '*.md',
+    yaml: '*.yaml', yml: '*.yml', xml: '*.xml', toml: '*.toml',
+    txt: '*.txt', sh: '*.sh', rb: '*.rb', php: '*.php',
+    c: '*.c', cpp: '*.cpp', h: '*.h',
+  };
+  return typeMap[typeFilter] ?? null;
+}
+
+async function rgViaSearchProvider(
+  parsed: ParsedRgArgs,
+  ctx: CommandContext,
+  provider: WorkspaceSearchProvider,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const searchFolder = parsed.paths.length > 0 ? resolvePath(ctx.cwd, parsed.paths[0]) : ctx.cwd;
+  const caseSensitive = rgSmartCaseSensitive(parsed);
+  const contextLines = Math.max(parsed.afterContext, parsed.beforeContext);
+
+  // Build include pattern from type filters and globs
+  let includePattern: string | undefined;
+  const includePatterns: string[] = [];
+  for (const t of parsed.typeFilters) {
+    const g = rgTypeToGlob(t);
+    if (g) includePatterns.push(g);
+  }
+  for (const g of parsed.globs) {
+    if (!g.startsWith('!')) includePatterns.push(g);
+  }
+  if (includePatterns.length > 0) includePattern = includePatterns.join(',');
+
+  let excludePattern: string | undefined;
+  const excludePatterns: string[] = [];
+  for (const g of parsed.globs) {
+    if (g.startsWith('!')) excludePatterns.push(g.slice(1));
+  }
+  if (excludePatterns.length > 0) excludePattern = excludePatterns.join(',');
+
+  const result = await provider.search({
+    pattern: parsed.pattern!,
+    isRegExp: !parsed.fixedStrings,
+    isCaseSensitive: caseSensitive,
+    isWordMatch: parsed.wordMatch,
+    folderPath: searchFolder,
+    includePattern,
+    excludePattern,
+    maxResults: parsed.maxCount > 0 ? parsed.maxCount : undefined,
+    surroundingContext: contextLines > 0 ? contextLines : undefined,
+  });
+
+  if (parsed.quiet) {
+    return { stdout: '', stderr: '', exitCode: result.files.length > 0 ? 0 : 1 };
+  }
+
+  const showLineNumbers = parsed.lineNumbers && !parsed.noLineNumbers;
+  const outputLines: string[] = [];
+
+  for (const fileResult of result.files) {
+    const display = relativizePath(fileResult.filePath, ctx.cwd);
+
+    if (parsed.filesOnly) {
+      outputLines.push(display);
+      continue;
+    }
+
+    if (parsed.countOnly) {
+      outputLines.push(`${display}:${fileResult.matches.length}`);
+      continue;
+    }
+
+    let fileMatchCount = 0;
+    for (const match of fileResult.matches) {
+      const lineNum = match.lineNumber + 1;
+      let text: string;
+      if (parsed.onlyMatching) {
+        text = match.lineText.substring(match.matchStart, match.matchEnd);
+      } else {
+        text = match.lineText;
+      }
+
+      if (showLineNumbers) {
+        outputLines.push(`${display}:${lineNum}:${text}`);
+      } else {
+        outputLines.push(`${display}:${text}`);
+      }
+
+      fileMatchCount++;
+      if (parsed.maxCount > 0 && fileMatchCount >= parsed.maxCount) break;
+    }
+
+    // rg separates files with blank line when multiple files have matches
+    if (fileResult.matches.length > 0 && result.files.indexOf(fileResult) < result.files.length - 1) {
+      outputLines.push('');
+    }
+  }
+
+  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
+  return { stdout, stderr: '', exitCode: result.files.length > 0 ? 0 : 1 };
+}
+
+async function rgViaVfs(
+  parsed: ParsedRgArgs,
+  ctx: CommandContext,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  // Convert rg args to grep-compatible and reuse VFS grep
+  let caseInsensitive = parsed.caseInsensitive;
+  if (parsed.smartCase && !parsed.caseSensitive && !parsed.caseInsensitive) {
+    caseInsensitive = parsed.pattern === parsed.pattern!.toLowerCase();
+  }
+
+  // Build include glob from type filters
+  let includeGlob: string | null = null;
+  if (parsed.typeFilters.length > 0) {
+    const g = rgTypeToGlob(parsed.typeFilters[0]);
+    if (g) includeGlob = g;
+  }
+  // Simple globs (non-negated)
+  for (const g of parsed.globs) {
+    if (!g.startsWith('!')) { includeGlob = g; break; }
+  }
+  let excludeGlob: string | null = null;
+  for (const g of parsed.globs) {
+    if (g.startsWith('!')) { excludeGlob = g.slice(1); break; }
+  }
+
+  const grepParsed: ParsedGrepArgs = {
+    pattern: parsed.pattern!,
+    files: parsed.paths.length > 0 ? parsed.paths : [],
+    recursive: true, // rg is always recursive
+    caseInsensitive,
+    lineNumbers: parsed.lineNumbers && !parsed.noLineNumbers,
+    filesOnly: parsed.filesOnly,
+    countOnly: parsed.countOnly,
+    invert: parsed.invert,
+    wordMatch: parsed.wordMatch,
+    extendedRegex: true,
+    fixedStrings: parsed.fixedStrings,
+    afterContext: parsed.afterContext,
+    beforeContext: parsed.beforeContext,
+    maxCount: parsed.maxCount,
+    quiet: parsed.quiet,
+    onlyMatching: parsed.onlyMatching,
+    includeGlob,
+    excludeGlob,
+  };
+
+  return grepViaVfs(grepParsed, ctx);
 }
 
 export default {

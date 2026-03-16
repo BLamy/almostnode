@@ -88,7 +88,15 @@ import {
   initChildProcess,
   stripInternalChildProcessEnv,
 } from "./shims/child_process";
+export type {
+  WorkspaceSearchProvider,
+  WorkspaceSearchOptions,
+  WorkspaceSearchResult,
+  WorkspaceSearchMatch,
+  WorkspaceSearchFileResult,
+} from "./shims/child_process";
 import type { IExecuteResult } from "./runtime-interface";
+import type { WorkspaceSearchProvider } from "./shims/child_process";
 
 export interface RunResult {
   stdout: string;
@@ -222,6 +230,7 @@ export function createContainer(options?: ContainerOptions): {
   createREPL: () => { eval: (code: string) => Promise<unknown> };
   on: (event: string, listener: (...args: unknown[]) => void) => void;
   setKeychain: (kc: { persistCurrentState(): Promise<void> }) => void;
+  setSearchProvider: (provider: WorkspaceSearchProvider) => void;
   setHMRTargetForPort: (port: number, targetWindow: Window) => void;
 } {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
@@ -522,6 +531,9 @@ export function createContainer(options?: ContainerOptions): {
     },
     setKeychain: (kc: { persistCurrentState(): Promise<void> }) => {
       childProcessController.keychain = kc;
+    },
+    setSearchProvider: (provider: WorkspaceSearchProvider) => {
+      childProcessController.searchProvider = provider;
     },
     setHMRTargetForPort: (port: number, targetWindow: Window) => {
       for (const server of childProcessController.frameworkDevServers.values()) {

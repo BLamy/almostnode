@@ -1,0 +1,3 @@
+[submodule "vendor/builder-assets"]
+	path = vendor/builder-assets
+	url = https://github.com/replayio/builder-assets.git

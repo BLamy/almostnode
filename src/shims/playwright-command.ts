@@ -1,12 +1,106 @@
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import type { VirtualFS } from '../virtual-fs';
 
+// ── Event listener system ────────────────────────────────────────────────────
+
+export interface PlaywrightSelectorContext {
+  role: string;
+  name: string;
+  tagName: string;
+  testId?: string;
+}
+
+export type PlaywrightCommandListener = (
+  subcommand: string,
+  args: string[],
+  result: JustBashExecResult,
+  selectorContext?: PlaywrightSelectorContext,
+) => void;
+
+const listeners: PlaywrightCommandListener[] = [];
+
+export function onPlaywrightCommand(fn: PlaywrightCommandListener): () => void {
+  listeners.push(fn);
+  return () => {
+    const i = listeners.indexOf(fn);
+    if (i >= 0) listeners.splice(i, 1);
+  };
+}
+
+function emitCommand(
+  subcommand: string,
+  args: string[],
+  result: JustBashExecResult,
+  selectorContext?: PlaywrightSelectorContext,
+): void {
+  for (const fn of listeners) {
+    try {
+      fn(subcommand, args, result, selectorContext);
+    } catch {
+      // listener errors must not break command execution
+    }
+  }
+}
+
+function getSelectorContextForRef(refId: string): PlaywrightSelectorContext | undefined {
+  const el = refMap.get(refId);
+  if (!el) return undefined;
+  const role = getRole(el);
+  const name = getAccessibleName(el);
+  const testId = el.getAttribute('data-testid') ?? undefined;
+  return {
+    role: role || el.tagName.toLowerCase(),
+    name,
+    tagName: el.tagName,
+    testId,
+  };
+}
+
 // ── Module-level state ──────────────────────────────────────────────────────
 
 let refMap = new Map<string, Element>();
 let refCounter = 0;
 const consoleMessages: Array<{ level: string; text: string }> = [];
-let consoleHooked = false;
+const networkRequests: Array<{
+  method: string;
+  url: string;
+  status: number;
+  statusText: string;
+  duration: number;
+  size: number;
+}> = [];
+
+// ── Bridge listener ─────────────────────────────────────────────────────────
+
+function installBridgeListener(): void {
+  if (typeof window === 'undefined') return;
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || typeof data !== 'object') return;
+
+    if (data.type === 'almostnode-console') {
+      if (consoleMessages.length < 1000) {
+        const text = Array.isArray(data.args) ? data.args.join(' ') : String(data.args);
+        consoleMessages.push({ level: data.level || 'log', text });
+      }
+    }
+
+    if (data.type === 'almostnode-network') {
+      if (networkRequests.length < 1000) {
+        networkRequests.push({
+          method: data.method || 'GET',
+          url: data.url || '',
+          status: data.status || 0,
+          statusText: data.statusText || '',
+          duration: data.duration || 0,
+          size: data.size || 0,
+        });
+      }
+    }
+  });
+}
+
+installBridgeListener();
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -64,32 +158,6 @@ function isInputOrTextArea(el: Element): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
 }
 
-// ── Console hook ────────────────────────────────────────────────────────────
-
-function installConsoleHook(iframe: HTMLIFrameElement): void {
-  if (consoleHooked) return;
-  const win = getIframeWindow(iframe);
-  if (!win) return;
-  consoleHooked = true;
-
-  const levels = ['log', 'warn', 'error', 'info', 'debug'] as const;
-  for (const level of levels) {
-    const winConsole = (win as any).console;
-    const original = winConsole[level];
-    winConsole[level] = (...args: any[]) => {
-      if (consoleMessages.length < 1000) {
-        consoleMessages.push({
-          level,
-          text: args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
-        });
-      }
-      if (typeof original === 'function') {
-        original.apply(winConsole, args);
-      }
-    };
-  }
-}
-
 // ── Accessibility snapshot ──────────────────────────────────────────────────
 
 const IMPLICIT_ROLES: Record<string, string> = {
@@ -144,13 +212,13 @@ function isVisible(el: Element): boolean {
   return true;
 }
 
-function getRole(el: Element): string | null {
+export function getRole(el: Element): string | null {
   const explicit = el.getAttribute('role');
   if (explicit) return explicit;
   return IMPLICIT_ROLES[el.tagName] ?? null;
 }
 
-function getAccessibleName(el: Element): string {
+export function getAccessibleName(el: Element): string {
   const ariaLabel = el.getAttribute('aria-label');
   if (ariaLabel) return ariaLabel;
 
@@ -182,7 +250,7 @@ function getAccessibleName(el: Element): string {
   return '';
 }
 
-interface SnapshotNode {
+export interface SnapshotNode {
   role: string;
   name: string;
   ref: string;
@@ -190,7 +258,7 @@ interface SnapshotNode {
   children: SnapshotNode[];
 }
 
-function buildSnapshotTree(root: Element): SnapshotNode[] {
+export function buildSnapshotTree(root: Element): SnapshotNode[] {
   refMap = new Map();
   refCounter = 0;
   const results: SnapshotNode[] = [];
@@ -324,7 +392,24 @@ async function resolvePreviewUrl(url: string): Promise<string> {
       return `${virtualBase}${parsed.pathname}${parsed.search}${parsed.hash}`;
     }
   } catch {
-    // Not a valid URL or bridge not available, return as-is
+    // Relative URL (e.g. "/notes") — resolve against the current virtual server
+    if (url.startsWith('/')) {
+      try {
+        const { getServerBridge } = await import('../server-bridge');
+        const bridge = getServerBridge();
+        // Try to extract port from the iframe's current src
+        const iframe = document.querySelector('iframe[src*="/__virtual__/"]') as HTMLIFrameElement | null;
+        const iframeMatch = iframe?.src?.match(/\/__virtual__\/(\d+)/);
+        const port = iframeMatch
+          ? parseInt(iframeMatch[1], 10)
+          : bridge.getServerPorts()[0];
+        if (port) {
+          return `${bridge.getServerUrl(port)}${url}`;
+        }
+      } catch {
+        // Bridge not available, return as-is
+      }
+    }
   }
   return url;
 }
@@ -377,7 +462,6 @@ async function cmdOpen(args: string[]): Promise<JustBashExecResult> {
     setTimeout(resolve, 10000); // timeout after 10s
   });
   await delay(100);
-  installConsoleHook(iframe);
   return ok(`Navigated to ${resolvedUrl}\n`);
 }
 
@@ -387,8 +471,6 @@ async function cmdSnapshot(): Promise<JustBashExecResult> {
 
   const doc = getIframeDoc(iframe);
   if (!doc || !doc.body) return err('preview iframe has no document. Wait for the page to load.\n');
-
-  installConsoleHook(iframe);
 
   const tree = buildSnapshotTree(doc.body);
   if (tree.length === 0) {
@@ -714,10 +796,185 @@ async function cmdConsole(args: string[]): Promise<JustBashExecResult> {
   return ok(lines.join('\n') + '\n');
 }
 
+async function cmdNetwork(): Promise<JustBashExecResult> {
+  if (networkRequests.length === 0) {
+    return ok('(no network requests)\n');
+  }
+
+  const lines = networkRequests.map((r) => {
+    const sizeStr = r.size > 0 ? ` ${r.size}B` : '';
+    return `[fetch] ${r.method} ${r.url} ${r.status} ${r.statusText} ${r.duration}ms${sizeStr}`;
+  });
+  return ok(lines.join('\n') + '\n');
+}
+
+// ── Cookie commands ─────────────────────────────────────────────────────────
+
+function parseCookies(doc: Document): Array<{ name: string; value: string; domain?: string }> {
+  const raw = doc.cookie;
+  if (!raw) return [];
+  return raw.split(';').map((c) => {
+    const [name, ...rest] = c.trim().split('=');
+    return { name, value: rest.join('=') };
+  });
+}
+
+async function cmdCookieList(args: string[]): Promise<JustBashExecResult> {
+  const iframe = getPreviewIframe();
+  if (!iframe) return err('no preview iframe found.\n');
+  const doc = getIframeDoc(iframe);
+  if (!doc) return err('preview iframe has no document.\n');
+
+  const domainFilter = args[0] === '--domain' ? args[1] : undefined;
+  const cookies = parseCookies(doc);
+
+  if (cookies.length === 0) return ok('(no cookies)\n');
+
+  // document.cookie doesn't expose domain, so --domain is a name-contains filter
+  const filtered = domainFilter
+    ? cookies.filter((c) => c.name.includes(domainFilter))
+    : cookies;
+
+  if (filtered.length === 0) return ok('(no matching cookies)\n');
+
+  const lines = filtered.map((c) => `${c.name}=${c.value}`);
+  return ok(lines.join('\n') + '\n');
+}
+
+async function cmdCookieGet(args: string[]): Promise<JustBashExecResult> {
+  const name = args[0];
+  if (!name) return err('usage: playwright-cli cookie-get <name>\n');
+
+  const iframe = getPreviewIframe();
+  if (!iframe) return err('no preview iframe found.\n');
+  const doc = getIframeDoc(iframe);
+  if (!doc) return err('preview iframe has no document.\n');
+
+  const cookie = parseCookies(doc).find((c) => c.name === name);
+  if (!cookie) return ok(`(cookie '${name}' not found)\n`);
+  return ok(`${cookie.value}\n`);
+}
+
+async function cmdCookieSet(args: string[]): Promise<JustBashExecResult> {
+  const name = args[0];
+  const value = args.slice(1).join(' ');
+  if (!name || value === undefined) return err('usage: playwright-cli cookie-set <name> <value>\n');
+
+  const iframe = getPreviewIframe();
+  if (!iframe) return err('no preview iframe found.\n');
+  const doc = getIframeDoc(iframe);
+  if (!doc) return err('preview iframe has no document.\n');
+
+  doc.cookie = `${name}=${value};path=/`;
+  return ok(`Set cookie ${name}\n`);
+}
+
+async function cmdCookieDelete(args: string[]): Promise<JustBashExecResult> {
+  const name = args[0];
+  if (!name) return err('usage: playwright-cli cookie-delete <name>\n');
+
+  const iframe = getPreviewIframe();
+  if (!iframe) return err('no preview iframe found.\n');
+  const doc = getIframeDoc(iframe);
+  if (!doc) return err('preview iframe has no document.\n');
+
+  doc.cookie = `${name}=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  return ok(`Deleted cookie ${name}\n`);
+}
+
+async function cmdCookieClear(): Promise<JustBashExecResult> {
+  const iframe = getPreviewIframe();
+  if (!iframe) return err('no preview iframe found.\n');
+  const doc = getIframeDoc(iframe);
+  if (!doc) return err('preview iframe has no document.\n');
+
+  const cookies = parseCookies(doc);
+  for (const c of cookies) {
+    doc.cookie = `${c.name}=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  }
+  return ok(`Cleared ${cookies.length} cookie(s)\n`);
+}
+
+// ── Storage commands (localStorage / sessionStorage) ────────────────────────
+
+function getStorage(type: 'local' | 'session'): Storage | null {
+  const iframe = getPreviewIframe();
+  if (!iframe) return null;
+  const win = getIframeWindow(iframe);
+  if (!win) return null;
+  return type === 'local' ? win.localStorage : win.sessionStorage;
+}
+
+function storageLabel(type: 'local' | 'session'): string {
+  return type === 'local' ? 'localStorage' : 'sessionStorage';
+}
+
+async function cmdStorageList(type: 'local' | 'session'): Promise<JustBashExecResult> {
+  const storage = getStorage(type);
+  if (!storage) return err('no preview iframe found.\n');
+
+  if (storage.length === 0) return ok(`(no ${storageLabel(type)} entries)\n`);
+
+  const lines: string[] = [];
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i)!;
+    const val = storage.getItem(key) ?? '';
+    const truncated = val.length > 80 ? val.slice(0, 80) + '...' : val;
+    lines.push(`${key} = ${truncated}`);
+  }
+  return ok(lines.join('\n') + '\n');
+}
+
+async function cmdStorageGet(type: 'local' | 'session', args: string[]): Promise<JustBashExecResult> {
+  const key = args[0];
+  if (!key) return err(`usage: playwright-cli ${storageLabel(type).toLowerCase()}-get <key>\n`);
+
+  const storage = getStorage(type);
+  if (!storage) return err('no preview iframe found.\n');
+
+  const val = storage.getItem(key);
+  if (val === null) return ok(`(key '${key}' not found)\n`);
+  return ok(`${val}\n`);
+}
+
+async function cmdStorageSet(type: 'local' | 'session', args: string[]): Promise<JustBashExecResult> {
+  const key = args[0];
+  const value = args.slice(1).join(' ');
+  if (!key || value === undefined) return err(`usage: playwright-cli ${storageLabel(type).toLowerCase()}-set <key> <value>\n`);
+
+  const storage = getStorage(type);
+  if (!storage) return err('no preview iframe found.\n');
+
+  storage.setItem(key, value);
+  return ok(`Set ${storageLabel(type)} key '${key}'\n`);
+}
+
+async function cmdStorageDelete(type: 'local' | 'session', args: string[]): Promise<JustBashExecResult> {
+  const key = args[0];
+  if (!key) return err(`usage: playwright-cli ${storageLabel(type).toLowerCase()}-delete <key>\n`);
+
+  const storage = getStorage(type);
+  if (!storage) return err('no preview iframe found.\n');
+
+  storage.removeItem(key);
+  return ok(`Deleted ${storageLabel(type)} key '${key}'\n`);
+}
+
+async function cmdStorageClear(type: 'local' | 'session'): Promise<JustBashExecResult> {
+  const storage = getStorage(type);
+  if (!storage) return err('no preview iframe found.\n');
+
+  const count = storage.length;
+  storage.clear();
+  return ok(`Cleared ${count} ${storageLabel(type)} entry/entries\n`);
+}
+
+// ── Close / Reset ───────────────────────────────────────────────────────────
+
 async function cmdClose(): Promise<JustBashExecResult> {
   refMap = new Map();
   consoleMessages.length = 0;
-  consoleHooked = false;
+  networkRequests.length = 0;
   return ok('Cleared state.\n');
 }
 
@@ -792,6 +1049,22 @@ Commands:
   hover <ref>             Hover over an element
   eval <expression>       Evaluate JS in the preview iframe
   console [level]         Show captured console messages
+  network                 Show captured network requests
+  cookie-list [--domain]  List cookies
+  cookie-get <name>       Get a cookie value
+  cookie-set <name> <val> Set a cookie
+  cookie-delete <name>    Delete a cookie
+  cookie-clear            Clear all cookies
+  localstorage-list       List localStorage entries
+  localstorage-get <key>  Get localStorage value
+  localstorage-set <k> <v> Set localStorage value
+  localstorage-delete <k> Delete localStorage entry
+  localstorage-clear      Clear all localStorage
+  sessionstorage-list     List sessionStorage entries
+  sessionstorage-get <k>  Get sessionStorage value
+  sessionstorage-set <k> <v> Set sessionStorage value
+  sessionstorage-delete <k> Delete sessionStorage entry
+  sessionstorage-clear    Clear all sessionStorage
   resize <width> <height> Resize the preview iframe
   screenshot [path]       Capture preview as PNG (default: /tmp/screenshot.png)
   close                   Clear element refs and console state
@@ -819,32 +1092,105 @@ export async function runPlaywrightCommand(
     return cmdHelp();
   }
 
+  const subArgs = args.slice(1);
+  let result: JustBashExecResult;
+  let selectorContext: PlaywrightSelectorContext | undefined;
+
+  // For ref-based commands, capture selector context before execution
+  const refBasedCommands = new Set(['click', 'fill', 'hover']);
+  if (refBasedCommands.has(subcommand) && subArgs[0]) {
+    selectorContext = getSelectorContextForRef(subArgs[0]);
+  }
+
   switch (subcommand) {
     case 'open':
-      return cmdOpen(args.slice(1));
+      result = await cmdOpen(subArgs);
+      break;
     case 'snapshot':
-      return cmdSnapshot();
+      result = await cmdSnapshot();
+      break;
     case 'click':
-      return cmdClick(args.slice(1));
+      result = await cmdClick(subArgs);
+      break;
     case 'fill':
-      return cmdFill(args.slice(1));
+      result = await cmdFill(subArgs);
+      break;
     case 'type':
-      return cmdType(args.slice(1));
+      result = await cmdType(subArgs);
+      break;
     case 'press':
-      return cmdPress(args.slice(1));
+      result = await cmdPress(subArgs);
+      break;
     case 'hover':
-      return cmdHover(args.slice(1));
+      result = await cmdHover(subArgs);
+      break;
     case 'eval':
-      return cmdEval(args.slice(1));
+      result = await cmdEval(subArgs);
+      break;
     case 'console':
-      return cmdConsole(args.slice(1));
+      result = await cmdConsole(subArgs);
+      break;
+    case 'network':
+      result = await cmdNetwork();
+      break;
+    case 'cookie-list':
+      result = await cmdCookieList(subArgs);
+      break;
+    case 'cookie-get':
+      result = await cmdCookieGet(subArgs);
+      break;
+    case 'cookie-set':
+      result = await cmdCookieSet(subArgs);
+      break;
+    case 'cookie-delete':
+      result = await cmdCookieDelete(subArgs);
+      break;
+    case 'cookie-clear':
+      result = await cmdCookieClear();
+      break;
+    case 'localstorage-list':
+      result = await cmdStorageList('local');
+      break;
+    case 'localstorage-get':
+      result = await cmdStorageGet('local', subArgs);
+      break;
+    case 'localstorage-set':
+      result = await cmdStorageSet('local', subArgs);
+      break;
+    case 'localstorage-delete':
+      result = await cmdStorageDelete('local', subArgs);
+      break;
+    case 'localstorage-clear':
+      result = await cmdStorageClear('local');
+      break;
+    case 'sessionstorage-list':
+      result = await cmdStorageList('session');
+      break;
+    case 'sessionstorage-get':
+      result = await cmdStorageGet('session', subArgs);
+      break;
+    case 'sessionstorage-set':
+      result = await cmdStorageSet('session', subArgs);
+      break;
+    case 'sessionstorage-delete':
+      result = await cmdStorageDelete('session', subArgs);
+      break;
+    case 'sessionstorage-clear':
+      result = await cmdStorageClear('session');
+      break;
     case 'close':
-      return cmdClose();
+      result = await cmdClose();
+      break;
     case 'resize':
-      return cmdResize(args.slice(1));
+      result = await cmdResize(subArgs);
+      break;
     case 'screenshot':
-      return cmdScreenshot(args.slice(1), _vfs);
+      result = await cmdScreenshot(subArgs, _vfs);
+      break;
     default:
       return err(`unknown command: ${subcommand}. Run 'playwright-cli help' for usage.\n`);
   }
+
+  emitCommand(subcommand, subArgs, result, selectorContext);
+  return result;
 }

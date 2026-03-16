@@ -1,12 +1,13 @@
-import { createContainer, type TerminalSession } from '../index';
-import { DEFAULT_FILE, DEFAULT_RUN_COMMAND, WORKSPACE_ROOT, seedWorkspace, getTemplateDefaults, type TemplateId } from './workspace-seed';
+import { createContainer, type TerminalSession, type WorkspaceSearchProvider } from '../index';
+import { DEFAULT_FILE, DEFAULT_RUN_COMMAND, WORKSPACE_ROOT, seedWorkspace, seedReferenceApp, getTemplateDefaults, type TemplateId } from './workspace-seed';
+import type { ReferenceAppFiles } from './reference-app-loader';
 import { FixtureMarketplaceClient } from './fixture-extensions';
 import { OpenVSXClient } from './open-vsx';
 import { prunePersistedWorkbenchExtensions } from './persisted-extensions';
 import { shouldRunWorkbenchCommandInteractively } from './terminal-command-routing';
 import { VfsFileSystemProvider } from './vfs-file-system-provider';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from './extension-services';
-import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
+import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, TestsSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
 import { Keychain, type KeychainState, CLAUDE_AUTH_CREDENTIALS_PATH, CLAUDE_AUTH_CONFIG_PATH, CLAUDE_LEGACY_CONFIG_PATH } from './keychain';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
 import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
@@ -28,6 +29,7 @@ import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-over
 import getTextmateServiceOverride from '@codingame/monaco-vscode-textmate-service-override';
 import getWorkbenchServiceOverride, { Parts, ViewContainerLocation, setPartVisibility } from '@codingame/monaco-vscode-workbench-service-override';
 import getExtensionsServiceOverride from '@codingame/monaco-vscode-extensions-service-override';
+import getLogServiceOverride from '@codingame/monaco-vscode-log-service-override';
 import { createIndexedDBProviders, registerFileSystemOverlay } from '@codingame/monaco-vscode-files-service-override';
 import * as monaco from 'monaco-editor';
 import '@codingame/monaco-vscode-theme-defaults-default-extension';
@@ -97,6 +99,7 @@ export interface WebIDEHostOptions {
   marketplaceMode?: MarketplaceMode;
   debugSections?: string[];
   template?: TemplateId;
+  referenceApp?: ReferenceAppFiles;
 }
 
 const PRELOADED_WORKBENCH_LANGUAGES: Array<Parameters<typeof monaco.languages.register>[0]> = [
@@ -423,6 +426,17 @@ const LIGHT_MODE_OVERRIDES = `
 }
 `;
 
+function loadPwWeb(): Promise<void> {
+  if ((window as any).playwrightWeb) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = `${import.meta.env.BASE_URL || '/'}pw-web.js`;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load pw-web.js'));
+    document.head.appendChild(script);
+  });
+}
+
 function prefersLightMode(): boolean {
   return typeof window !== 'undefined'
     && window.matchMedia?.('(prefers-color-scheme: light)').matches === true;
@@ -479,6 +493,12 @@ export class WebIDEHost {
   private readonly databaseBrowserSurface: DatabaseBrowserSurface;
   private readonly keychainSurface: KeychainSidebarSurface;
   private pgliteMiddleware: import('../server-bridge').RequestMiddleware | null = null;
+  private readonly testsSurface = new TestsSidebarSurface();
+  private testRecorder: import('./test-recorder').TestRecorder | null = null;
+  private testRunner: import('./test-runner').TestRunner | null = null;
+  private testMetadataList: import('./test-spec-generator').TestMetadata[] = [];
+  // testStepsMap removed — pw-web.js reads spec files directly from VFS
+  private removePlaywrightListener: (() => void) | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
     this.templateId = options.template || 'vite';
@@ -489,7 +509,7 @@ export class WebIDEHost {
     });
     this.previewSurface = new PreviewSurface({
       run: () => {
-        void this.runPreviewCommand(getTemplateDefaults(this.templateId).runCommand);
+        void this.runPreviewCommand(this.getDefaults().runCommand);
       },
       refresh: () => this.refreshPreview(),
     });
@@ -547,6 +567,10 @@ export class WebIDEHost {
         case 'unlock': void this.unlockKeychain(); break;
         case 'save': void this.unlockKeychain(); break;
         case 'forget': void this.forgetKeychain(); break;
+        case 'login:github': void this.keychainAuthAction('gh auth login'); break;
+        case 'logout:github': void this.keychainAuthAction('gh auth logout'); break;
+        case 'login:replay': void this.keychainAuthAction('replayio login'); break;
+        case 'logout:replay': void this.keychainAuthAction('replayio logout'); break;
       }
     });
     this.keychain.registerSlot('claude', [
@@ -556,6 +580,9 @@ export class WebIDEHost {
     ]);
     this.keychain.registerSlot('github', [
       '/home/user/.config/gh/hosts.yml',
+    ]);
+    this.keychain.registerSlot('replay', [
+      '/home/user/.replay/auth.json',
     ]);
   }
 
@@ -567,6 +594,17 @@ export class WebIDEHost {
 
   private get workbench(): HTMLElement {
     return this.options.elements.workbench;
+  }
+
+  /** Returns defaultFile + runCommand for the active template or reference app. */
+  getDefaults(): { defaultFile: string; runCommand: string } {
+    if (this.options.referenceApp) {
+      return {
+        defaultFile: `${WORKSPACE_ROOT}/${this.options.referenceApp.defaultFile}`,
+        runCommand: this.options.referenceApp.runCommand,
+      };
+    }
+    return getTemplateDefaults(this.templateId);
   }
 
   get terminal(): Terminal {
@@ -631,7 +669,7 @@ export class WebIDEHost {
     }
 
     this.previewStartRequested = true;
-    void this.runPreviewCommand(getTemplateDefaults(this.templateId).runCommand)
+    void this.runPreviewCommand(this.getDefaults().runCommand)
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         this.updatePreviewStatus(message);
@@ -839,10 +877,17 @@ export class WebIDEHost {
     this.keychainSurface.update(
       [
         { name: 'claude', label: 'Claude Code', active: this.keychain.hasSlotData('claude') },
-        { name: 'github', label: 'GitHub Auth', active: this.keychain.hasSlotData('github') },
+        { name: 'github', label: 'GitHub', active: this.keychain.hasSlotData('github'), canAuth: true },
+        { name: 'replay', label: 'Replay.io', active: this.keychain.hasSlotData('replay'), canAuth: true },
       ],
       { hasStoredVault: state.hasStoredVault, supported: state.supported },
     );
+  }
+
+  private async keychainAuthAction(command: string): Promise<void> {
+    await this.revealTerminalPanel(true);
+    const tab = this.createUserTerminalTab(true);
+    await this.runCommand(tab, command, { echoCommand: true });
   }
 
   async revealClaudePanel(focus: boolean): Promise<void> {
@@ -902,7 +947,7 @@ export class WebIDEHost {
   }
 
   async executeHostCommand(command?: string): Promise<void> {
-    const resolved = command || window.prompt('Command to run', getTemplateDefaults(this.templateId).runCommand) || '';
+    const resolved = command || window.prompt('Command to run', this.getDefaults().runCommand) || '';
     await this.runCommand(this.requireActiveTerminalTab(), resolved, { echoCommand: true });
   }
 
@@ -1180,6 +1225,119 @@ export class WebIDEHost {
       : new Error(`Search provider did not initialize for pattern "${pattern}".`);
   }
 
+  private createSearchProvider(): WorkspaceSearchProvider {
+    return {
+      search: async (options) => {
+        const searchService = await getService(ISearchService);
+        const start = Date.now();
+
+        // Wait for search provider to initialize (same retry as searchWorkspaceText)
+        while (!searchService.schemeHasFileSearchProvider('file') && Date.now() - start < 5000) {
+          await delay(100);
+        }
+
+        let lastError: unknown = null;
+        while (Date.now() - start < 5000) {
+          try {
+            const folderUri = URI.file(options.folderPath);
+            const query: Parameters<typeof searchService.textSearch>[0] = {
+              type: QueryType.Text,
+              folderQueries: [{ folder: folderUri }],
+              contentPattern: {
+                pattern: options.pattern,
+                isRegExp: options.isRegExp,
+                isCaseSensitive: options.isCaseSensitive,
+                isWordMatch: options.isWordMatch,
+              },
+              previewOptions: {
+                matchLines: 1,
+                charsPerLine: 10000,
+              },
+              maxResults: options.maxResults ?? 10000,
+              surroundingContext: options.surroundingContext,
+            };
+
+            if (options.includePattern) {
+              const patterns: Record<string, boolean> = {};
+              for (const p of options.includePattern.split(',')) {
+                if (p.trim()) patterns[p.trim()] = true;
+              }
+              query.includePattern = patterns;
+            }
+            if (options.excludePattern) {
+              const patterns: Record<string, boolean> = {};
+              for (const p of options.excludePattern.split(',')) {
+                if (p.trim()) patterns[p.trim()] = true;
+              }
+              query.excludePattern = patterns;
+            }
+
+            const searchResult = await searchService.textSearch(query);
+
+            // Map VS Code results → WorkspaceSearchResult
+            const resultFiles: Array<{
+              filePath: string;
+              matches: Array<{
+                lineNumber: number;
+                lineText: string;
+                matchStart: number;
+                matchEnd: number;
+              }>;
+            }> = [];
+
+            for (const fileMatch of searchResult.results) {
+              const filePath = fileMatch.resource.path;
+              const matches: Array<{
+                lineNumber: number;
+                lineText: string;
+                matchStart: number;
+                matchEnd: number;
+              }> = [];
+
+              if (fileMatch.results) {
+                for (const textResult of fileMatch.results) {
+                  // ITextSearchMatch has rangeLocations + previewText
+                  // ITextSearchContext has text + lineNumber
+                  if ('rangeLocations' in textResult && textResult.rangeLocations) {
+                    const match = textResult as { rangeLocations: Array<{ source: { startLineNumber: number; startColumn: number; endColumn: number }; preview: { startColumn: number; endColumn: number } }>; previewText: string };
+                    for (const rangePair of match.rangeLocations) {
+                      matches.push({
+                        lineNumber: rangePair.source.startLineNumber,
+                        lineText: match.previewText,
+                        matchStart: rangePair.preview.startColumn,
+                        matchEnd: rangePair.preview.endColumn,
+                      });
+                    }
+                  }
+                }
+              }
+
+              if (matches.length > 0) {
+                resultFiles.push({ filePath, matches });
+              }
+            }
+
+            return {
+              files: resultFiles,
+              limitHit: searchResult.limitHit ?? false,
+            };
+          } catch (error) {
+            lastError = error;
+            const message = error instanceof Error ? error.message : String(error);
+            if (!message.includes('Search provider not initialized')) {
+              throw error;
+            }
+            await delay(100);
+          }
+        }
+
+        throw lastError instanceof Error
+          ? lastError
+          : new Error('Search provider did not initialize.');
+      },
+    };
+  }
+
   private bindTerminal(tab: TerminalTabState): void {
     tab.terminal.onData((data) => {
       // Interactive CLIs need raw input passthrough while they own the terminal.
@@ -1411,6 +1569,7 @@ export class WebIDEHost {
 
     await initialize(
       {
+        ...getLogServiceOverride(),
         ...getConfigurationServiceOverride(),
         ...getKeybindingsServiceOverride(),
         ...getLanguagesServiceOverride(),
@@ -1735,12 +1894,17 @@ export class WebIDEHost {
     };
 
     logMemory('before workspace seed');
-    seedWorkspace(this.container, this.templateId);
+    if (this.options.referenceApp) {
+      seedReferenceApp(this.container, this.options.referenceApp);
+    } else {
+      seedWorkspace(this.container, this.templateId);
+    }
 
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
     await this.keychain.init();
     this.container.setKeychain(this.keychain);
+    this.container.setSearchProvider(this.createSearchProvider());
     this.updatePreviewStatus('Waiting for a preview server');
     this.updateTerminalStatus(initialTab, 'Idle');
 
@@ -1817,6 +1981,9 @@ export class WebIDEHost {
     // ── PGlite database initialization (after workbench is ready) ──
     void this.initPGliteIfNeeded();
 
+    // ── Test recorder initialization (after workbench is ready) ──
+    void this.initTestRecorder();
+
     this.ensurePreviewServerRunning();
     window.__almostnodeWebIDE = this;
 
@@ -1866,5 +2033,306 @@ export class WebIDEHost {
     }
 
     await this.claudeCodeInstallPromise;
+  }
+
+  // ── Test Recorder / Runner ──────────────────────────────────────────────────
+
+  private async initTestRecorder(): Promise<void> {
+    const { TestRecorder } = await import('./test-recorder');
+    const { onPlaywrightCommand } = await import('../shims/playwright-command');
+    const { initToasts, showTestDetectedToast, showTestSavedToast, showTestResultToast } = await import('./toast');
+
+    // Mount toast system
+    const workbenchEl = this.options.elements.workbench;
+    initToasts(workbenchEl.parentElement ?? workbenchEl);
+
+    // Create recorder
+    const recorder = new TestRecorder();
+    this.testRecorder = recorder;
+
+    recorder.setCallbacks({
+      onTestDetected: () => {
+        showTestDetectedToast({
+          onSave: (name) => void this.saveDetectedTest(name),
+          onDismiss: () => recorder.reset(),
+        });
+      },
+      onStepRecorded: () => {
+        // Could update UI in real-time if needed
+      },
+    });
+
+    // Subscribe to playwright commands
+    this.removePlaywrightListener = onPlaywrightCommand((subcommand, args, result, selectorContext) => {
+      recorder.recordCommand(subcommand, args, result, selectorContext);
+    });
+
+    // Register tests sidebar view (workbench is already initialized)
+    const { registerCustomView } = await import('@codingame/monaco-vscode-workbench-service-override');
+    registerCustomView({
+      id: 'almostnode.sidebar.tests',
+      name: 'Tests',
+      location: ViewContainerLocation.Sidebar,
+      order: 2,
+      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>'),
+      renderBody: (container) => this.testsSurface.attach(container),
+    });
+
+    // Wire sidebar callbacks
+    this.testsSurface.setCallbacks({
+      onRun: (id) => void this.runTest(id),
+      onRunAll: () => void this.runAllTests(),
+      onDelete: (id) => this.deleteTest(id),
+      onOpen: (id) => void this.openTestSpec(id),
+    });
+
+    // Load saved test metadata
+    this.loadTestMetadata();
+
+    const { registerTestCodeLens } = await import('./test-codelens');
+    registerTestCodeLens({
+      getTests: () => this.testMetadataList,
+      onRunTest: (id) => void this.runTest(id),
+    });
+
+    console.log('[test-recorder] Initialized');
+  }
+
+  private async saveDetectedTest(name: string): Promise<void> {
+    if (!this.testRecorder) return;
+
+    const steps = this.testRecorder.finalize();
+    if (steps.length === 0) return;
+
+    const { generateTestSpec, generateTestId } = await import('./test-spec-generator');
+    const { showTestSavedToast } = await import('./toast');
+
+    const testId = generateTestId();
+    const specContent = generateTestSpec(name, steps);
+    const specPath = `/tests/e2e/${name.replace(/[^a-zA-Z0-9_-]/g, '-')}.spec.ts`;
+
+    // Ensure directory exists
+    const dir = specPath.substring(0, specPath.lastIndexOf('/'));
+    if (!this.container.vfs.existsSync(dir)) {
+      this.container.vfs.mkdirSync(dir, { recursive: true });
+    }
+
+    // Write spec file
+    this.container.vfs.writeFileSync(specPath, specContent);
+
+    // Store metadata (no steps — pw-web.js reads spec files directly)
+    const metadata: import('./test-spec-generator').TestMetadata = {
+      id: testId,
+      name,
+      specPath,
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    };
+    this.testMetadataList.push(metadata);
+
+    // Persist metadata
+    this.saveTestMetadata();
+
+    // Update sidebar
+    this.testsSurface.update(
+      this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+    );
+
+    showTestSavedToast(name, specPath);
+    console.log(`[test-recorder] Test "${name}" saved to ${specPath}`);
+  }
+
+  private async runTest(testId: string): Promise<void> {
+    const metadata = this.testMetadataList.find((m) => m.id === testId);
+    if (!metadata) return;
+
+    // Load pw-web.js if not already loaded
+    await loadPwWeb();
+
+    // Ensure runner exists
+    if (!this.testRunner) {
+      const { TestRunner } = await import('./test-runner');
+      const devUrl = this.previewUrl || `/__virtual__/${this.previewPort || 5173}/`;
+      this.testRunner = new TestRunner(this.container.vfs, devUrl);
+    }
+
+    // Create a test runner tab in the terminal panel
+    const runnerEl = document.createElement('div');
+    runnerEl.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:8px;height:100%;overflow:auto;align-content:start;background:#071018;color:#ccc;font-family:monospace;font-size:12px;';
+
+    const statusLine = document.createElement('div');
+    statusLine.style.cssText = 'width:100%;padding:4px 8px;';
+    statusLine.textContent = `Running test: ${metadata.name}...`;
+    runnerEl.appendChild(statusLine);
+
+    const tabId = `test-run-${testId.slice(0, 8)}`;
+    this.terminalSurface.addCustomTab({
+      id: tabId,
+      title: `Test: ${metadata.name}`,
+      element: runnerEl,
+      closable: true,
+    });
+    this.setActiveTerminalTab(tabId);
+
+    // Update status
+    metadata.status = 'running';
+    this.testsSurface.updateTestStatus(testId, 'running');
+
+    this.testRunner.setCallbacks({
+      onTestStart: () => {
+        statusLine.textContent = `Running: ${metadata.name}`;
+      },
+      onTestComplete: (id, result) => {
+        const status = result.passed ? 'passed' : 'failed';
+        metadata.status = status;
+        metadata.lastRunAt = new Date().toISOString();
+        if (result.error) metadata.error = result.error;
+        this.testsSurface.updateTestStatus(id, status);
+        this.saveTestMetadata();
+
+        // Show result in the tab
+        statusLine.textContent = '';
+        const resultEl = document.createElement('div');
+        resultEl.style.cssText = 'width:100%;';
+
+        const header = document.createElement('div');
+        header.style.cssText = `padding:8px;font-weight:bold;color:${result.passed ? '#4ec9b0' : '#e06c75'};`;
+        header.textContent = `${result.passed ? 'PASSED' : 'FAILED'} - ${metadata.name} (${result.duration}ms)`;
+        resultEl.appendChild(header);
+
+        for (const step of result.steps) {
+          const stepEl = document.createElement('div');
+          stepEl.style.cssText = `padding:2px 16px;color:${step.status === 'passed' ? '#98c379' : '#e06c75'};`;
+          stepEl.textContent = `${step.status === 'passed' ? '\u2713' : '\u2717'} ${step.description}`;
+          if (step.error) {
+            const errEl = document.createElement('div');
+            errEl.style.cssText = 'padding:2px 32px;color:#e06c75;font-style:italic;';
+            errEl.textContent = step.error;
+            stepEl.appendChild(errEl);
+          }
+          resultEl.appendChild(stepEl);
+        }
+
+        if (result.error) {
+          const errSummary = document.createElement('div');
+          errSummary.style.cssText = 'padding:8px;color:#e06c75;';
+          errSummary.textContent = `Error: ${result.error}`;
+          resultEl.appendChild(errSummary);
+        }
+
+        runnerEl.appendChild(resultEl);
+      },
+      onProgress: () => {},
+    });
+
+    this.testRunner.setHostContainer(runnerEl);
+
+    const { showTestResultToast } = await import('./toast');
+    const result = await this.testRunner.runTest(metadata.specPath, metadata.name, testId);
+    showTestResultToast(metadata.name, result.passed, result.error);
+  }
+
+  private async runAllTests(): Promise<void> {
+    for (const metadata of this.testMetadataList) {
+      await this.runTest(metadata.id);
+    }
+  }
+
+  private deleteTest(testId: string): void {
+    const idx = this.testMetadataList.findIndex((m) => m.id === testId);
+    if (idx < 0) return;
+
+    const metadata = this.testMetadataList[idx];
+
+    // Remove spec file from VFS
+    try {
+      this.container.vfs.unlinkSync(metadata.specPath);
+    } catch { /* file may already be gone */ }
+
+    this.testMetadataList.splice(idx, 1);
+    this.saveTestMetadata();
+
+    this.testsSurface.update(
+      this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+    );
+  }
+
+  private async openTestSpec(testId: string): Promise<void> {
+    const metadata = this.testMetadataList.find((m) => m.id === testId);
+    if (!metadata) return;
+    void this.openWorkspaceFile(metadata.specPath);
+  }
+
+  private loadTestMetadata(): void {
+    const metaPath = '/tests/.almostnode-tests.json';
+    try {
+      if (this.container.vfs.existsSync(metaPath)) {
+        const raw = this.container.vfs.readFileSync(metaPath, 'utf8') as string;
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.tests)) {
+          this.testMetadataList = data.tests;
+          this.testsSurface.update(
+            this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+          );
+        }
+      }
+    } catch {
+      // No saved tests
+    }
+
+    // Auto-discover spec files not already tracked
+    this.autoDiscoverTests();
+  }
+
+  private autoDiscoverTests(): void {
+    const testDir = '/tests/e2e';
+    try {
+      if (!this.container.vfs.existsSync(testDir)) return;
+
+      const entries = this.container.vfs.readdirSync(testDir) as string[];
+      const knownPaths = new Set(this.testMetadataList.map((m) => m.specPath));
+      let added = false;
+
+      for (const entry of entries) {
+        if (!entry.endsWith('.spec.ts')) continue;
+        const specPath = `${testDir}/${entry}`;
+        if (knownPaths.has(specPath)) continue;
+
+        // Extract test name from filename
+        const name = entry.replace(/\.spec\.ts$/, '');
+
+        // Generate a unique ID inline (same logic as generateTestId)
+        const id = `test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        this.testMetadataList.push({
+          id,
+          name,
+          specPath,
+          createdAt: new Date().toISOString(),
+          status: 'pending',
+        });
+        added = true;
+      }
+
+      if (added) {
+        this.saveTestMetadata();
+        this.testsSurface.update(
+          this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+        );
+      }
+    } catch {
+      // Directory may not exist yet
+    }
+  }
+
+  private saveTestMetadata(): void {
+    const metaPath = '/tests/.almostnode-tests.json';
+    const dir = '/tests';
+    if (!this.container.vfs.existsSync(dir)) {
+      this.container.vfs.mkdirSync(dir, { recursive: true });
+    }
+
+    this.container.vfs.writeFileSync(metaPath, JSON.stringify({
+      tests: this.testMetadataList,
+    }, null, 2));
   }
 }

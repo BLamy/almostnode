@@ -1847,6 +1847,24 @@ export interface KeychainSlotStatus {
   name: string;
   label: string;
   active: boolean;
+  /** Whether this slot supports login/logout buttons in the sidebar */
+  canAuth?: boolean;
+}
+
+// ── SVG icons for services ──────────────────────────────────────────────────
+
+const ICON_GITHUB = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
+const ICON_REPLAY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM6.5 4.5l5 3.5-5 3.5v-7z"/></svg>`;
+const ICON_CLAUDE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7 5a1 1 0 112 0 1 1 0 01-2 0zm-.25 2.5h2.5v4.25h-2.5V7.5z"/></svg>`;
+const ICON_KEY = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 1a4.5 4.5 0 00-3.83 6.84L2 13.5V16h2.5l.5-.5v-1.5H6.5l.5-.5v-1.5H8.5l1.17-1.17A4.5 4.5 0 1011.5 1zm1 3a1 1 0 110-2 1 1 0 010 2z"/></svg>`;
+
+function getSlotIcon(name: string): string {
+  switch (name) {
+    case 'github': return ICON_GITHUB;
+    case 'replay': return ICON_REPLAY;
+    case 'claude': return ICON_CLAUDE;
+    default: return ICON_KEY;
+  }
 }
 
 export class KeychainSidebarSurface {
@@ -1858,17 +1876,37 @@ export class KeychainSidebarSurface {
 
   constructor() {
     this.root.className = 'almostnode-keychain-sidebar';
-    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:#ccc;font-size:13px;';
+    this.root.style.cssText = `
+      display: flex; flex-direction: column; height: 100%;
+      padding: 12px; gap: 0; color: #ccc; font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    `.replace(/\n\s*/g, '');
 
-    const header = document.createElement('div');
-    header.style.cssText = 'font-weight:600;margin-bottom:4px;';
-    header.textContent = 'Keychain';
+    const headerRow = document.createElement('div');
+    headerRow.style.cssText = `
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 16px; padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    `.replace(/\n\s*/g, '');
 
-    this.listEl.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:2px;';
+    const headerIcon = document.createElement('span');
+    headerIcon.innerHTML = ICON_KEY;
+    headerIcon.style.cssText = 'color: #e0a458; display: flex; align-items: center;';
 
-    this.footerEl.style.cssText = 'display:flex;gap:6px;padding-top:8px;border-top:1px solid #333;';
+    const headerText = document.createElement('span');
+    headerText.style.cssText = 'font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #999;';
+    headerText.textContent = 'Credentials';
 
-    this.root.append(header, this.listEl, this.footerEl);
+    headerRow.append(headerIcon, headerText);
+
+    this.listEl.style.cssText = 'flex: 1; display: flex; flex-direction: column; gap: 6px;';
+
+    this.footerEl.style.cssText = `
+      display: flex; gap: 6px; padding-top: 12px; margin-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    `.replace(/\n\s*/g, '');
+
+    this.root.append(headerRow, this.listEl, this.footerEl);
   }
 
   setActionHandler(handler: (action: string) => void): void {
@@ -1895,23 +1933,76 @@ export class KeychainSidebarSurface {
   private render(): void {
     this.listEl.innerHTML = '';
     for (const slot of this.slots) {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:3px;';
+      const card = document.createElement('div');
+      card.style.cssText = `
+        display: flex; align-items: center; gap: 10px;
+        padding: 8px 10px; border-radius: 6px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.06);
+        transition: background 0.15s;
+      `.replace(/\n\s*/g, '');
+      card.addEventListener('mouseenter', () => { card.style.background = 'rgba(255,255,255,0.07)'; });
+      card.addEventListener('mouseleave', () => { card.style.background = 'rgba(255,255,255,0.04)'; });
 
-      const dot = document.createElement('span');
-      dot.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${slot.active ? '#4ec9b0' : '#e06c75'};`;
-      dot.title = slot.active ? 'Authenticated' : 'Not authenticated';
+      const iconWrap = document.createElement('span');
+      iconWrap.innerHTML = getSlotIcon(slot.name);
+      iconWrap.style.cssText = `
+        display: flex; align-items: center; justify-content: center;
+        width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+        background: ${slot.active ? 'rgba(78,201,176,0.12)' : 'rgba(255,255,255,0.06)'};
+        color: ${slot.active ? '#4ec9b0' : '#888'};
+      `.replace(/\n\s*/g, '');
 
-      const label = document.createElement('span');
-      label.style.cssText = 'flex:1;';
+      const info = document.createElement('div');
+      info.style.cssText = 'flex: 1; min-width: 0;';
+
+      const label = document.createElement('div');
+      label.style.cssText = 'font-size: 13px; font-weight: 500; color: #e0e0e0; line-height: 1.3;';
       label.textContent = slot.label;
 
-      const status = document.createElement('span');
-      status.style.cssText = `font-size:11px;color:${slot.active ? '#4ec9b0' : '#666'};`;
-      status.textContent = slot.active ? 'Active' : 'None';
+      const statusText = document.createElement('div');
+      statusText.style.cssText = `font-size: 11px; color: ${slot.active ? '#4ec9b0' : '#666'}; line-height: 1.3;`;
+      statusText.textContent = slot.active ? 'Connected' : 'Not connected';
 
-      row.append(dot, label, status);
-      this.listEl.appendChild(row);
+      info.append(label, statusText);
+
+      card.append(iconWrap, info);
+
+      // Add login/logout button for services that support it (not Claude)
+      if (slot.canAuth) {
+        const authBtn = document.createElement('button');
+        authBtn.textContent = slot.active ? 'Logout' : 'Login';
+        const isLogout = slot.active;
+        authBtn.style.cssText = `
+          background: ${isLogout ? 'rgba(255,255,255,0.06)' : 'rgba(78,201,176,0.15)'};
+          color: ${isLogout ? '#999' : '#4ec9b0'};
+          border: 1px solid ${isLogout ? 'rgba(255,255,255,0.1)' : 'rgba(78,201,176,0.3)'};
+          padding: 3px 10px; border-radius: 4px; cursor: pointer;
+          font-size: 11px; font-weight: 500; flex-shrink: 0;
+          transition: all 0.15s;
+        `.replace(/\n\s*/g, '');
+        const hoverBg = isLogout ? 'rgba(224,108,117,0.15)' : 'rgba(78,201,176,0.25)';
+        const hoverColor = isLogout ? '#e06c75' : '#4ec9b0';
+        const hoverBorder = isLogout ? 'rgba(224,108,117,0.3)' : 'rgba(78,201,176,0.4)';
+        authBtn.addEventListener('mouseenter', () => {
+          authBtn.style.background = hoverBg;
+          authBtn.style.color = hoverColor;
+          authBtn.style.borderColor = hoverBorder;
+        });
+        authBtn.addEventListener('mouseleave', () => {
+          authBtn.style.background = isLogout ? 'rgba(255,255,255,0.06)' : 'rgba(78,201,176,0.15)';
+          authBtn.style.color = isLogout ? '#999' : '#4ec9b0';
+          authBtn.style.borderColor = isLogout ? 'rgba(255,255,255,0.1)' : 'rgba(78,201,176,0.3)';
+        });
+        const action = slot.active ? `logout:${slot.name}` : `login:${slot.name}`;
+        authBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.onAction?.(action);
+        });
+        card.appendChild(authBtn);
+      }
+
+      this.listEl.appendChild(card);
     }
   }
 
@@ -1919,32 +2010,186 @@ export class KeychainSidebarSurface {
     this.footerEl.innerHTML = '';
     if (!options?.supported) {
       const note = document.createElement('span');
-      note.style.cssText = 'font-size:11px;color:#666;';
+      note.style.cssText = 'font-size: 11px; color: #666;';
       note.textContent = 'Passkey not supported in this browser';
       this.footerEl.appendChild(note);
       return;
     }
 
     if (options.hasStoredVault) {
-      const unlockBtn = this.createFooterButton('Unlock', 'unlock');
-      const forgetBtn = this.createFooterButton('Forget', 'forget');
+      const unlockBtn = this.createFooterButton('Unlock Vault', 'unlock', true);
+      const forgetBtn = this.createFooterButton('Forget', 'forget', false);
       this.footerEl.append(unlockBtn, forgetBtn);
     } else {
-      const saveBtn = this.createFooterButton('Save with passkey', 'save');
+      const saveBtn = this.createFooterButton('Save with Passkey', 'save', true);
       this.footerEl.appendChild(saveBtn);
     }
   }
 
-  private createFooterButton(text: string, action: string): HTMLButtonElement {
+  private createFooterButton(text: string, action: string, primary: boolean): HTMLButtonElement {
     const btn = document.createElement('button');
     btn.textContent = text;
-    btn.style.cssText = 'background:#0e639c;color:#fff;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
-    btn.addEventListener('mouseenter', () => { btn.style.background = '#1177bb'; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = '#0e639c'; });
+    const bg = primary ? '#0e639c' : 'rgba(255,255,255,0.06)';
+    const hoverBg = primary ? '#1177bb' : 'rgba(255,255,255,0.1)';
+    const color = primary ? '#fff' : '#999';
+    btn.style.cssText = `
+      background: ${bg}; color: ${color};
+      border: 1px solid ${primary ? 'transparent' : 'rgba(255,255,255,0.1)'};
+      padding: 5px 12px; border-radius: 4px; cursor: pointer;
+      font-size: 12px; font-weight: 500; transition: all 0.15s;
+    `.replace(/\n\s*/g, '');
+    btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = bg; });
     btn.addEventListener('click', () => {
       this.onAction?.(action);
     });
     return btn;
+  }
+}
+
+// ── Tests Sidebar ────────────────────────────────────────────────────────────
+
+const TESTS_VIEW_ID = 'almostnode.sidebar.tests';
+
+export interface TestEntry {
+  id: string;
+  name: string;
+  status: 'pending' | 'passed' | 'failed' | 'running';
+}
+
+export interface TestsSidebarCallbacks {
+  onRun: (testId: string) => void;
+  onRunAll: () => void;
+  onDelete: (testId: string) => void;
+  onOpen: (testId: string) => void;
+}
+
+export class TestsSidebarSurface {
+  private readonly root = document.createElement('div');
+  private readonly listEl = document.createElement('div');
+  private readonly actionsEl = document.createElement('div');
+  private tests: TestEntry[] = [];
+  private callbacks: TestsSidebarCallbacks | null = null;
+
+  constructor() {
+    this.root.className = 'almostnode-tests-sidebar';
+    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:#ccc;font-size:13px;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight:600;margin-bottom:4px;';
+    header.textContent = 'Tests';
+
+    this.listEl.style.cssText = 'flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;';
+
+    this.actionsEl.style.cssText = 'display:flex;gap:4px;padding-top:8px;border-top:1px solid #333;';
+
+    const runAllBtn = document.createElement('button');
+    runAllBtn.textContent = 'Run All';
+    runAllBtn.style.cssText = 'flex:1;background:#0e639c;color:#fff;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
+    runAllBtn.addEventListener('click', () => {
+      this.callbacks?.onRunAll();
+    });
+    this.actionsEl.appendChild(runAllBtn);
+
+    this.root.append(header, this.listEl, this.actionsEl);
+  }
+
+  setCallbacks(callbacks: TestsSidebarCallbacks): void {
+    this.callbacks = callbacks;
+  }
+
+  update(tests: TestEntry[]): void {
+    this.tests = tests;
+    this.render();
+  }
+
+  updateTestStatus(testId: string, status: TestEntry['status']): void {
+    const test = this.tests.find((t) => t.id === testId);
+    if (test) {
+      test.status = status;
+      this.render();
+    }
+  }
+
+  attach(container: HTMLElement): IDisposable {
+    container.appendChild(this.root);
+    return {
+      dispose: () => {
+        if (this.root.parentElement === container) {
+          container.removeChild(this.root);
+        }
+      },
+    };
+  }
+
+  private statusColor(status: TestEntry['status']): string {
+    switch (status) {
+      case 'passed': return '#4ec9b0';
+      case 'failed': return '#e06c75';
+      case 'running': return '#dcdcaa';
+      default: return '#555';
+    }
+  }
+
+  private render(): void {
+    this.listEl.innerHTML = '';
+
+    if (this.tests.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:#666;font-style:italic;padding:4px 8px;font-size:12px;';
+      empty.textContent = 'No tests recorded yet. Use Claude to interact with the preview — tests will be auto-detected.';
+      this.listEl.appendChild(empty);
+      return;
+    }
+
+    for (const test of this.tests) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;';
+      row.addEventListener('mouseenter', () => { row.style.background = '#2a2d2e'; });
+      row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+
+      // Status dot
+      const indicator = document.createElement('span');
+      indicator.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${this.statusColor(test.status)};`;
+      if (test.status === 'running') {
+        indicator.style.animation = 'almostnode-test-pulse 1s ease-in-out infinite';
+      }
+
+      // Test name
+      const label = document.createElement('span');
+      label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;';
+      label.textContent = test.name;
+      label.addEventListener('click', () => {
+        this.callbacks?.onOpen(test.id);
+      });
+
+      // Play button
+      const playBtn = document.createElement('button');
+      playBtn.textContent = '\u25b6';
+      playBtn.title = `Run ${test.name}`;
+      playBtn.style.cssText = 'background:none;border:none;color:#4ec9b0;cursor:pointer;font-size:12px;padding:0 2px;line-height:1;';
+      playBtn.addEventListener('mouseenter', () => { playBtn.style.color = '#6ee7c7'; });
+      playBtn.addEventListener('mouseleave', () => { playBtn.style.color = '#4ec9b0'; });
+      playBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.callbacks?.onRun(test.id);
+      });
+
+      // Delete button
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '\u00d7';
+      delBtn.title = `Delete ${test.name}`;
+      delBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:16px;padding:0 2px;line-height:1;';
+      delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#e06c75'; });
+      delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#888'; });
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.callbacks?.onDelete(test.id);
+      });
+
+      row.append(indicator, label, playBtn, delBtn);
+      this.listEl.appendChild(row);
+    }
   }
 }
 
