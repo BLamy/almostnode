@@ -12,7 +12,8 @@ skills:
 ## Your Responsibilities
 
 - Building and modifying React components and pages
-- Styling with Tailwind CSS and shadcn/ui
+- Styling with Tailwind CSS, shadcn/ui and cva
+- IMPORTANT: do your best to avoid rawcss and try to do everythign with tailwind
 - Client-side routing with react-router-dom
 - TypeScript type safety in frontend code
 - Responsive design and accessibility

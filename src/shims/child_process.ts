@@ -438,7 +438,7 @@ function maybeRunCustomCommandDirect(
   // Strip quoted content and shell redirections (e.g. 2>&1) first so
   // operators inside quotes or redirections are ignored.
   const withoutQuoted = normalized
-    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '')
+    .replace(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g, '')
     .replace(/\d*>&\d+/g, '');
   if (/[|;&]/.test(withoutQuoted)) return null;
 
@@ -499,7 +499,7 @@ function stripQuotesForBash(command: string): string {
   if (!command.includes('"') && !command.includes("'")) return command;
 
   const result: string[] = [];
-  const matcher = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s]+)/g;
+  const matcher = /"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|([^\s]+)/g;
   let match: RegExpExecArray | null = null;
 
   while ((match = matcher.exec(command)) !== null) {
@@ -2833,7 +2833,7 @@ function parseSyntheticShellExec(args: string[]): { script?: string; error?: str
 
 export function splitCommandArgs(command: string): string[] {
   const tokens: string[] = [];
-  const matcher = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s]+)/g;
+  const matcher = /"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|([^\s]+)/g;
 
   let match: RegExpExecArray | null = null;
   while ((match = matcher.exec(command)) !== null) {
