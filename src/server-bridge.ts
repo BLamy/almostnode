@@ -290,6 +290,14 @@ export class ServerBridge extends EventEmitter {
           { type: 'init', data: { basePath: this.basePath }, port: this.messageChannel.port2 },
           [this.messageChannel.port2]
         );
+        // Re-announce all registered servers so the (possibly new) SW
+        // repopulates its registeredPorts set.
+        for (const [port, entry] of this.servers) {
+          this.messageChannel.port1.postMessage({
+            type: 'server-registered',
+            data: { port, hostname: entry.hostname },
+          });
+        }
       }
     };
     navigator.serviceWorker.addEventListener('controllerchange', reinit);

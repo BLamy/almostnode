@@ -138,7 +138,7 @@ export interface BuildResult {
  * Packages with custom conditions (e.g. "convex", "react-native") will
  * fall through to one of these standard conditions.
  */
-const EXPORT_CONDITION_PRIORITY = ['module', 'import', 'require', 'default'] as const;
+const EXPORT_CONDITION_PRIORITY = ['browser', 'module', 'import', 'require', 'default'] as const;
 
 /**
  * Resolves a package.json exports entry to a file path by evaluating export conditions.
@@ -252,7 +252,8 @@ function resolveExportConditions(entry: ExportEntry): string | undefined {
 function resolveNodeModuleImport(
   vfs: VirtualFS,
   importPath: string,
-  extensions: string[]
+  extensions: string[],
+  importer?: string
 ): NodeModuleResolution | null {
   // Parse the import path to extract package name and subpath
   // Scoped packages: "@scope/pkg/sub" -> ["@scope", "pkg", "sub"]
@@ -268,56 +269,86 @@ function resolveNodeModuleImport(
     ? pathParts.slice(2).join('/')       // Everything after "@scope/pkg/"
     : pathParts.slice(1).join('/');      // Everything after "pkg/"
 
-  // Check if the package exists in VFS node_modules
-  // Try /node_modules/ first (dev server), then /project/node_modules/ (convex)
-  let nodeModulesBase = '/node_modules/' + moduleName;
-  if (!vfs.existsSync(nodeModulesBase)) {
-    nodeModulesBase = '/project/node_modules/' + moduleName;
+  // Build search paths using Node.js resolution algorithm:
+  // Walk up from the importer's directory, checking node_modules/ at each level
+  const searchBases: string[] = [];
+  if (importer) {
+    let dir = importer.substring(0, importer.lastIndexOf('/'));
+    const seen = new Set<string>();
+    while (dir && dir.length > 0) {
+      // Skip node_modules directories themselves to avoid
+      // node_modules/node_modules lookups
+      if (!dir.endsWith('/node_modules')) {
+        const candidate = dir + '/node_modules/' + moduleName;
+        if (!seen.has(candidate)) {
+          seen.add(candidate);
+          searchBases.push(candidate);
+        }
+      }
+      const lastSlash = dir.lastIndexOf('/');
+      if (lastSlash <= 0) {
+        // Check root level
+        const rootCandidate = '/node_modules/' + moduleName;
+        if (!seen.has(rootCandidate)) {
+          searchBases.push(rootCandidate);
+        }
+        break;
+      }
+      dir = dir.substring(0, lastSlash);
+    }
+  }
+  // Always include hardcoded fallback paths
+  if (!searchBases.includes('/node_modules/' + moduleName)) {
+    searchBases.push('/node_modules/' + moduleName);
+  }
+  if (!searchBases.includes('/project/node_modules/' + moduleName)) {
+    searchBases.push('/project/node_modules/' + moduleName);
+  }
+
+  for (const nodeModulesBase of searchBases) {
     if (!vfs.existsSync(nodeModulesBase)) {
-      return null;
-    }
-  }
-
-  // Read package.json to determine the entry point
-  const packageJsonPath = nodeModulesBase + '/package.json';
-  if (!vfs.existsSync(packageJsonPath)) {
-    return null;
-  }
-
-  try {
-    const packageJsonContent = vfs.readFileSync(packageJsonPath, 'utf8');
-    const packageJson = JSON.parse(packageJsonContent) as {
-      exports?: Record<string, ExportEntry> | ExportEntry;
-      module?: string;
-      main?: string;
-    };
-
-    let resolvedPath: string | null = null;
-
-    if (subPath) {
-      // Importing a subpath like "convex/server"
-      resolvedPath = resolveSubpathImport(
-        vfs,
-        packageJson,
-        nodeModulesBase,
-        subPath,
-        extensions
-      );
-    } else {
-      // Importing the main module like "convex"
-      resolvedPath = resolveMainImport(
-        vfs,
-        packageJson,
-        nodeModulesBase,
-        extensions
-      );
+      continue;
     }
 
-    if (resolvedPath) {
-      return { path: resolvedPath, pluginData: { fromVFS: true } };
+    // Read package.json to determine the entry point
+    const packageJsonPath = nodeModulesBase + '/package.json';
+    if (!vfs.existsSync(packageJsonPath)) {
+      continue;
     }
-  } catch {
-    // Failed to read package.json, fall through to return null
+
+    try {
+      const packageJsonContent = vfs.readFileSync(packageJsonPath, 'utf8');
+      const packageJson = JSON.parse(packageJsonContent) as {
+        exports?: Record<string, ExportEntry> | ExportEntry;
+        module?: string;
+        main?: string;
+      };
+
+      let resolvedPath: string | null = null;
+
+      if (subPath) {
+        resolvedPath = resolveSubpathImport(
+          vfs,
+          packageJson,
+          nodeModulesBase,
+          subPath,
+          extensions
+        );
+      } else {
+        resolvedPath = resolveMainImport(
+          vfs,
+          packageJson,
+          nodeModulesBase,
+          extensions
+        );
+      }
+
+      if (resolvedPath) {
+        return { path: resolvedPath, pluginData: { fromVFS: true } };
+      }
+    } catch {
+      // Failed to read package.json, try next search path
+    }
   }
 
   return null;
@@ -332,7 +363,7 @@ function resolveNodeModuleImport(
  */
 function resolveSubpathImport(
   vfs: VirtualFS,
-  packageJson: { exports?: Record<string, ExportEntry> | ExportEntry },
+  packageJson: { exports?: Record<string, ExportEntry> | ExportEntry; module?: string; main?: string },
   nodeModulesBase: string,
   subPath: string,
   extensions: string[]
@@ -380,7 +411,31 @@ function resolveSubpathImport(
 
   // Fall back to direct path resolution
   const directPath = nodeModulesBase + '/' + subPath;
-  return findVFSFile(vfs, directPath, extensions);
+  const directResult = findVFSFile(vfs, directPath, extensions);
+  if (directResult) return directResult;
+
+  // Infer subpath location from main/module fields.
+  // Packages without exports (e.g., react-remove-scroll-bar) store files
+  // in dist/ directories. If main="dist/es5/index.js", then
+  // "pkg/constants" → try "dist/es5/constants.js", "dist/es5/constants/index.js"
+  for (const field of [packageJson.module, packageJson.main]) {
+    if (typeof field !== 'string') continue;
+    const lastSlash = field.lastIndexOf('/');
+    if (lastSlash === -1) continue;
+    const dir = field.slice(0, lastSlash + 1).replace(/^\.\//, '');
+    const inferredPath = nodeModulesBase + '/' + dir + subPath;
+    const found = findVFSFile(vfs, inferredPath, extensions);
+    if (found) return found;
+    // Also try subPath/index.* inside the inferred directory
+    for (const ext of ['.js', '.ts', '.tsx', '.mjs']) {
+      const indexPath = inferredPath + '/index' + ext;
+      if (findVFSFile(vfs, indexPath, [''])) {
+        return indexPath;
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -719,7 +774,7 @@ function createVFSPlugin(externals?: string[]): unknown {
           return { external: true };
         }
 
-        const resolution = resolveNodeModuleImport(vfs, importPath, extensions);
+        const resolution = resolveNodeModuleImport(vfs, importPath, extensions, importer);
         if (resolution) {
           // Apply .mjs/.cjs normalization for bare imports too
           if (resolution.path && (resolution.path.endsWith('.mjs') || resolution.path.endsWith('.cjs'))) {

@@ -55,7 +55,7 @@ export function initNpmServe(vfs: VirtualFS): void {
  * Prefers import > module > default > require.
  * Skips 'types' condition (resolves to .d.ts files).
  */
-const CJS_CONDITION_PRIORITY = ['import', 'module', 'default', 'require'] as const;
+const CJS_CONDITION_PRIORITY = ['browser', 'import', 'module', 'default', 'require'] as const;
 
 function resolveExportEntry(entry: unknown): string | undefined {
   if (typeof entry === 'string') return entry;
@@ -146,6 +146,19 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
         const directPath = pkgDir + '/' + subPath;
         for (const ext of ['', '.js', '.cjs', '.mjs', '.json']) {
           if (isFile(directPath + ext)) return directPath + ext;
+        }
+        // Infer subpath location from main/module fields.
+        // e.g., main="dist/es5/index.js" + subPath="constants"
+        //   → try "dist/es5/constants.js"
+        for (const field of [pkgJson.module, pkgJson.main]) {
+          if (typeof field !== 'string') continue;
+          const lastSlash = field.lastIndexOf('/');
+          if (lastSlash === -1) continue;
+          const dir = field.slice(0, lastSlash + 1).replace(/^\.\//, '');
+          for (const ext of ['', '.js', '.cjs', '.mjs', '.json']) {
+            const inferredPath = pkgDir + '/' + dir + subPath + ext;
+            if (isFile(inferredPath)) return inferredPath;
+          }
         }
       }
     } catch { /* ignore parse errors */ }
@@ -300,6 +313,13 @@ export async function bundleNpmModuleForBrowser(specifier: string, searchRoots: 
 
   // Post-process: replace __require("ext") with ESM imports
   code = patchExternalRequires(code);
+
+  // If the raw entry file didn't yield CJS export names (e.g. entry was ESM
+  // but esbuild wrapped transitive CJS deps, or resolvePackageEntry returned
+  // null), try extracting them from the bundled output itself.
+  if (exportNames.length === 0 && /export\s+default\s+require_\w+\(\)/.test(code)) {
+    exportNames = extractCjsExportNames(code);
+  }
 
   // Post-process: add named ESM exports for CJS bundles
   if (exportNames.length > 0) {

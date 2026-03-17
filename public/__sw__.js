@@ -89,6 +89,19 @@ function handleMainMessage(event) {
 
   DEBUG && console.log('[SW] Received message from main:', type, 'id:', id);
 
+  // server-registered/server-unregistered arrive via the MessageChannel (port1→port2),
+  // NOT via the global 'message' event, so we must handle them here too.
+  if (type === 'server-registered' && data) {
+    registeredPorts.add(data.port);
+    DEBUG && console.log('[SW] Server registered on port', data.port, '(via MessageChannel)');
+    return;
+  }
+  if (type === 'server-unregistered' && data) {
+    registeredPorts.delete(data.port);
+    DEBUG && console.log('[SW] Server unregistered from port', data.port, '(via MessageChannel)');
+    return;
+  }
+
   if (type === 'response') {
     const pending = pendingRequests.get(id);
     DEBUG && console.log('[SW] Looking for pending request:', id, 'found:', !!pending);
@@ -319,29 +332,49 @@ self.addEventListener('fetch', (event) => {
     // virtual server, even when the Referer chain has lost the /__virtual__/ context
     // (e.g. /_npm/foo imports /_npm/foo/constants — the Referer is /_npm/foo, not /__virtual__/).
     if (pathname.startsWith('/_npm/')) {
-      let virtualPort = null;
-      const npmReferer = event.request.referrer;
-      if (npmReferer) {
-        try {
-          const refererUrl = new URL(npmReferer);
-          const refererPathname = basePath && refererUrl.pathname.startsWith(basePath)
-            ? refererUrl.pathname.slice(basePath.length) || '/'
-            : refererUrl.pathname;
-          const refererMatch = refererPathname.match(/^\/__virtual__\/(\d+)/);
-          if (refererMatch) {
-            virtualPort = parseInt(refererMatch[1], 10);
+      var npmPath = pathname + url.search;
+      event.respondWith((async function() {
+        var virtualPort = null;
+        var npmReferer = event.request.referrer;
+        if (npmReferer) {
+          try {
+            var refererUrl = new URL(npmReferer);
+            var refererPathname = basePath && refererUrl.pathname.startsWith(basePath)
+              ? refererUrl.pathname.slice(basePath.length) || '/'
+              : refererUrl.pathname;
+            var refererMatch = refererPathname.match(/^\/__virtual__\/(\d+)/);
+            if (refererMatch) {
+              virtualPort = parseInt(refererMatch[1], 10);
+            }
+          } catch (e) {}
+        }
+        // Fall back to first registered port if Referer doesn't have virtual context
+        if (!virtualPort && registeredPorts.size > 0) {
+          virtualPort = registeredPorts.values().next().value;
+        }
+        // If no port yet, wait for one to be registered (startup race condition)
+        if (!virtualPort) {
+          await new Promise(function(resolve) {
+            var check = setInterval(function() {
+              if (registeredPorts.size > 0) { clearInterval(check); resolve(); }
+            }, 50);
+            setTimeout(function() { clearInterval(check); resolve(); }, 10000);
+          });
+          if (registeredPorts.size > 0) {
+            virtualPort = registeredPorts.values().next().value;
           }
-        } catch (e) {}
-      }
-      // Fall back to first registered port if Referer doesn't have virtual context
-      if (!virtualPort && registeredPorts.size > 0) {
-        virtualPort = registeredPorts.values().next().value;
-      }
-      if (virtualPort) {
-        DEBUG && console.log('[SW] Routing /_npm/ request to virtual server:', pathname, 'port:', virtualPort);
-        event.respondWith(handleVirtualRequest(event.request, virtualPort, pathname + url.search));
-        return;
-      }
+        }
+        if (virtualPort) {
+          DEBUG && console.log('[SW] Routing /_npm/ request to virtual server:', npmPath, 'port:', virtualPort);
+          return handleVirtualRequest(event.request, virtualPort, npmPath);
+        }
+        // Still no virtual server — return a JS error module
+        return new Response(
+          'console.error("[almostnode] No virtual server available for ' + npmPath.replace(/'/g, "\\'") + '");\nexport default undefined;\n',
+          { status: 503, headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' } }
+        );
+      })());
+      return;
     }
 
     // Not a virtual request - but check if it's from a virtual context
@@ -562,6 +595,10 @@ function getErudaInjectionScript() {
     if (typeof eruda === 'undefined') return;
     eruda.init({ useShadowDom: true, defaults: { theme: 'Dark' } });
     eruda.hide();
+    // Eruda overrides console but omits some methods React 19 needs
+    if (typeof console.timeStamp !== 'function') {
+      console.timeStamp = function() {};
+    }
   };
   script.onerror = function() { /* CDN unavailable — console bridge still works */ };
   document.head.appendChild(script);
@@ -732,7 +769,18 @@ async function handleVirtualRequest(request, port, path) {
     return finalResponse;
   } catch (error) {
     console.error('[SW] Error handling virtual request:', error);
-    return new Response(`Service Worker Error: ${error.message}`, {
+    // For module-like requests (/_npm/, .js, .ts, .tsx, .jsx, .mjs),
+    // return a valid JS module so browsers don't reject due to MIME type
+    if (path.startsWith('/_npm/') || /\.(js|ts|tsx|jsx|mjs)(\?|$)/.test(path)) {
+      var errMsg = 'Service Worker Error: ' + error.message;
+      var jsBody = 'console.error(' + JSON.stringify(errMsg) + ');\nexport default undefined;\n';
+      return new Response(jsBody, {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'Content-Type': 'application/javascript; charset=utf-8' },
+      });
+    }
+    return new Response('Service Worker Error: ' + error.message, {
       status: 500,
       statusText: 'Internal Server Error',
       headers: { 'Content-Type': 'text/plain' },

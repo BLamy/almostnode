@@ -11,6 +11,7 @@ import {
 import type { IEditorGroup } from '@codingame/monaco-vscode-api/services';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { strToU8, zipSync } from 'fflate';
 import type { VirtualFS } from '../virtual-fs';
 
 const PREVIEW_EDITOR_TYPE_ID = 'almostnode.editor.preview';
@@ -413,6 +414,8 @@ export class FilesSidebarSurface {
           { label: 'Delete', action: () => {
             try { this.vfs.unlinkSync(fullPath); } catch { /* ignore */ }
           }},
+          'separator',
+          { label: 'Download', action: () => this.downloadFile(fullPath) },
         ]);
       });
 
@@ -505,6 +508,10 @@ export class FilesSidebarSurface {
           }},
         );
       }
+      menuItems.push(
+        'separator',
+        { label: 'Download as ZIP', action: () => this.downloadFolder(path) },
+      );
       this.showContextMenu(e.clientX, e.clientY, menuItems);
     });
 
@@ -742,6 +749,53 @@ export class FilesSidebarSurface {
     } else {
       this.vfs.unlinkSync(path);
     }
+  }
+
+  private downloadFile(filePath: string): void {
+    try {
+      const data = this.vfs.readFileSync(filePath);
+      const blob = new Blob([typeof data === 'string' ? data : data], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = this.nameOf(filePath);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  }
+
+  private downloadFolder(folderPath: string): void {
+    try {
+      const files: Record<string, Uint8Array> = {};
+      const prefix = folderPath.endsWith('/') ? folderPath : folderPath + '/';
+      const collect = (dir: string): void => {
+        const entries = this.vfs.readdirSync(dir);
+        for (const entry of entries) {
+          const full = this.joinPath(dir, entry);
+          const stat = this.vfs.statSync(full);
+          if (stat.isDirectory()) {
+            collect(full);
+          } else {
+            const relative = full.startsWith(prefix) ? full.slice(prefix.length) : full;
+            const data = this.vfs.readFileSync(full);
+            files[relative] = typeof data === 'string' ? strToU8(data) : new Uint8Array(data as ArrayBuffer);
+          }
+        }
+      };
+      collect(folderPath);
+      const zipped = zipSync(files);
+      const blob = new Blob([zipped], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = this.nameOf(folderPath) + '.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
   }
 
   private canMoveTo(sourcePath: string, targetDir: string): boolean {

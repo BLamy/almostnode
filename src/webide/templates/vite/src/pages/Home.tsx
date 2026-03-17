@@ -1,6 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 const PILLARS = [
   {
@@ -19,8 +28,8 @@ const PILLARS = [
 
 const NOTES = [
   {
-    title: 'Next useful command',
-    body: 'Run npx shadcn@latest add dropdown-menu after you want a real shadcn component. The project is already configured for it.',
+    title: 'shadcn dropdown-menu',
+    body: 'A real @radix-ui/react-dropdown-menu component is already installed. Check src/components/ui/dropdown-menu.tsx for the source.',
   },
   {
     title: 'Tailwind config',
@@ -34,6 +43,7 @@ const NOTES = [
 
 function Home() {
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const navigate = useNavigate();
 
   useEffect(() => {
     const root = document.documentElement;
@@ -47,6 +57,45 @@ function Home() {
         <Link to="/" className="text-sm font-semibold text-foreground hover:text-foreground/80 transition-colors">Home</Link>
         <Link to="/about" className="text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors">About</Link>
         <Link to="/todos" className="text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors">Todos</Link>
+        <div className="ml-auto">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+                Menu
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuLabel>Navigation</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                <DropdownMenuItem onSelect={() => navigate('/')}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                  Home
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => navigate('/about')}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                  About
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => navigate('/todos')}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
+                  Todos
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>Appearance</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => setTheme('light')}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+                Light mode
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setTheme('dark')}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+                Dark mode
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </nav>
       <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
         <section className="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_22rem]">
@@ -106,9 +155,9 @@ function Home() {
               </div>
 
               <div className="rounded-3xl border border-border/60 bg-background/70 p-4">
-                <p className="text-sm font-semibold tracking-tight">Suggested next command</p>
+                <p className="text-sm font-semibold tracking-tight">Included components</p>
                 <p className="mt-2 font-mono text-xs leading-6 text-muted-foreground">
-                  npx shadcn@latest add dropdown-menu
+                  button, dropdown-menu
                 </p>
               </div>
 
@@ -167,7 +216,8 @@ function Home() {
               <p className="text-sm font-semibold tracking-tight">Useful files</p>
               <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
                 <li><span className="font-mono text-foreground">src/App.tsx</span> for the landing surface.</li>
-                <li><span className="font-mono text-foreground">src/components/ui/button.tsx</span> for a local shadcn-style primitive.</li>
+                <li><span className="font-mono text-foreground">src/components/ui/button.tsx</span> for the Button primitive.</li>
+                <li><span className="font-mono text-foreground">src/components/ui/dropdown-menu.tsx</span> for the DropdownMenu component.</li>
                 <li><span className="font-mono text-foreground">src/lib/utils.ts</span> for the shared cn helper.</li>
               </ul>
             </div>

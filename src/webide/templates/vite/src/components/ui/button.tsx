@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from 'react';
+import { forwardRef, type ButtonHTMLAttributes } from 'react';
 import { cn } from '@/lib/utils';
 
 type ButtonVariant = 'default' | 'secondary' | 'outline';
@@ -27,18 +27,20 @@ const sizeStyles: Record<ButtonSize, string> = {
   lg: 'h-12 px-6 text-base',
 };
 
-export function Button({
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(({
   className,
   type = 'button',
   variant = 'default',
   size = 'default',
   ...props
-}: ButtonProps) {
+}, ref) => {
   return (
     <button
+      ref={ref}
       type={type}
       className={cn(baseStyles, variantStyles[variant], sizeStyles[size], className)}
       {...props}
     />
   );
-}
+});
+Button.displayName = 'Button';

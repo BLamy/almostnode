@@ -1071,10 +1071,10 @@ module.exports = (async () => {
           pendingTimerIdleMs += CHECK_MS;
         }
 
-        const keepAliveForInteractiveInput = execution.interactive || (!!execution.signal && (
+        const keepAliveForInteractiveInput = !!execution.signal && (
           stdinRawMode ||
           hasActiveStdinListeners(proc.stdin)
-        ));
+        );
         if (keepAliveForInteractiveInput) {
           continue;
         }
@@ -1373,11 +1373,6 @@ module.exports = (async () => {
       ALMOSTNODE_NPX_EXEC: '1',
     };
 
-    // Suppress streaming during ctx.exec so child output is captured in the result
-    // rather than streamed to the terminal (which interleaves with Claude Code's UI).
-    const savedCallbacks = { ...legacyStreamingCallbacks };
-    legacyStreamingCallbacks = { onStdout: null, onStderr: null, signal: null };
-
     if (resolvedBinTarget) {
       const fullCommand = ['node', resolvedBinTarget, ...commandArgs].map((value) => quoteArg(value)).join(' ');
       almostnodeDebugLog(
@@ -1385,12 +1380,10 @@ module.exports = (async () => {
         `[almostnode DEBUG] npx exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
       );
       const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
-      Object.assign(legacyStreamingCallbacks, savedCallbacks);
       return withNpxExecDiagnostics(result, `node ${resolvedBinTarget}`);
     }
 
     if (!binPath) {
-      Object.assign(legacyStreamingCallbacks, savedCallbacks);
       return { stdout: '', stderr: `npx: command not found: ${binName}\n`, exitCode: 1 };
     }
 
@@ -1400,7 +1393,6 @@ module.exports = (async () => {
       `[almostnode DEBUG] npx exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
     );
     const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
-    Object.assign(legacyStreamingCallbacks, savedCallbacks);
     return withNpxExecDiagnostics(result, binPath);
   });
 
@@ -2949,9 +2941,15 @@ function execWithBinding(
       return;
     }
 
-    const existingExecution = getActiveExecutionContext(controller, binding, envHint);
-    const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
-    const ownsExecution = !existingExecution;
+    // Create a dedicated child execution without streaming callbacks.
+    // child_process.exec captures output in result.stdout/stderr and returns
+    // it via the callback — it should NOT stream live to the parent terminal
+    // (which causes output to leak in Claude Code's UI).
+    const parentExecution = getActiveExecutionContext(controller, binding, envHint);
+    const execution = createExecutionContext(controller, {
+      signal: parentExecution?.signal || undefined,
+    });
+    const ownsExecution = true;
     try {
       const resolvedCwd = options.cwd ?? getBindingDefaultCwd(binding);
       const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(options.env || {}) }, resolvedCwd);
@@ -3260,9 +3258,14 @@ function spawnWithBinding(
 
     child.emit('spawn');
 
-    const existingExecution = getActiveExecutionContext(controller, binding, envHint);
-    const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
-    const ownsExecution = !existingExecution;
+    // Create a dedicated child execution without streaming callbacks.
+    // spawn captures output via child.stdout/child.stderr streams —
+    // it should NOT stream live to the parent terminal.
+    const parentExecution = getActiveExecutionContext(controller, binding, envHint);
+    const execution = createExecutionContext(controller, {
+      signal: parentExecution?.signal || undefined,
+    });
+    const ownsExecution = true;
     try {
       const resolvedCwd = spawnOptions.cwd ?? getBindingDefaultCwd(binding);
       const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(spawnOptions.env || {}) }, resolvedCwd);

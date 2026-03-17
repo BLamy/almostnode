@@ -1384,36 +1384,60 @@ function createConsoleWrapper(
   const ConsoleCtor = (builtinModules.console as { Console?: unknown }).Console;
   const wrapper = {
     log: (...args: unknown[]) => {
-      HOST_CONSOLE.log(...args);
-      onConsole?.('log', args);
+      if (onConsole) {
+        onConsole('log', args);
+      } else {
+        HOST_CONSOLE.log(...args);
+      }
     },
     error: (...args: unknown[]) => {
-      HOST_CONSOLE.error(...args);
-      onConsole?.('error', args);
+      if (onConsole) {
+        onConsole('error', args);
+      } else {
+        HOST_CONSOLE.error(...args);
+      }
     },
     warn: (...args: unknown[]) => {
-      HOST_CONSOLE.warn(...args);
-      onConsole?.('warn', args);
+      if (onConsole) {
+        onConsole('warn', args);
+      } else {
+        HOST_CONSOLE.warn(...args);
+      }
     },
     info: (...args: unknown[]) => {
-      HOST_CONSOLE.info(...args);
-      onConsole?.('info', args);
+      if (onConsole) {
+        onConsole('info', args);
+      } else {
+        HOST_CONSOLE.info(...args);
+      }
     },
     debug: (...args: unknown[]) => {
-      HOST_CONSOLE.debug(...args);
-      onConsole?.('debug', args);
+      if (onConsole) {
+        onConsole('debug', args);
+      } else {
+        HOST_CONSOLE.debug(...args);
+      }
     },
     trace: (...args: unknown[]) => {
-      HOST_CONSOLE.trace(...args);
-      onConsole?.('trace', args);
+      if (onConsole) {
+        onConsole('trace', args);
+      } else {
+        HOST_CONSOLE.trace(...args);
+      }
     },
     dir: (obj: unknown) => {
-      HOST_CONSOLE.dir(obj);
-      onConsole?.('dir', [obj]);
+      if (onConsole) {
+        onConsole('dir', [obj]);
+      } else {
+        HOST_CONSOLE.dir(obj);
+      }
     },
     dirxml: (...args: unknown[]) => {
-      HOST_CONSOLE.dirxml?.(...args);
-      onConsole?.('dirxml', args);
+      if (onConsole) {
+        onConsole('dirxml', args);
+      } else {
+        HOST_CONSOLE.dirxml?.(...args);
+      }
     },
     time: HOST_CONSOLE.time.bind(HOST_CONSOLE),
     timeEnd: HOST_CONSOLE.timeEnd.bind(HOST_CONSOLE),
@@ -1426,6 +1450,7 @@ function createConsoleWrapper(
     groupCollapsed: HOST_CONSOLE.groupCollapsed.bind(HOST_CONSOLE),
     groupEnd: HOST_CONSOLE.groupEnd.bind(HOST_CONSOLE),
     table: HOST_CONSOLE.table.bind(HOST_CONSOLE),
+    timeStamp: HOST_CONSOLE.timeStamp?.bind(HOST_CONSOLE) ?? (() => {}),
     Console: ConsoleCtor,
   };
 
