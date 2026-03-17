@@ -44,6 +44,9 @@ importers:
       '@codingame/monaco-vscode-languages-service-override':
         specifier: ^27.0.0
         version: 27.0.0
+      '@codingame/monaco-vscode-log-service-override':
+        specifier: ^27.0.0
+        version: 27.0.0
       '@codingame/monaco-vscode-search-service-override':
         specifier: ^27.0.0
         version: 27.0.0
@@ -116,12 +119,21 @@ importers:
       pako:
         specifier: ^2.1.0
         version: 2.1.0
+      react:
+        specifier: ^19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.2.4
+        version: 19.2.4(react@19.2.4)
       resolve.exports:
         specifier: ^2.0.3
         version: 2.0.3
       sha.js:
         specifier: ^2.4.12
         version: 2.4.12
+      sonner:
+        specifier: ^2.0.3
+        version: 2.0.7(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       vite-plugin-top-level-await:
         specifier: ^1.6.0
         version: 1.6.0(rollup@4.59.0)(vite@5.4.21(@types/node@25.5.0))
@@ -159,9 +171,6 @@ importers:
       jsdom:
         specifier: ^27.4.0
         version: 27.4.0
-      react-dom:
-        specifier: ^19.2.4
-        version: 19.2.4(react@19.2.4)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -267,6 +276,9 @@ packages:
 
   '@codingame/monaco-vscode-layout-service-override@27.0.0':
     resolution: {integrity: sha512-pRQD0vjD0HoFjGlAYK8GZftzNkmcczfEdPuS77WujmRcV8Ldm7Cy63UahpqPPjEfIkUneFVlRWgp/Xivyi2Akw==}
+
+  '@codingame/monaco-vscode-log-service-override@27.0.0':
+    resolution: {integrity: sha512-DQarDQEsIp74keSp9VHUV2ooZ/Nu5+Q5aubjVdmALLwhhU1cLRSpd94TC4PiiyMqp5ZdgikyENkSMk1NPF1iow==}
 
   '@codingame/monaco-vscode-quickaccess-service-override@27.0.0':
     resolution: {integrity: sha512-XTH5vCLRDaA+YaXTI0BnCohD6UOAds5zXkohdEMIMxMDiWANiiCTpc6ncetjeFSFXv0uYVQmj1GyfsrM+DA7IA==}
@@ -1570,6 +1582,12 @@ packages:
     resolution: {integrity: sha512-4zemZi0HvTnYwLfrpk/CF9LOd9Lt87kAt50GnqhMpyF9U3poDAP2+iukq2bZsO/ufegbYehBkqINbsWxj4l4cw==}
     engines: {node: '>= 18'}
 
+  sonner@2.0.7:
+    resolution: {integrity: sha512-W6ZN4p58k8aDKA4XPcx2hpIQXBRAgyiWVkYhT7CvK6D3iAu7xjvVyhQHg2/iaKJZ1XVJ4r7XuwGL+WGEK37i9w==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0 || ^19.0.0-rc
+      react-dom: ^18.0.0 || ^19.0.0 || ^19.0.0-rc
+
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
@@ -1972,6 +1990,11 @@ snapshots:
   '@codingame/monaco-vscode-layout-service-override@27.0.0':
     dependencies:
       '@codingame/monaco-vscode-api': 27.0.0
+
+  '@codingame/monaco-vscode-log-service-override@27.0.0':
+    dependencies:
+      '@codingame/monaco-vscode-api': 27.0.0
+      '@codingame/monaco-vscode-environment-service-override': 27.0.0
 
   '@codingame/monaco-vscode-quickaccess-service-override@27.0.0':
     dependencies:
@@ -3140,6 +3163,11 @@ snapshots:
       simple-concat: 1.0.1
 
   smol-toml@1.6.0: {}
+
+  sonner@2.0.7(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
+    dependencies:
+      react: 19.2.4
+      react-dom: 19.2.4(react@19.2.4)
 
   source-map-js@1.2.1: {}
 
