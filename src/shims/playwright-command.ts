@@ -771,7 +771,7 @@ async function cmdEval(args: string[]): Promise<JustBashExecResult> {
 
 async function cmdConsole(args: string[]): Promise<JustBashExecResult> {
   const levelFilter = args[0];
-  const severityOrder = ['error', 'warn', 'warning', 'info', 'log', 'debug'];
+  const severityOrder = ['error', 'warn', 'warning', 'log', 'info', 'debug'];
 
   let filtered = consoleMessages;
   if (levelFilter) {

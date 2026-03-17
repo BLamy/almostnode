@@ -80,3 +80,4 @@ pg --json "SELECT * FROM todos WHERE completed = false"
 - Always quote your SQL string: `pg "SELECT ..."` — unquoted SQL will be mangled by the shell.
 - For complex queries with single quotes, use double quotes around the whole statement: `pg "INSERT INTO todos (title) VALUES ('Buy milk')"`.
 - The `pg` command bypasses the shell lexer, so SQL with semicolons, backslashes, and quotes works correctly.
+- Do NOT escape `!` — there is no history expansion in this environment. `\!` stores a literal backslash.

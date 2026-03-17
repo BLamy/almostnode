@@ -90,3 +90,10 @@ Modifiers: `.primaryKey()`, `.notNull()`, `.default(value)`, `.defaultNow()`
 - Column type changes need manual ALTER statements
 - Always verify migrations applied correctly with `drizzle-kit status`
 - Test queries with `pg` before wiring into application code
+
+## PGlite-Specific Gotchas
+
+- **IndexedDB persistence** — PGlite persists data to IndexedDB between sessions. Old data from previous sessions can contaminate new runs. If data looks stale, clear the table or use `drizzle-kit push --force` to reset.
+- **Migration safety** — Always run `drizzle-kit migrate --force` after changing `schema.ts`. Without this, the TypeScript types and actual database schema diverge silently — queries compile but fail at runtime.
+- **Query timing** — PGlite takes 1-3 seconds to initialize. All database access must be gated on the ready state (`isReady` from `useDB`). Never fire queries in a useEffect without checking readiness first.
+- **No background processes** — Unlike a real Postgres server, PGlite runs in the main browser thread. Long-running queries block the UI. Keep queries simple and fast.

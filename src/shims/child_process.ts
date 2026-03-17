@@ -506,7 +506,7 @@ function stripQuotesForBash(command: string): string {
     if (match[1] !== undefined) {
       // Was double-quoted — unescape, then re-quote if it contains
       // characters that would confuse just-bash's lexer.
-      const content = match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      const content = match[1].replace(/\\(["\\$`!])/g, '$1');
       if (/[()$`]/.test(content) || /\s/.test(content)) {
         result.push('"' + content.replace(/["\\$`]/g, '\\$&') + '"');
       } else {
@@ -514,7 +514,7 @@ function stripQuotesForBash(command: string): string {
       }
     } else if (match[2] !== undefined) {
       // Was single-quoted — unescape, then re-quote if needed.
-      const content = match[2].replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+      const content = match[2].replace(/\\(['\\!])/g, '$1');
       if (/[()$`]/.test(content) || /\s/.test(content)) {
         result.push('"' + content.replace(/["\\$`]/g, '\\$&') + '"');
       } else {
@@ -2831,18 +2831,18 @@ function parseSyntheticShellExec(args: string[]): { script?: string; error?: str
   return {};
 }
 
-function splitCommandArgs(command: string): string[] {
+export function splitCommandArgs(command: string): string[] {
   const tokens: string[] = [];
   const matcher = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s]+)/g;
 
   let match: RegExpExecArray | null = null;
   while ((match = matcher.exec(command)) !== null) {
     if (match[1] !== undefined) {
-      tokens.push(match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\'));
+      tokens.push(match[1].replace(/\\(["\\$`!])/g, '$1'));
       continue;
     }
     if (match[2] !== undefined) {
-      tokens.push(match[2].replace(/\\'/g, '\'').replace(/\\\\/g, '\\'));
+      tokens.push(match[2].replace(/\\(['\\!])/g, '$1'));
       continue;
     }
     if (match[3] !== undefined) {

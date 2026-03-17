@@ -5,6 +5,7 @@ skills:
   - frontend-design
   - shadcn
   - playwright
+  - framer-motion
 ---
 
 
@@ -89,6 +90,38 @@ playwright-cli cookie-list          # Check cookies (auth tokens, preferences)
 ```
 
 Fix any console errors before moving on to visual verification.
+
+### React Anti-Pattern Awareness
+
+Watch for these common patterns that cause subtle bugs:
+
+- **Stale closures** — Callbacks in useEffect capture state at render time. Use functional updaters (`setCount(prev => prev + 1)`) instead of direct references (`setCount(count + 1)`) in async callbacks, timers, and effects.
+- **useEffect feedback loops** — If an effect updates state that's in its own dependency array, you get infinite re-renders. If you can compute a value from existing state, use `useMemo` instead of useEffect + useState.
+- **Dirty flag for autosave** — When implementing autosave, track `isDirty` to prevent save→state update→save loops. Only save when the user has actually changed something.
+- **Key props in lists** — Always use stable unique IDs (like `item.id`), never array indices. Index keys break on reorder/delete and cause wrong data in items.
+- **useEffect cleanup** — Always return a cleanup function from effects that do async work. Use an `ignore` flag to prevent stale callbacks from updating state.
+
+See `.claude/skills/debugging/rules/react-state.md` for detailed patterns and fixes.
+
+### Animation & Motion
+
+**Easing decision rules:**
+- **Enter/appear** → `ease-out-*` (element decelerates into place). Default: `ease-out-quart`
+- **Exit/disappear** → `ease-out-*` (same family, but with `duration-exit` for 20% faster)
+- **On-screen movement** → `ease-in-out-*` (accelerate then decelerate). Default: `ease-in-out-cubic`
+- **Hover/focus micro** → CSS `ease` (built-in), `duration-micro`
+
+**Available Tailwind classes:**
+- Easing: `ease-out-quad`, `ease-out-cubic`, `ease-out-quart`, `ease-out-quint`, `ease-out-expo`, `ease-out-circ`, `ease-in-out-quad` through `ease-in-out-circ`
+- Duration: `duration-micro`, `duration-fast`, `duration-standard`, `duration-modal`, `duration-slow`, `duration-exit`
+- Animation: `animate-fade-in`, `animate-scale-in`, `animate-slide-in-up`, `animate-slide-in-down`, `animate-slide-in-left`, `animate-slide-in-right`, `animate-fade-out`, `animate-scale-out`, `animate-slide-out-down`, `animate-slide-out-up`
+
+**Performance rules:**
+- Only animate `transform` and `opacity` — these are GPU-composited and won't trigger layout/paint
+- Never animate `width`, `height`, `top`, `left`, `margin`, or `padding`
+- Use `will-change-transform` sparingly and only on elements that are about to animate
+
+**Accessibility:** `prefers-reduced-motion: reduce` is handled globally in `index.css` — all animations collapse to 0.01ms (so `animationend` events still fire). No per-component work needed.
 
 ### Escalating to the Debugging Engineer
 

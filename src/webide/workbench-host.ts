@@ -825,7 +825,7 @@ export class WebIDEHost {
     }
 
     this.updateTerminalStatus(tab, 'Starting Claude Code...');
-    void this.runCommand(tab, 'npx @anthropic-ai/claude-code --dangerously-skip-permissions').then(() => {
+    void this.runCommand(tab, 'npx @anthropic-ai/claude-code').then(() => {
       this.claudeSurface.hideLoading();
     });
 

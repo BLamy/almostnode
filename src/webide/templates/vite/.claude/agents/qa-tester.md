@@ -132,6 +132,30 @@ When you find an issue, report it clearly:
 - Verify accessibility by checking snapshot output for proper roles and labels
 - Check network requests for failed API calls after data operations
 
+### Quick Data Contamination Checks
+
+Before reporting a data-related bug, rule out stale state:
+
+```bash
+pg "\dt"                          # Are expected tables present?
+pg "SELECT count(*) FROM todos"   # Expected row count?
+pg "SELECT * FROM todos LIMIT 5"  # Does data look reasonable?
+drizzle-kit status                # Are migrations applied?
+```
+
+If tables are missing → migrations haven't run (not a bug, infrastructure issue).
+If data looks stale → IndexedDB persistence from a previous session (clear and retry).
+
+### Structured Verification Checklist
+
+Run these checks in order after any code change:
+
+1. **Console** — `playwright-cli console error` — Any JS errors?
+2. **Network** — `playwright-cli network` — Any failed requests?
+3. **Database** — `pg "\dt"` and `pg "SELECT * FROM <table>"` — Data intact?
+4. **UI** — `playwright-cli snapshot` — Correct elements present?
+5. **Visual** — `playwright-cli screenshot` — Looks right?
+
 ### Escalating to the Debugging Engineer
 
 Your job is to **find and report** bugs, not to fix them. If you find issues, report them clearly using the bug report format above. For bugs that are hard to reproduce or involve complex state interactions, recommend delegating to the Debugging Engineer subagent (`.claude/agents/debugging.md`) which has `replayio` for time-travel debugging.

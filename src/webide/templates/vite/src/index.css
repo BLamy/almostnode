@@ -19,6 +19,42 @@
   --input: 215 25% 84%;
   --ring: 23 92% 58%;
   --radius: 1.4rem;
+
+  /* Semantic colors */
+  --success: 142 72% 42%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 92% 50%;
+  --warning-foreground: 38 28% 10%;
+  --surface: 210 20% 95%;
+  --surface-foreground: 222 39% 11%;
+  --chart-1: 23 92% 58%;
+  --chart-2: 198 69% 47%;
+  --chart-3: 142 72% 42%;
+  --chart-4: 38 92% 50%;
+  --chart-5: 270 60% 58%;
+
+  /* Easing curves */
+  --ease-out-quad: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-out-cubic: cubic-bezier(0.215, 0.61, 0.355, 1);
+  --ease-out-quart: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-out-circ: cubic-bezier(0.075, 0.82, 0.165, 1);
+  --ease-in-out-quad: cubic-bezier(0.455, 0.03, 0.515, 0.955);
+  --ease-in-out-cubic: cubic-bezier(0.645, 0.045, 0.355, 1);
+  --ease-in-out-quart: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-in-out-quint: cubic-bezier(0.86, 0, 0.07, 1);
+  --ease-in-out-expo: cubic-bezier(1, 0, 0, 1);
+  --ease-in-out-circ: cubic-bezier(0.785, 0.135, 0.15, 0.86);
+
+  /* Duration tokens */
+  --duration-micro: 100ms;
+  --duration-fast: 150ms;
+  --duration-standard: 200ms;
+  --duration-modal: 250ms;
+  --duration-slow: 300ms;
+  --duration-exit: 150ms;
+
   font-family: "Avenir Next", "Segoe UI", sans-serif;
 }
 
@@ -42,6 +78,31 @@
   --border: 222 17% 23%;
   --input: 222 17% 23%;
   --ring: 24 96% 63%;
+
+  /* Semantic colors (dark) */
+  --success: 142 64% 48%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 88% 55%;
+  --warning-foreground: 38 28% 10%;
+  --surface: 223 28% 15%;
+  --surface-foreground: 36 43% 96%;
+  --chart-1: 24 96% 63%;
+  --chart-2: 198 72% 54%;
+  --chart-3: 142 64% 48%;
+  --chart-4: 38 88% 55%;
+  --chart-5: 270 55% 65%;
+}
+
+/* Reduced motion: collapse durations so animationend still fires */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 * {

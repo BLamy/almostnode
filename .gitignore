@@ -23,7 +23,7 @@ Thumbs.db
 .claude/
 .claude-trace/
 !src/webide/templates/*/.claude/
-!src/webide/templates/_shared/.vscode/settings.json
+!src/webide/templates/_shared/*
 
 # Environment
 .env

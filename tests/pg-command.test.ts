@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { classifySQL, parsePgArgs, runPgCommand } from '../src/shims/pg-command';
+import { splitCommandArgs } from '../src/shims/child_process';
 import type { CommandContext } from 'just-bash';
 import type { VirtualFS } from '../src/virtual-fs';
 
@@ -295,5 +296,59 @@ describe('runPgCommand', () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain('relation');
     expect(result.stderr).toContain('does not exist');
+  });
+});
+
+// ── splitCommandArgs backslash unescaping ──
+
+describe('splitCommandArgs', () => {
+  it('unescapes \\! in double quotes', () => {
+    const tokens = splitCommandArgs('pg "Hello\\!"');
+    expect(tokens).toEqual(['pg', 'Hello!']);
+  });
+
+  it('unescapes \\\\ in double quotes', () => {
+    const tokens = splitCommandArgs('pg "C:\\\\path"');
+    expect(tokens).toEqual(['pg', 'C:\\path']);
+  });
+
+  it('unescapes \\" in double quotes', () => {
+    const tokens = splitCommandArgs('pg "say \\"hello\\""');
+    expect(tokens).toEqual(['pg', 'say "hello"']);
+  });
+
+  it('unescapes \\$ in double quotes', () => {
+    const tokens = splitCommandArgs('pg "price is \\$5"');
+    expect(tokens).toEqual(['pg', 'price is $5']);
+  });
+
+  it('unescapes \\` in double quotes', () => {
+    const tokens = splitCommandArgs('pg "use \\`backticks\\`"');
+    expect(tokens).toEqual(['pg', 'use `backticks`']);
+  });
+
+  it('handles multiple escapes in one argument', () => {
+    const tokens = splitCommandArgs('pg "Hello\\! Cost is \\$5 on C:\\\\drive"');
+    expect(tokens).toEqual(['pg', 'Hello! Cost is $5 on C:\\drive']);
+  });
+
+  it('does NOT strip backslash from \\n (not a bash double-quote escape)', () => {
+    const tokens = splitCommandArgs('pg "line1\\nline2"');
+    expect(tokens).toEqual(['pg', 'line1\\nline2']);
+  });
+
+  it('unescapes \\! in single quotes', () => {
+    const tokens = splitCommandArgs("pg 'Hello\\!'");
+    expect(tokens).toEqual(['pg', 'Hello!']);
+  });
+
+  it('unescapes \\\\ in single quotes', () => {
+    const tokens = splitCommandArgs("pg 'C:\\\\path'");
+    expect(tokens).toEqual(['pg', 'C:\\path']);
+  });
+
+  it("unescapes \\' in single quotes", () => {
+    const tokens = splitCommandArgs("pg 'it\\'s'");
+    expect(tokens).toEqual(['pg', "it's"]);
   });
 });
