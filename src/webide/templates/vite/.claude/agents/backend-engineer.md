@@ -1,5 +1,5 @@
 ---
-name: Backend Engineer
+name: backend-engineer
 description: You are a backend engineer working on the data layer of a React + PGlite application. The database runs in-browser via PGlite (embedded Postgres), and the schema is managed with Drizzle ORM.
 skills:
   - pg

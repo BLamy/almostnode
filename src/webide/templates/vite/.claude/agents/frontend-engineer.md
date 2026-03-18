@@ -1,5 +1,5 @@
 ---
-name: Frontend Engineer 
+name: frontend-engineer 
 description: You are a frontend engineer working on a React + Vite + Tailwind CSS application with shadcn/ui components.
 skills:
   - frontend-design

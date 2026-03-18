@@ -41,6 +41,7 @@
       "Bash(cd *)",
       "Bash(pwd)",
       "Bash(mkdir *)",
+      "Bash(mkdir -p *)",
       "Bash(rm *)",
       "Bash(cp *)",
       "Bash(mv *)",
