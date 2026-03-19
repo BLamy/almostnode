@@ -29,6 +29,91 @@ Built by the creators of [Macaly.com](https://macaly.com) — a tool that lets a
 
 ---
 
+## Architecture
+
+```mermaid
+graph TB
+    subgraph UserLayer["User Layer"]
+        Editor["Code Editor / Demo HTML"]
+        Preview["Preview iframe"]
+    end
+
+    subgraph Container["createContainer()"]
+        Runtime["Runtime<br/><i>JS execution engine</i>"]
+        VFS["VirtualFS<br/><i>In-memory filesystem</i>"]
+        PM["PackageManager<br/><i>npm install & resolution</i>"]
+        Shell["just-bash<br/><i>Shell emulator</i>"]
+    end
+
+    subgraph Shims["Node.js Shims (43 modules)"]
+        FS["fs"]
+        Path["path"]
+        HTTP["http"]
+        Crypto["crypto"]
+        Others["events, stream,<br/>os, url, ..."]
+    end
+
+    subgraph Transforms["Code Transforms"]
+        ESBuild["esbuild-wasm<br/><i>JSX/TS → JS</i>"]
+        ESMtoCJS["ESM → CJS<br/><i>acorn AST</i>"]
+        ReactRefresh["React Refresh<br/><i>HMR injection</i>"]
+        NpmRedirect["Import Rewrite<br/><i>react → /__npm__/react</i>"]
+    end
+
+    subgraph DevServers["Dev Servers"]
+        Vite["ViteDevServer<br/><i>React + HMR</i>"]
+        Next["NextDevServer<br/><i>Pages & App Router</i>"]
+        NpmServe["npm-serve<br/><i>/__npm__/ bundling</i>"]
+    end
+
+    subgraph Network["Network Layer"]
+        SW["Service Worker<br/><i>Request interception</i>"]
+        Bridge["ServerBridge<br/><i>Routes requests to servers</i>"]
+    end
+
+    subgraph External["External"]
+        Registry["npm Registry<br/><i>Package metadata & tarballs</i>"]
+    end
+
+    Editor -->|"writes files"| VFS
+    Editor -->|"container.run()"| Shell
+    Shell -->|"npm install"| PM
+    Shell -->|"node script.js"| Runtime
+
+    Runtime -->|"require('fs')"| Shims
+    FS -->|"reads/writes"| VFS
+    HTTP -->|"listen(port)"| Bridge
+
+    PM -->|"fetch metadata"| Registry
+    PM -->|"installs to /node_modules"| VFS
+
+    Preview -->|"fetch /__virtual__/3000/"| SW
+    SW -->|"routes by port"| Bridge
+    Bridge -->|"handleRequest()"| Vite
+    Bridge -->|"handleRequest()"| Next
+    Bridge -->|"/__npm__/ requests"| NpmServe
+
+    Vite -->|"reads source"| VFS
+    Next -->|"reads source"| VFS
+    NpmServe -->|"bundles from /node_modules"| VFS
+
+    Vite -->|"transform pipeline"| Transforms
+    Next -->|"transform pipeline"| Transforms
+
+    Vite -->|"HMR update"| Preview
+    Next -->|"HMR update"| Preview
+
+    style UserLayer fill:#e8f4f8,stroke:#2196F3
+    style Container fill:#fff3e0,stroke:#FF9800
+    style Shims fill:#f3e5f5,stroke:#9C27B0
+    style Transforms fill:#e8f5e9,stroke:#4CAF50
+    style DevServers fill:#fce4ec,stroke:#E91E63
+    style Network fill:#e0f2f1,stroke:#009688
+    style External fill:#f5f5f5,stroke:#9E9E9E
+```
+
+---
+
 ## Requirements
 
 - **Node.js 20+** - Required for development and building

@@ -87,6 +87,7 @@ export default defineConfig({
     },
   },
   resolve: {
+    dedupe: ['react', 'react-dom'],
     alias: isTest ? [] : [
       {
         find: /^@codingame\/monaco-vscode-api\/vscode\/(.*)$/,

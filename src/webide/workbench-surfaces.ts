@@ -975,6 +975,10 @@ export class PreviewSurface {
   getIframe(): HTMLIFrameElement {
     return this.iframe;
   }
+
+  getBody(): HTMLDivElement {
+    return this.body;
+  }
 }
 
 export class ConsolePanelElement {

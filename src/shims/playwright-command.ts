@@ -8,6 +8,7 @@ export interface PlaywrightSelectorContext {
   name: string;
   tagName: string;
   testId?: string;
+  elementRect?: { x: number; y: number; width: number; height: number };
 }
 
 export type PlaywrightCommandListener = (
@@ -48,11 +49,18 @@ function getSelectorContextForRef(refId: string): PlaywrightSelectorContext | un
   const role = getRole(el);
   const name = getAccessibleName(el);
   const testId = el.getAttribute('data-testid') ?? undefined;
+  let elementRect: { x: number; y: number; width: number; height: number } | undefined;
+  if (typeof (el as HTMLElement).getBoundingClientRect === 'function') {
+    const r = (el as HTMLElement).getBoundingClientRect();
+    elementRect = { x: r.x, y: r.y, width: r.width, height: r.height };
+  }
+
   return {
     role: role || el.tagName.toLowerCase(),
     name,
     tagName: el.tagName,
     testId,
+    elementRect,
   };
 }
 
@@ -1096,9 +1104,15 @@ export async function runPlaywrightCommand(
   let result: JustBashExecResult;
   let selectorContext: PlaywrightSelectorContext | undefined;
 
-  // For ref-based commands, capture selector context before execution
+  // For ref-based commands, scroll the element into view first so
+  // getBoundingClientRect() returns accurate viewport-relative coordinates,
+  // then capture the context before execution (element may be removed by click).
   const refBasedCommands = new Set(['click', 'fill', 'hover']);
   if (refBasedCommands.has(subcommand) && subArgs[0]) {
+    const el = refMap.get(subArgs[0]);
+    if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
+      (el as HTMLElement).scrollIntoView({ block: 'center' });
+    }
     selectorContext = getSelectorContextForRef(subArgs[0]);
   }
 

@@ -516,6 +516,7 @@ export class WebIDEHost {
   private testMetadataList: import('./test-spec-generator').TestMetadata[] = [];
   // testStepsMap removed — pw-web.js reads spec files directly from VFS
   private removePlaywrightListener: (() => void) | null = null;
+  private removeCursorOverlay: (() => void) | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
     this.templateId = options.template || 'vite';
@@ -2135,6 +2136,13 @@ export class WebIDEHost {
     this.removePlaywrightListener = onPlaywrightCommand((subcommand, args, result, selectorContext) => {
       recorder.recordCommand(subcommand, args, result, selectorContext);
     });
+
+    // Cursor overlay — animated agent cursor on preview
+    const { initCursorOverlay } = await import('./cursor-overlay');
+    this.removeCursorOverlay = initCursorOverlay(
+      this.previewSurface.getBody(),
+      onPlaywrightCommand,
+    );
 
     // Register tests sidebar view (workbench is already initialized)
     const { registerCustomView } = await import('@codingame/monaco-vscode-workbench-service-override');
