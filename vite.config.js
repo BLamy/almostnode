@@ -2,7 +2,6 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import wasm from 'vite-plugin-wasm';
 import { workspaceTemplatesPlugin } from './src/webide/vite-plugin-workspace-templates';
-import { referenceAppsPlugin } from './src/webide/vite-plugin-reference-apps';
 
 const monacoVscodePackages = [
   '@codingame/monaco-vscode-api',
@@ -38,7 +37,6 @@ export default defineConfig({
   },
   plugins: [
     workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, 'src/webide/templates') }),
-    referenceAppsPlugin({ builderAssetsDir: resolve(__dirname, 'vendor/builder-assets') }),
     ...(isTest ? [] : [wasm(),
     {
       name: 'browser-shims',
@@ -85,7 +83,7 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
     },
     fs: {
-      allow: [resolve(__dirname, './'), resolve(__dirname, 'node_modules'), resolve(__dirname, 'vendor/builder-assets')],
+      allow: [resolve(__dirname, './'), resolve(__dirname, 'node_modules')],
     },
   },
   resolve: {

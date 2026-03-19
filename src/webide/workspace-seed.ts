@@ -4,6 +4,9 @@ import type { ReferenceAppFiles } from "./reference-app-loader";
 import templates from "virtual:workspace-templates";
 
 export const WORKSPACE_ROOT = "/project";
+export const WORKSPACE_TESTS_ROOT = `${WORKSPACE_ROOT}/tests`;
+export const WORKSPACE_TEST_E2E_ROOT = `${WORKSPACE_TESTS_ROOT}/e2e`;
+export const WORKSPACE_TEST_METADATA_PATH = `${WORKSPACE_TESTS_ROOT}/.almostnode-tests.json`;
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
@@ -130,7 +133,7 @@ const DEMO_TEST_METADATA = JSON.stringify({
     {
       id: "test-seed-todo-crud",
       name: "todo-crud",
-      specPath: "/tests/e2e/todo-crud.spec.ts",
+      specPath: `${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`,
       createdAt: "2026-03-16T00:00:00.000Z",
       status: "pending",
     },
@@ -138,11 +141,10 @@ const DEMO_TEST_METADATA = JSON.stringify({
 }, null, 2);
 
 function seedDemoTests(container: ReturnTypeOfCreateContainer): void {
-  // Tests live at /tests/ (outside /project/) — matching loadTestMetadata/saveTestMetadata paths
-  ensureDirectory(container, "/tests/e2e");
-  container.vfs.writeFileSync("/tests/e2e/todo-crud.spec.ts", DEMO_TEST_SPEC);
-  if (!container.vfs.existsSync("/tests/.almostnode-tests.json")) {
-    container.vfs.writeFileSync("/tests/.almostnode-tests.json", DEMO_TEST_METADATA);
+  ensureDirectory(container, WORKSPACE_TEST_E2E_ROOT);
+  container.vfs.writeFileSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`, DEMO_TEST_SPEC);
+  if (!container.vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)) {
+    container.vfs.writeFileSync(WORKSPACE_TEST_METADATA_PATH, DEMO_TEST_METADATA);
   }
 }
 

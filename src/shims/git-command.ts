@@ -54,6 +54,15 @@ interface DiffEntry {
   rightText: string;
 }
 
+interface IgnoreRule {
+  baseRel: string;
+  pattern: string;
+  negated: boolean;
+  dirOnly: boolean;
+  anchored: boolean;
+  hasSlash: boolean;
+}
+
 // ── Hash ────────────────────────────────────────────────────────────────────
 
 function simpleHash(content: string): string {
@@ -206,30 +215,195 @@ function resolveToSha(vfs: VirtualFS, dir: string, refOrSha: string): string | n
 
 // ── Working tree helpers ────────────────────────────────────────────────────
 
-function collectWorkingTreeFiles(vfs: VirtualFS, dir: string): Record<string, string> {
+function escapeRegex(input: string): string {
+  return input.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+}
+
+function segmentPatternToRegex(pattern: string): RegExp {
+  const source = pattern
+    .split('')
+    .map((char) => {
+      if (char === '*') return '[^/]*';
+      if (char === '?') return '[^/]';
+      return escapeRegex(char);
+    })
+    .join('');
+  return new RegExp(`^${source}$`);
+}
+
+function pathPatternToRegex(pattern: string): RegExp {
+  const normalized = pattern.replace(/^\/+/, '').replace(/\/+/g, '/');
+  const source = normalized
+    .split('/')
+    .map((segment) => segmentPatternToRegex(segment).source.slice(1, -1))
+    .join('/');
+  return new RegExp(`^${source}$`);
+}
+
+function parseIgnoreRules(content: string, baseRel: string): IgnoreRule[] {
+  const rules: IgnoreRule[] = [];
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    let pattern = line;
+    let negated = false;
+    if (pattern.startsWith('!')) {
+      negated = true;
+      pattern = pattern.slice(1).trim();
+    }
+
+    const dirOnly = pattern.endsWith('/');
+    if (dirOnly) {
+      pattern = pattern.slice(0, -1);
+    }
+
+    const anchored = pattern.startsWith('/');
+    if (anchored) {
+      pattern = pattern.replace(/^\/+/, '');
+    }
+
+    pattern = pattern.replace(/\/+/g, '/');
+    if (!pattern || pattern === '.') {
+      continue;
+    }
+
+    rules.push({
+      baseRel,
+      pattern,
+      negated,
+      dirOnly,
+      anchored,
+      hasSlash: pattern.includes('/'),
+    });
+  }
+  return rules;
+}
+
+function relativeToIgnoreBase(repoRel: string, baseRel: string): string | null {
+  if (!baseRel) {
+    return repoRel;
+  }
+  if (repoRel === baseRel) {
+    return '.';
+  }
+  if (!repoRel.startsWith(`${baseRel}/`)) {
+    return null;
+  }
+  return repoRel.slice(baseRel.length + 1);
+}
+
+function listDirectoryCandidates(candidateRel: string, isDir: boolean): string[] {
+  const segments = candidateRel.split('/').filter(Boolean);
+  const max = isDir ? segments.length : Math.max(segments.length - 1, 0);
+  const candidates: string[] = [];
+  for (let index = 1; index <= max; index += 1) {
+    candidates.push(segments.slice(0, index).join('/'));
+  }
+  return candidates;
+}
+
+function matchesIgnoreRule(repoRel: string, isDir: boolean, rule: IgnoreRule): boolean {
+  const candidateRel = relativeToIgnoreBase(repoRel, rule.baseRel);
+  if (!candidateRel || candidateRel === '.') {
+    return false;
+  }
+
+  if (!rule.hasSlash && !rule.anchored) {
+    const matcher = segmentPatternToRegex(rule.pattern);
+    if (rule.dirOnly) {
+      const directoryCandidates = listDirectoryCandidates(candidateRel, isDir);
+      return directoryCandidates.some((directory) => {
+        const lastSegment = directory.split('/').pop();
+        return lastSegment ? matcher.test(lastSegment) : false;
+      });
+    }
+
+    return candidateRel.split('/').some((segment) => matcher.test(segment));
+  }
+
+  const matcher = pathPatternToRegex(rule.pattern);
+  if (rule.dirOnly) {
+    return listDirectoryCandidates(candidateRel, isDir).some((directory) => matcher.test(directory));
+  }
+
+  return matcher.test(candidateRel);
+}
+
+function isIgnoredPath(repoRel: string, isDir: boolean, rules: IgnoreRule[]): boolean {
+  let ignored = false;
+  for (const rule of rules) {
+    if (!matchesIgnoreRule(repoRel, isDir, rule)) {
+      continue;
+    }
+    ignored = !rule.negated;
+  }
+  return ignored;
+}
+
+function hasTrackedDescendant(trackedPaths: Set<string>, prefix: string): boolean {
+  if (trackedPaths.has(prefix)) {
+    return true;
+  }
+  const normalizedPrefix = `${prefix}/`;
+  for (const trackedPath of trackedPaths) {
+    if (trackedPath.startsWith(normalizedPrefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectWorkingTreeFiles(
+  vfs: VirtualFS,
+  dir: string,
+  trackedPaths: Set<string> = new Set(),
+): Record<string, string> {
   const result: Record<string, string> = {};
-  const walk = (current: string, prefix: string) => {
+  const walk = (current: string, prefix: string, inheritedRules: IgnoreRule[]) => {
     if (!vfs.existsSync(current)) return;
+    let activeRules = inheritedRules;
+    const ignorePath = normalizePath(path.join(current, '.gitignore'));
+    if (vfs.existsSync(ignorePath)) {
+      const baseRel = prefix;
+      const rules = parseIgnoreRules(vfs.readFileSync(ignorePath, 'utf8'), baseRel);
+      if (rules.length > 0) {
+        activeRules = [...inheritedRules, ...rules];
+      }
+    }
     const entries = vfs.readdirSync(current);
     for (const entry of entries) {
       if (entry === '.git') continue;
       const fullPath = normalizePath(path.join(current, entry));
       const relativePath = prefix ? `${prefix}/${entry}` : entry;
       const stat = vfs.statSync(fullPath);
+      const tracked = stat.isDirectory()
+        ? hasTrackedDescendant(trackedPaths, relativePath)
+        : trackedPaths.has(relativePath);
+      const ignored = isIgnoredPath(relativePath, stat.isDirectory(), activeRules);
+      if (ignored && !tracked) {
+        continue;
+      }
       if (stat.isDirectory()) {
-        walk(fullPath, relativePath);
+        walk(fullPath, relativePath, activeRules);
       } else {
         const content = vfs.readFileSync(fullPath, 'utf8');
         result[relativePath] = content;
       }
     }
   };
-  walk(dir, '');
+  walk(dir, '', []);
   return result;
 }
 
-function hashWorkingTree(vfs: VirtualFS, dir: string): Record<string, string> {
-  const files = collectWorkingTreeFiles(vfs, dir);
+function hashWorkingTree(
+  vfs: VirtualFS,
+  dir: string,
+  trackedPaths: Set<string> = new Set(),
+): Record<string, string> {
+  const files = collectWorkingTreeFiles(vfs, dir, trackedPaths);
   const hashed: Record<string, string> = {};
   for (const [filepath, content] of Object.entries(files)) {
     hashed[filepath] = simpleHash(content);
@@ -471,7 +645,11 @@ function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
   const headTree = getHeadTree(vfs, dir);
   const index = readIndex(vfs, dir);
-  const workTree = hashWorkingTree(vfs, dir);
+  const trackedPaths = new Set([
+    ...Object.keys(headTree),
+    ...Object.keys(index),
+  ]);
+  const workTree = hashWorkingTree(vfs, dir, trackedPaths);
 
   const entries = computeStatusMatrix(headTree, index, workTree);
 
@@ -522,7 +700,11 @@ function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
 
   if (addAll) {
     // Stage everything: add all working tree files, remove deleted files
-    const workFiles = collectWorkingTreeFiles(vfs, dir);
+    const trackedPaths = new Set([
+      ...Object.keys(headTree),
+      ...Object.keys(index),
+    ]);
+    const workFiles = collectWorkingTreeFiles(vfs, dir, trackedPaths);
 
     // Add/update all working tree files
     for (const [filepath, content] of Object.entries(workFiles)) {

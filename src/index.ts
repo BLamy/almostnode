@@ -269,6 +269,7 @@ export function createContainer(options?: ContainerOptions): {
   };
   const runtime = new Runtime(vfs, runtimeOptions);
   const npmManager = new PackageManager(vfs, {
+    cwd: options?.cwd ?? runtime.getProcess().cwd(),
     installMode: options?.installMode,
     onMutation: childProcessController.onInstallMutation || undefined,
   });

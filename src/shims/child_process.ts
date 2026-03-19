@@ -446,42 +446,46 @@ function maybeRunCustomCommandDirect(
   // Filter out shell redirections like 2>&1 that splitCommandArgs picks up as tokens
   const args = tokens.slice(1).filter(t => !/^\d*>&\d+$/.test(t));
   const vfs = controller.vfs;
+  const directContext = {
+    cwd: _cwd,
+    env: _env,
+  };
 
   switch (cmd) {
     case 'playwright-cli':
       return (async () => {
         const { runPlaywrightCommand } = await import('./playwright-command');
-        return runPlaywrightCommand(args, {} as any, vfs);
+        return runPlaywrightCommand(args, directContext as any, vfs);
       })();
     case 'pg':
       return (async () => {
         const { runPgCommand } = await import('./pg-command');
-        return runPgCommand(args, {} as any, vfs);
+        return runPgCommand(args, directContext as any, vfs);
       })();
     case 'pglite':
       return (async () => {
         const { runPGliteCommand } = await import('./pglite-command');
-        return runPGliteCommand(args, {} as any, vfs);
+        return runPGliteCommand(args, directContext as any, vfs);
       })();
     case 'curl':
       return (async () => {
         const { runCurlCommand } = await import('./curl-command');
-        return runCurlCommand(args, {} as any, vfs);
+        return runCurlCommand(args, directContext as any, vfs);
       })();
     case 'git':
       return (async () => {
         const { runGitCommand } = await import('./git-command');
-        return runGitCommand(args, {} as any, vfs);
+        return runGitCommand(args, directContext as any, vfs);
       })();
     case 'gh':
       return (async () => {
         const { runGhCommand } = await import('./gh-command');
-        return runGhCommand(args, {} as any, vfs);
+        return runGhCommand(args, directContext as any, vfs);
       })();
     case 'tsc':
       return (async () => {
         const { runTscCommand } = await import('./tsc-command');
-        return runTscCommand(args, {} as any, vfs);
+        return runTscCommand(args, directContext as any, vfs);
       })();
     default:
       return null;

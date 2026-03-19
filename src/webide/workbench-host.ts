@@ -1,5 +1,16 @@
 import { createContainer, type TerminalSession, type WorkspaceSearchProvider } from '../index';
-import { DEFAULT_FILE, DEFAULT_RUN_COMMAND, WORKSPACE_ROOT, seedWorkspace, seedReferenceApp, getTemplateDefaults, type TemplateId } from './workspace-seed';
+import {
+  DEFAULT_FILE,
+  DEFAULT_RUN_COMMAND,
+  WORKSPACE_ROOT,
+  WORKSPACE_TESTS_ROOT,
+  WORKSPACE_TEST_E2E_ROOT,
+  WORKSPACE_TEST_METADATA_PATH,
+  seedWorkspace,
+  seedReferenceApp,
+  getTemplateDefaults,
+  type TemplateId,
+} from './workspace-seed';
 import type { ReferenceAppFiles } from './reference-app-loader';
 import { FixtureMarketplaceClient } from './fixture-extensions';
 import { OpenVSXClient } from './open-vsx';
@@ -89,6 +100,11 @@ const WORKBENCH_WORKERS = {
     url: extensionHostWorkerUrl,
   },
 } satisfies Record<string, { options: WorkerOptions; url: string }>;
+
+const CLAUDE_CODE_PACKAGE_PATH = `${WORKSPACE_ROOT}/node_modules/@anthropic-ai/claude-code/package.json`;
+const LEGACY_TESTS_ROOT = '/tests';
+const LEGACY_TEST_E2E_ROOT = `${LEGACY_TESTS_ROOT}/e2e`;
+const LEGACY_TEST_METADATA_PATH = `${LEGACY_TESTS_ROOT}/.almostnode-tests.json`;
 
 export interface WebIDEHostElements {
   workbench: HTMLElement;
@@ -463,6 +479,7 @@ interface TerminalTabState {
 export class WebIDEHost {
   readonly container = createContainer({
     basePath: import.meta.env.BASE_URL?.replace(/\/$/, '') || '',
+    cwd: WORKSPACE_ROOT,
   });
   private readonly marketplaceMode: MarketplaceMode;
   private readonly debugSections: string[];
@@ -1879,10 +1896,62 @@ export class WebIDEHost {
   }
 
   private async ensureGitInitialized(): Promise<void> {
-    if (this.container.vfs.existsSync('/project/.git')) return;
-    await this.container.run('git init', { cwd: '/project' });
-    await this.container.run('git add -A', { cwd: '/project' });
-    await this.container.run('git commit -m "Initial commit"', { cwd: '/project' });
+    if (this.container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)) return;
+    await this.container.run('git init', { cwd: WORKSPACE_ROOT });
+    await this.container.run('git add -A', { cwd: WORKSPACE_ROOT });
+    await this.container.run('git commit -m "Initial commit"', { cwd: WORKSPACE_ROOT });
+  }
+
+  private migrateLegacyTestsToWorkspace(): void {
+    const vfs = this.container.vfs;
+
+    if (!vfs.existsSync(LEGACY_TESTS_ROOT)) {
+      return;
+    }
+
+    if (vfs.existsSync(LEGACY_TEST_E2E_ROOT) && !vfs.existsSync(WORKSPACE_TEST_E2E_ROOT)) {
+      if (!vfs.existsSync(WORKSPACE_TESTS_ROOT)) {
+        vfs.mkdirSync(WORKSPACE_TESTS_ROOT, { recursive: true });
+      }
+      vfs.renameSync(LEGACY_TEST_E2E_ROOT, WORKSPACE_TEST_E2E_ROOT);
+    }
+
+    if (vfs.existsSync(LEGACY_TEST_METADATA_PATH) && !vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)) {
+      const raw = vfs.readFileSync(LEGACY_TEST_METADATA_PATH, 'utf8') as string;
+      try {
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.tests)) {
+          data.tests = data.tests.map((test: Record<string, unknown>) => {
+            const specPath = typeof test.specPath === 'string'
+              ? test.specPath.replace(LEGACY_TEST_E2E_ROOT, WORKSPACE_TEST_E2E_ROOT)
+              : test.specPath;
+            return { ...test, specPath };
+          });
+          if (!vfs.existsSync(WORKSPACE_TESTS_ROOT)) {
+            vfs.mkdirSync(WORKSPACE_TESTS_ROOT, { recursive: true });
+          }
+          vfs.writeFileSync(WORKSPACE_TEST_METADATA_PATH, JSON.stringify(data, null, 2));
+        }
+      } catch {
+        // Ignore malformed legacy metadata and leave it in place.
+      }
+    }
+
+    try {
+      if (vfs.existsSync(LEGACY_TEST_METADATA_PATH) && vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)) {
+        vfs.unlinkSync(LEGACY_TEST_METADATA_PATH);
+      }
+    } catch {
+      // Ignore cleanup failures.
+    }
+
+    try {
+      if (vfs.existsSync(LEGACY_TESTS_ROOT) && vfs.readdirSync(LEGACY_TESTS_ROOT).length === 0) {
+        vfs.rmdirSync(LEGACY_TESTS_ROOT);
+      }
+    } catch {
+      // Ignore cleanup failures.
+    }
   }
 
   private async init(): Promise<void> {
@@ -1899,6 +1968,8 @@ export class WebIDEHost {
     } else {
       seedWorkspace(this.container, this.templateId);
     }
+    this.migrateLegacyTestsToWorkspace();
+    await this.ensureGitInitialized();
 
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
@@ -2010,18 +2081,16 @@ export class WebIDEHost {
       }
     }
 
-    // Initialize git repo in the background (non-blocking)
-    void this.ensureGitInitialized();
   }
 
   private async ensureClaudeCodeInstalled(onProgress?: (message: string) => void): Promise<void> {
-    if (this.container.vfs.existsSync('/node_modules/@anthropic-ai/claude-code/package.json')) {
+    if (this.container.vfs.existsSync(CLAUDE_CODE_PACKAGE_PATH)) {
       return;
     }
 
     if (!this.claudeCodeInstallPromise) {
       this.claudeCodeInstallPromise = this.container.npm.install('@anthropic-ai/claude-code', {
-        save: true,
+        save: false,
         onProgress: (message) => {
           console.log(`[claude-code] ${message}`);
           onProgress?.(message);
@@ -2109,7 +2178,7 @@ export class WebIDEHost {
 
     const testId = generateTestId();
     const specContent = generateTestSpec(name, steps);
-    const specPath = `/tests/e2e/${name.replace(/[^a-zA-Z0-9_-]/g, '-')}.spec.ts`;
+    const specPath = `${WORKSPACE_TEST_E2E_ROOT}/${name.replace(/[^a-zA-Z0-9_-]/g, '-')}.spec.ts`;
 
     // Ensure directory exists
     const dir = specPath.substring(0, specPath.lastIndexOf('/'));
@@ -2264,7 +2333,7 @@ export class WebIDEHost {
   }
 
   private loadTestMetadata(): void {
-    const metaPath = '/tests/.almostnode-tests.json';
+    const metaPath = WORKSPACE_TEST_METADATA_PATH;
     try {
       if (this.container.vfs.existsSync(metaPath)) {
         const raw = this.container.vfs.readFileSync(metaPath, 'utf8') as string;
@@ -2285,7 +2354,7 @@ export class WebIDEHost {
   }
 
   private autoDiscoverTests(): void {
-    const testDir = '/tests/e2e';
+    const testDir = WORKSPACE_TEST_E2E_ROOT;
     try {
       if (!this.container.vfs.existsSync(testDir)) return;
 
@@ -2325,8 +2394,8 @@ export class WebIDEHost {
   }
 
   private saveTestMetadata(): void {
-    const metaPath = '/tests/.almostnode-tests.json';
-    const dir = '/tests';
+    const metaPath = WORKSPACE_TEST_METADATA_PATH;
+    const dir = WORKSPACE_TESTS_ROOT;
     if (!this.container.vfs.existsSync(dir)) {
       this.container.vfs.mkdirSync(dir, { recursive: true });
     }

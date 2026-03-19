@@ -3,6 +3,8 @@ import { createContainer } from "../src";
 import {
   DEFAULT_FILE,
   WORKSPACE_ROOT,
+  WORKSPACE_TEST_E2E_ROOT,
+  WORKSPACE_TEST_METADATA_PATH,
   seedWorkspace,
 } from "../src/webide/workspace-seed";
 
@@ -28,6 +30,9 @@ describe("webide workspace seed", () => {
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/src/lib/utils.ts`)).toBe(
       true,
     );
+    expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.gitignore`)).toBe(true);
+    expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`)).toBe(true);
+    expect(container.vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)).toBe(true);
 
     const pkg = JSON.parse(
       container.vfs.readFileSync(`${WORKSPACE_ROOT}/package.json`, "utf8"),
@@ -60,6 +65,10 @@ describe("webide workspace seed", () => {
       `${WORKSPACE_ROOT}/README.md`,
       "utf8",
     );
+    const gitignore = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/.gitignore`,
+      "utf8",
+    );
 
     expect(pkg.name).toBe("almostnode-webide-tailwind-starter");
     expect(pkg.scripts?.dev).toBe("vite --port 3000");
@@ -73,5 +82,60 @@ describe("webide workspace seed", () => {
     expect(homeSource).toContain("Tailwind + shadcn starter");
     expect(homeSource).toContain("import { Button } from '@/components/ui/button';");
     expect(readme).toContain("npx shadcn@latest add dropdown-menu");
+    expect(gitignore).toContain(".claude/");
+    expect(gitignore).toContain("node_modules/");
+  });
+
+  it("keeps template-only files out of git when seeded into /project", async () => {
+    const container = createContainer({
+      cwd: WORKSPACE_ROOT,
+      git: {
+        authorName: "Test User",
+        authorEmail: "test@example.com",
+      },
+    });
+
+    seedWorkspace(container);
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/node_modules/demo/package.json`, '{"name":"demo"}\n');
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/build/out.txt`, 'build output\n');
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/tmp/cache.txt`, 'tmp data\n');
+
+    let result = await container.run("git init");
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run("git add -A");
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run("git status --short");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain(".claude/");
+    expect(result.stdout).not.toContain("node_modules/");
+    expect(result.stdout).not.toContain("build/");
+    expect(result.stdout).not.toContain("tmp/");
+  });
+
+  it("uses /project as the default container cwd for git and npm state", async () => {
+    const container = createContainer({ cwd: WORKSPACE_ROOT });
+
+    container.vfs.mkdirSync(WORKSPACE_ROOT, { recursive: true });
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/package.json`, '{"name":"project-root"}\n');
+    container.vfs.writeFileSync(`${WORKSPACE_ROOT}/node_modules/project-only/package.json`, '{"name":"project-only","version":"1.0.0"}\n');
+    container.vfs.writeFileSync(`/node_modules/root-only/package.json`, '{"name":"root-only","version":"1.0.0"}\n');
+
+    const session = container.createTerminalSession();
+    expect(session.getState().cwd).toBe(WORKSPACE_ROOT);
+
+    const pwdResult = await container.run("pwd");
+    expect(pwdResult.exitCode).toBe(0);
+    expect(pwdResult.stdout.trim()).toBe(WORKSPACE_ROOT);
+
+    const packages = container.npm.list();
+    expect(packages["project-only"]).toBe("1.0.0");
+    expect(packages["root-only"]).toBeUndefined();
+
+    const gitResult = await container.run("git init");
+    expect(gitResult.exitCode).toBe(0);
+    expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)).toBe(true);
+    expect(container.vfs.existsSync("/.git")).toBe(false);
   });
 });

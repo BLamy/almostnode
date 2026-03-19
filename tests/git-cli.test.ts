@@ -207,6 +207,79 @@ describe('git CLI command', () => {
     expect(result.stdout).toContain('A  src/app/page.tsx');
   });
 
+  it('respects .gitignore patterns for workspace-only directories', async () => {
+    const container = createContainer({
+      git: {
+        authorName: 'Ignore Tester',
+        authorEmail: 'ignore@tester.dev',
+      },
+    });
+
+    container.vfs.mkdirSync('/project', { recursive: true });
+    container.vfs.writeFileSync('/project/.gitignore', '.claude/\nnode_modules/\nbuild/\ntmp/\n');
+    container.vfs.writeFileSync('/project/package.json', '{"name":"project"}\n');
+    container.vfs.writeFileSync('/project/src/main.ts', 'export const value = 1;\n');
+    container.vfs.writeFileSync('/project/.claude/settings.json', '{}\n');
+    container.vfs.writeFileSync('/project/node_modules/demo/package.json', '{"name":"demo"}\n');
+    container.vfs.writeFileSync('/project/build/out.txt', 'build\n');
+    container.vfs.writeFileSync('/project/tmp/cache.txt', 'tmp\n');
+
+    let result = await container.run('git init', { cwd: '/project' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git add -A', { cwd: '/project' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git status --short', { cwd: '/project' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('A  .gitignore');
+    expect(result.stdout).toContain('A  package.json');
+    expect(result.stdout).toContain('A  src/main.ts');
+    expect(result.stdout).not.toContain('.claude/');
+    expect(result.stdout).not.toContain('node_modules/');
+    expect(result.stdout).not.toContain('build/');
+    expect(result.stdout).not.toContain('tmp/');
+  });
+
+  it('uses the nested /project repository even when a legacy root repo exists', async () => {
+    const container = createContainer({
+      git: {
+        authorName: 'Nested Repo Tester',
+        authorEmail: 'nested@tester.dev',
+      },
+    });
+
+    container.vfs.mkdirSync('/project', { recursive: true });
+    container.vfs.writeFileSync('/project/.gitignore', '.claude/\nnode_modules/\n');
+    container.vfs.writeFileSync('/project/package.json', '{"name":"project"}\n');
+    container.vfs.writeFileSync('/project/src/main.ts', 'export const value = 1;\n');
+    container.vfs.writeFileSync('/project/.claude/settings.json', '{}\n');
+    container.vfs.writeFileSync('/home/user/.claude.json', '{}\n');
+
+    let result = await container.run('git init', { cwd: '/' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git add -A', { cwd: '/' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+
+    result = await container.run('git init', { cwd: '/project' });
+    expect(result.exitCode).toBe(0);
+    expect(container.vfs.existsSync('/project/.git')).toBe(true);
+
+    result = await container.run('git add -A', { cwd: '/project' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git status --short', { cwd: '/project' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('A  .gitignore');
+    expect(result.stdout).toContain('A  package.json');
+    expect(result.stdout).toContain('A  src/main.ts');
+    expect(result.stdout).not.toContain('project/');
+    expect(result.stdout).not.toContain('home/user/');
+    expect(result.stdout).not.toContain('.claude/settings.json');
+  });
+
   it('keeps git index valid after status + add . across repeated resets', async () => {
     const container = createContainer({
       git: {
