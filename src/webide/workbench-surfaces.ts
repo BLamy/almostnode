@@ -13,6 +13,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { strToU8, zipSync } from 'fflate';
 import type { VirtualFS } from '../virtual-fs';
+import { registerRenderedEditors, type RenderedEditorFactories } from './rendered-editors';
 
 const PREVIEW_EDITOR_TYPE_ID = 'almostnode.editor.preview';
 const PREVIEW_EDITOR_RESOURCE = URI.from({
@@ -91,6 +92,7 @@ interface PreviewSurfaceCommands {
 export interface RegisteredWorkbenchSurfaces {
   previewInput: SimpleEditorInput;
   databaseInput: SimpleEditorInput;
+  renderedEditors: RenderedEditorFactories;
   filesViewId: string;
   terminalViewId: string;
   claudeViewId: string;
@@ -185,6 +187,7 @@ export class FilesSidebarSurface {
     private readonly vfs: VirtualFS,
     private readonly workspaceRoot: string,
     private readonly openFile: (path: string) => void,
+    private readonly openFileAsText?: (path: string) => void,
   ) {
     this.root.id = 'webideFilesTree';
     this.root.className = 'almostnode-files-tree';
@@ -409,14 +412,21 @@ export class FilesSidebarSurface {
       button.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.showContextMenu(e.clientX, e.clientY, [
+        const menuItems: Array<{ label: string; action: () => void } | 'separator'> = [];
+        const lowerEntry = entry.toLowerCase();
+        if (this.openFileAsText && (lowerEntry.endsWith('.md') || lowerEntry.endsWith('.json'))) {
+          menuItems.push({ label: 'Open as Text', action: () => this.openFileAsText!(fullPath) });
+          menuItems.push('separator');
+        }
+        menuItems.push(
           { label: 'Rename', action: () => this.startInlineInput(path, 'file', fullPath) },
           { label: 'Delete', action: () => {
             try { this.vfs.unlinkSync(fullPath); } catch { /* ignore */ }
           }},
           'separator',
           { label: 'Download', action: () => this.downloadFile(fullPath) },
-        ]);
+        );
+        this.showContextMenu(e.clientX, e.clientY, menuItems);
       });
 
       children.appendChild(button);
@@ -2258,6 +2268,8 @@ export function registerWorkbenchSurfaces(options: {
   claudeSurface: ClaudeTerminalSurface;
   databaseBrowserSurface: DatabaseBrowserSurface;
   keychainSurface: KeychainSidebarSurface;
+  vfs: VirtualFS;
+  openFileAsText: (path: string) => void;
 }): RegisteredWorkbenchSurfaces {
   class PreviewEditorInput extends SimpleEditorInput {
     readonly typeId = PREVIEW_EDITOR_TYPE_ID;
@@ -2333,6 +2345,12 @@ export function registerWorkbenchSurfaces(options: {
 
   disposables.add(registerEditorPane(PREVIEW_EDITOR_TYPE_ID, 'Preview', PreviewEditorPane, [PreviewEditorInput]));
   disposables.add(registerEditorPane(DATABASE_EDITOR_TYPE_ID, 'Database', DatabaseEditorPane, [DatabaseEditorInput]));
+
+  const rendered = registerRenderedEditors({
+    vfs: options.vfs,
+    openFileAsText: options.openFileAsText,
+  });
+  disposables.add(rendered);
   disposables.add(
     registerCustomView({
       id: FILES_VIEW_ID,
@@ -2376,6 +2394,7 @@ export function registerWorkbenchSurfaces(options: {
   return {
     previewInput,
     databaseInput,
+    renderedEditors: rendered.factories,
     filesViewId: FILES_VIEW_ID,
     terminalViewId: TERMINAL_VIEW_ID,
     claudeViewId: CLAUDE_VIEW_ID,

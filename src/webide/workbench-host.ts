@@ -19,6 +19,7 @@ import { shouldRunWorkbenchCommandInteractively } from './terminal-command-routi
 import { VfsFileSystemProvider } from './vfs-file-system-provider';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from './extension-services';
 import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, TestsSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
+import { MarkdownEditorInput, JsonEditorInput } from './rendered-editors';
 import { Keychain, type KeychainState, CLAUDE_AUTH_CREDENTIALS_PATH, CLAUDE_AUTH_CONFIG_PATH, CLAUDE_LEGACY_CONFIG_PATH } from './keychain';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
 import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
@@ -524,6 +525,8 @@ export class WebIDEHost {
     this.debugSections = Array.from(new Set((options.debugSections || []).map((section) => section.trim()).filter(Boolean)));
     this.filesSurface = new FilesSidebarSurface(this.container.vfs, WORKSPACE_ROOT, (path) => {
       void this.openWorkspaceFile(path);
+    }, (path) => {
+      void this.openWorkspaceFileAsText(path);
     });
     this.previewSurface = new PreviewSurface({
       run: () => {
@@ -571,6 +574,8 @@ export class WebIDEHost {
       claudeSurface: this.claudeSurface,
       databaseBrowserSurface: this.databaseBrowserSurface,
       keychainSurface: this.keychainSurface,
+      vfs: this.container.vfs,
+      openFileAsText: (path: string) => void this.openWorkspaceFileAsText(path),
     });
     this.keychain = new Keychain({
       vfs: this.container.vfs,
@@ -986,6 +991,28 @@ export class WebIDEHost {
   }
 
   private async openWorkspaceFile(path: string): Promise<void> {
+    const lowerPath = path.toLowerCase();
+
+    // Route .md files to rendered markdown editor
+    if (lowerPath.endsWith('.md')) {
+      const editorService = await getService(IEditorService);
+      const input = this.workbenchSurfaces.renderedEditors.createMarkdownInput(path);
+      await editorService.openEditor(input, { pinned: true });
+      return;
+    }
+
+    // Route .json files to visual JSON editor
+    if (lowerPath.endsWith('.json')) {
+      const editorService = await getService(IEditorService);
+      const input = this.workbenchSurfaces.renderedEditors.createJsonInput(path);
+      await editorService.openEditor(input, { pinned: true });
+      return;
+    }
+
+    await this.openWorkspaceFileAsText(path);
+  }
+
+  private async openWorkspaceFileAsText(path: string): Promise<void> {
     const editorService = await getService(IEditorService);
     const languageId = inferWorkbenchLanguageId(path);
 

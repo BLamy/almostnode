@@ -1,0 +1,84 @@
+/* Scoped Tailwind CSS for rendered editor panes */
+@import "tailwindcss" layer(tailwind);
+
+/* Scope Tailwind to markdown pane only to avoid leaking into the IDE */
+@layer tailwind {
+  @scope (.almostnode-markdown-pane) {
+    @import "streamdown/styles.css";
+  }
+}
+
+/* Markdown pane container */
+.almostnode-markdown-pane {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 16px 24px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--vscode-editor-foreground, #ccc);
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+.almostnode-markdown-pane :where(a) {
+  color: var(--vscode-textLink-foreground, #3794ff);
+}
+
+.almostnode-markdown-pane :where(a:hover) {
+  color: var(--vscode-textLink-activeForeground, #3794ff);
+  text-decoration: underline;
+}
+
+/* JSON pane container */
+.almostnode-json-pane {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  color: var(--vscode-editor-foreground, #ccc);
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+.almostnode-json-pane [data-visual-json] {
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+}
+
+/* Toolbar for rendered editors */
+.almostnode-rendered-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 8px;
+  background: var(--vscode-editorGroupHeader-tabsBackground, #252526);
+  border-bottom: 1px solid var(--vscode-editorGroupHeader-tabsBorder, #1e1e1e);
+  min-height: 32px;
+}
+
+.almostnode-rendered-toolbar__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.almostnode-rendered-toolbar__button:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+}
+
+.almostnode-rendered-toolbar__button svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

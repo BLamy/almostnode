@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import wasm from 'vite-plugin-wasm';
+import tailwindcss from '@tailwindcss/vite';
 import { workspaceTemplatesPlugin } from './src/webide/vite-plugin-workspace-templates';
 
 const monacoVscodePackages = [
@@ -37,7 +38,7 @@ export default defineConfig({
   },
   plugins: [
     workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, 'src/webide/templates') }),
-    ...(isTest ? [] : [wasm(),
+    ...(isTest ? [] : [tailwindcss(), wasm(),
     {
       name: 'browser-shims',
       enforce: 'pre',
