@@ -32,13 +32,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build library
-        run: pnpm run build:lib
+        run: pnpm nx build almostnode
 
       - name: Run type check
-        run: pnpm run type-check
+        run: pnpm nx run-many -t type-check
 
       - name: Run tests
-        run: pnpm run test:run
+        run: pnpm nx run-many -t test
 
   e2e:
     runs-on: ubuntu-latest
@@ -65,7 +65,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Run E2E tests
-        run: pnpm exec playwright test e2e/
+        run: pnpm nx e2e almostnode
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}

@@ -34,23 +34,23 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build site
-        run: pnpm run build
+      - name: Build web-ide
+        run: pnpm nx build web-ide
         env:
           GITHUB_PAGES: true
 
       - name: Prepare web-ide deploy directory
         run: |
           mkdir -p deploy
-          cp dist-site/examples/web-ide-demo.html deploy/index.html
+          cp apps/web-ide/dist-site/web-ide-demo.html deploy/index.html
           # Copy all shared assets (JS chunks, CSS, wasm, etc.)
-          cp -r dist-site/assets deploy/assets
+          cp -r apps/web-ide/dist-site/assets deploy/assets
           # Copy service worker and other root-level files needed at runtime
-          cp dist-site/__sw__.js deploy/__sw__.js
-          cp dist-site/favicon.svg deploy/favicon.svg
+          cp apps/web-ide/dist-site/__sw__.js deploy/__sw__.js
+          cp apps/web-ide/dist-site/favicon.svg deploy/favicon.svg
           # Copy PGlite WASM assets needed at runtime
-          cp dist-site/pglite.wasm deploy/pglite.wasm
-          cp dist-site/pglite.data deploy/pglite.data
+          cp apps/web-ide/dist-site/pglite.wasm deploy/pglite.wasm
+          cp apps/web-ide/dist-site/pglite.data deploy/pglite.data
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

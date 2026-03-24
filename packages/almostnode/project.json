@@ -1,0 +1,50 @@
+{
+  "name": "almostnode",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/almostnode/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite build --config vite.lib.config.js",
+        "cwd": "packages/almostnode"
+      }
+    },
+    "build-types": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --project tsconfig.build.json",
+        "cwd": "packages/almostnode"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run",
+        "cwd": "packages/almostnode"
+      }
+    },
+    "type-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit",
+        "cwd": "packages/almostnode"
+      }
+    },
+    "serve-examples": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite --config vite.examples.config.js",
+        "cwd": "packages/almostnode"
+      }
+    },
+    "e2e": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "playwright test",
+        "cwd": "packages/almostnode"
+      }
+    }
+  }
+}

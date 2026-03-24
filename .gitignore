@@ -4,6 +4,11 @@ node_modules/
 # Build output
 dist/
 dist-site/
+.output/
+
+# Nx
+.nx/
+node_modules/.cache/nx
 
 # Test results
 test-results/
@@ -22,8 +27,8 @@ Thumbs.db
 # Claude Code
 .claude/
 .claude-trace/
-!src/webide/templates/*/.claude/
-!src/webide/templates/_shared/*
+!apps/web-ide/src/templates/content/*/.claude/
+!apps/web-ide/src/templates/content/_shared/*
 
 # Environment
 .env
@@ -38,8 +43,7 @@ npm-debug.log*
 temp/
 
 # Scratch files
-e2e/deploy-debug.spec.ts
-examples/macaly-demo.html
-
+packages/almostnode/e2e/deploy-debug.spec.ts
+packages/almostnode/examples/macaly-demo.html
 
 /.playwright-cli

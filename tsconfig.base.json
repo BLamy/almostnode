@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "almostnode": ["packages/almostnode/src/index.ts"],
+      "almostnode-sdk": ["packages/almostnode-sdk/src/index.ts"],
+      "almostnode-react": ["packages/almostnode-react/src/index.ts"],
+      "almostnode/internal": ["packages/almostnode/src/internal.ts"],
+      "@webide/*": ["apps/web-ide/src/*"]
+    }
+  }
+}

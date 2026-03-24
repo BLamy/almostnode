@@ -1,0 +1,30 @@
+{
+  "name": "desktop-ide",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/desktop-ide/src",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "electron-vite dev",
+        "cwd": "apps/desktop-ide"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
+      "options": {
+        "command": "electron-vite build",
+        "cwd": "apps/desktop-ide"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run",
+        "cwd": "apps/desktop-ide"
+      }
+    }
+  }
+}
