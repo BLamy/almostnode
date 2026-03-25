@@ -9,20 +9,7 @@
       if (!params.has("template")) {
         params.set("template", "vite");
       }
-
-      const url = new URL(window.location.href);
-      const segments = url.pathname.split("/").filter(Boolean);
-      const lastSegment = segments[segments.length - 1];
-
-      if (lastSegment === "web-ide-demo.html" || lastSegment === "index.html") {
-        segments.pop();
-      }
-
-      if (segments[segments.length - 1] === "examples") {
-        segments.pop();
-      }
-
-      url.pathname = `/${[...segments, "ide"].join("/")}`;
+      const url = new URL("../", window.location.href);
       url.search = params.toString();
       url.hash = "";
       window.location.replace(url.toString());

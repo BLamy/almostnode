@@ -7,6 +7,8 @@ import {
 import * as React from 'react';
 import '../styles/ide.css';
 
+const faviconHref = `${import.meta.env.BASE_URL}favicon.svg`;
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
@@ -14,7 +16,7 @@ export const Route = createRootRoute({
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
     ],
     links: [
-      { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
+      { rel: 'icon', href: faviconHref, type: 'image/svg+xml' },
       { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
       { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: 'anonymous' },
       {

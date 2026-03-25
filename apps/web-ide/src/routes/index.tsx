@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { Link, createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useEffect, type ReactNode } from 'react';
 import type { TemplateId } from '../features/workspace-seed';
 
@@ -220,7 +220,7 @@ function Homepage() {
       {/* ── Nav ── */}
       <nav className="hp-nav">
         <div className="hp-nav__inner">
-          <a className="hp-nav__brand" href="/">
+          <Link className="hp-nav__brand" to="/">
             <span className="hp-nav__mark">
               <svg width="20" height="20" viewBox="0 0 64 64" fill="none">
                 <rect x="8" y="8" width="48" height="48" rx="14" fill="url(#navGrad)" />
@@ -234,7 +234,7 @@ function Homepage() {
               </svg>
             </span>
             <span className="hp-nav__wordmark">opensandbox</span>
-          </a>
+          </Link>
           <div className="hp-nav__links">
             <a className="hp-nav__link" href="https://github.com/aspect-build/opensandbox" target="_blank" rel="noopener noreferrer">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
