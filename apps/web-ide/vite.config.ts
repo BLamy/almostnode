@@ -382,6 +382,13 @@ function extractCommonJsNamedExports(code: string): string[] {
 }
 
 function commonJsNodeModulesInterop() {
+  const passthroughPackages = [
+    "/node_modules/react/",
+    "/node_modules/react-dom/",
+    "/node_modules/scheduler/",
+    "/node_modules/use-sync-external-store/",
+  ];
+
   return {
     name: "commonjs-node-modules-interop",
     enforce: "pre" as const,
@@ -395,6 +402,9 @@ function commonJsNodeModulesInterop() {
         return null;
       }
       if (path.includes("vite-plugin-node-polyfills")) {
+        return null;
+      }
+      if (passthroughPackages.some((segment) => path.includes(segment))) {
         return null;
       }
       if (!existsSync(path)) {
