@@ -33,6 +33,9 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -70,6 +73,9 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
