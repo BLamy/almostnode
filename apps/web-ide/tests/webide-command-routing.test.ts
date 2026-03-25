@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
-  matchesClaudeLaunchCommand,
+  matchesOpenCodeLaunchCommand,
   matchesShadcnLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from '../src/features/terminal-command-routing';
 
 describe('webide terminal command routing', () => {
-  it('matches Claude launch commands across wrappers', () => {
-    expect(matchesClaudeLaunchCommand('npx @anthropic-ai/claude-code --version')).toBe(true);
-    expect(matchesClaudeLaunchCommand('env FOO=bar npm exec -- claude')).toBe(true);
-    expect(matchesClaudeLaunchCommand('time ./node_modules/.bin/claude help')).toBe(true);
+  it('matches OpenCode launch commands across wrappers', () => {
+    expect(matchesOpenCodeLaunchCommand('npx opencode-ai')).toBe(true);
+    expect(matchesOpenCodeLaunchCommand('env FOO=bar npm exec -- opencode')).toBe(true);
+    expect(matchesOpenCodeLaunchCommand('time ./node_modules/.bin/opencode-ai help')).toBe(true);
   });
 
   it('matches shadcn launch commands across wrappers', () => {
@@ -18,11 +18,11 @@ describe('webide terminal command routing', () => {
     expect(matchesShadcnLaunchCommand('command ./node_modules/.bin/shadcn init')).toBe(true);
   });
 
-  it('treats shadcn and Claude as interactive in the regular workbench terminal', () => {
+  it('treats shadcn and OpenCode as interactive in the regular workbench terminal', () => {
     expect(shouldRunWorkbenchCommandInteractively('npx shadcn@latest add dropdown-menu', 'user')).toBe(true);
-    expect(shouldRunWorkbenchCommandInteractively('npx @anthropic-ai/claude-code', 'user')).toBe(true);
+    expect(shouldRunWorkbenchCommandInteractively('npx opencode-ai', 'user')).toBe(true);
     expect(shouldRunWorkbenchCommandInteractively('npm run dev', 'user')).toBe(false);
     expect(shouldRunWorkbenchCommandInteractively('npx shadcn@latest add dropdown-menu', 'preview')).toBe(false);
-    expect(shouldRunWorkbenchCommandInteractively('printf "hello"', 'claude')).toBe(true);
+    expect(shouldRunWorkbenchCommandInteractively('printf "hello"', 'agent')).toBe(true);
   });
 });

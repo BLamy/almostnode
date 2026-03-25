@@ -1,0 +1,4 @@
+{
+  "defaultFile": "src/App.tsx",
+  "runCommand": "npm run dev"
+}

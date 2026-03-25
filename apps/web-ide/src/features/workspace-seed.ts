@@ -50,8 +50,6 @@ export function getTemplateDefaults(id: TemplateId): {
   return { defaultFile: template.defaultFile, runCommand: template.runCommand };
 }
 
-const CLAUDE_WRAPPER_PATH = "/usr/local/bin/claude-wrapper";
-const CLAUDE_WRAPPER_SCRIPT = '#!/bin/sh\nexec claude "$@"\n';
 const SETTINGS_PATH = `${WORKSPACE_ROOT}/.vscode/settings.json`;
 
 function ensureDirectory(
@@ -80,10 +78,6 @@ export function seedWorkspace(
     }
     container.vfs.writeFileSync(path, content);
   }
-
-  // Write Claude wrapper executable
-  ensureDirectory(container, "/usr/local/bin");
-  container.vfs.writeFileSync(CLAUDE_WRAPPER_PATH, CLAUDE_WRAPPER_SCRIPT);
 
   // Seed demo test for vite template
   if (templateId === "vite") {
@@ -250,7 +244,4 @@ export function seedReferenceApp(
     }
   }
 
-  // Write Claude wrapper executable
-  ensureDirectory(container, "/usr/local/bin");
-  container.vfs.writeFileSync(CLAUDE_WRAPPER_PATH, CLAUDE_WRAPPER_SCRIPT);
 }

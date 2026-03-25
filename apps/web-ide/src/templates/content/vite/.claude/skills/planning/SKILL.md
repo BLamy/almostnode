@@ -1,3 +1,8 @@
+---
+name: planning
+description: Structured implementation workflows for common Vite template tasks such as new features, bug fixes, schema changes, and UI-only updates. Use when the task benefits from a stepwise execution plan.
+---
+
 # Planning Workflows
 
 Structured approaches for different task types. Pick the workflow that matches your task, then follow the steps in order.

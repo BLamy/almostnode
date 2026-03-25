@@ -27,10 +27,35 @@ async function getHostTerminalText(page: Page): Promise<string> {
   });
 }
 
+async function getOpenCodeTerminalText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const term = (window as any).__OPENCODE_BROWSER_TUI__?.term;
+    if (!term) return '';
+
+    const buffer = term.buffer.active;
+    const lastLine = buffer.baseY + buffer.cursorY;
+    let text = '';
+
+    for (let i = 0; i <= lastLine; i++) {
+      const line = buffer.getLine(i);
+      if (line) text += line.translateToString(true) + '\n';
+    }
+
+    return text;
+  });
+}
+
 async function focusHostTerminal(page: Page): Promise<void> {
   await page.locator('#webideTerminal').click();
   await page.evaluate(() => {
     (window as any).__almostnodeWebIDE?.terminal?.focus?.();
+  });
+}
+
+async function focusOpenCodeTerminal(page: Page): Promise<void> {
+  await page.locator('.almostnode-opencode-host').click();
+  await page.evaluate(() => {
+    (window as any).__OPENCODE_BROWSER_TUI__?.term?.focus?.();
   });
 }
 
@@ -204,36 +229,62 @@ test.describe('web-ide host terminal', () => {
     expect(firstTabText || '').not.toContain('tab-two');
   });
 
-  test('runs Claude Code from the regular terminal without builtin module failures', async ({ page }) => {
+  test('mounts OpenCode from the regular terminal and restores the shell tab on close', async ({ page }) => {
     test.setTimeout(6 * 60 * 1000);
     await loadWebIDE(page);
 
-    const consoleMessages: string[] = [];
-    const moduleFailures: string[] = [];
-
-    page.on('console', (msg) => {
-      consoleMessages.push(msg.text());
+    await page.evaluate(async () => {
+      await (window as any).__almostnodeWebIDE.executeHostCommand('printf "shell-before\\n"');
     });
-    page.on('response', (response) => {
-      if (response.status() >= 500 && response.url().includes('/__modules__/r/') && response.url().includes('claude-code')) {
-        moduleFailures.push(`${response.status()} ${response.url()}`);
-      }
+    await page.waitForFunction(() => {
+      return (document.querySelector('#webideTerminal .xterm-rows')?.textContent || '').includes('shell-before');
     });
 
     await page.evaluate(async () => {
-      await (window as any).__almostnodeWebIDE.executeHostCommand('npx @anthropic-ai/claude-code --version');
+      await (window as any).__almostnodeWebIDE.executeHostCommand('npx opencode-ai');
     });
 
-    await expect(page.locator('#webideTerminalStatus')).toHaveText('Exited 0');
+    await expect(page.locator('#webideTerminalStatus')).toHaveText('Starting OpenCode...', { timeout: 20000 });
+    await page.waitForFunction(() => Boolean((window as any).__OPENCODE_BROWSER_TUI__), {
+      timeout: 180000,
+    });
+    await expect(page.locator('#webideTerminalStatus')).toHaveText('OpenCode ready', { timeout: 120000 });
+    await expect(page.locator('.almostnode-terminal-surface__tab.is-active')).toContainText('OpenCode');
 
-    const output = await getHostTerminalText(page);
-    expect(output).toMatch(/(?:^|\n)v?\d+\.\d+\.\d+(?: \(Claude Code\))?(?:\n|$)/);
-    expect(output).not.toContain(`npx: command "claude-code" exited with code`);
-    expect(output).not.toContain(`Cannot find module 'node:stream/consumers'`);
-    expect(output).not.toContain('does not provide an export named');
-    expect(consoleMessages.join('\n')).not.toContain(`Cannot find module 'node:stream/consumers'`);
-    expect(consoleMessages.join('\n')).not.toContain('does not provide an export named');
-    expect(moduleFailures).toEqual([]);
+    await focusOpenCodeTerminal(page);
+    await page.keyboard.type('!pwd');
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => {
+      const output = await getOpenCodeTerminalText(page);
+      return output.includes('/workspace');
+    }, { timeout: 120000 }).toBe(true);
+
+    await focusOpenCodeTerminal(page);
+    await page.keyboard.type('!ls');
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => {
+      const output = await getOpenCodeTerminalText(page);
+      return output.includes('package.json') || output.includes('src');
+    }, { timeout: 120000 }).toBe(true);
+
+    const mountedState = await page.evaluate(() => {
+      const host = (window as any).__almostnodeWebIDE;
+      return {
+        mounted: Boolean((window as any).__OPENCODE_BROWSER_TUI__),
+        hasPackageJson: host.container.vfs.existsSync('/project/package.json'),
+      };
+    });
+    expect(mountedState).toEqual({
+      mounted: true,
+      hasPackageJson: true,
+    });
+
+    await page.locator('.almostnode-terminal-surface__tab.is-active .almostnode-terminal-surface__tab-close').click();
+    await expect(page.locator('.almostnode-terminal-surface__tab.is-active')).toContainText('Terminal 1');
+    await expect.poll(async () => {
+      const output = await getHostTerminalText(page);
+      return output.includes('shell-before');
+    }, { timeout: 30000 }).toBe(true);
   });
 
   test('runs shadcn from the seeded Web IDE workspace with debug output and survives a second run', async ({ page }) => {

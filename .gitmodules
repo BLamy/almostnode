@@ -1,3 +1,13 @@
 [submodule "vendor/builder-assets"]
 	path = vendor/builder-assets
 	url = https://github.com/replayio/builder-assets.git
+[submodule "vendor/opencode"]
+	path = vendor/opencode
+	url = https://github.com/BLamy/opencode.git
+	branch = dev
+	ignore = untracked
+[submodule "vendor/opentui"]
+	path = vendor/opentui
+	url = https://github.com/BLamy/opentui.git
+	branch = main
+	ignore = untracked

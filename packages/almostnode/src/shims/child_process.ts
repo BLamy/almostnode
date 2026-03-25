@@ -2581,6 +2581,7 @@ async function handleNpmInstall(
     if (pkgArgs.length === 0) {
       // npm install (no package name) -> install from package.json
       const installResult = await pm.installFromPackageJson({
+        includeDev: true,
         onProgress: emitProgress,
       });
       if (suppressedDepCount > 0) {

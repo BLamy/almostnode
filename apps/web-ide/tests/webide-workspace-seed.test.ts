@@ -69,6 +69,17 @@ describe("webide workspace seed", () => {
       `${WORKSPACE_ROOT}/.gitignore`,
       "utf8",
     );
+    const envDecl = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/src/env.d.ts`,
+      "utf8",
+    );
+    const tsconfig = JSON.parse(
+      container.vfs.readFileSync(`${WORKSPACE_ROOT}/tsconfig.json`, "utf8"),
+    ) as {
+      compilerOptions?: {
+        baseUrl?: string;
+      };
+    };
 
     expect(pkg.name).toBe("almostnode-webide-tailwind-starter");
     expect(pkg.scripts?.dev).toBe("vite --port 3000");
@@ -84,6 +95,9 @@ describe("webide workspace seed", () => {
     expect(readme).toContain("npx shadcn@latest add dropdown-menu");
     expect(gitignore).toContain(".claude/");
     expect(gitignore).toContain("node_modules/");
+    expect(envDecl.trim()).toBe('/// <reference types="vite/client" />');
+    expect(envDecl).not.toContain("declare module 'react'");
+    expect(tsconfig.compilerOptions?.baseUrl).toBeUndefined();
   });
 
   it("keeps template-only files out of git when seeded into /project", async () => {

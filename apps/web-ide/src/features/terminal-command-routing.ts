@@ -1,4 +1,4 @@
-type WorkbenchTerminalKind = 'user' | 'preview' | 'claude';
+type WorkbenchTerminalKind = 'user' | 'preview' | 'agent';
 
 function normalizeCommandSegment(segment: string): string {
   let normalized = segment.trim();
@@ -46,6 +46,19 @@ export function matchesClaudeLaunchCommand(command: string): boolean {
     .some((segment) => matchesSegment(segment, patterns));
 }
 
+export function matchesOpenCodeLaunchCommand(command: string): boolean {
+  const patterns = [
+    /^(?:\.\/)?(?:node_modules\/\.bin\/)?opencode(?:\s|$)/,
+    /^(?:\.\/)?(?:node_modules\/\.bin\/)?opencode-ai(?:\s|$)/,
+    /^npx(?:\s+[-\w=]+)*(?:\s+opencode-ai|\s+opencode)(?:\s|$)/,
+    /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+opencode-ai|\s+opencode)(?:\s|$)/,
+  ];
+
+  return command
+    .split(/\s*(?:&&|\|\||;)\s*/)
+    .some((segment) => matchesSegment(segment, patterns));
+}
+
 export function matchesShadcnLaunchCommand(command: string): boolean {
   const patterns = [
     /^(?:\.\/)?(?:node_modules\/\.bin\/)?shadcn(?:\s|$)/,
@@ -62,7 +75,7 @@ export function shouldRunWorkbenchCommandInteractively(
   command: string,
   terminalKind: WorkbenchTerminalKind,
 ): boolean {
-  if (terminalKind === 'claude') {
+  if (terminalKind === 'agent') {
     return true;
   }
 
@@ -70,5 +83,7 @@ export function shouldRunWorkbenchCommandInteractively(
     return false;
   }
 
-  return matchesClaudeLaunchCommand(command) || matchesShadcnLaunchCommand(command);
+  return matchesClaudeLaunchCommand(command)
+    || matchesOpenCodeLaunchCommand(command)
+    || matchesShadcnLaunchCommand(command);
 }

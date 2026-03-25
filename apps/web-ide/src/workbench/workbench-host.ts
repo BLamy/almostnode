@@ -15,15 +15,28 @@ import type { ReferenceAppFiles } from '../features/reference-app-loader';
 import { FixtureMarketplaceClient } from '../extensions/fixture-extensions';
 import { OpenVSXClient } from '../extensions/open-vsx';
 import { prunePersistedWorkbenchExtensions } from '../features/persisted-extensions';
-import { shouldRunWorkbenchCommandInteractively } from '../features/terminal-command-routing';
+import { matchesOpenCodeLaunchCommand, shouldRunWorkbenchCommandInteractively } from '../features/terminal-command-routing';
 import { VfsFileSystemProvider } from '../features/vfs-file-system-provider';
 import type { DesktopBridge } from '../desktop/bridge';
 import { HostTerminalSession } from '../desktop/host-terminal-session';
 import { loadProjectFilesIntoVfs, type SerializedFile } from '../desktop/project-snapshot';
 import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from '../extensions/extension-services';
-import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, ClaudeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, TestsSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
+import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, OpenCodeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, TestsSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
 import { MarkdownEditorInput, JsonEditorInput } from '../features/rendered-editors';
-import { Keychain, type KeychainState, CLAUDE_AUTH_CREDENTIALS_PATH, CLAUDE_AUTH_CONFIG_PATH, CLAUDE_LEGACY_CONFIG_PATH } from '../features/keychain';
+import {
+  Keychain,
+  OPENCODE_AUTH_PATH,
+  OPENCODE_CONFIG_JSONC_PATH,
+  OPENCODE_CONFIG_PATH,
+  OPENCODE_LEGACY_CONFIG_PATH,
+  OPENCODE_MCP_AUTH_PATH,
+  type KeychainState,
+} from '../features/keychain';
+import {
+  mountOpenCodeBrowserSession,
+  type OpenCodeBrowserSessionHandle,
+  type OpenCodeBrowserShellState,
+} from '../features/opencode-browser-session';
 import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
 import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
@@ -105,7 +118,6 @@ const WORKBENCH_WORKERS = {
   },
 } satisfies Record<string, { options: WorkerOptions; url: string }>;
 
-const CLAUDE_CODE_PACKAGE_PATH = `${WORKSPACE_ROOT}/node_modules/@anthropic-ai/claude-code/package.json`;
 const LEGACY_TESTS_ROOT = '/tests';
 const LEGACY_TEST_E2E_ROOT = `${LEGACY_TESTS_ROOT}/e2e`;
 const LEGACY_TEST_METADATA_PATH = `${LEGACY_TESTS_ROOT}/.almostnode-tests.json`;
@@ -292,12 +304,12 @@ const LAYOUT_OVERRIDES = `
 .part.sidebar .split-view-view,
 .part.sidebar .pane-body,
 .part.sidebar .pane-body > .monaco-scrollable-element,
-.part.sidebar .almostnode-claude-panel-host,
+.part.sidebar .almostnode-opencode-panel-host,
 .part.sidebar .almostnode-files-tree-host {
   height: 100% !important;
   min-height: 0 !important;
 }
-.part.sidebar .almostnode-claude-panel-host,
+.part.sidebar .almostnode-opencode-panel-host,
 .part.sidebar .almostnode-files-tree-host {
   display: flex !important;
   flex-direction: column !important;
@@ -490,8 +502,24 @@ interface TerminalTabState {
   historyIndex: number;
   runningAbortController: AbortController | null;
   closable: boolean;
-  kind: 'user' | 'preview' | 'claude';
+  kind: 'user' | 'preview' | 'agent';
   inputMode: 'managed' | 'passthrough';
+}
+
+interface OpenCodeTabState {
+  id: string;
+  title: string;
+  host: HTMLElement;
+  session: OpenCodeBrowserSessionHandle;
+  restoreShellState: OpenCodeBrowserShellState | null;
+  restoreTitle: string | null;
+}
+
+interface OpenCodeSidebarTabState {
+  id: string;
+  title: string;
+  host: HTMLElement;
+  session: OpenCodeBrowserSessionHandle;
 }
 
 interface WorkbenchTerminalSession {
@@ -529,17 +557,18 @@ export class WebIDEHost {
   private readonly marketplaceMode: MarketplaceMode;
   private readonly debugSections: string[];
   private readonly filesSurface: FilesSidebarSurface;
+  private readonly openCodeSurface: OpenCodeTerminalSurface;
   private readonly previewSurface: PreviewSurface;
   private readonly terminalSurface: TerminalPanelSurface;
-  private readonly claudeSurface: ClaudeTerminalSurface;
   private readonly workbenchSurfaces: RegisteredWorkbenchSurfaces;
   private readonly terminalTabs = new Map<string, TerminalTabState>();
+  private readonly openCodeTabs = new Map<string, OpenCodeTabState>();
+  private readonly openCodeSidebarTabs = new Map<string, OpenCodeSidebarTabState>();
   private activeTerminalTabId: string | null = null;
   private previewTerminalTabId: string | null = null;
   private terminalCounter = 0;
-  private readonly claudeTerminalTabs = new Map<string, TerminalTabState>();
-  private activeClaudeTabId: string | null = null;
-  private claudeTerminalCounter = 0;
+  private openCodeTerminalCounter = 0;
+  private openCodeSidebarCounter = 0;
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
@@ -549,7 +578,6 @@ export class WebIDEHost {
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
-  private claudeCodeInstallPromise: Promise<void> | null = null;
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
   private readonly templateId: TemplateId;
   private readonly initialProjectFiles: SerializedFile[] | null;
@@ -587,7 +615,7 @@ export class WebIDEHost {
     this.desktopBridge = options.desktopBridge ?? null;
     this.hostProjectDirectory = options.hostProjectDirectory ?? null;
     this.agentMode = this.desktopBridge ? 'host' : 'browser';
-    this.agentLaunchCommand = options.agentLaunchCommand ?? (this.agentMode === 'host' ? 'claude' : null);
+    this.agentLaunchCommand = options.agentLaunchCommand ?? (this.agentMode === 'host' ? 'opencode' : null);
     this.marketplaceMode = options.marketplaceMode || 'open-vsx';
     this.debugSections = Array.from(new Set((options.debugSections || []).map((section) => section.trim()).filter(Boolean)));
     this.filesSurface = new FilesSidebarSurface(this.container.vfs, WORKSPACE_ROOT, (path) => {
@@ -616,19 +644,16 @@ export class WebIDEHost {
         tab?.session.resize(cols, rows);
       },
     });
-    this.claudeSurface = new ClaudeTerminalSurface({
+    this.openCodeSurface = new OpenCodeTerminalSurface({
       onCreateTab: () => {
-        void this.createClaudeTerminalTab(true);
+        void this.createOpenCodeSidebarTab(true);
       },
       onCloseTab: (id) => {
-        this.closeClaudeTerminalTab(id);
+        this.closeOpenCodeSidebarTab(id);
       },
       onSelectTab: (id) => {
-        this.setActiveClaudeTab(id);
-      },
-      onResize: (id, cols, rows) => {
-        const tab = this.claudeTerminalTabs.get(id);
-        tab?.session.resize(cols, rows);
+        this.openCodeSurface.setActiveTab(id);
+        this.openCodeSidebarTabs.get(id)?.host.focus();
       },
     });
     this.databaseSurface = new DatabaseSidebarSurface();
@@ -636,9 +661,9 @@ export class WebIDEHost {
     this.keychainSurface = new KeychainSidebarSurface();
     this.workbenchSurfaces = registerWorkbenchSurfaces({
       filesSurface: this.filesSurface,
+      openCodeSurface: this.openCodeSurface,
       previewSurface: this.previewSurface,
       terminalSurface: this.terminalSurface,
-      claudeSurface: this.claudeSurface,
       databaseBrowserSurface: this.databaseBrowserSurface,
       keychainSurface: this.keychainSurface,
       vfs: this.container.vfs,
@@ -663,13 +688,15 @@ export class WebIDEHost {
         case 'logout:replay': void this.keychainAuthAction('replayio logout'); break;
       }
     });
-    this.keychain.registerSlot('claude', [
-      CLAUDE_AUTH_CREDENTIALS_PATH,
-      CLAUDE_AUTH_CONFIG_PATH,
-      CLAUDE_LEGACY_CONFIG_PATH,
-    ]);
     this.keychain.registerSlot('github', [
       '/home/user/.config/gh/hosts.yml',
+    ]);
+    this.keychain.registerSlot('opencode', [
+      OPENCODE_AUTH_PATH,
+      OPENCODE_MCP_AUTH_PATH,
+      OPENCODE_CONFIG_JSONC_PATH,
+      OPENCODE_CONFIG_PATH,
+      OPENCODE_LEGACY_CONFIG_PATH,
     ]);
     this.keychain.registerSlot('replay', [
       '/home/user/.replay/auth.json',
@@ -793,10 +820,17 @@ export class WebIDEHost {
 
   private requireActiveTerminalTab(): TerminalTabState {
     const tab = this.activeTerminalTabId ? this.terminalTabs.get(this.activeTerminalTabId) : null;
-    if (!tab) {
-      throw new Error('No active terminal tab');
+    if (tab) {
+      return tab;
     }
-    return tab;
+
+    const fallback = this.terminalTabs.values().next().value as TerminalTabState | undefined;
+    if (fallback) {
+      this.setActiveTerminalTab(fallback.id);
+      return fallback;
+    }
+
+    return this.createUserTerminalTab(false);
   }
 
   private printPrompt(tab: TerminalTabState): void {
@@ -805,25 +839,11 @@ export class WebIDEHost {
 
   private writeTerminal(tab: TerminalTabState, text: string): void {
     if (!text) return;
-    if (tab.kind === 'claude') {
-      // Filter out debug and install noise from Claude terminal
-      const filtered = text
-        .split('\n')
-        .filter((line) => !line.startsWith('[almostnode DEBUG]'))
-        .join('\n');
-      if (!filtered) return;
-      tab.terminal.write(normalizeTerminalOutput(filtered));
-    } else {
-      tab.terminal.write(normalizeTerminalOutput(text));
-    }
+    tab.terminal.write(normalizeTerminalOutput(text));
   }
 
   private updateTerminalStatus(tab: TerminalTabState, text: string): void {
-    if (tab.kind === 'claude') {
-      this.claudeSurface.updateTabStatus(tab.id, text);
-    } else {
-      this.terminalSurface.updateTabStatus(tab.id, text);
-    }
+    this.terminalSurface.updateTabStatus(tab.id, text);
   }
 
   private updatePreviewStatus(text: string): void {
@@ -852,16 +872,29 @@ export class WebIDEHost {
     this.ensurePreviewServerRunning();
   }
 
-  private createTerminalTab(kind: 'user' | 'preview', title: string, focus: boolean, closable: boolean): TerminalTabState {
-    const id = `${kind}-${crypto.randomUUID()}`;
+  private createTerminalTab(
+    kind: 'user' | 'preview' | 'agent',
+    title: string,
+    focus: boolean,
+    closable: boolean,
+    options?: {
+      id?: string;
+      cwd?: string;
+      env?: Record<string, string>;
+      session?: WorkbenchTerminalSession;
+      inputMode?: 'managed' | 'passthrough';
+    },
+  ): TerminalTabState {
+    const id = options?.id ?? `${kind}-${crypto.randomUUID()}`;
     const { terminal, fitAddon } = this.createTerminalInstance();
     const tab: TerminalTabState = {
       id,
       title,
       terminal,
       fitAddon,
-      session: this.container.createTerminalSession({
-        cwd: WORKSPACE_ROOT,
+      session: options?.session ?? this.container.createTerminalSession({
+        cwd: options?.cwd ?? WORKSPACE_ROOT,
+        env: options?.env,
       }),
       currentLine: '',
       history: [],
@@ -869,7 +902,7 @@ export class WebIDEHost {
       runningAbortController: null,
       closable,
       kind,
-      inputMode: 'managed',
+      inputMode: options?.inputMode ?? 'managed',
     };
     this.terminalTabs.set(id, tab);
     this.terminalSurface.addTab({
@@ -890,13 +923,25 @@ export class WebIDEHost {
     if (kind === 'user' && this.terminalCounter === 1 && this.debugSections.length > 0) {
       terminal.write(`\r\n[almostnode debug] enabled: ${this.debugSections.join(', ')}`);
     }
-    this.printPrompt(tab);
+    if (kind === 'agent') {
+      terminal.write('almostnode opencode terminal');
+    }
+    if (!(kind === 'agent' && tab.inputMode === 'passthrough')) {
+      this.printPrompt(tab);
+    }
     return tab;
   }
 
-  private createUserTerminalTab(focus: boolean): TerminalTabState {
-    this.terminalCounter += 1;
-    return this.createTerminalTab('user', `Terminal ${this.terminalCounter}`, focus, true);
+  private createUserTerminalTab(
+    focus: boolean,
+    options?: { id?: string; title?: string; cwd?: string; env?: Record<string, string> },
+  ): TerminalTabState {
+    const title = options?.title ?? `Terminal ${++this.terminalCounter}`;
+    return this.createTerminalTab('user', title, focus, true, {
+      id: options?.id,
+      cwd: options?.cwd,
+      env: options?.env,
+    });
   }
 
   private getPreviewTerminalTab(): TerminalTabState {
@@ -908,109 +953,230 @@ export class WebIDEHost {
   }
 
   private setActiveTerminalTab(id: string): void {
-    if (!this.terminalTabs.has(id)) {
+    if (!this.terminalTabs.has(id) && !this.openCodeTabs.has(id) && id !== this.consoleTabId) {
       return;
     }
     this.activeTerminalTabId = id;
     this.terminalSurface.setActiveTab(id);
+    this.openCodeTabs.get(id)?.host.focus();
   }
 
   private closeTerminalTab(id: string): void {
+    if (this.openCodeTabs.has(id)) {
+      this.closeOpenCodeTab(id, { restoreShell: true });
+      return;
+    }
+
     const tab = this.terminalTabs.get(id);
     if (!tab || tab.kind === 'preview') {
       return;
     }
 
+    const wasActive = this.activeTerminalTabId === id;
     tab.runningAbortController?.abort();
     this.terminalTabs.delete(id);
     this.terminalSurface.removeTab(id);
     tab.terminal.dispose();
     tab.session.dispose();
 
-    if (this.activeTerminalTabId === id) {
-      const nextTab = this.terminalTabs.values().next().value as TerminalTabState | undefined;
-      if (nextTab) {
-        this.setActiveTerminalTab(nextTab.id);
-      } else {
-        this.createUserTerminalTab(true);
-      }
+    if (wasActive) {
+      this.activateFallbackTerminalTab(true);
     }
   }
 
-  private async createClaudeTerminalTab(focus: boolean): Promise<TerminalTabState> {
+  private createOpenCodeHostElement(): HTMLElement {
+    const host = document.createElement('div');
+    host.className = 'almostnode-opencode-host';
+    host.tabIndex = -1;
+    host.style.height = '100%';
+    host.style.minHeight = '0';
+    host.style.display = 'flex';
+    host.style.flexDirection = 'column';
+    host.style.background = prefersLightMode() ? '#ffffff' : '#0d1117';
+    return host;
+  }
+
+  private async revealOpenCodeSidebarView(focus: boolean): Promise<void> {
+    const paneCompositeService = await getService(IPaneCompositePartService);
+    setPartVisibility(Parts.SIDEBAR_PART, true);
+    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.openCodeViewId, ViewContainerLocation.Sidebar, focus);
+    if (focus) {
+      this.openCodeSurface.focus();
+    }
+  }
+
+  private async createOpenCodeSidebarTab(focus: boolean): Promise<void> {
     if (this.agentMode === 'host') {
-      return this.createHostAgentTerminalTab(focus);
+      await this.revealTerminalPanel(focus);
+      void this.createHostAgentTerminalTab(focus);
+      return;
     }
 
-    this.claudeTerminalCounter += 1;
-    const id = `claude-${crypto.randomUUID()}`;
-    const { terminal, fitAddon } = this.createTerminalInstance();
-    const tab: TerminalTabState = {
+    if (!await this.keychain.prepareForCommand('opencode')) {
+      await this.revealKeychainPanel();
+      return;
+    }
+
+    this.openCodeSidebarCounter += 1;
+    const id = `opencode-sidebar-${crypto.randomUUID()}`;
+    const title = `OpenCode ${this.openCodeSidebarCounter}`;
+    const host = this.createOpenCodeHostElement();
+
+    this.openCodeSurface.addCustomTab({
       id,
-      title: `Claude ${this.claudeTerminalCounter}`,
-      terminal,
-      fitAddon,
-      session: this.container.createTerminalSession({
-        cwd: WORKSPACE_ROOT,
-      }),
-      currentLine: '',
-      history: [],
-      historyIndex: -1,
-      runningAbortController: null,
-      closable: true,
-      kind: 'claude',
-      inputMode: 'managed',
-    };
-    this.claudeTerminalTabs.set(id, tab);
-    this.claudeSurface.addTab({
-      id,
-      title: tab.title,
-      terminal,
-      fitAddon,
+      title,
+      element: host,
       closable: true,
     });
-    this.bindTerminal(tab);
-    if (focus || !this.activeClaudeTabId) {
-      this.setActiveClaudeTab(id);
-    }
+    this.openCodeSurface.updateTabStatus(id, 'Starting OpenCode...');
+    this.openCodeSurface.setActiveTab(id);
 
-    this.claudeSurface.showLoading();
-    const state = this.keychain.getState();
-    if (state.hasStoredVault && !state.hasLiveCredentials) {
-      try {
-        await this.keychain.handlePrimaryAction();
-      } catch {
-        terminal.write('Keychain unlock failed. You can retry from the status bar.\r\n');
-        this.claudeSurface.hideLoading();
-        this.printPrompt(tab);
-        return tab;
-      }
-    }
-
-    this.updateTerminalStatus(tab, 'Preparing Claude Code...');
     try {
-      await this.ensureClaudeCodeInstalled((message) => {
-        this.updateTerminalStatus(tab, message);
+      const session = await mountOpenCodeBrowserSession({
+        container: this.container,
+        element: host,
+        cwd: WORKSPACE_ROOT,
+        env: {},
+        onTitleChange: (nextTitle) => {
+          const resolvedTitle = nextTitle?.trim() || title;
+          this.openCodeSurface.updateTabTitle(id, resolvedTitle);
+        },
+      });
+
+      this.openCodeSidebarTabs.set(id, {
+        id,
+        title,
+        host,
+        session,
+      });
+      this.openCodeSurface.updateTabStatus(id, 'OpenCode ready');
+
+      void session.exited.finally(() => {
+        if (!this.openCodeSidebarTabs.has(id)) {
+          return;
+        }
+
+        this.closeOpenCodeSidebarTab(id);
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to install Claude Code';
-      terminal.write(`Claude Code install failed: ${message}\r\n`);
-      this.updateTerminalStatus(tab, 'Claude Code install failed');
-      this.claudeSurface.hideLoading();
+      console.error('[opencode] failed to start sidebar session', error);
+      this.openCodeSurface.removeTab(id);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.revealTerminalPanel(focus);
+      const tab = this.createUserTerminalTab(focus);
+      tab.terminal.write(`\r\nOpenCode failed to start: ${message}`);
       this.printPrompt(tab);
-      return tab;
+    }
+  }
+
+  private closeOpenCodeSidebarTab(id: string): void {
+    const tab = this.openCodeSidebarTabs.get(id);
+    if (!tab) {
+      return;
     }
 
-    this.updateTerminalStatus(tab, 'Starting Claude Code...');
-    void this.runCommand(tab, 'npx @anthropic-ai/claude-code').then(() => {
-      this.claudeSurface.hideLoading();
+    this.openCodeSidebarTabs.delete(id);
+    this.openCodeSurface.removeTab(id);
+    tab.session.dispose();
+
+    const nextTab = this.openCodeSidebarTabs.values().next().value as OpenCodeSidebarTabState | undefined;
+    if (nextTab) {
+      this.openCodeSurface.setActiveTab(nextTab.id);
+    }
+  }
+
+  private async createOpenCodeTerminalTab(
+    focus: boolean,
+    options?: {
+      replaceTab?: TerminalTabState;
+      title?: string;
+    },
+  ): Promise<void> {
+    if (this.agentMode === 'host') {
+      void this.createHostAgentTerminalTab(focus);
+      return;
+    }
+
+    if (!await this.keychain.prepareForCommand('opencode')) {
+      await this.revealKeychainPanel();
+      return;
+    }
+
+    this.openCodeTerminalCounter += 1;
+    const restoreTitle = options?.replaceTab?.title ?? null;
+    const initialShellState = options?.replaceTab
+      ? options.replaceTab.session.getState()
+      : { cwd: WORKSPACE_ROOT, env: {} as Record<string, string>, running: false };
+    const id = options?.replaceTab?.id ?? `opencode-${crypto.randomUUID()}`;
+    const title = options?.title ?? `OpenCode ${this.openCodeTerminalCounter}`;
+    const host = this.createOpenCodeHostElement();
+
+    if (options?.replaceTab) {
+      this.disposeShellTerminalTab(options.replaceTab.id);
+    }
+
+    this.terminalSurface.addCustomTab({
+      id,
+      title,
+      element: host,
+      closable: true,
     });
+    this.terminalSurface.updateTabStatus(id, 'Starting OpenCode...');
+    if (focus || !this.activeTerminalTabId) {
+      this.setActiveTerminalTab(id);
+    }
 
-    // Hide loading after a short delay once output starts flowing
-    await delay(2000);
-    this.claudeSurface.hideLoading();
-
-    return tab;
+    try {
+      const session = await mountOpenCodeBrowserSession({
+        container: this.container,
+        element: host,
+        cwd: initialShellState.cwd,
+        env: initialShellState.env,
+        onTitleChange: (nextTitle) => {
+          const resolvedTitle = nextTitle?.trim() || title;
+          this.terminalSurface.updateTabTitle(id, resolvedTitle);
+        },
+      });
+      this.openCodeTabs.set(id, {
+        id,
+        title,
+        host,
+        session,
+        restoreShellState: restoreTitle
+          ? { cwd: initialShellState.cwd, env: initialShellState.env }
+          : null,
+        restoreTitle,
+      });
+      this.terminalSurface.updateTabStatus(id, 'OpenCode ready');
+      void session.exited.finally(() => {
+        if (!this.openCodeTabs.has(id)) {
+          return;
+        }
+        const shellState = session.getShellState();
+        this.closeOpenCodeTab(id, {
+          restoreShell: true,
+          restoreShellState: shellState,
+        });
+      });
+    } catch (error) {
+      console.error('[opencode] failed to start terminal session', error);
+      this.terminalSurface.removeTab(id);
+      const message = error instanceof Error ? error.message : String(error);
+      if (options?.replaceTab) {
+        const restored = this.createUserTerminalTab(focus, {
+          id,
+          title: restoreTitle ?? `Terminal ${this.terminalCounter}`,
+          cwd: initialShellState.cwd,
+          env: initialShellState.env,
+        });
+        restored.terminal.write(`\r\nOpenCode failed to start: ${message}`);
+        this.printPrompt(restored);
+      } else {
+        const tab = this.createUserTerminalTab(focus);
+        tab.terminal.write(`\r\nOpenCode failed to start: ${message}`);
+        this.printPrompt(tab);
+      }
+    }
   }
 
   private async createHostAgentTerminalTab(focus: boolean): Promise<TerminalTabState> {
@@ -1018,38 +1184,15 @@ export class WebIDEHost {
       throw new Error('Host agent mode requires a desktop bridge.');
     }
 
-    this.claudeTerminalCounter += 1;
+    this.openCodeTerminalCounter += 1;
     const id = `agent-${crypto.randomUUID()}`;
-    const { terminal, fitAddon } = this.createTerminalInstance();
     const session = new HostTerminalSession(this.desktopBridge);
-    const tab: TerminalTabState = {
+    const tab = this.createTerminalTab('agent', `OpenCode ${this.openCodeTerminalCounter}`, focus, true, {
       id,
-      title: `Agent ${this.claudeTerminalCounter}`,
-      terminal,
-      fitAddon,
       session,
-      currentLine: '',
-      history: [],
-      historyIndex: -1,
-      runningAbortController: null,
-      closable: true,
-      kind: 'claude',
       inputMode: 'passthrough',
-    };
-    this.claudeTerminalTabs.set(id, tab);
-    this.claudeSurface.addTab({
-      id,
-      title: tab.title,
-      terminal,
-      fitAddon,
-      closable: true,
     });
-    this.bindTerminal(tab);
-    if (focus || !this.activeClaudeTabId) {
-      this.setActiveClaudeTab(id);
-    }
-
-    this.claudeSurface.showLoading();
+    const { terminal } = tab;
     this.updateTerminalStatus(tab, 'Starting host agent shell...');
     try {
       const { shell, cwd } = await session.init({
@@ -1074,62 +1217,115 @@ export class WebIDEHost {
       if (this.agentLaunchCommand) {
         terminal.write(`Launching ${this.agentLaunchCommand} with bridge routing enabled...\r\n`);
       } else {
-        terminal.write('Try: claude | codex | opencode | cursor-cli\r\n');
+        terminal.write('Try: opencode | codex | cursor-cli\r\n');
       }
       this.updateTerminalStatus(tab, this.agentLaunchCommand ? `Launching ${this.agentLaunchCommand}` : 'Host shell ready');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       terminal.write(`Failed to start host shell: ${message}\r\n`);
       this.updateTerminalStatus(tab, 'Host shell failed');
-    } finally {
-      this.claudeSurface.hideLoading();
     }
 
     return tab;
   }
 
-  private setActiveClaudeTab(id: string): void {
-    if (!this.claudeTerminalTabs.has(id)) {
+  private disposeShellTerminalTab(id: string): void {
+    const tab = this.terminalTabs.get(id);
+    if (!tab) {
       return;
     }
-    this.activeClaudeTabId = id;
-    this.claudeSurface.setActiveTab(id);
+    this.terminalTabs.delete(id);
+    this.terminalSurface.removeTab(id);
+    tab.runningAbortController?.abort();
+    tab.terminal.dispose();
+    tab.session.dispose();
   }
 
-  private closeClaudeTerminalTab(id: string): void {
-    const tab = this.claudeTerminalTabs.get(id);
+  private activateFallbackTerminalTab(focus: boolean): void {
+    const nextShellTab = this.terminalTabs.values().next().value as TerminalTabState | undefined;
+    if (nextShellTab) {
+      this.setActiveTerminalTab(nextShellTab.id);
+      return;
+    }
+
+    const nextOpenCodeTab = this.openCodeTabs.values().next().value as OpenCodeTabState | undefined;
+    if (nextOpenCodeTab) {
+      this.setActiveTerminalTab(nextOpenCodeTab.id);
+      return;
+    }
+
+    this.createUserTerminalTab(focus);
+  }
+
+  private closeOpenCodeTab(
+    id: string,
+    options?: {
+      restoreShell: boolean;
+      restoreShellState?: OpenCodeBrowserShellState;
+    },
+  ): void {
+    const tab = this.openCodeTabs.get(id);
     if (!tab) {
       return;
     }
 
-    tab.runningAbortController?.abort();
-    this.claudeTerminalTabs.delete(id);
-    this.claudeSurface.removeTab(id);
-    tab.terminal.dispose();
+    const wasActive = this.activeTerminalTabId === id;
+    const nextShellState = options?.restoreShellState ?? tab.session.getShellState();
+    this.openCodeTabs.delete(id);
+    this.terminalSurface.removeTab(id);
     tab.session.dispose();
 
-    if (this.activeClaudeTabId === id) {
-      const nextTab = this.claudeTerminalTabs.values().next().value as TerminalTabState | undefined;
-      if (nextTab) {
-        this.setActiveClaudeTab(nextTab.id);
-      } else {
-        this.activeClaudeTabId = null;
-      }
+    if (options?.restoreShell && tab.restoreShellState) {
+      this.createUserTerminalTab(wasActive, {
+        id,
+        title: tab.restoreTitle ?? undefined,
+        cwd: nextShellState.cwd,
+        env: nextShellState.env,
+      });
+      return;
     }
+
+    if (wasActive) {
+      this.activateFallbackTerminalTab(true);
+    }
+  }
+
+  async revealOpenCodePanel(focus: boolean): Promise<void> {
+    if (this.agentMode === 'host') {
+      await this.revealTerminalPanel(focus);
+      const existing = this.openCodeTabs.values().next().value as OpenCodeTabState | undefined;
+      if (existing) {
+        this.setActiveTerminalTab(existing.id);
+        return;
+      }
+
+      await this.createOpenCodeTerminalTab(focus);
+      return;
+    }
+
+    await this.revealOpenCodeSidebarView(focus);
+    const existing = this.openCodeSidebarTabs.values().next().value as OpenCodeSidebarTabState | undefined;
+    if (existing) {
+      this.openCodeSurface.setActiveTab(existing.id);
+      existing.host.focus();
+      return;
+    }
+
+    await this.createOpenCodeSidebarTab(focus);
   }
 
   async revealKeychainPanel(): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
-    setPartVisibility(Parts.SIDEBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.keychainViewId, ViewContainerLocation.Sidebar, true);
+    setPartVisibility(Parts.AUXILIARYBAR_PART, true);
+    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.keychainViewId, ViewContainerLocation.AuxiliaryBar, true);
     this.updateKeychainSurface();
   }
 
   private updateKeychainSurface(state = this.keychain.getState()): void {
     this.keychainSurface.update(
       [
-        { name: 'claude', label: 'Claude Code', active: this.keychain.hasSlotData('claude') },
         { name: 'github', label: 'GitHub', active: this.keychain.hasSlotData('github'), canAuth: true },
+        { name: 'opencode', label: 'OpenCode', active: this.keychain.hasSlotData('opencode') },
         { name: 'replay', label: 'Replay.io', active: this.keychain.hasSlotData('replay'), canAuth: true },
       ],
       { hasStoredVault: state.hasStoredVault, supported: state.supported },
@@ -1143,15 +1339,7 @@ export class WebIDEHost {
   }
 
   async revealClaudePanel(focus: boolean): Promise<void> {
-    const paneCompositeService = await getService(IPaneCompositePartService);
-    setPartVisibility(Parts.SIDEBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.claudeViewId, ViewContainerLocation.Sidebar, focus);
-    if (this.claudeTerminalTabs.size === 0) {
-      await this.createClaudeTerminalTab(focus);
-    }
-    if (focus) {
-      this.claudeSurface.focus();
-    }
+    await this.revealOpenCodePanel(focus);
   }
 
   private async runCommand(
@@ -1168,6 +1356,13 @@ export class WebIDEHost {
     if (options?.echoCommand) {
       tab.terminal.write(trimmed);
       tab.terminal.write('\r\n');
+    }
+
+    if (tab.kind === 'user' && matchesOpenCodeLaunchCommand(trimmed)) {
+      await this.createOpenCodeTerminalTab(true, {
+        replaceTab: tab,
+      });
+      return;
     }
 
     if (!await this.keychain.prepareForCommand(trimmed)) {
@@ -1768,7 +1963,7 @@ export class WebIDEHost {
 
   private async registerStatusbarEntries(): Promise<void> {
     const statusbarService = await getService(IStatusbarService);
-    const agentLabel = this.agentMode === 'host' ? 'Agents' : 'Claude Code';
+    const agentLabel = 'OpenCode';
     statusbarService.addEntry(
       {
         name: 'Run',
@@ -1813,10 +2008,10 @@ export class WebIDEHost {
         name: agentLabel,
         text: `$(sparkle) ${agentLabel}`,
         ariaLabel: `Open ${agentLabel}`,
-        tooltip: this.agentMode === 'host' ? 'Open the host agent panel' : 'Open the Claude Code panel',
-        command: 'almostnode.claude.open',
+        tooltip: this.agentMode === 'host' ? 'Open the host OpenCode terminal' : 'Open OpenCode',
+        command: 'almostnode.opencode.open',
       },
-      'almostnode.status.claude',
+      'almostnode.status.opencode',
       StatusbarAlignment.LEFT,
       { primary: 997, secondary: 997 },
     );
@@ -1884,7 +2079,6 @@ export class WebIDEHost {
         defaultLayout: {
           force: true,
           views: [
-            { id: this.workbenchSurfaces.claudeViewId },
             { id: this.workbenchSurfaces.filesViewId },
             { id: this.workbenchSurfaces.terminalViewId },
           ],
@@ -1934,10 +2128,16 @@ export class WebIDEHost {
             handler: () => this.focusTerminal(),
           },
           {
-            id: 'almostnode.claude.open',
-            label: 'Almostnode: Open Claude Code',
+            id: 'almostnode.opencode.open',
+            label: 'Almostnode: Open OpenCode',
             menu: Menu.CommandPalette,
-            handler: () => this.revealClaudePanel(true),
+            handler: () => this.revealOpenCodePanel(true),
+          },
+          {
+            id: 'almostnode.claude.open',
+            label: 'Almostnode: Open OpenCode',
+            menu: Menu.CommandPalette,
+            handler: () => this.revealOpenCodePanel(true),
           },
           {
             id: 'almostnode.keychain.primary',
@@ -1962,12 +2162,7 @@ export class WebIDEHost {
 
     await this.registerStatusbarEntries();
 
-    const paneCompositeService = await getService(IPaneCompositePartService);
     const editorService = await getService(IEditorService);
-
-    // Open Claude Code panel in the primary sidebar by default
-    setPartVisibility(Parts.SIDEBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.claudeViewId, ViewContainerLocation.Sidebar, false);
 
     // Open preview as the only editor (no default source file)
     await editorService.openEditor(
@@ -2337,55 +2532,13 @@ export class WebIDEHost {
     }
     window.__almostnodeWebIDE = this;
 
-    logMemory('before claude boot');
-    // Feature flag: skip Claude Code auto-boot to reduce memory pressure (e.g. on GitHub Pages)
-    const skipClaude = new URLSearchParams(window.location.search).has('no-claude');
-    if (!skipClaude && this.agentMode === 'host') {
-      void this.revealClaudePanel(false);
-      return;
+    logMemory('before opencode boot');
+    const searchParams = new URLSearchParams(window.location.search);
+    const skipOpenCode = searchParams.has('no-opencode') || searchParams.has('no-claude');
+    if (!skipOpenCode) {
+      void this.revealOpenCodePanel(false);
     }
 
-    if (!skipClaude) {
-      // Show Claude loading splash immediately so it's visible during WebAuthn
-      this.claudeSurface.showLoading();
-
-      // Auto-start Claude Code: if there's a stored API key, prompt WebAuthn
-      // to unlock it, then start a Claude Code session
-      const claudeState = this.keychain.getState();
-      if (claudeState.hasStoredVault && !claudeState.hasLiveCredentials) {
-        this.keychain.handlePrimaryAction().then(() => {
-          void this.revealClaudePanel(false);
-        }).catch(() => {
-          // Auth unlock declined/failed — still reveal the panel so user can retry
-          void this.revealClaudePanel(false);
-        });
-      } else {
-        // No stored vault or already unlocked — just open the Claude panel
-        void this.revealClaudePanel(false);
-      }
-    }
-
-  }
-
-  private async ensureClaudeCodeInstalled(onProgress?: (message: string) => void): Promise<void> {
-    if (this.container.vfs.existsSync(CLAUDE_CODE_PACKAGE_PATH)) {
-      return;
-    }
-
-    if (!this.claudeCodeInstallPromise) {
-      this.claudeCodeInstallPromise = this.container.npm.install('@anthropic-ai/claude-code', {
-        save: false,
-        onProgress: (message) => {
-          console.log(`[claude-code] ${message}`);
-          onProgress?.(message);
-        },
-      }).then(() => undefined).catch((error) => {
-        this.claudeCodeInstallPromise = null;
-        throw error;
-      });
-    }
-
-    await this.claudeCodeInstallPromise;
   }
 
   private async ensureWorkspaceDependenciesInstalled(): Promise<void> {

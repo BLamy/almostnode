@@ -1,0 +1,150 @@
+:root {
+  --background: 36 40% 96%;
+  --foreground: 222 39% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 39% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 39% 11%;
+  --primary: 23 92% 58%;
+  --primary-foreground: 24 28% 10%;
+  --secondary: 210 32% 92%;
+  --secondary-foreground: 222 39% 18%;
+  --muted: 210 22% 89%;
+  --muted-foreground: 222 15% 40%;
+  --accent: 198 69% 47%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 54%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 215 25% 84%;
+  --input: 215 25% 84%;
+  --ring: 23 92% 58%;
+  --radius: 1.4rem;
+
+  /* Semantic colors */
+  --success: 142 72% 42%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 92% 50%;
+  --warning-foreground: 38 28% 10%;
+  --surface: 210 20% 95%;
+  --surface-foreground: 222 39% 11%;
+  --chart-1: 23 92% 58%;
+  --chart-2: 198 69% 47%;
+  --chart-3: 142 72% 42%;
+  --chart-4: 38 92% 50%;
+  --chart-5: 270 60% 58%;
+
+  /* Easing curves */
+  --ease-out-quad: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-out-cubic: cubic-bezier(0.215, 0.61, 0.355, 1);
+  --ease-out-quart: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-out-circ: cubic-bezier(0.075, 0.82, 0.165, 1);
+  --ease-in-out-quad: cubic-bezier(0.455, 0.03, 0.515, 0.955);
+  --ease-in-out-cubic: cubic-bezier(0.645, 0.045, 0.355, 1);
+  --ease-in-out-quart: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-in-out-quint: cubic-bezier(0.86, 0, 0.07, 1);
+  --ease-in-out-expo: cubic-bezier(1, 0, 0, 1);
+  --ease-in-out-circ: cubic-bezier(0.785, 0.135, 0.15, 0.86);
+
+  /* Duration tokens */
+  --duration-micro: 100ms;
+  --duration-fast: 150ms;
+  --duration-standard: 200ms;
+  --duration-modal: 250ms;
+  --duration-slow: 300ms;
+  --duration-exit: 150ms;
+
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.dark {
+  --background: 224 36% 9%;
+  --foreground: 36 43% 96%;
+  --card: 223 33% 13%;
+  --card-foreground: 36 43% 96%;
+  --popover: 223 33% 13%;
+  --popover-foreground: 36 43% 96%;
+  --primary: 24 96% 63%;
+  --primary-foreground: 20 28% 10%;
+  --secondary: 222 24% 18%;
+  --secondary-foreground: 36 43% 96%;
+  --muted: 223 21% 17%;
+  --muted-foreground: 218 19% 72%;
+  --accent: 198 72% 54%;
+  --accent-foreground: 224 36% 9%;
+  --destructive: 0 74% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 222 17% 23%;
+  --input: 222 17% 23%;
+  --ring: 24 96% 63%;
+
+  /* Semantic colors (dark) */
+  --success: 142 64% 48%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 88% 55%;
+  --warning-foreground: 38 28% 10%;
+  --surface: 223 28% 15%;
+  --surface-foreground: 36 43% 96%;
+  --chart-1: 24 96% 63%;
+  --chart-2: 198 72% 54%;
+  --chart-3: 142 64% 48%;
+  --chart-4: 38 88% 55%;
+  --chart-5: 270 55% 65%;
+}
+
+/* Reduced motion: collapse durations so animationend still fires */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  border-color: hsl(var(--border));
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: hsl(var(--foreground));
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.22), transparent 28rem),
+    radial-gradient(circle at bottom right, rgba(56, 189, 248, 0.16), transparent 32rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0));
+}
+
+.dark body {
+  background-image:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.2), transparent 28rem),
+    radial-gradient(circle at bottom right, rgba(56, 189, 248, 0.14), transparent 32rem),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.45), rgba(15, 23, 42, 0));
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+::selection {
+  background: rgba(249, 115, 22, 0.24);
+}

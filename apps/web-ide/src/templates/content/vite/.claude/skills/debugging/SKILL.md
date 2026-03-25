@@ -1,3 +1,8 @@
+---
+name: debugging
+description: Structured debugging guidance for React, Vite, PGlite, and browser-runtime issues in the Vite template. Use when diagnosing broken UI flows, stale state, timing problems, or infrastructure setup failures.
+---
+
 # Debugging Knowledge Base
 
 ## Pre-Debugging Triage

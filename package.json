@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "pnpm nx serve-examples almostnode",
     "dev:web-ide": "pnpm nx dev web-ide",
-    "dev:sdk-showcase": "pnpm nx dev sdk-showcase",
+    "dev:sdk-showcase": "pnpm vendor:install:opencode && pnpm nx dev sdk-showcase",
+    "vendor:install:opencode": "git submodule update --init --recursive vendor/opentui vendor/opencode && bun install --cwd vendor/opentui && bun run --cwd vendor/opentui/packages/core build:wasm && bun install --cwd vendor/opencode",
     "build": "pnpm nx run-many -t build",
     "build:lib": "pnpm nx build almostnode",
     "build:types": "pnpm nx build-types almostnode",

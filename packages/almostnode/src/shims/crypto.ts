@@ -3,9 +3,20 @@
  * Provides cryptographic utilities using Web Crypto API
  */
 
-import shajs from 'sha.js';
+import * as shajsModule from 'sha.js';
 import { Buffer } from './stream';
 import { EventEmitter } from './events';
+
+const shajs = ((shajsModule as { default?: unknown }).default ?? shajsModule) as unknown as (
+  algorithm: string,
+) => {
+  update(data: string | ArrayBuffer | ArrayBufferView): {
+    digest(): Uint8Array;
+    digest(encoding: 'hex' | 'base64'): string;
+  };
+  digest(): Uint8Array;
+  digest(encoding: 'hex' | 'base64'): string;
+};
 
 // ============================================================================
 // Random functions

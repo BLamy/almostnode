@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenSandbox Web IDE Demo</title>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      if (!params.has("template")) {
+        params.set("template", "vite");
+      }
+      window.location.replace(`/ide?${params.toString()}`);
+    </script>
+  </head>
+  <body></body>
+</html>

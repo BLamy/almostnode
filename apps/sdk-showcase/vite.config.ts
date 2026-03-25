@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { readFile, readdir } from "node:fs/promises"
 import { resolve } from "node:path"
 import { transformAsync } from "@babel/core"
@@ -12,8 +13,8 @@ const __dirname = new URL(".", import.meta.url).pathname
 const workspaceRoot = resolve(__dirname, "../..")
 const almostnodeSrc = resolve(__dirname, "../../packages/almostnode/src")
 const almostnodePublic = resolve(__dirname, "../../packages/almostnode/public/__sw__.js")
-const opencodeRoot = resolve(__dirname, "../../../opencode")
-const opentuiRoot = resolve(__dirname, "../../../opentui")
+const opencodeRoot = resolve(workspaceRoot, "vendor/opencode")
+const opentuiRoot = resolve(workspaceRoot, "vendor/opentui")
 
 const opencodeSrc = resolve(opencodeRoot, "packages/opencode/src")
 const opencodeTuiSrc = resolve(opencodeSrc, "cli/cmd/tui")
@@ -27,7 +28,10 @@ const opentuiSpinnerSolidPath = resolve(opencodeNodeModules, "opentui-spinner/di
 const opentuiCoreSrc = resolve(opentuiRoot, "packages/core/src")
 const opentuiSolidSrc = resolve(opentuiRoot, "packages/solid")
 const solidJsRoot = resolve(opentuiRoot, "node_modules/solid-js")
-const opentuiWasmPath = `/@fs/${resolve(opentuiCoreSrc, "zig/lib/wasm32-freestanding/opentui.wasm")}`
+const opentuiWasmPath = `/@fs/${resolveFirstExistingPath([
+  resolve(opentuiCoreSrc, "zig/lib/wasm32-freestanding/libopentui.wasm"),
+  resolve(opentuiCoreSrc, "zig/lib/wasm32-freestanding/opentui.wasm"),
+])}`
 const streamBrowserifyPath = resolve(workspaceRoot, "node_modules/stream-browserify")
 const polyfillRoot = resolve(
   workspaceRoot,
@@ -48,6 +52,10 @@ function migrationTimestamp(tag: string): number {
     Number(match[5]),
     Number(match[6]),
   )
+}
+
+function resolveFirstExistingPath(paths: string[]): string {
+  return paths.find((path) => existsSync(path)) ?? paths[0]
 }
 
 async function loadOpencodeMigrations(): Promise<Array<{ sql: string; timestamp: number; name: string }>> {
@@ -150,6 +158,21 @@ function stubModulePrefixes(stubPath: string, prefixes: string[]) {
   }
 }
 
+function redirectModuleImport(replacement: string, options: { source: string; importer: string }) {
+  return {
+    name: "redirect-module-import",
+    enforce: "pre" as const,
+    resolveId(source: string, importer?: string) {
+      if (source !== options.source || !importer) {
+        return null
+      }
+
+      const importerPath = sourcePath(importer)
+      return importerPath === options.importer ? replacement : null
+    },
+  }
+}
+
 function treeSitterQueryLoader() {
   return {
     name: "tree-sitter-query-loader",
@@ -173,6 +196,10 @@ export default defineConfig(async ({ mode }) => {
   plugins: [
     opentuiSolidTransform(),
     treeSitterQueryLoader(),
+    redirectModuleImport(resolve(__dirname, "src/shims/opencode-models-snapshot.ts"), {
+      source: "./models-snapshot",
+      importer: resolve(opencodeSrc, "provider/models.ts"),
+    }),
     stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/stubs.ts"), [
       "bonjour-service",
       "gray-matter",
@@ -332,7 +359,7 @@ export default defineConfig(async ({ mode }) => {
       },
       {
         find: "@opentui/core",
-        replacement: resolve(opentuiCoreSrc, "browser-core.ts"),
+        replacement: resolve(__dirname, "src/shims/opentui-core.ts"),
       },
       {
         find: /^opentui-spinner\/solid$/,

@@ -1,9 +1,28 @@
 import type { VirtualFS, FSWatcher } from 'almostnode';
-import { matchesClaudeLaunchCommand } from './terminal-command-routing';
-
 export const CLAUDE_AUTH_CREDENTIALS_PATH = '/home/user/.claude/.credentials.json';
 export const CLAUDE_AUTH_CONFIG_PATH = '/home/user/.claude/.config.json';
 export const CLAUDE_LEGACY_CONFIG_PATH = '/home/user/.claude.json';
+const OPENCODE_DATA_ROOT = '/opencode/data/opencode';
+const OPENCODE_CONFIG_ROOT = '/opencode/config/opencode';
+const LEGACY_OPENCODE_AUTH_PATH = '/opencode/data/auth.json';
+const LEGACY_OPENCODE_MCP_AUTH_PATH = '/opencode/data/mcp-auth.json';
+const LEGACY_OPENCODE_CONFIG_PATH = '/opencode/config/opencode.json';
+const LEGACY_OPENCODE_CONFIG_JSONC_PATH = '/opencode/config/opencode.jsonc';
+const LEGACY_OPENCODE_LEGACY_CONFIG_PATH = '/opencode/config/config.json';
+
+export const OPENCODE_AUTH_PATH = `${OPENCODE_DATA_ROOT}/auth.json`;
+export const OPENCODE_MCP_AUTH_PATH = `${OPENCODE_DATA_ROOT}/mcp-auth.json`;
+export const OPENCODE_CONFIG_PATH = `${OPENCODE_CONFIG_ROOT}/opencode.json`;
+export const OPENCODE_CONFIG_JSONC_PATH = `${OPENCODE_CONFIG_ROOT}/opencode.jsonc`;
+export const OPENCODE_LEGACY_CONFIG_PATH = `${OPENCODE_CONFIG_ROOT}/config.json`;
+
+const OPENCODE_PATH_ALIASES: Record<string, string> = {
+  [LEGACY_OPENCODE_AUTH_PATH]: OPENCODE_AUTH_PATH,
+  [LEGACY_OPENCODE_MCP_AUTH_PATH]: OPENCODE_MCP_AUTH_PATH,
+  [LEGACY_OPENCODE_CONFIG_PATH]: OPENCODE_CONFIG_PATH,
+  [LEGACY_OPENCODE_CONFIG_JSONC_PATH]: OPENCODE_CONFIG_JSONC_PATH,
+  [LEGACY_OPENCODE_LEGACY_CONFIG_PATH]: OPENCODE_LEGACY_CONFIG_PATH,
+};
 
 const V1_STORAGE_KEY = 'almostnode.webide.claudeAuth.v1';
 export const KEYCHAIN_STORAGE_KEY = 'almostnode.webide.keychain.v2';
@@ -14,6 +33,7 @@ const KEYCHAIN_BANNER_ID = 'almostnodeKeychainBanner';
 const KEYCHAIN_STYLE_ID = 'almostnodeKeychainBannerStyles';
 const KEYCHAIN_WATCH_DEBOUNCE_MS = 150;
 const KEYCHAIN_PRF_INFO = 'almostnode claude auth vault';
+const INVALID_STORED_PAYLOAD_MESSAGE = 'The saved credentials payload is invalid.';
 
 type BannerMode = 'save' | 'unlock' | null;
 type SupportState = 'unknown' | 'supported' | 'unsupported';
@@ -41,6 +61,11 @@ interface SnapshotEntry {
 
 interface SnapshotPayload {
   files: SnapshotEntry[];
+}
+
+interface ManagedSnapshotState {
+  files: SnapshotEntry[];
+  hasInvalidClaudeCredentials: boolean;
 }
 
 interface BannerAction {
@@ -385,6 +410,51 @@ function inspectCredentialsFile(vfs: VirtualFS): AuthFileInspection {
   }
 }
 
+function readManagedSnapshotState(vfs: VirtualFS, managedPaths: string[]): ManagedSnapshotState {
+  const files: SnapshotEntry[] = [];
+  let hasInvalidClaudeCredentials = false;
+
+  for (const path of managedPaths) {
+    if (!vfs.existsSync(path)) {
+      continue;
+    }
+
+    if (path === CLAUDE_AUTH_CREDENTIALS_PATH) {
+      const inspection = inspectCredentialsFile(vfs);
+      if (inspection.kind === 'valid') {
+        files.push({
+          path,
+          rawText: inspection.rawText,
+        });
+        continue;
+      }
+
+      if (inspection.kind === 'invalid') {
+        hasInvalidClaudeCredentials = true;
+      }
+      continue;
+    }
+
+    try {
+      if (!vfs.statSync(path).isFile()) {
+        continue;
+      }
+      files.push({
+        path,
+        rawText: vfs.readFileSync(path, 'utf8'),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new WebAuthnError(`Unable to read managed file ${path}: ${message}`);
+    }
+  }
+
+  return {
+    files,
+    hasInvalidClaudeCredentials,
+  };
+}
+
 function ensureBannerStyles(): void {
   if (document.getElementById(KEYCHAIN_STYLE_ID)) {
     return;
@@ -562,6 +632,19 @@ export class Keychain {
     return this.managedPaths.includes(path);
   }
 
+  private normalizeManagedPath(path: string): string | null {
+    if (this.isManagedPath(path)) {
+      return path;
+    }
+
+    const aliased = OPENCODE_PATH_ALIASES[path];
+    if (aliased && this.isManagedPath(aliased)) {
+      return aliased;
+    }
+
+    return null;
+  }
+
   async init(): Promise<void> {
     ensureBannerStyles();
     this.ensureBannerElement();
@@ -602,31 +685,52 @@ export class Keychain {
   }
 
   async prepareForCommand(command: string): Promise<boolean> {
-    if (!matchesClaudeLaunchCommand(command)) {
+    const stored = this.getStoredVault();
+    if (!stored || this.hasRestoredState(stored)) {
+      return true;
+    }
+
+    const normalized = command.trim().toLowerCase();
+    const shouldAutoRestore = /\b(opencode(?:-ai)?|gh|replayio)\b/.test(normalized);
+    if (!shouldAutoRestore) {
       return true;
     }
 
     if (!await this.detectSupport()) {
-      return true;
-    }
-
-    const stored = this.getStoredVault();
-    if (!stored) {
-      return true;
-    }
-
-    const inspection = inspectCredentialsFile(this.vfs);
-    if (inspection.kind === 'valid' && this.hasRestoredState(stored)) {
-      return true;
-    }
-
-    try {
-      await this.restoreSavedCredentials();
-      return true;
-    } catch (error) {
-      this.showUnlockBanner(this.toUserFacingError(error));
+      this.showUnlockBanner('Unlock the saved keychain before running this command.');
       return false;
     }
+
+    let restored = true;
+    let discardedInvalidVault = false;
+    await this.runBusyAction(async () => {
+      await this.restoreSavedCredentials();
+      this.hideBanner();
+    }, (error) => {
+      if (this.isInvalidStoredPayloadError(error)) {
+        discardedInvalidVault = true;
+        this.discardInvalidStoredVault();
+        return;
+      }
+
+      restored = false;
+      this.showUnlockBanner(this.toUserFacingError(error));
+    });
+
+    if (discardedInvalidVault) {
+      return true;
+    }
+
+    const current = this.getStoredVault();
+    if (!current) {
+      return restored;
+    }
+
+    return restored && this.hasRestoredState(current);
+  }
+
+  private getManagedSnapshotState(): ManagedSnapshotState {
+    return readManagedSnapshotState(this.vfs, this.managedPaths);
   }
 
   async handlePrimaryAction(): Promise<void> {
@@ -645,13 +749,18 @@ export class Keychain {
         await this.restoreSavedCredentials();
         this.hideBanner();
       }, (error) => {
+        if (this.isInvalidStoredPayloadError(error)) {
+          this.discardInvalidStoredVault();
+          return;
+        }
+
         this.showUnlockBanner(this.toUserFacingError(error));
       });
       return;
     }
 
-    const inspection = inspectCredentialsFile(this.vfs);
-    if (inspection.kind !== 'valid') {
+    const snapshot = this.getManagedSnapshotState().files;
+    if (snapshot.length === 0) {
       this.showSaveBanner('No credentials are available to save yet.');
       return;
     }
@@ -670,15 +779,16 @@ export class Keychain {
   }
 
   getState(): KeychainState {
+    const snapshotState = this.getManagedSnapshotState();
     return {
       supported: this.supportState === 'supported',
       hasStoredVault: Boolean(this.getStoredVault()),
       hasUnlockedKey: this.unlockedKey !== null,
-      hasLiveCredentials: inspectCredentialsFile(this.vfs).kind === 'valid',
+      hasLiveCredentials: snapshotState.files.length > 0,
       bannerMode: this.bannerMode,
       bannerMessage: this.bannerMessage,
       busy: this.busy,
-      path: CLAUDE_AUTH_CREDENTIALS_PATH,
+      path: this.managedPaths[0] ?? CLAUDE_AUTH_CREDENTIALS_PATH,
     };
   }
 
@@ -687,7 +797,7 @@ export class Keychain {
       return;
     }
 
-    const snapshot = this.readManagedSnapshot();
+    const snapshot = this.getManagedSnapshotState().files;
     if (snapshot.length === 0) {
       return;
     }
@@ -714,8 +824,13 @@ export class Keychain {
       return;
     }
 
-    const inspection = inspectCredentialsFile(this.vfs);
-    if (inspection.kind === 'missing' || inspection.kind === 'withoutAuth') {
+    const snapshotState = this.getManagedSnapshotState();
+    if (snapshotState.files.length === 0) {
+      if (snapshotState.hasInvalidClaudeCredentials) {
+        this.emitState();
+        return;
+      }
+
       if (this.getStoredVault()) {
         this.clearStoredVault();
       } else {
@@ -724,12 +839,7 @@ export class Keychain {
       return;
     }
 
-    if (inspection.kind === 'invalid') {
-      this.emitState();
-      return;
-    }
-
-    const rawSnapshot = serializeSnapshot(this.readManagedSnapshot());
+    const rawSnapshot = serializeSnapshot(snapshotState.files);
 
     if (this.getStoredVault() && this.unlockedKey) {
       try {
@@ -751,7 +861,7 @@ export class Keychain {
   private async saveCurrentCredentials(): Promise<void> {
     const existing = this.getStoredVault();
     let key = this.unlockedKey;
-    const snapshot = this.readManagedSnapshot();
+    const snapshot = this.getManagedSnapshotState().files;
     const rawSnapshot = serializeSnapshot(snapshot);
     const snapshotPaths = snapshot.map((entry) => entry.path);
 
@@ -813,7 +923,7 @@ export class Keychain {
 
     const key = this.unlockedKey ?? await unlockVaultKey(stored.credentialId, base64URLStringToBuffer(stored.prfSalt));
     const decrypted = await decryptData(key, stored.ciphertext, stored.iv);
-    const snapshot = parseSnapshotPayload(decrypted, (p) => this.isManagedPath(p));
+    const snapshot = parseSnapshotPayload(decrypted, (p) => this.normalizeManagedPath(p));
     if (!snapshot.some((entry) => entry.path === CLAUDE_AUTH_CREDENTIALS_PATH)) {
       // Might be a keychain that only has non-Claude data — that's fine, just restore what's there
     }
@@ -838,28 +948,7 @@ export class Keychain {
   }
 
   private readManagedSnapshot(): SnapshotEntry[] {
-    const files: SnapshotEntry[] = [];
-
-    for (const path of this.managedPaths) {
-      if (!this.vfs.existsSync(path)) {
-        continue;
-      }
-
-      try {
-        if (!this.vfs.statSync(path).isFile()) {
-          continue;
-        }
-        files.push({
-          path,
-          rawText: this.vfs.readFileSync(path, 'utf8'),
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new WebAuthnError(`Unable to read managed file ${path}: ${message}`);
-      }
-    }
-
-    return files;
+    return this.getManagedSnapshotState().files;
   }
 
   private buildSlotManifest(snapshotPaths: string[]): StoredKeychain['slots'] {
@@ -875,18 +964,13 @@ export class Keychain {
 
   private hasRestoredState(vault: StoredKeychain): boolean {
     const paths = this.getStoredVaultPaths(vault);
-    if (!paths.includes(CLAUDE_AUTH_CREDENTIALS_PATH)) {
-      return false;
-    }
-
-    const credentials = inspectCredentialsFile(this.vfs);
-    if (credentials.kind !== 'valid') {
+    if (paths.length === 0) {
       return false;
     }
 
     return paths.every((path) => {
       if (path === CLAUDE_AUTH_CREDENTIALS_PATH) {
-        return true;
+        return inspectCredentialsFile(this.vfs).kind === 'valid';
       }
       try {
         return this.vfs.existsSync(path) && this.vfs.statSync(path).isFile();
@@ -900,8 +984,9 @@ export class Keychain {
     const paths: string[] = [];
     for (const slot of vault.slots) {
       for (const p of slot.paths) {
-        if (this.isManagedPath(p) && !paths.includes(p)) {
-          paths.push(p);
+        const normalized = this.normalizeManagedPath(p);
+        if (normalized && !paths.includes(normalized)) {
+          paths.push(normalized);
         }
       }
     }
@@ -953,9 +1038,9 @@ export class Keychain {
 
   private handleDismiss(): void {
     if (this.bannerMode === 'save') {
-      const inspection = inspectCredentialsFile(this.vfs);
-      if (inspection.kind === 'valid') {
-        this.dismissedSaveDigest = serializeSnapshot(this.readManagedSnapshot());
+      const snapshot = this.getManagedSnapshotState().files;
+      if (snapshot.length > 0) {
+        this.dismissedSaveDigest = serializeSnapshot(snapshot);
       }
     }
     this.hideBanner();
@@ -963,6 +1048,21 @@ export class Keychain {
 
   private handleForget(): void {
     this.clearStoredVault();
+    this.hideBanner();
+  }
+
+  private isInvalidStoredPayloadError(error: unknown): boolean {
+    return error instanceof WebAuthnError && error.message === INVALID_STORED_PAYLOAD_MESSAGE;
+  }
+
+  private discardInvalidStoredVault(): void {
+    this.clearStoredVault();
+    const snapshot = this.getManagedSnapshotState().files;
+    if (snapshot.length > 0) {
+      this.showSaveBanner('Saved credentials were invalid and were cleared. Save the current credentials again?');
+      return;
+    }
+
     this.hideBanner();
   }
 
@@ -1167,27 +1267,35 @@ function serializeSnapshot(files: SnapshotEntry[]): string {
   return JSON.stringify({ files } satisfies SnapshotPayload);
 }
 
-function parseSnapshotPayload(rawText: string, isManaged: (path: string) => boolean): SnapshotEntry[] {
+function parseSnapshotPayload(rawText: string, normalizePath: (path: string) => string | null): SnapshotEntry[] {
   const parsed = JSON.parse(rawText) as Record<string, unknown>;
 
   if (parsed && Array.isArray(parsed.files)) {
-    const files = parsed.files
-      .filter((entry): entry is SnapshotEntry => {
-        return Boolean(
-          entry
-          && typeof entry === 'object'
-          && typeof (entry as { path?: unknown }).path === 'string'
-          && typeof (entry as { rawText?: unknown }).rawText === 'string'
-          && isManaged((entry as { path: string }).path),
-        );
-      })
-      .map((entry) => ({
-        path: entry.path,
-        rawText: entry.rawText,
-      }));
+    const files = new Map<string, SnapshotEntry>();
 
-    if (files.length > 0) {
-      return files;
+    for (const entry of parsed.files) {
+      if (
+        !entry
+        || typeof entry !== 'object'
+        || typeof (entry as { path?: unknown }).path !== 'string'
+        || typeof (entry as { rawText?: unknown }).rawText !== 'string'
+      ) {
+        continue;
+      }
+
+      const normalizedPath = normalizePath((entry as { path: string }).path);
+      if (!normalizedPath) {
+        continue;
+      }
+
+      files.set(normalizedPath, {
+        path: normalizedPath,
+        rawText: (entry as { rawText: string }).rawText,
+      });
+    }
+
+    if (files.size > 0) {
+      return Array.from(files.values());
     }
   }
 
@@ -1199,7 +1307,7 @@ function parseSnapshotPayload(rawText: string, isManaged: (path: string) => bool
     }];
   }
 
-  throw new WebAuthnError('The saved credentials payload is invalid.');
+  throw new WebAuthnError(INVALID_STORED_PAYLOAD_MESSAGE);
 }
 
 export function parseStoredKeychain(raw: string | null): StoredKeychain | null {

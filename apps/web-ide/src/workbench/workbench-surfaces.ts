@@ -26,8 +26,8 @@ const DATABASE_EDITOR_RESOURCE = URI.from({
   path: '/browser',
 });
 const FILES_VIEW_ID = 'almostnode.sidebar.files';
+const OPEN_CODE_VIEW_ID = 'almostnode.sidebar.opencode';
 const TERMINAL_VIEW_ID = 'almostnode.panel.terminal';
-const CLAUDE_VIEW_ID = 'almostnode.sidebar.claude';
 const DATABASE_VIEW_ID = 'almostnode.sidebar.database';
 const NODE_MODULES_REFRESH_DELAY_MS = 48;
 
@@ -94,8 +94,8 @@ export interface RegisteredWorkbenchSurfaces {
   databaseInput: SimpleEditorInput;
   renderedEditors: RenderedEditorFactories;
   filesViewId: string;
+  openCodeViewId: string;
   terminalViewId: string;
-  claudeViewId: string;
   databaseViewId: string;
   keychainViewId: string;
   dispose(): void;
@@ -1335,7 +1335,7 @@ export class TerminalPanelSurface {
   }
 }
 
-export class ClaudeTerminalSurface {
+export class OpenCodeTerminalSurface {
   private readonly root = document.createElement('div');
   private readonly statusRow = document.createElement('div');
   private readonly tabs = document.createElement('div');
@@ -1350,6 +1350,8 @@ export class ClaudeTerminalSurface {
   private readonly tabBodies = new Map<string, HTMLDivElement>();
   private readonly tabStatuses = new Map<string, string>();
   private readonly terminals = new Map<string, { terminal: Terminal; fitAddon: FitAddon }>();
+  private readonly customTabs = new Set<string>();
+  private readonly customHosts = new Map<string, HTMLElement>();
 
   constructor(
     private readonly callbacks: {
@@ -1359,26 +1361,26 @@ export class ClaudeTerminalSurface {
       onResize?: (id: string, cols: number, rows: number) => void;
     },
   ) {
-    this.root.className = 'almostnode-claude-surface';
-    this.statusRow.className = 'almostnode-claude-surface__status-row';
-    this.tabs.className = 'almostnode-claude-surface__tabs';
-    this.actions.className = 'almostnode-claude-surface__actions';
+    this.root.className = 'almostnode-opencode-surface';
+    this.statusRow.className = 'almostnode-opencode-surface__status-row';
+    this.tabs.className = 'almostnode-opencode-surface__tabs';
+    this.actions.className = 'almostnode-opencode-surface__actions';
 
     this.newTabButton.type = 'button';
-    this.newTabButton.className = 'almostnode-claude-surface__new-tab';
+    this.newTabButton.className = 'almostnode-opencode-surface__new-tab';
     this.newTabButton.textContent = '+';
-    this.newTabButton.setAttribute('aria-label', 'New Claude terminal');
+    this.newTabButton.setAttribute('aria-label', 'New OpenCode session');
     this.newTabButton.addEventListener('click', () => {
       this.callbacks.onCreateTab();
     });
 
-    this.body.className = 'almostnode-claude-surface__body';
+    this.body.className = 'almostnode-opencode-surface__body';
 
-    this.loading.className = 'almostnode-claude-surface__loading';
+    this.loading.className = 'almostnode-opencode-surface__loading';
     this.loading.innerHTML =
-      '<div class="almostnode-claude-surface__loading-content">'
-      + '<div class="almostnode-claude-surface__loading-icon">✦</div>'
-      + '<div class="almostnode-claude-surface__loading-text">Starting Claude Code...</div>'
+      '<div class="almostnode-opencode-surface__loading-content">'
+      + '<div class="almostnode-opencode-surface__loading-icon">✦</div>'
+      + '<div class="almostnode-opencode-surface__loading-text">Starting OpenCode...</div>'
       + '</div>';
     this.loading.hidden = true;
     this.loading.style.display = 'none';
@@ -1395,7 +1397,7 @@ export class ClaudeTerminalSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add('almostnode-claude-panel-host');
+    container.classList.add('almostnode-opencode-panel-host');
     container.appendChild(this.root);
 
     if (!this.opened) {
@@ -1447,7 +1449,12 @@ export class ClaudeTerminalSurface {
 
   focus(): void {
     const active = this.activeTabId ? this.terminals.get(this.activeTabId) : null;
-    active?.terminal.focus();
+    if (active) {
+      active.terminal.focus();
+      return;
+    }
+
+    this.activeTabId && this.customHosts.get(this.activeTabId)?.focus();
   }
 
   addTab(tab: {
@@ -1467,21 +1474,21 @@ export class ClaudeTerminalSurface {
 
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'almostnode-claude-surface__tab';
+    button.className = 'almostnode-opencode-surface__tab';
     button.dataset.terminalId = tab.id;
     button.addEventListener('click', () => {
       this.callbacks.onSelectTab(tab.id);
     });
 
     const label = document.createElement('span');
-    label.className = 'almostnode-claude-surface__tab-label';
+    label.className = 'almostnode-opencode-surface__tab-label';
     label.textContent = tab.title;
     button.appendChild(label);
 
     if (tab.closable) {
       const closeButton = document.createElement('button');
       closeButton.type = 'button';
-      closeButton.className = 'almostnode-claude-surface__tab-close';
+      closeButton.className = 'almostnode-opencode-surface__tab-close';
       closeButton.textContent = 'x';
       closeButton.setAttribute('aria-label', `Close ${tab.title}`);
       closeButton.addEventListener('click', (event) => {
@@ -1492,7 +1499,7 @@ export class ClaudeTerminalSurface {
     }
 
     const body = document.createElement('div');
-    body.className = 'almostnode-claude-surface__terminal';
+    body.className = 'almostnode-opencode-surface__terminal';
     body.dataset.terminalId = tab.id;
     body.hidden = true;
     body.style.display = 'none';
@@ -1510,6 +1517,60 @@ export class ClaudeTerminalSurface {
     queueTerminalFit(() => this.fit());
   }
 
+  addCustomTab(tab: {
+    id: string;
+    title: string;
+    element: HTMLElement;
+    closable: boolean;
+  }): void {
+    if (this.tabButtons.has(tab.id)) {
+      this.updateTabTitle(tab.id, tab.title);
+      return;
+    }
+
+    this.customTabs.add(tab.id);
+    this.customHosts.set(tab.id, tab.element);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'almostnode-opencode-surface__tab';
+    button.dataset.terminalId = tab.id;
+    button.addEventListener('click', () => {
+      this.callbacks.onSelectTab(tab.id);
+    });
+
+    const label = document.createElement('span');
+    label.className = 'almostnode-opencode-surface__tab-label';
+    label.textContent = tab.title;
+    button.appendChild(label);
+
+    if (tab.closable) {
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'almostnode-opencode-surface__tab-close';
+      closeButton.textContent = 'x';
+      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
+      closeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.callbacks.onCloseTab(tab.id);
+      });
+      button.appendChild(closeButton);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'almostnode-opencode-surface__terminal';
+    body.dataset.terminalId = tab.id;
+    body.hidden = true;
+    body.style.display = 'none';
+    body.appendChild(tab.element);
+
+    this.tabButtons.set(tab.id, button);
+    this.tabBodies.set(tab.id, body);
+    this.tabStatuses.set(tab.id, 'Idle');
+    this.tabs.appendChild(button);
+    this.body.appendChild(body);
+  }
+
   removeTab(id: string): void {
     this.tabButtons.get(id)?.remove();
     this.tabBodies.get(id)?.remove();
@@ -1517,6 +1578,8 @@ export class ClaudeTerminalSurface {
     this.tabBodies.delete(id);
     this.tabStatuses.delete(id);
     this.terminals.delete(id);
+    this.customTabs.delete(id);
+    this.customHosts.delete(id);
 
     if (this.activeTabId === id) {
       this.activeTabId = null;
@@ -1525,7 +1588,7 @@ export class ClaudeTerminalSurface {
 
   updateTabTitle(id: string, title: string): void {
     const button = this.tabButtons.get(id);
-    const label = button?.querySelector('.almostnode-claude-surface__tab-label');
+    const label = button?.querySelector('.almostnode-opencode-surface__tab-label');
     if (label) {
       label.textContent = title;
     }
@@ -1551,6 +1614,9 @@ export class ClaudeTerminalSurface {
 
   private fit(): void {
     if (!this.opened || !this.activeTabId) {
+      return;
+    }
+    if (this.customTabs.has(this.activeTabId)) {
       return;
     }
     const activeBody = this.tabBodies.get(this.activeTabId);
@@ -2036,7 +2102,7 @@ export class KeychainSidebarSurface {
 
       card.append(iconWrap, info);
 
-      // Add login/logout button for services that support it (not Claude)
+      // Add login/logout button for services that support direct auth actions.
       if (slot.canAuth) {
         const authBtn = document.createElement('button');
         authBtn.textContent = slot.active ? 'Logout' : 'Login';
@@ -2205,7 +2271,7 @@ export class TestsSidebarSurface {
     if (this.tests.length === 0) {
       const empty = document.createElement('div');
       empty.style.cssText = 'color:#666;font-style:italic;padding:4px 8px;font-size:12px;';
-      empty.textContent = 'No tests recorded yet. Use Claude to interact with the preview — tests will be auto-detected.';
+      empty.textContent = 'No tests recorded yet. Use OpenCode to interact with the preview and tests will be auto-detected.';
       this.listEl.appendChild(empty);
       return;
     }
@@ -2263,9 +2329,9 @@ export class TestsSidebarSurface {
 
 export function registerWorkbenchSurfaces(options: {
   filesSurface: FilesSidebarSurface;
+  openCodeSurface: OpenCodeTerminalSurface;
   previewSurface: PreviewSurface;
   terminalSurface: TerminalPanelSurface;
-  claudeSurface: ClaudeTerminalSurface;
   databaseBrowserSurface: DatabaseBrowserSurface;
   keychainSurface: KeychainSidebarSurface;
   vfs: VirtualFS;
@@ -2364,21 +2430,20 @@ export function registerWorkbenchSurfaces(options: {
   );
   disposables.add(
     registerCustomView({
-      id: TERMINAL_VIEW_ID,
-      name: 'Terminal',
-      location: ViewContainerLocation.Panel,
-      renderBody: (container) => options.terminalSurface.attach(container),
+      id: OPEN_CODE_VIEW_ID,
+      name: 'OpenCode',
+      location: ViewContainerLocation.Sidebar,
+      order: 0,
+      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>'),
+      renderBody: (container) => options.openCodeSurface.attach(container),
     }),
   );
   disposables.add(
     registerCustomView({
-      id: CLAUDE_VIEW_ID,
-      name: 'Claude Code',
-      location: ViewContainerLocation.Sidebar,
-      default: true,
-      order: 0,
-      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19L8 5L13 19M5.5 14H10.5M18 5V19"/></svg>'),
-      renderBody: (container) => options.claudeSurface.attach(container),
+      id: TERMINAL_VIEW_ID,
+      name: 'Terminal',
+      location: ViewContainerLocation.Panel,
+      renderBody: (container) => options.terminalSurface.attach(container),
     }),
   );
   disposables.add(
@@ -2396,8 +2461,8 @@ export function registerWorkbenchSurfaces(options: {
     databaseInput,
     renderedEditors: rendered.factories,
     filesViewId: FILES_VIEW_ID,
+    openCodeViewId: OPEN_CODE_VIEW_ID,
     terminalViewId: TERMINAL_VIEW_ID,
-    claudeViewId: CLAUDE_VIEW_ID,
     databaseViewId: DATABASE_VIEW_ID,
     keychainViewId: KEYCHAIN_VIEW_ID,
     dispose: () => disposables.dispose(),

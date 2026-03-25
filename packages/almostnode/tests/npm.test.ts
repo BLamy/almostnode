@@ -964,6 +964,93 @@ describe('npm', () => {
       expect(result.stdout).toContain('added 1 packages');
       expect(container.vfs.existsSync('/node_modules/stream-pkg/package.json')).toBe(true);
     });
+
+    it('installs devDependencies for npm install with no package args', async () => {
+      const manifests = new Map([
+        ['runtime-pkg', {
+          name: 'runtime-pkg',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'runtime-pkg',
+              version: '1.0.0',
+              dist: {
+                tarball: 'https://registry.npmjs.org/runtime-pkg/-/runtime-pkg-1.0.0.tgz',
+                shasum: 'runtime',
+              },
+              dependencies: {},
+            },
+          },
+        }],
+        ['dev-only-pkg', {
+          name: 'dev-only-pkg',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'dev-only-pkg',
+              version: '1.0.0',
+              dist: {
+                tarball: 'https://registry.npmjs.org/dev-only-pkg/-/dev-only-pkg-1.0.0.tgz',
+                shasum: 'dev-only',
+              },
+              dependencies: {},
+            },
+          },
+        }],
+      ]);
+
+      const tarballs = new Map([
+        ['runtime-pkg', pako.gzip(createMinimalTarball({
+          'package/package.json': '{"name":"runtime-pkg","version":"1.0.0"}',
+        }))],
+        ['dev-only-pkg', pako.gzip(createMinimalTarball({
+          'package/package.json': '{"name":"dev-only-pkg","version":"1.0.0"}',
+        }))],
+      ]);
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+
+        for (const [pkgName, manifest] of manifests) {
+          const encodedManifestUrl = encodeURIComponent(`https://registry.npmjs.org/${pkgName}`);
+          const encodedTarballUrl = encodeURIComponent(`https://registry.npmjs.org/${pkgName}/-/${pkgName}-1.0.0.tgz`);
+          if ((urlStr.includes(`/${pkgName}`) || urlStr.includes(encodedManifestUrl)) && !urlStr.includes('.tgz')) {
+            return new Response(JSON.stringify(manifest), { status: 200 });
+          }
+          if (urlStr.includes(`${pkgName}-1.0.0.tgz`) || urlStr.includes(encodedTarballUrl)) {
+            return new Response(tarballs.get(pkgName), { status: 200 });
+          }
+        }
+
+        return new Response('Not found', { status: 404 });
+      });
+
+      const container = createContainer({
+        cwd: '/project',
+        installMode: 'main-thread',
+      });
+      container.vfs.mkdirSync('/project', { recursive: true });
+      container.vfs.writeFileSync(
+        '/project/package.json',
+        JSON.stringify({
+          name: 'demo-project',
+          version: '1.0.0',
+          dependencies: {
+            'runtime-pkg': '^1.0.0',
+          },
+          devDependencies: {
+            'dev-only-pkg': '^1.0.0',
+          },
+        }),
+      );
+
+      const result = await container.run('npm install');
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('added 2 packages');
+      expect(container.vfs.existsSync('/project/node_modules/runtime-pkg/package.json')).toBe(true);
+      expect(container.vfs.existsSync('/project/node_modules/dev-only-pkg/package.json')).toBe(true);
+    });
   });
 });
 

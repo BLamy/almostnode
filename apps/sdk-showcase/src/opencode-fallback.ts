@@ -17,7 +17,7 @@ export class BrowserAgent {
       `OpenCode fallback is active in the production build.\nReceived: ${message}\n`,
     );
     this.terminal.writeln(
-      "Run `pnpm dev:sdk-showcase` to use the sibling OpenCode browser compatibility loader.",
+      "Run `pnpm vendor:install:opencode` once, then `pnpm dev:sdk-showcase` to use the OpenCode/OpenTUI submodule browser compatibility loader.",
     );
   }
 }

@@ -34,7 +34,7 @@ export function showTestDetectedToast(opts: {
   onDismiss: () => void;
 }): void {
   toast('Test actions detected', {
-    description: 'Claude performed UI actions that can be saved as a replayable test.',
+    description: 'Agent-driven UI actions can be saved as a replayable test.',
     action: {
       label: 'Save Test',
       onClick: () => {

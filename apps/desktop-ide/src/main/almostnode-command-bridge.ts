@@ -8,9 +8,8 @@ import { randomUUID } from 'node:crypto';
 export const ALMOSTNODE_BRIDGE_COMMAND_NAME = 'almostnode-bridge';
 export const ALMOSTNODE_BRIDGE_SHELL_COMMAND_NAME = 'almostnode-shell';
 
-const BRIDGED_COMMAND_NAMES = [
+export const BRIDGED_COMMAND_NAMES = [
   'bun',
-  'cat',
   'find',
   'grep',
   'ls',
@@ -29,6 +28,35 @@ const BRIDGED_COMMAND_NAMES = [
   'vitest',
   'yarn',
 ] as const;
+
+const SHELL_PROXY_BYPASS_PREFIXES = [
+  'claude',
+  'codex',
+  'opencode',
+  'cursor-cli',
+  'brew',
+  'open',
+  'pbcopy',
+  'pbpaste',
+] as const;
+
+export function shouldProxyShellWrapperCommand(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  // Keep multiline scripts on the real host shell. Commands like
+  // `cat <<'EOF' ... EOF` rely on heredoc/stdin semantics that the bridge
+  // path does not emulate correctly, while project mirroring still syncs the
+  // resulting file changes back into the VFS.
+  if (/[\r\n]/.test(trimmed)) {
+    return false;
+  }
+
+  const firstToken = trimmed.split(/\s+/, 1)[0] ?? '';
+  return !SHELL_PROXY_BYPASS_PREFIXES.some((prefix) => firstToken.startsWith(prefix));
+}
 
 interface BridgeExecRequest {
   command: string;
@@ -306,6 +334,7 @@ main();
 }
 
 function getShellWrapperSource(cliPath: string): string {
+  const bypassCasePattern = SHELL_PROXY_BYPASS_PREFIXES.map((prefix) => `${prefix}*`).join('|');
   return `#!/bin/sh
 BRIDGE_CLI=${JSON.stringify(cliPath)}
 REAL_SHELL="\${ALMOSTNODE_REAL_SHELL:-/bin/zsh}"
@@ -314,7 +343,9 @@ PROJECT_DIR="\${ALMOSTNODE_BRIDGE_PROJECT_DIR:-}"
 should_proxy_command() {
   case "$1" in
     "" ) return 1 ;;
-    claude*|codex*|opencode*|cursor-cli*|brew*|open*|pbcopy*|pbpaste* )
+    *'
+'* ) return 1 ;;
+    ${bypassCasePattern} )
       return 1
       ;;
     * )

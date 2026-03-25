@@ -7,6 +7,8 @@
       "Bash(npm *)",
       "Bash(npm run *)",
       "Bash(npx *)",
+      "Bash(opencode)",
+      "Bash(opencode *)",
       "Bash(npx shadcn *)",
       "Bash(npx shadcn add *)",
       "Bash(npx shadcn docs *)",

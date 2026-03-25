@@ -22,6 +22,12 @@ import {
 import {
   Keychain,
   KEYCHAIN_STORAGE_KEY,
+  OPENCODE_AUTH_PATH,
+  OPENCODE_CONFIG_JSONC_PATH,
+  OPENCODE_CONFIG_PATH,
+  OPENCODE_LEGACY_CONFIG_PATH,
+  OPENCODE_MCP_AUTH_PATH,
+  deriveVaultKeyFromPrf,
   parseStoredKeychain,
 } from '../src/features/keychain';
 
@@ -29,6 +35,13 @@ const CLAUDE_SLOT_PATHS = [
   CLAUDE_AUTH_CREDENTIALS_PATH,
   CLAUDE_AUTH_CONFIG_PATH,
   CLAUDE_LEGACY_CONFIG_PATH,
+];
+const OPENCODE_SLOT_PATHS = [
+  OPENCODE_AUTH_PATH,
+  OPENCODE_MCP_AUTH_PATH,
+  OPENCODE_CONFIG_JSONC_PATH,
+  OPENCODE_CONFIG_PATH,
+  OPENCODE_LEGACY_CONFIG_PATH,
 ];
 
 const GH_HOSTS_PATH = '/home/user/.config/gh/hosts.yml';
@@ -154,6 +167,7 @@ function createKeychain(vfs = new VirtualFS()): Keychain {
   });
   kc.registerSlot('claude', CLAUDE_SLOT_PATHS);
   kc.registerSlot('github', [GH_HOSTS_PATH]);
+  kc.registerSlot('opencode', OPENCODE_SLOT_PATHS);
   return kc;
 }
 
@@ -192,6 +206,76 @@ function writeGhHosts(vfs: VirtualFS, token: string): string {
   vfs.mkdirSync('/home/user/.config/gh', { recursive: true });
   vfs.writeFileSync(GH_HOSTS_PATH, raw);
   return raw;
+}
+
+function writeOpenCodeAuth(vfs: VirtualFS, apiKey: string): string {
+  const raw = JSON.stringify({
+    openai: {
+      type: 'api',
+      key: apiKey,
+    },
+  });
+  vfs.mkdirSync(OPENCODE_AUTH_PATH.slice(0, OPENCODE_AUTH_PATH.lastIndexOf('/')), { recursive: true });
+  vfs.writeFileSync(OPENCODE_AUTH_PATH, raw);
+  return raw;
+}
+
+function writeOpenCodeConfig(vfs: VirtualFS): { json: string; jsonc: string } {
+  const json = JSON.stringify({
+    provider: {
+      openai: {
+        disabled: false,
+      },
+    },
+  });
+  const jsonc = '{\n  "provider": {\n    "openai": {\n      "disabled": false\n    }\n  }\n}\n';
+
+  vfs.mkdirSync(OPENCODE_CONFIG_PATH.slice(0, OPENCODE_CONFIG_PATH.lastIndexOf('/')), { recursive: true });
+  vfs.writeFileSync(OPENCODE_CONFIG_PATH, json);
+  vfs.writeFileSync(OPENCODE_CONFIG_JSONC_PATH, jsonc);
+
+  return { json, jsonc };
+}
+
+async function unlockStoredKeychainKey(stored: { credentialId: string; prfSalt: string }): Promise<CryptoKey> {
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      timeout: 60_000,
+      userVerification: 'required',
+      rpId: window.location.hostname,
+      allowCredentials: [
+        {
+          id: base64URLStringToBuffer(stored.credentialId),
+          type: 'public-key',
+        },
+      ],
+      extensions: {
+        prf: {
+          evalByCredential: {
+            [stored.credentialId]: {
+              first: base64URLStringToBuffer(stored.prfSalt),
+            },
+          },
+        },
+      },
+    },
+  }) as PublicKeyCredential & {
+    getClientExtensionResults: () => {
+      prf?: {
+        results?: {
+          first?: ArrayBuffer;
+        };
+      };
+    };
+  };
+
+  const prfOutput = assertion.getClientExtensionResults().prf?.results?.first;
+  if (!prfOutput) {
+    throw new Error('Mock authenticator did not return a PRF result.');
+  }
+
+  return deriveVaultKeyFromPrf(prfOutput, base64URLStringToBuffer(stored.prfSalt));
 }
 
 describe('ClaudeAuthVault', () => {
@@ -637,5 +721,103 @@ describe('Keychain', () => {
 
     expect(freshVfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, 'utf8')).toContain('multi-alpha');
     expect(freshVfs.readFileSync(GH_HOSTS_PATH, 'utf8')).toBe(ghContent);
+  });
+
+  it('stores and restores OpenCode auth/config without requiring Claude files', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const vfs = new VirtualFS();
+    const kc = createKeychain(vfs);
+    await kc.init();
+
+    const auth = writeOpenCodeAuth(vfs, 'sk-openai-test');
+    const config = writeOpenCodeConfig(vfs);
+    await flushWatcher();
+
+    expect(kc.getState().hasLiveCredentials).toBe(true);
+
+    await kc.handlePrimaryAction();
+
+    const stored = parseStoredKeychain(localStorage.getItem(KEYCHAIN_STORAGE_KEY));
+    expect(stored?.slots).toEqual([
+      {
+        name: 'opencode',
+        paths: [
+          OPENCODE_AUTH_PATH,
+          OPENCODE_CONFIG_JSONC_PATH,
+          OPENCODE_CONFIG_PATH,
+        ],
+      },
+    ]);
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+    expect(freshKc.getState().bannerMode).toBe('unlock');
+
+    await freshKc.handlePrimaryAction();
+
+    expect(freshVfs.readFileSync(OPENCODE_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshVfs.readFileSync(OPENCODE_CONFIG_PATH, 'utf8')).toBe(config.json);
+    expect(freshVfs.readFileSync(OPENCODE_CONFIG_JSONC_PATH, 'utf8')).toBe(config.jsonc);
+  });
+
+  it('auto-restores saved OpenCode auth before opencode commands run', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    const auth = writeOpenCodeAuth(setupVfs, 'sk-openai-prepare');
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    expect(freshKc.getState().hasLiveCredentials).toBe(false);
+
+    await expect(freshKc.prepareForCommand('opencode')).resolves.toBe(true);
+
+    expect(freshVfs.readFileSync(OPENCODE_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshKc.getState().hasLiveCredentials).toBe(true);
+  });
+
+  it('drops an invalid saved payload instead of blocking opencode startup', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    writeOpenCodeAuth(setupVfs, 'sk-openai-invalid-payload');
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const stored = parseStoredKeychain(localStorage.getItem(KEYCHAIN_STORAGE_KEY));
+    expect(stored).toBeTruthy();
+
+    const key = await unlockStoredKeychainKey(stored!);
+    const encrypted = await encryptData(key, JSON.stringify({ files: [] }));
+    localStorage.setItem(KEYCHAIN_STORAGE_KEY, JSON.stringify({
+      ...stored,
+      iv: encrypted.iv,
+      ciphertext: encrypted.ciphertext,
+    }));
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    await expect(freshKc.prepareForCommand('opencode')).resolves.toBe(true);
+
+    expect(localStorage.getItem(KEYCHAIN_STORAGE_KEY)).toBeNull();
+    expect(freshKc.getState().hasStoredVault).toBe(false);
+    expect(freshKc.getState().hasLiveCredentials).toBe(false);
   });
 });
