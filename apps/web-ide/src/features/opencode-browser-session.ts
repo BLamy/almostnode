@@ -6,6 +6,8 @@ declare const __OPENTUI_WASM_URL__: string;
 
 type OpenCodeBrowserModule = typeof import("opencode-browser-tui");
 
+export type OpenCodeThemeMode = "dark" | "light";
+
 export interface OpenCodeBrowserShellState {
   cwd: string;
   env: Record<string, string>;
@@ -16,6 +18,7 @@ export interface OpenCodeBrowserSessionOptions {
   element: HTMLElement;
   cwd: string;
   env: Record<string, string>;
+  themeMode: OpenCodeThemeMode;
   onTitleChange?: (title: string) => void;
 }
 
@@ -23,11 +26,16 @@ export interface OpenCodeBrowserSessionHandle {
   exited: Promise<void>;
   dispose(): void;
   getShellState(): OpenCodeBrowserShellState;
+  setThemeMode(themeMode: OpenCodeThemeMode): void;
 }
 
 function ensureBrowserProcess(cwd: string, env: Record<string, string>): void {
   const current = globalThis.process as typeof globalThis.process | undefined;
-  if (current && typeof current.on === "function" && typeof current.cwd === "function") {
+  if (
+    current &&
+    typeof current.on === "function" &&
+    typeof current.cwd === "function"
+  ) {
     return;
   }
 
@@ -48,18 +56,21 @@ function quoteShellArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function getShellCommandFromInvocation(command: string, args: string[]): string | null {
+function getShellCommandFromInvocation(
+  command: string,
+  args: string[],
+): string | null {
   const base = command.split("/").pop()?.toLowerCase() ?? command.toLowerCase();
   const normalizedBase = base.endsWith(".exe") ? base.slice(0, -4) : base;
   const isShell =
-    normalizedBase === "sh"
-    || normalizedBase === "bash"
-    || normalizedBase === "zsh"
-    || normalizedBase === "fish"
-    || normalizedBase === "nu"
-    || normalizedBase === "cmd"
-    || normalizedBase === "powershell"
-    || normalizedBase === "pwsh";
+    normalizedBase === "sh" ||
+    normalizedBase === "bash" ||
+    normalizedBase === "zsh" ||
+    normalizedBase === "fish" ||
+    normalizedBase === "nu" ||
+    normalizedBase === "cmd" ||
+    normalizedBase === "powershell" ||
+    normalizedBase === "pwsh";
 
   if (!isShell || args.length === 0) {
     return null;
@@ -71,13 +82,15 @@ function getShellCommandFromInvocation(command: string, args: string[]): string 
       return null;
     }
 
-    const evalMatch = /eval\s+("(?:(?:\\.|[^"])*)"|'(?:\\.|[^'])*')\s*$/s.exec(script);
+    const evalMatch = /eval\s+("(?:(?:\\.|[^"])*)"|'(?:\\.|[^'])*')\s*$/s.exec(
+      script,
+    );
     if (!evalMatch) {
       return script;
     }
 
     const quotedCommand = evalMatch[1];
-    if (quotedCommand.startsWith("\"")) {
+    if (quotedCommand.startsWith('"')) {
       try {
         return JSON.parse(quotedCommand) as string;
       } catch {
@@ -169,7 +182,10 @@ function createWorkspaceBridge(container: ReturnTypeOfCreateContainer) {
       }
 
       if (vfs.statSync(mapped).isDirectory()) {
-        vfs.rmSync(mapped, { recursive: Boolean(options?.recursive), force: true });
+        vfs.rmSync(mapped, {
+          recursive: Boolean(options?.recursive),
+          force: true,
+        });
         return;
       }
 
@@ -218,16 +234,22 @@ function createProcessBridge(session: TerminalSession) {
       const run = async () => {
         const nextCwd = input.cwd ? toContainerPath(input.cwd) : null;
         const state = session.getState();
-        const shellCommand = getShellCommandFromInvocation(input.command, input.args);
-        const commandString = shellCommand
-          ?? (
-            input.shell || input.args.length === 0
-              ? input.command
-              : [quoteShellArg(input.command), ...input.args.map(quoteShellArg)].join(" ")
-          );
-        const fullCommand = nextCwd && nextCwd !== state.cwd
-          ? `cd ${quoteShellArg(nextCwd)} && ${commandString}`
-          : commandString;
+        const shellCommand = getShellCommandFromInvocation(
+          input.command,
+          input.args,
+        );
+        const commandString =
+          shellCommand ??
+          (input.shell || input.args.length === 0
+            ? input.command
+            : [
+                quoteShellArg(input.command),
+                ...input.args.map(quoteShellArg),
+              ].join(" "));
+        const fullCommand =
+          nextCwd && nextCwd !== state.cwd
+            ? `cd ${quoteShellArg(nextCwd)} && ${commandString}`
+            : commandString;
 
         const result = await session.run(fullCommand, {
           signal: input.signal,
@@ -241,7 +263,10 @@ function createProcessBridge(session: TerminalSession) {
       };
 
       const resultPromise = pending.then(run, run);
-      pending = resultPromise.then(() => undefined, () => undefined);
+      pending = resultPromise.then(
+        () => undefined,
+        () => undefined,
+      );
       return resultPromise;
     },
   };
@@ -258,7 +283,8 @@ export async function mountOpenCodeBrowserSession(
 
   ensureBrowserProcess(options.cwd, options.env);
 
-  const { mountOpenCodeTui } = await import("opencode-browser-tui") as OpenCodeBrowserModule;
+  const { mountOpenCodeTui } =
+    (await import("opencode-browser-tui")) as OpenCodeBrowserModule;
   const mounted = await mountOpenCodeTui({
     container: options.element,
     wasmUrl: __OPENTUI_WASM_URL__,
@@ -274,7 +300,7 @@ export async function mountOpenCodeBrowserSession(
           document.title = title;
         }
       },
-      themeMode: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+      themeMode: options.themeMode,
     },
   });
 
@@ -293,6 +319,9 @@ export async function mountOpenCodeBrowserSession(
         cwd: state.cwd,
         env: state.env,
       };
+    },
+    setThemeMode(themeMode) {
+      mounted.setThemeMode(themeMode);
     },
   };
 }

@@ -1,4 +1,8 @@
-import { createContainer, type RunResult, type WorkspaceSearchProvider } from 'almostnode';
+import {
+  createContainer,
+  type RunResult,
+  type WorkspaceSearchProvider,
+} from "almostnode";
 import {
   DEFAULT_FILE,
   DEFAULT_RUN_COMMAND,
@@ -10,19 +14,43 @@ import {
   seedReferenceApp,
   getTemplateDefaults,
   type TemplateId,
-} from '../features/workspace-seed';
-import type { ReferenceAppFiles } from '../features/reference-app-loader';
-import { FixtureMarketplaceClient } from '../extensions/fixture-extensions';
-import { OpenVSXClient } from '../extensions/open-vsx';
-import { prunePersistedWorkbenchExtensions } from '../features/persisted-extensions';
-import { matchesOpenCodeLaunchCommand, shouldRunWorkbenchCommandInteractively } from '../features/terminal-command-routing';
-import { VfsFileSystemProvider } from '../features/vfs-file-system-provider';
-import type { DesktopBridge } from '../desktop/bridge';
-import { HostTerminalSession } from '../desktop/host-terminal-session';
-import { loadProjectFilesIntoVfs, type SerializedFile } from '../desktop/project-snapshot';
-import { createExtensionServiceOverrides, type ExtensionServiceOverrideBundle } from '../extensions/extension-services';
-import { FilesSidebarSurface, PreviewSurface, TerminalPanelSurface, OpenCodeTerminalSurface, ConsolePanelElement, DatabaseSidebarSurface, DatabaseBrowserSurface, KeychainSidebarSurface, TestsSidebarSurface, registerWorkbenchSurfaces, type RegisteredWorkbenchSurfaces } from './workbench-surfaces';
-import { MarkdownEditorInput, JsonEditorInput } from '../features/rendered-editors';
+} from "../features/workspace-seed";
+import type { ReferenceAppFiles } from "../features/reference-app-loader";
+import { FixtureMarketplaceClient } from "../extensions/fixture-extensions";
+import { OpenVSXClient } from "../extensions/open-vsx";
+import { prunePersistedWorkbenchExtensions } from "../features/persisted-extensions";
+import {
+  matchesOpenCodeLaunchCommand,
+  shouldRunWorkbenchCommandInteractively,
+} from "../features/terminal-command-routing";
+import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
+import type { DesktopBridge } from "../desktop/bridge";
+import { HostTerminalSession } from "../desktop/host-terminal-session";
+import {
+  loadProjectFilesIntoVfs,
+  type SerializedFile,
+} from "../desktop/project-snapshot";
+import {
+  createExtensionServiceOverrides,
+  type ExtensionServiceOverrideBundle,
+} from "../extensions/extension-services";
+import {
+  FilesSidebarSurface,
+  PreviewSurface,
+  TerminalPanelSurface,
+  OpenCodeTerminalSurface,
+  ConsolePanelElement,
+  DatabaseSidebarSurface,
+  DatabaseBrowserSurface,
+  KeychainSidebarSurface,
+  TestsSidebarSurface,
+  registerWorkbenchSurfaces,
+  type RegisteredWorkbenchSurfaces,
+} from "./workbench-surfaces";
+import {
+  MarkdownEditorInput,
+  JsonEditorInput,
+} from "../features/rendered-editors";
 import {
   Keychain,
   OPENCODE_AUTH_PATH,
@@ -31,56 +59,75 @@ import {
   OPENCODE_LEGACY_CONFIG_PATH,
   OPENCODE_MCP_AUTH_PATH,
   type KeychainState,
-} from '../features/keychain';
+} from "../features/keychain";
 import {
   mountOpenCodeBrowserSession,
   type OpenCodeBrowserSessionHandle,
   type OpenCodeBrowserShellState,
-} from '../features/opencode-browser-session';
-import { initialize, getService, ICommandService, Menu } from '@codingame/monaco-vscode-api';
-import { IConfigurationService, IEditorService, IPaneCompositePartService, IStatusbarService, IWorkbenchLayoutService, IWorkbenchThemeService } from '@codingame/monaco-vscode-api/services';
-import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
+} from "../features/opencode-browser-session";
+import {
+  initialize,
+  getService,
+  ICommandService,
+  Menu,
+  ConfigurationTarget,
+} from "@codingame/monaco-vscode-api";
+import {
+  IEditorService,
+  IPaneCompositePartService,
+  IStatusbarService,
+  IWorkbenchLayoutService,
+  IWorkbenchThemeService,
+} from "@codingame/monaco-vscode-api/services";
+import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import {
   StatusbarAlignment,
   type IStatusbarEntry,
   type IStatusbarEntryAccessor,
-} from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/statusbar/browser/statusbar';
-import { EnablementState } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement';
-import { ISearchService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service';
-import { QueryType } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search';
-import { SIDE_GROUP } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService';
-import getConfigurationServiceOverride from '@codingame/monaco-vscode-configuration-service-override';
-import getKeybindingsServiceOverride from '@codingame/monaco-vscode-keybindings-service-override';
-import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override';
-import getSearchServiceOverride from '@codingame/monaco-vscode-search-service-override';
-import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-override';
-import getTextmateServiceOverride from '@codingame/monaco-vscode-textmate-service-override';
-import getWorkbenchServiceOverride, { Parts, ViewContainerLocation, setPartVisibility } from '@codingame/monaco-vscode-workbench-service-override';
-import getExtensionsServiceOverride from '@codingame/monaco-vscode-extensions-service-override';
-import getLogServiceOverride from '@codingame/monaco-vscode-log-service-override';
-import { createIndexedDBProviders, registerFileSystemOverlay } from '@codingame/monaco-vscode-files-service-override';
-import * as monaco from 'monaco-editor';
-import '@codingame/monaco-vscode-theme-defaults-default-extension';
-import '@codingame/monaco-vscode-javascript-default-extension';
-import '@codingame/monaco-vscode-json-default-extension';
-import '@codingame/monaco-vscode-typescript-basics-default-extension';
-import '@codingame/monaco-vscode-html-default-extension';
-import '@codingame/monaco-vscode-css-default-extension';
-import '@codingame/monaco-vscode-sql-default-extension';
-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._configuration';
-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._editorPane';
-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._fileEditorFactory';
-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/fileActions.contribution';
-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/fileCommands';
-import '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/extensions/browser/extensions.contribution';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
+} from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/statusbar/browser/statusbar";
+import { EnablementState } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement";
+import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
+import { QueryType } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
+import { SIDE_GROUP } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService";
+import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
+import getKeybindingsServiceOverride from "@codingame/monaco-vscode-keybindings-service-override";
+import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-service-override";
+import getSearchServiceOverride from "@codingame/monaco-vscode-search-service-override";
+import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
+import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
+import getWorkbenchServiceOverride, {
+  Parts,
+  ViewContainerLocation,
+  setPartVisibility,
+} from "@codingame/monaco-vscode-workbench-service-override";
+import getExtensionsServiceOverride from "@codingame/monaco-vscode-extensions-service-override";
+import getLogServiceOverride from "@codingame/monaco-vscode-log-service-override";
+import {
+  createIndexedDBProviders,
+  registerFileSystemOverlay,
+} from "@codingame/monaco-vscode-files-service-override";
+import * as monaco from "monaco-editor";
+import "@codingame/monaco-vscode-theme-defaults-default-extension";
+import "@codingame/monaco-vscode-javascript-default-extension";
+import "@codingame/monaco-vscode-json-default-extension";
+import "@codingame/monaco-vscode-typescript-basics-default-extension";
+import "@codingame/monaco-vscode-html-default-extension";
+import "@codingame/monaco-vscode-css-default-extension";
+import "@codingame/monaco-vscode-sql-default-extension";
+import "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._configuration";
+import "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._editorPane";
+import "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/files.contribution._fileEditorFactory";
+import "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/fileActions.contribution";
+import "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/files/browser/fileCommands";
+import "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/extensions/browser/extensions.contribution";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 // Worker URLs via ?worker&url — Vite bundles these as self-contained worker files
-import editorWorkerUrl from 'monaco-editor/esm/vs/editor/editor.worker.js?worker&url';
-import textMateWorkerUrl from '@codingame/monaco-vscode-textmate-service-override/worker?worker&url';
-import extensionHostWorkerUrl from '@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url';
+import editorWorkerUrl from "monaco-editor/esm/vs/editor/editor.worker.js?worker&url";
+import textMateWorkerUrl from "@codingame/monaco-vscode-textmate-service-override/worker?worker&url";
+import extensionHostWorkerUrl from "@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url";
 
 // Force full page reload on change — the Monaco workbench cannot be safely
 // hot-reloaded because module-identity-dependent instanceof checks break.
@@ -93,32 +140,38 @@ export type ReturnTypeOfCreateContainer = ReturnType<typeof createContainer>;
 declare global {
   interface Window {
     MonacoEnvironment?: {
-      getWorker?: (_workerId: string, label: string) => Worker | Promise<Worker> | undefined;
+      getWorker?: (
+        _workerId: string,
+        label: string,
+      ) => Worker | Promise<Worker> | undefined;
       getWorkerUrl?: (_workerId: string, label: string) => string | undefined;
-      getWorkerOptions?: (_workerId: string, label: string) => WorkerOptions | undefined;
+      getWorkerOptions?: (
+        _workerId: string,
+        label: string,
+      ) => WorkerOptions | undefined;
     };
     __almostnodeWebIDE?: unknown;
   }
 }
 
-type MarketplaceMode = 'open-vsx' | 'fixtures';
+type MarketplaceMode = "open-vsx" | "fixtures";
 
 const WORKBENCH_WORKERS = {
   editorWorkerService: {
-    options: { type: 'module' as const, name: 'editorWorkerService' },
+    options: { type: "module" as const, name: "editorWorkerService" },
     url: editorWorkerUrl,
   },
   TextMateWorker: {
-    options: { type: 'module' as const, name: 'TextMateWorker' },
+    options: { type: "module" as const, name: "TextMateWorker" },
     url: textMateWorkerUrl,
   },
   extensionHostWorkerMain: {
-    options: { type: 'module' as const, name: 'extensionHostWorkerMain' },
+    options: { type: "module" as const, name: "extensionHostWorkerMain" },
     url: extensionHostWorkerUrl,
   },
 } satisfies Record<string, { options: WorkerOptions; url: string }>;
 
-const LEGACY_TESTS_ROOT = '/tests';
+const LEGACY_TESTS_ROOT = "/tests";
 const LEGACY_TEST_E2E_ROOT = `${LEGACY_TESTS_ROOT}/e2e`;
 const LEGACY_TEST_METADATA_PATH = `${LEGACY_TESTS_ROOT}/.almostnode-tests.json`;
 
@@ -147,19 +200,23 @@ export interface BridgedCommandResult extends RunResult {
   vfsCwd: string;
 }
 
-const PRELOADED_WORKBENCH_LANGUAGES: Array<Parameters<typeof monaco.languages.register>[0]> = [
-  { id: 'javascript' },
-  { id: 'javascriptreact' },
-  { id: 'typescript' },
-  { id: 'typescriptreact' },
+const PRELOADED_WORKBENCH_LANGUAGES: Array<
+  Parameters<typeof monaco.languages.register>[0]
+> = [
+  { id: "javascript" },
+  { id: "javascriptreact" },
+  { id: "typescript" },
+  { id: "typescriptreact" },
 ];
 
 function normalizeTerminalOutput(text: string): string {
-  return text.replace(/\r?\n/g, '\r\n');
+  return text.replace(/\r?\n/g, "\r\n");
 }
 
 function registerWorkbenchLanguages(): void {
-  const registered = new Set(monaco.languages.getLanguages().map((language) => language.id));
+  const registered = new Set(
+    monaco.languages.getLanguages().map((language) => language.id),
+  );
 
   for (const language of PRELOADED_WORKBENCH_LANGUAGES) {
     if (registered.has(language.id)) {
@@ -175,14 +232,21 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-async function withTimeout<T>(promise: Promise<T>, message: string, timeoutMs = 15000): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  message: string,
+  timeoutMs = 15000,
+): Promise<T> {
   let timeoutId = 0;
 
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+        timeoutId = window.setTimeout(
+          () => reject(new Error(message)),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {
@@ -195,74 +259,84 @@ async function withTimeout<T>(promise: Promise<T>, message: string, timeoutMs = 
 function inferWorkbenchLanguageId(path: string): string | null {
   const normalized = path.toLowerCase();
 
-  if (normalized.endsWith('.tsx')) return 'typescriptreact';
-  if (normalized.endsWith('.ts') || normalized.endsWith('.cts') || normalized.endsWith('.mts')) return 'typescript';
-  if (normalized.endsWith('.jsx')) return 'javascriptreact';
+  if (normalized.endsWith(".tsx")) return "typescriptreact";
   if (
-    normalized.endsWith('.js')
-    || normalized.endsWith('.cjs')
-    || normalized.endsWith('.mjs')
-    || normalized.endsWith('.es6')
+    normalized.endsWith(".ts") ||
+    normalized.endsWith(".cts") ||
+    normalized.endsWith(".mts")
+  )
+    return "typescript";
+  if (normalized.endsWith(".jsx")) return "javascriptreact";
+  if (
+    normalized.endsWith(".js") ||
+    normalized.endsWith(".cjs") ||
+    normalized.endsWith(".mjs") ||
+    normalized.endsWith(".es6")
   ) {
-    return 'javascript';
+    return "javascript";
   }
-  if (normalized.endsWith('.json')) return 'json';
-  if (normalized.endsWith('.jsonc')) return 'jsonc';
-  if (normalized.endsWith('.html') || normalized.endsWith('.htm') || normalized.endsWith('.xhtml')) return 'html';
-  if (normalized.endsWith('.css')) return 'css';
-  if (normalized.endsWith('.sql')) return 'sql';
+  if (normalized.endsWith(".json")) return "json";
+  if (normalized.endsWith(".jsonc")) return "jsonc";
+  if (
+    normalized.endsWith(".html") ||
+    normalized.endsWith(".htm") ||
+    normalized.endsWith(".xhtml")
+  )
+    return "html";
+  if (normalized.endsWith(".css")) return "css";
+  if (normalized.endsWith(".sql")) return "sql";
 
   return null;
 }
 
 const TERMINAL_THEME_DARK = {
-  background: '#0e1218',
-  foreground: '#dce5f3',
-  cursor: '#ff7a59',
-  cursorAccent: '#0e1218',
-  selectionBackground: 'rgba(255, 122, 89, 0.34)',
-  selectionInactiveBackground: 'rgba(255, 122, 89, 0.24)',
-  black: '#1e2630',
-  red: '#f47067',
-  green: '#8ddb8c',
-  yellow: '#f69d50',
-  blue: '#6cb6ff',
-  magenta: '#dcbdfb',
-  cyan: '#76e3ea',
-  white: '#adbac7',
-  brightBlack: '#444c56',
-  brightRed: '#ff938a',
-  brightGreen: '#b4f1b4',
-  brightYellow: '#f5c67a',
-  brightBlue: '#96d0ff',
-  brightMagenta: '#eedcfe',
-  brightCyan: '#b3f0f5',
-  brightWhite: '#ffffff',
+  background: "#0e1218",
+  foreground: "#dce5f3",
+  cursor: "#ff7a59",
+  cursorAccent: "#0e1218",
+  selectionBackground: "rgba(255, 122, 89, 0.34)",
+  selectionInactiveBackground: "rgba(255, 122, 89, 0.24)",
+  black: "#1e2630",
+  red: "#f47067",
+  green: "#8ddb8c",
+  yellow: "#f69d50",
+  blue: "#6cb6ff",
+  magenta: "#dcbdfb",
+  cyan: "#76e3ea",
+  white: "#adbac7",
+  brightBlack: "#444c56",
+  brightRed: "#ff938a",
+  brightGreen: "#b4f1b4",
+  brightYellow: "#f5c67a",
+  brightBlue: "#96d0ff",
+  brightMagenta: "#eedcfe",
+  brightCyan: "#b3f0f5",
+  brightWhite: "#ffffff",
 };
 
 const TERMINAL_THEME_LIGHT = {
-  background: '#ffffff',
-  foreground: '#24292f',
-  cursor: '#d1480a',
-  cursorAccent: '#ffffff',
-  selectionBackground: 'rgba(209, 72, 10, 0.18)',
-  selectionInactiveBackground: 'rgba(209, 72, 10, 0.12)',
-  black: '#24292f',
-  red: '#cf222e',
-  green: '#116329',
-  yellow: '#9a6700',
-  blue: '#0550ae',
-  magenta: '#8250df',
-  cyan: '#1b7c83',
-  white: '#6e7781',
-  brightBlack: '#57606a',
-  brightRed: '#a40e26',
-  brightGreen: '#1a7f37',
-  brightYellow: '#7d5600',
-  brightBlue: '#0969da',
-  brightMagenta: '#6639ba',
-  brightCyan: '#3192aa',
-  brightWhite: '#8b949e',
+  background: "#ffffff",
+  foreground: "#24292f",
+  cursor: "#d1480a",
+  cursorAccent: "#ffffff",
+  selectionBackground: "rgba(209, 72, 10, 0.18)",
+  selectionInactiveBackground: "rgba(209, 72, 10, 0.12)",
+  black: "#24292f",
+  red: "#cf222e",
+  green: "#116329",
+  yellow: "#9a6700",
+  blue: "#0550ae",
+  magenta: "#8250df",
+  cyan: "#1b7c83",
+  white: "#6e7781",
+  brightBlack: "#57606a",
+  brightRed: "#a40e26",
+  brightGreen: "#1a7f37",
+  brightYellow: "#7d5600",
+  brightBlue: "#0969da",
+  brightMagenta: "#6639ba",
+  brightCyan: "#3192aa",
+  brightWhite: "#8b949e",
 };
 
 /**
@@ -474,21 +548,49 @@ const LIGHT_MODE_OVERRIDES = `
 function loadPwWeb(): Promise<void> {
   if ((window as any).playwrightWeb) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = `${import.meta.env.BASE_URL || '/'}pw-web.js`;
+    const script = document.createElement("script");
+    script.src = `${import.meta.env.BASE_URL || "/"}pw-web.js`;
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load pw-web.js'));
+    script.onerror = () => reject(new Error("Failed to load pw-web.js"));
     document.head.appendChild(script);
   });
 }
 
-function prefersLightMode(): boolean {
-  return typeof window !== 'undefined'
-    && window.matchMedia?.('(prefers-color-scheme: light)').matches === true;
+function getTerminalTheme(
+  themeKind: WorkbenchThemeKind,
+): typeof TERMINAL_THEME_DARK {
+  return themeKind === "light" ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
 }
 
-function getTerminalTheme(): typeof TERMINAL_THEME_DARK {
-  return prefersLightMode() ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
+function normalizeWorkbenchThemeKind(
+  theme: { type?: string } | null | undefined,
+): WorkbenchThemeKind {
+  return theme?.type === "light" || theme?.type === "hcLight"
+    ? "light"
+    : "dark";
+}
+
+function inferThemeKindFromThemeName(
+  themeName: string | null | undefined,
+): WorkbenchThemeKind | null {
+  if (typeof themeName !== "string") {
+    return null;
+  }
+
+  const normalized = themeName.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes("light")) {
+    return "light";
+  }
+
+  if (normalized.includes("dark")) {
+    return "dark";
+  }
+
+  return null;
 }
 
 interface TerminalTabState {
@@ -502,8 +604,8 @@ interface TerminalTabState {
   historyIndex: number;
   runningAbortController: AbortController | null;
   closable: boolean;
-  kind: 'user' | 'preview' | 'agent';
-  inputMode: 'managed' | 'passthrough';
+  kind: "user" | "preview" | "agent";
+  inputMode: "managed" | "passthrough";
 }
 
 interface OpenCodeTabState {
@@ -522,6 +624,8 @@ interface OpenCodeSidebarTabState {
   session: OpenCodeBrowserSessionHandle;
 }
 
+type WorkbenchThemeKind = "light" | "dark";
+
 interface WorkbenchTerminalSession {
   run?: (
     command: string,
@@ -536,15 +640,19 @@ interface WorkbenchTerminalSession {
   resize: (cols: number, rows: number) => void;
   abort: () => void;
   dispose: () => void;
-  getState: () => { cwd: string; env: Record<string, string>; running: boolean };
+  getState: () => {
+    cwd: string;
+    env: Record<string, string>;
+    running: boolean;
+  };
 }
 
 function getWorkbenchCorsProxyUrl(): string | undefined {
-  if (typeof window === 'undefined') {
+  if (typeof window === "undefined") {
     return undefined;
   }
 
-  if (!['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)) {
+  if (!["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)) {
     return undefined;
   }
 
@@ -563,7 +671,10 @@ export class WebIDEHost {
   private readonly workbenchSurfaces: RegisteredWorkbenchSurfaces;
   private readonly terminalTabs = new Map<string, TerminalTabState>();
   private readonly openCodeTabs = new Map<string, OpenCodeTabState>();
-  private readonly openCodeSidebarTabs = new Map<string, OpenCodeSidebarTabState>();
+  private readonly openCodeSidebarTabs = new Map<
+    string,
+    OpenCodeSidebarTabState
+  >();
   private activeTerminalTabId: string | null = null;
   private previewTerminalTabId: string | null = null;
   private terminalCounter = 0;
@@ -573,7 +684,7 @@ export class WebIDEHost {
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
   private readonly consolePanel = new ConsolePanelElement();
-  private readonly consoleTabId = 'console-panel';
+  private readonly consoleTabId = "console-panel";
   private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
@@ -586,15 +697,22 @@ export class WebIDEHost {
   private readonly desktopBridge: DesktopBridge | null;
   private readonly hostProjectDirectory: string | null;
   private readonly agentLaunchCommand: string | null;
-  private readonly agentMode: 'browser' | 'host';
+  private readonly agentMode: "browser" | "host";
   private readonly databaseSurface: DatabaseSidebarSurface;
   private readonly databaseBrowserSurface: DatabaseBrowserSurface;
   private readonly keychainSurface: KeychainSidebarSurface;
-  private pgliteMiddleware: import('almostnode/internal').RequestMiddleware | null = null;
+  private pgliteMiddleware:
+    | import("almostnode/internal").RequestMiddleware
+    | null = null;
   private readonly testsSurface = new TestsSidebarSurface();
-  private testRecorder: import('../features/test-recorder').TestRecorder | null = null;
-  private testRunner: import('../features/test-runner').TestRunner | null = null;
-  private testMetadataList: import('../features/test-spec-generator').TestMetadata[] = [];
+  private workbenchThemeKind: WorkbenchThemeKind = "dark";
+  private testRecorder:
+    | import("../features/test-recorder").TestRecorder
+    | null = null;
+  private testRunner: import("../features/test-runner").TestRunner | null =
+    null;
+  private testMetadataList: import("../features/test-spec-generator").TestMetadata[] =
+    [];
   // testStepsMap removed — pw-web.js reads spec files directly from VFS
   private removePlaywrightListener: (() => void) | null = null;
   private removeCursorOverlay: (() => void) | null = null;
@@ -602,27 +720,40 @@ export class WebIDEHost {
   constructor(private readonly options: WebIDEHostOptions) {
     this.container = createContainer({
       baseUrl: options.baseUrl,
-      basePath: import.meta.env.BASE_URL?.replace(/\/$/, '') || '',
+      basePath: import.meta.env.BASE_URL?.replace(/\/$/, "") || "",
       cwd: WORKSPACE_ROOT,
       env: WebIDEHost.defaultCorsProxyUrl
         ? { CORS_PROXY_URL: WebIDEHost.defaultCorsProxyUrl }
         : undefined,
     });
-    this.templateId = options.template || 'vite';
+    this.templateId = options.template || "vite";
     this.initialProjectFiles = options.initialProjectFiles ?? null;
     this.skipWorkspaceSeed = options.skipWorkspaceSeed === true;
     this.deferPreviewStart = options.deferPreviewStart === true;
     this.desktopBridge = options.desktopBridge ?? null;
     this.hostProjectDirectory = options.hostProjectDirectory ?? null;
-    this.agentMode = this.desktopBridge ? 'host' : 'browser';
-    this.agentLaunchCommand = options.agentLaunchCommand ?? (this.agentMode === 'host' ? 'opencode' : null);
-    this.marketplaceMode = options.marketplaceMode || 'open-vsx';
-    this.debugSections = Array.from(new Set((options.debugSections || []).map((section) => section.trim()).filter(Boolean)));
-    this.filesSurface = new FilesSidebarSurface(this.container.vfs, WORKSPACE_ROOT, (path) => {
-      void this.openWorkspaceFile(path);
-    }, (path) => {
-      void this.openWorkspaceFileAsText(path);
-    });
+    this.agentMode = this.desktopBridge ? "host" : "browser";
+    this.agentLaunchCommand =
+      options.agentLaunchCommand ??
+      (this.agentMode === "host" ? "opencode" : null);
+    this.marketplaceMode = options.marketplaceMode || "open-vsx";
+    this.debugSections = Array.from(
+      new Set(
+        (options.debugSections || [])
+          .map((section) => section.trim())
+          .filter(Boolean),
+      ),
+    );
+    this.filesSurface = new FilesSidebarSurface(
+      this.container.vfs,
+      WORKSPACE_ROOT,
+      (path) => {
+        void this.openWorkspaceFile(path);
+      },
+      (path) => {
+        void this.openWorkspaceFileAsText(path);
+      },
+    );
     this.previewSurface = new PreviewSurface({
       run: () => {
         void this.runPreviewCommand(this.getDefaults().runCommand);
@@ -671,7 +802,8 @@ export class WebIDEHost {
     });
     this.keychain = new Keychain({
       vfs: this.container.vfs,
-      overlayRoot: options.elements.workbench.parentElement ?? options.elements.workbench,
+      overlayRoot:
+        options.elements.workbench.parentElement ?? options.elements.workbench,
       onStateChange: (state) => {
         this.updateKeychainStatusEntry(state);
         this.updateKeychainSurface(state);
@@ -679,28 +811,38 @@ export class WebIDEHost {
     });
     this.keychainSurface.setActionHandler((action) => {
       switch (action) {
-        case 'unlock': void this.unlockKeychain(); break;
-        case 'save': void this.unlockKeychain(); break;
-        case 'forget': void this.forgetKeychain(); break;
-        case 'login:github': void this.keychainAuthAction('gh auth login'); break;
-        case 'logout:github': void this.keychainAuthAction('gh auth logout'); break;
-        case 'login:replay': void this.keychainAuthAction('replayio login'); break;
-        case 'logout:replay': void this.keychainAuthAction('replayio logout'); break;
+        case "unlock":
+          void this.unlockKeychain();
+          break;
+        case "save":
+          void this.unlockKeychain();
+          break;
+        case "forget":
+          void this.forgetKeychain();
+          break;
+        case "login:github":
+          void this.keychainAuthAction("gh auth login");
+          break;
+        case "logout:github":
+          void this.keychainAuthAction("gh auth logout");
+          break;
+        case "login:replay":
+          void this.keychainAuthAction("replayio login");
+          break;
+        case "logout:replay":
+          void this.keychainAuthAction("replayio logout");
+          break;
       }
     });
-    this.keychain.registerSlot('github', [
-      '/home/user/.config/gh/hosts.yml',
-    ]);
-    this.keychain.registerSlot('opencode', [
+    this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
+    this.keychain.registerSlot("opencode", [
       OPENCODE_AUTH_PATH,
       OPENCODE_MCP_AUTH_PATH,
       OPENCODE_CONFIG_JSONC_PATH,
       OPENCODE_CONFIG_PATH,
       OPENCODE_LEGACY_CONFIG_PATH,
     ]);
-    this.keychain.registerSlot('replay', [
-      '/home/user/.replay/auth.json',
-    ]);
+    this.keychain.registerSlot("replay", ["/home/user/.replay/auth.json"]);
   }
 
   static async bootstrap(options: WebIDEHostOptions): Promise<WebIDEHost> {
@@ -729,11 +871,17 @@ export class WebIDEHost {
   }
 
   private normalizeHostPath(value: string): string {
-    return value.replace(/\\/g, '/').replace(/\/+$/g, '');
+    return value.replace(/\\/g, "/").replace(/\/+$/g, "");
   }
 
-  private resolveBridgeWorkspaceCwd(candidate: string | null | undefined): string {
-    if (!this.hostProjectDirectory || typeof candidate !== 'string' || !candidate.trim()) {
+  private resolveBridgeWorkspaceCwd(
+    candidate: string | null | undefined,
+  ): string {
+    if (
+      !this.hostProjectDirectory ||
+      typeof candidate !== "string" ||
+      !candidate.trim()
+    ) {
       return WORKSPACE_ROOT;
     }
 
@@ -748,17 +896,21 @@ export class WebIDEHost {
       return WORKSPACE_ROOT;
     }
 
-    const relativePath = resolvedCandidate.slice(projectPrefix.length).replace(/^\/+/, '');
+    const relativePath = resolvedCandidate
+      .slice(projectPrefix.length)
+      .replace(/^\/+/, "");
     if (!relativePath) {
       return WORKSPACE_ROOT;
     }
 
-    const segments = relativePath.split('/').filter((segment) => segment && segment !== '.' && segment !== '..');
+    const segments = relativePath
+      .split("/")
+      .filter((segment) => segment && segment !== "." && segment !== "..");
     if (segments.length === 0) {
       return WORKSPACE_ROOT;
     }
 
-    return `${WORKSPACE_ROOT}/${segments.join('/')}`;
+    return `${WORKSPACE_ROOT}/${segments.join("/")}`;
   }
 
   private normalizeBridgedCommand(command: string): string {
@@ -767,18 +919,25 @@ export class WebIDEHost {
       return trimmed;
     }
 
-    const hostProjectDirectory = this.normalizeHostPath(this.hostProjectDirectory);
+    const hostProjectDirectory = this.normalizeHostPath(
+      this.hostProjectDirectory,
+    );
     return trimmed.split(hostProjectDirectory).join(WORKSPACE_ROOT);
   }
 
-  async executeBridgedCommand(params: Record<string, unknown>): Promise<BridgedCommandResult> {
-    const command = typeof params.command === 'string' ? params.command.trim() : '';
+  async executeBridgedCommand(
+    params: Record<string, unknown>,
+  ): Promise<BridgedCommandResult> {
+    const command =
+      typeof params.command === "string" ? params.command.trim() : "";
     if (!command) {
-      throw new Error('Bridged command payload is missing a command.');
+      throw new Error("Bridged command payload is missing a command.");
     }
 
     const background = params.background === true;
-    const vfsCwd = this.resolveBridgeWorkspaceCwd(typeof params.cwd === 'string' ? params.cwd : null);
+    const vfsCwd = this.resolveBridgeWorkspaceCwd(
+      typeof params.cwd === "string" ? params.cwd : null,
+    );
     const normalizedCommand = this.normalizeBridgedCommand(command);
 
     if (background) {
@@ -787,8 +946,8 @@ export class WebIDEHost {
         session.dispose();
       });
       return {
-        stdout: '',
-        stderr: '',
+        stdout: "",
+        stderr: "",
         exitCode: 0,
         background: true,
         normalizedCommand,
@@ -809,22 +968,26 @@ export class WebIDEHost {
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: true,
-      fontFamily: 'IBM Plex Mono, monospace',
+      fontFamily: "IBM Plex Mono, monospace",
       fontSize: 12,
       scrollback: 5000,
-      theme: getTerminalTheme(),
+      theme: getTerminalTheme(this.workbenchThemeKind),
     });
     const fitAddon = new FitAddon();
     return { terminal, fitAddon };
   }
 
   private requireActiveTerminalTab(): TerminalTabState {
-    const tab = this.activeTerminalTabId ? this.terminalTabs.get(this.activeTerminalTabId) : null;
+    const tab = this.activeTerminalTabId
+      ? this.terminalTabs.get(this.activeTerminalTabId)
+      : null;
     if (tab) {
       return tab;
     }
 
-    const fallback = this.terminalTabs.values().next().value as TerminalTabState | undefined;
+    const fallback = this.terminalTabs.values().next().value as
+      | TerminalTabState
+      | undefined;
     if (fallback) {
       this.setActiveTerminalTab(fallback.id);
       return fallback;
@@ -834,7 +997,7 @@ export class WebIDEHost {
   }
 
   private printPrompt(tab: TerminalTabState): void {
-    tab.terminal.write('\r\n$ ');
+    tab.terminal.write("\r\n$ ");
   }
 
   private writeTerminal(tab: TerminalTabState, text: string): void {
@@ -873,7 +1036,7 @@ export class WebIDEHost {
   }
 
   private createTerminalTab(
-    kind: 'user' | 'preview' | 'agent',
+    kind: "user" | "preview" | "agent",
     title: string,
     focus: boolean,
     closable: boolean,
@@ -882,7 +1045,7 @@ export class WebIDEHost {
       cwd?: string;
       env?: Record<string, string>;
       session?: WorkbenchTerminalSession;
-      inputMode?: 'managed' | 'passthrough';
+      inputMode?: "managed" | "passthrough";
     },
   ): TerminalTabState {
     const id = options?.id ?? `${kind}-${crypto.randomUUID()}`;
@@ -892,17 +1055,19 @@ export class WebIDEHost {
       title,
       terminal,
       fitAddon,
-      session: options?.session ?? this.container.createTerminalSession({
-        cwd: options?.cwd ?? WORKSPACE_ROOT,
-        env: options?.env,
-      }),
-      currentLine: '',
+      session:
+        options?.session ??
+        this.container.createTerminalSession({
+          cwd: options?.cwd ?? WORKSPACE_ROOT,
+          env: options?.env,
+        }),
+      currentLine: "",
       history: [],
       historyIndex: -1,
       runningAbortController: null,
       closable,
       kind,
-      inputMode: options?.inputMode ?? 'managed',
+      inputMode: options?.inputMode ?? "managed",
     };
     this.terminalTabs.set(id, tab);
     this.terminalSurface.addTab({
@@ -913,20 +1078,30 @@ export class WebIDEHost {
       closable,
     });
     this.bindTerminal(tab);
-    if (kind === 'preview') {
+    if (kind === "preview") {
       this.previewTerminalTabId = id;
     }
     if (focus || !this.activeTerminalTabId) {
       this.setActiveTerminalTab(id);
     }
-    terminal.write(kind === 'preview' ? 'almostnode preview terminal' : 'almostnode webide terminal');
-    if (kind === 'user' && this.terminalCounter === 1 && this.debugSections.length > 0) {
-      terminal.write(`\r\n[almostnode debug] enabled: ${this.debugSections.join(', ')}`);
+    terminal.write(
+      kind === "preview"
+        ? "almostnode preview terminal"
+        : "almostnode webide terminal",
+    );
+    if (
+      kind === "user" &&
+      this.terminalCounter === 1 &&
+      this.debugSections.length > 0
+    ) {
+      terminal.write(
+        `\r\n[almostnode debug] enabled: ${this.debugSections.join(", ")}`,
+      );
     }
-    if (kind === 'agent') {
-      terminal.write('almostnode opencode terminal');
+    if (kind === "agent") {
+      terminal.write("almostnode opencode terminal");
     }
-    if (!(kind === 'agent' && tab.inputMode === 'passthrough')) {
+    if (!(kind === "agent" && tab.inputMode === "passthrough")) {
       this.printPrompt(tab);
     }
     return tab;
@@ -934,10 +1109,15 @@ export class WebIDEHost {
 
   private createUserTerminalTab(
     focus: boolean,
-    options?: { id?: string; title?: string; cwd?: string; env?: Record<string, string> },
+    options?: {
+      id?: string;
+      title?: string;
+      cwd?: string;
+      env?: Record<string, string>;
+    },
   ): TerminalTabState {
     const title = options?.title ?? `Terminal ${++this.terminalCounter}`;
-    return this.createTerminalTab('user', title, focus, true, {
+    return this.createTerminalTab("user", title, focus, true, {
       id: options?.id,
       cwd: options?.cwd,
       env: options?.env,
@@ -945,15 +1125,21 @@ export class WebIDEHost {
   }
 
   private getPreviewTerminalTab(): TerminalTabState {
-    const existing = this.previewTerminalTabId ? this.terminalTabs.get(this.previewTerminalTabId) : null;
+    const existing = this.previewTerminalTabId
+      ? this.terminalTabs.get(this.previewTerminalTabId)
+      : null;
     if (existing) {
       return existing;
     }
-    return this.createTerminalTab('preview', 'Preview', false, false);
+    return this.createTerminalTab("preview", "Preview", false, false);
   }
 
   private setActiveTerminalTab(id: string): void {
-    if (!this.terminalTabs.has(id) && !this.openCodeTabs.has(id) && id !== this.consoleTabId) {
+    if (
+      !this.terminalTabs.has(id) &&
+      !this.openCodeTabs.has(id) &&
+      id !== this.consoleTabId
+    ) {
       return;
     }
     this.activeTerminalTabId = id;
@@ -968,7 +1154,7 @@ export class WebIDEHost {
     }
 
     const tab = this.terminalTabs.get(id);
-    if (!tab || tab.kind === 'preview') {
+    if (!tab || tab.kind === "preview") {
       return;
     }
 
@@ -985,34 +1171,37 @@ export class WebIDEHost {
   }
 
   private createOpenCodeHostElement(): HTMLElement {
-    const host = document.createElement('div');
-    host.className = 'almostnode-opencode-host';
+    const host = document.createElement("div");
+    host.className = "almostnode-opencode-host";
     host.tabIndex = -1;
-    host.style.height = '100%';
-    host.style.minHeight = '0';
-    host.style.display = 'flex';
-    host.style.flexDirection = 'column';
-    host.style.background = prefersLightMode() ? '#ffffff' : '#0d1117';
+    host.style.height = "100%";
+    host.style.minHeight = "0";
+    host.style.display = "flex";
+    host.style.flexDirection = "column";
     return host;
   }
 
   private async revealOpenCodeSidebarView(focus: boolean): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
     setPartVisibility(Parts.SIDEBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.openCodeViewId, ViewContainerLocation.Sidebar, focus);
+    await paneCompositeService.openPaneComposite(
+      this.workbenchSurfaces.openCodeViewId,
+      ViewContainerLocation.Sidebar,
+      focus,
+    );
     if (focus) {
       this.openCodeSurface.focus();
     }
   }
 
   private async createOpenCodeSidebarTab(focus: boolean): Promise<void> {
-    if (this.agentMode === 'host') {
+    if (this.agentMode === "host") {
       await this.revealTerminalPanel(focus);
       void this.createHostAgentTerminalTab(focus);
       return;
     }
 
-    if (!await this.keychain.prepareForCommand('opencode')) {
+    if (!(await this.keychain.prepareForCommand("opencode"))) {
       await this.revealKeychainPanel();
       return;
     }
@@ -1028,7 +1217,7 @@ export class WebIDEHost {
       element: host,
       closable: true,
     });
-    this.openCodeSurface.updateTabStatus(id, 'Starting OpenCode...');
+    this.openCodeSurface.updateTabStatus(id, "Starting OpenCode...");
     this.openCodeSurface.setActiveTab(id);
 
     try {
@@ -1037,6 +1226,7 @@ export class WebIDEHost {
         element: host,
         cwd: WORKSPACE_ROOT,
         env: {},
+        themeMode: this.workbenchThemeKind,
         onTitleChange: (nextTitle) => {
           const resolvedTitle = nextTitle?.trim() || title;
           this.openCodeSurface.updateTabTitle(id, resolvedTitle);
@@ -1049,7 +1239,7 @@ export class WebIDEHost {
         host,
         session,
       });
-      this.openCodeSurface.updateTabStatus(id, 'OpenCode ready');
+      this.openCodeSurface.updateTabStatus(id, "OpenCode ready");
 
       void session.exited.finally(() => {
         if (!this.openCodeSidebarTabs.has(id)) {
@@ -1059,7 +1249,7 @@ export class WebIDEHost {
         this.closeOpenCodeSidebarTab(id);
       });
     } catch (error) {
-      console.error('[opencode] failed to start sidebar session', error);
+      console.error("[opencode] failed to start sidebar session", error);
       this.openCodeSurface.removeTab(id);
       const message = error instanceof Error ? error.message : String(error);
       await this.revealTerminalPanel(focus);
@@ -1079,7 +1269,9 @@ export class WebIDEHost {
     this.openCodeSurface.removeTab(id);
     tab.session.dispose();
 
-    const nextTab = this.openCodeSidebarTabs.values().next().value as OpenCodeSidebarTabState | undefined;
+    const nextTab = this.openCodeSidebarTabs.values().next().value as
+      | OpenCodeSidebarTabState
+      | undefined;
     if (nextTab) {
       this.openCodeSurface.setActiveTab(nextTab.id);
     }
@@ -1092,12 +1284,12 @@ export class WebIDEHost {
       title?: string;
     },
   ): Promise<void> {
-    if (this.agentMode === 'host') {
+    if (this.agentMode === "host") {
       void this.createHostAgentTerminalTab(focus);
       return;
     }
 
-    if (!await this.keychain.prepareForCommand('opencode')) {
+    if (!(await this.keychain.prepareForCommand("opencode"))) {
       await this.revealKeychainPanel();
       return;
     }
@@ -1106,7 +1298,11 @@ export class WebIDEHost {
     const restoreTitle = options?.replaceTab?.title ?? null;
     const initialShellState = options?.replaceTab
       ? options.replaceTab.session.getState()
-      : { cwd: WORKSPACE_ROOT, env: {} as Record<string, string>, running: false };
+      : {
+          cwd: WORKSPACE_ROOT,
+          env: {} as Record<string, string>,
+          running: false,
+        };
     const id = options?.replaceTab?.id ?? `opencode-${crypto.randomUUID()}`;
     const title = options?.title ?? `OpenCode ${this.openCodeTerminalCounter}`;
     const host = this.createOpenCodeHostElement();
@@ -1121,7 +1317,7 @@ export class WebIDEHost {
       element: host,
       closable: true,
     });
-    this.terminalSurface.updateTabStatus(id, 'Starting OpenCode...');
+    this.terminalSurface.updateTabStatus(id, "Starting OpenCode...");
     if (focus || !this.activeTerminalTabId) {
       this.setActiveTerminalTab(id);
     }
@@ -1132,6 +1328,7 @@ export class WebIDEHost {
         element: host,
         cwd: initialShellState.cwd,
         env: initialShellState.env,
+        themeMode: this.workbenchThemeKind,
         onTitleChange: (nextTitle) => {
           const resolvedTitle = nextTitle?.trim() || title;
           this.terminalSurface.updateTabTitle(id, resolvedTitle);
@@ -1147,7 +1344,7 @@ export class WebIDEHost {
           : null,
         restoreTitle,
       });
-      this.terminalSurface.updateTabStatus(id, 'OpenCode ready');
+      this.terminalSurface.updateTabStatus(id, "OpenCode ready");
       void session.exited.finally(() => {
         if (!this.openCodeTabs.has(id)) {
           return;
@@ -1159,7 +1356,7 @@ export class WebIDEHost {
         });
       });
     } catch (error) {
-      console.error('[opencode] failed to start terminal session', error);
+      console.error("[opencode] failed to start terminal session", error);
       this.terminalSurface.removeTab(id);
       const message = error instanceof Error ? error.message : String(error);
       if (options?.replaceTab) {
@@ -1179,21 +1376,29 @@ export class WebIDEHost {
     }
   }
 
-  private async createHostAgentTerminalTab(focus: boolean): Promise<TerminalTabState> {
+  private async createHostAgentTerminalTab(
+    focus: boolean,
+  ): Promise<TerminalTabState> {
     if (!this.desktopBridge) {
-      throw new Error('Host agent mode requires a desktop bridge.');
+      throw new Error("Host agent mode requires a desktop bridge.");
     }
 
     this.openCodeTerminalCounter += 1;
     const id = `agent-${crypto.randomUUID()}`;
     const session = new HostTerminalSession(this.desktopBridge);
-    const tab = this.createTerminalTab('agent', `OpenCode ${this.openCodeTerminalCounter}`, focus, true, {
-      id,
-      session,
-      inputMode: 'passthrough',
-    });
+    const tab = this.createTerminalTab(
+      "agent",
+      `OpenCode ${this.openCodeTerminalCounter}`,
+      focus,
+      true,
+      {
+        id,
+        session,
+        inputMode: "passthrough",
+      },
+    );
     const { terminal } = tab;
-    this.updateTerminalStatus(tab, 'Starting host agent shell...');
+    this.updateTerminalStatus(tab, "Starting host agent shell...");
     try {
       const { shell, cwd } = await session.init({
         cols: terminal.cols,
@@ -1207,23 +1412,32 @@ export class WebIDEHost {
         terminal.write(normalizeTerminalOutput(data));
       });
       session.onExit(({ exitCode, signal }) => {
-        const signalSuffix = signal ? `, signal ${signal}` : '';
+        const signalSuffix = signal ? `, signal ${signal}` : "";
         this.updateTerminalStatus(tab, `Exited ${exitCode}${signalSuffix}`);
       });
 
       terminal.write(`Host shell: ${shell}\r\n`);
       terminal.write(`CWD: ${cwd}\r\n`);
-      terminal.write('almostnode bridge routing is enabled for shell commands.\r\n');
+      terminal.write(
+        "almostnode bridge routing is enabled for shell commands.\r\n",
+      );
       if (this.agentLaunchCommand) {
-        terminal.write(`Launching ${this.agentLaunchCommand} with bridge routing enabled...\r\n`);
+        terminal.write(
+          `Launching ${this.agentLaunchCommand} with bridge routing enabled...\r\n`,
+        );
       } else {
-        terminal.write('Try: opencode | codex | cursor-cli\r\n');
+        terminal.write("Try: opencode | codex | cursor-cli\r\n");
       }
-      this.updateTerminalStatus(tab, this.agentLaunchCommand ? `Launching ${this.agentLaunchCommand}` : 'Host shell ready');
+      this.updateTerminalStatus(
+        tab,
+        this.agentLaunchCommand
+          ? `Launching ${this.agentLaunchCommand}`
+          : "Host shell ready",
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       terminal.write(`Failed to start host shell: ${message}\r\n`);
-      this.updateTerminalStatus(tab, 'Host shell failed');
+      this.updateTerminalStatus(tab, "Host shell failed");
     }
 
     return tab;
@@ -1242,13 +1456,17 @@ export class WebIDEHost {
   }
 
   private activateFallbackTerminalTab(focus: boolean): void {
-    const nextShellTab = this.terminalTabs.values().next().value as TerminalTabState | undefined;
+    const nextShellTab = this.terminalTabs.values().next().value as
+      | TerminalTabState
+      | undefined;
     if (nextShellTab) {
       this.setActiveTerminalTab(nextShellTab.id);
       return;
     }
 
-    const nextOpenCodeTab = this.openCodeTabs.values().next().value as OpenCodeTabState | undefined;
+    const nextOpenCodeTab = this.openCodeTabs.values().next().value as
+      | OpenCodeTabState
+      | undefined;
     if (nextOpenCodeTab) {
       this.setActiveTerminalTab(nextOpenCodeTab.id);
       return;
@@ -1270,7 +1488,8 @@ export class WebIDEHost {
     }
 
     const wasActive = this.activeTerminalTabId === id;
-    const nextShellState = options?.restoreShellState ?? tab.session.getShellState();
+    const nextShellState =
+      options?.restoreShellState ?? tab.session.getShellState();
     this.openCodeTabs.delete(id);
     this.terminalSurface.removeTab(id);
     tab.session.dispose();
@@ -1291,9 +1510,11 @@ export class WebIDEHost {
   }
 
   async revealOpenCodePanel(focus: boolean): Promise<void> {
-    if (this.agentMode === 'host') {
+    if (this.agentMode === "host") {
       await this.revealTerminalPanel(focus);
-      const existing = this.openCodeTabs.values().next().value as OpenCodeTabState | undefined;
+      const existing = this.openCodeTabs.values().next().value as
+        | OpenCodeTabState
+        | undefined;
       if (existing) {
         this.setActiveTerminalTab(existing.id);
         return;
@@ -1304,7 +1525,9 @@ export class WebIDEHost {
     }
 
     await this.revealOpenCodeSidebarView(focus);
-    const existing = this.openCodeSidebarTabs.values().next().value as OpenCodeSidebarTabState | undefined;
+    const existing = this.openCodeSidebarTabs.values().next().value as
+      | OpenCodeSidebarTabState
+      | undefined;
     if (existing) {
       this.openCodeSurface.setActiveTab(existing.id);
       existing.host.focus();
@@ -1317,16 +1540,34 @@ export class WebIDEHost {
   async revealKeychainPanel(): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
     setPartVisibility(Parts.AUXILIARYBAR_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.keychainViewId, ViewContainerLocation.AuxiliaryBar, true);
+    await paneCompositeService.openPaneComposite(
+      this.workbenchSurfaces.keychainViewId,
+      ViewContainerLocation.AuxiliaryBar,
+      true,
+    );
     this.updateKeychainSurface();
   }
 
   private updateKeychainSurface(state = this.keychain.getState()): void {
     this.keychainSurface.update(
       [
-        { name: 'github', label: 'GitHub', active: this.keychain.hasSlotData('github'), canAuth: true },
-        { name: 'opencode', label: 'OpenCode', active: this.keychain.hasSlotData('opencode') },
-        { name: 'replay', label: 'Replay.io', active: this.keychain.hasSlotData('replay'), canAuth: true },
+        {
+          name: "github",
+          label: "GitHub",
+          active: this.keychain.hasSlotData("github"),
+          canAuth: true,
+        },
+        {
+          name: "opencode",
+          label: "OpenCode",
+          active: this.keychain.hasSlotData("opencode"),
+        },
+        {
+          name: "replay",
+          label: "Replay.io",
+          active: this.keychain.hasSlotData("replay"),
+          canAuth: true,
+        },
       ],
       { hasStoredVault: state.hasStoredVault, supported: state.supported },
     );
@@ -1355,19 +1596,22 @@ export class WebIDEHost {
 
     if (options?.echoCommand) {
       tab.terminal.write(trimmed);
-      tab.terminal.write('\r\n');
+      tab.terminal.write("\r\n");
     }
 
-    if (tab.kind === 'user' && matchesOpenCodeLaunchCommand(trimmed)) {
+    if (tab.kind === "user" && matchesOpenCodeLaunchCommand(trimmed)) {
       await this.createOpenCodeTerminalTab(true, {
         replaceTab: tab,
       });
       return;
     }
 
-    if (!await this.keychain.prepareForCommand(trimmed)) {
-      this.updateTerminalStatus(tab, 'Keychain unlock required');
-      this.writeTerminal(tab, 'Keychain unlock is required before running this command.\n');
+    if (!(await this.keychain.prepareForCommand(trimmed))) {
+      this.updateTerminalStatus(tab, "Keychain unlock required");
+      this.writeTerminal(
+        tab,
+        "Keychain unlock is required before running this command.\n",
+      );
       this.printPrompt(tab);
       return;
     }
@@ -1376,8 +1620,11 @@ export class WebIDEHost {
       throw new Error(`${tab.title} is already running a command`);
     }
     if (!tab.session.run) {
-      this.updateTerminalStatus(tab, 'Host shell attached');
-      this.writeTerminal(tab, 'This terminal is attached directly to the host shell.\n');
+      this.updateTerminalStatus(tab, "Host shell attached");
+      this.writeTerminal(
+        tab,
+        "This terminal is attached directly to the host shell.\n",
+      );
       return;
     }
 
@@ -1399,8 +1646,13 @@ export class WebIDEHost {
   }
 
   async executeHostCommand(command?: string): Promise<void> {
-    const resolved = command || window.prompt('Command to run', this.getDefaults().runCommand) || '';
-    await this.runCommand(this.requireActiveTerminalTab(), resolved, { echoCommand: true });
+    const resolved =
+      command ||
+      window.prompt("Command to run", this.getDefaults().runCommand) ||
+      "";
+    await this.runCommand(this.requireActiveTerminalTab(), resolved, {
+      echoCommand: true,
+    });
   }
 
   private async runPreviewCommand(command: string): Promise<void> {
@@ -1424,17 +1676,19 @@ export class WebIDEHost {
     const lowerPath = path.toLowerCase();
 
     // Route .md files to rendered markdown editor
-    if (lowerPath.endsWith('.md')) {
+    if (lowerPath.endsWith(".md")) {
       const editorService = await getService(IEditorService);
-      const input = this.workbenchSurfaces.renderedEditors.createMarkdownInput(path);
+      const input =
+        this.workbenchSurfaces.renderedEditors.createMarkdownInput(path);
       await editorService.openEditor(input, { pinned: true });
       return;
     }
 
     // Route .json files to visual JSON editor
-    if (lowerPath.endsWith('.json')) {
+    if (lowerPath.endsWith(".json")) {
       const editorService = await getService(IEditorService);
-      const input = this.workbenchSurfaces.renderedEditors.createJsonInput(path);
+      const input =
+        this.workbenchSurfaces.renderedEditors.createJsonInput(path);
       await editorService.openEditor(input, { pinned: true });
       return;
     }
@@ -1459,7 +1713,7 @@ export class WebIDEHost {
       // the resolve alias) to get the same module instance that Monaco uses internally.
       const { URI: InternalURI } = await import(
         /* @vite-ignore */
-        '@codingame/monaco-vscode-api/vscode/src/vs/base/common/uri.js'
+        "@codingame/monaco-vscode-api/vscode/src/vs/base/common/uri.js"
       );
       await editorService.openEditor({
         resource: InternalURI.file(path),
@@ -1473,7 +1727,9 @@ export class WebIDEHost {
       return;
     }
 
-    const modelReference = await monaco.editor.createModelReference(URI.file(path));
+    const modelReference = await monaco.editor.createModelReference(
+      URI.file(path),
+    );
     try {
       const model = monaco.editor.getModel(URI.file(path));
       if (model && model.getLanguageId() !== languageId) {
@@ -1487,9 +1743,13 @@ export class WebIDEHost {
   private async revealPreviewEditor(): Promise<void> {
     const editorService = await getService(IEditorService);
     const existing = this.workbenchSurfaces.previewInput.resource
-      ? editorService.findEditors(this.workbenchSurfaces.previewInput.resource).find((identifier) => {
-          return identifier.editor.matches(this.workbenchSurfaces.previewInput);
-        })
+      ? editorService
+          .findEditors(this.workbenchSurfaces.previewInput.resource)
+          .find((identifier) => {
+            return identifier.editor.matches(
+              this.workbenchSurfaces.previewInput,
+            );
+          })
       : undefined;
 
     await editorService.openEditor(
@@ -1504,9 +1764,13 @@ export class WebIDEHost {
   private async revealDatabaseEditor(): Promise<void> {
     const editorService = await getService(IEditorService);
     const existing = this.workbenchSurfaces.databaseInput.resource
-      ? editorService.findEditors(this.workbenchSurfaces.databaseInput.resource).find((identifier) => {
-          return identifier.editor.matches(this.workbenchSurfaces.databaseInput);
-        })
+      ? editorService
+          .findEditors(this.workbenchSurfaces.databaseInput.resource)
+          .find((identifier) => {
+            return identifier.editor.matches(
+              this.workbenchSurfaces.databaseInput,
+            );
+          })
       : undefined;
 
     await editorService.openEditor(
@@ -1521,7 +1785,11 @@ export class WebIDEHost {
   private async revealTerminalPanel(focus: boolean): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
     setPartVisibility(Parts.PANEL_PART, true);
-    await paneCompositeService.openPaneComposite(this.workbenchSurfaces.terminalViewId, ViewContainerLocation.Panel, focus);
+    await paneCompositeService.openPaneComposite(
+      this.workbenchSurfaces.terminalViewId,
+      ViewContainerLocation.Panel,
+      focus,
+    );
     if (focus) {
       this.terminalSurface.focus();
     }
@@ -1544,7 +1812,7 @@ export class WebIDEHost {
       return;
     }
 
-    throw new Error('Preview server did not become ready in time.');
+    throw new Error("Preview server did not become ready in time.");
   }
 
   refreshPreview(): void {
@@ -1554,7 +1822,7 @@ export class WebIDEHost {
 
     this.consolePanel.clear();
     this.consoleMessageCount = 0;
-    this.terminalSurface.updateTabStatus(this.consoleTabId, '');
+    this.terminalSurface.updateTabStatus(this.consoleTabId, "");
     this.previewSurface.reload();
   }
 
@@ -1562,9 +1830,29 @@ export class WebIDEHost {
     await this.revealTerminalPanel(true);
   }
 
-  async executeWorkbenchCommand(command: string, ...args: unknown[]): Promise<unknown> {
+  async executeWorkbenchCommand(
+    command: string,
+    ...args: unknown[]
+  ): Promise<unknown> {
     const commandService = await getService(ICommandService);
     return commandService.executeCommand(command, ...args);
+  }
+
+  async setWorkbenchColorTheme(themeId: string): Promise<void> {
+    const themeService = await getService(IWorkbenchThemeService);
+    const resolvedThemeId = await this.resolveWorkbenchColorThemeId(
+      themeService,
+      themeId,
+    );
+    const appliedTheme = await themeService.setColorTheme(
+      resolvedThemeId,
+      ConfigurationTarget.WORKSPACE,
+    );
+    this.applyWorkbenchThemeKind(
+      appliedTheme
+        ? normalizeWorkbenchThemeKind(appliedTheme)
+        : (inferThemeKindFromThemeName(themeId) ?? this.workbenchThemeKind),
+    );
   }
 
   async searchMarketplace(query: string): Promise<string[]> {
@@ -1584,15 +1872,19 @@ export class WebIDEHost {
 
   async installExtension(extensionId: string): Promise<void> {
     if (!this.extensionServices) {
-      throw new Error('Extension services are not initialized.');
+      throw new Error("Extension services are not initialized.");
     }
 
     const [extension] = await withTimeout(
-      this.extensionServices.galleryService.getExtensions([{ id: extensionId }]),
+      this.extensionServices.galleryService.getExtensions([
+        { id: extensionId },
+      ]),
       `Timed out while resolving extension ${extensionId}.`,
     );
     if (!extension) {
-      throw new Error(`Extension ${extensionId} was not found in the marketplace.`);
+      throw new Error(
+        `Extension ${extensionId} was not found in the marketplace.`,
+      );
     }
 
     await withTimeout(
@@ -1601,16 +1893,21 @@ export class WebIDEHost {
     );
   }
 
-  async setExtensionEnabled(extensionId: string, enabled: boolean): Promise<void> {
+  async setExtensionEnabled(
+    extensionId: string,
+    enabled: boolean,
+  ): Promise<void> {
     if (!this.extensionServices) {
-      throw new Error('Extension services are not initialized.');
+      throw new Error("Extension services are not initialized.");
     }
 
     const installed = await withTimeout(
       this.extensionServices.managementService.getInstalled(),
       `Timed out while listing installed extensions for ${extensionId}.`,
     );
-    const extension = installed.find((candidate) => candidate.identifier.id === extensionId);
+    const extension = installed.find(
+      (candidate) => candidate.identifier.id === extensionId,
+    );
     if (!extension) {
       throw new Error(`Extension ${extensionId} is not installed.`);
     }
@@ -1618,7 +1915,9 @@ export class WebIDEHost {
     await withTimeout(
       this.extensionServices.enablementService.setEnablement(
         [extension],
-        enabled ? EnablementState.EnabledGlobally : EnablementState.DisabledGlobally,
+        enabled
+          ? EnablementState.EnabledGlobally
+          : EnablementState.DisabledGlobally,
       ),
       `Timed out while updating enablement for ${extensionId}.`,
     );
@@ -1626,14 +1925,16 @@ export class WebIDEHost {
 
   async uninstallExtension(extensionId: string): Promise<void> {
     if (!this.extensionServices) {
-      throw new Error('Extension services are not initialized.');
+      throw new Error("Extension services are not initialized.");
     }
 
     const installed = await withTimeout(
       this.extensionServices.managementService.getInstalled(),
       `Timed out while listing installed extensions for ${extensionId}.`,
     );
-    const extension = installed.find((candidate) => candidate.identifier.id === extensionId);
+    const extension = installed.find(
+      (candidate) => candidate.identifier.id === extensionId,
+    );
     if (!extension) {
       throw new Error(`Extension ${extensionId} is not installed.`);
     }
@@ -1644,18 +1945,21 @@ export class WebIDEHost {
     );
   }
 
-  async listInstalledExtensions(): Promise<Array<{ id: string; enabled: boolean }>> {
+  async listInstalledExtensions(): Promise<
+    Array<{ id: string; enabled: boolean }>
+  > {
     if (!this.extensionServices) {
       return [];
     }
 
     const installed = await withTimeout(
       this.extensionServices.managementService.getInstalled(),
-      'Timed out while listing installed extensions.',
+      "Timed out while listing installed extensions.",
     );
     return installed.map((extension) => ({
       id: extension.identifier.id,
-      enabled: this.extensionServices?.enablementService.isEnabled(extension) ?? false,
+      enabled:
+        this.extensionServices?.enablementService.isEnabled(extension) ?? false,
     }));
   }
 
@@ -1663,7 +1967,10 @@ export class WebIDEHost {
     const searchService = await getService(ISearchService);
     const start = Date.now();
 
-    while (!searchService.schemeHasFileSearchProvider('file') && Date.now() - start < 5000) {
+    while (
+      !searchService.schemeHasFileSearchProvider("file") &&
+      Date.now() - start < 5000
+    ) {
       await delay(100);
     }
 
@@ -1688,7 +1995,7 @@ export class WebIDEHost {
       } catch (error) {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes('Search provider not initialized')) {
+        if (!message.includes("Search provider not initialized")) {
           throw error;
         }
         await delay(100);
@@ -1697,7 +2004,9 @@ export class WebIDEHost {
 
     throw lastError instanceof Error
       ? lastError
-      : new Error(`Search provider did not initialize for pattern "${pattern}".`);
+      : new Error(
+          `Search provider did not initialize for pattern "${pattern}".`,
+        );
   }
 
   private createSearchProvider(): WorkspaceSearchProvider {
@@ -1707,7 +2016,10 @@ export class WebIDEHost {
         const start = Date.now();
 
         // Wait for search provider to initialize (same retry as searchWorkspaceText)
-        while (!searchService.schemeHasFileSearchProvider('file') && Date.now() - start < 5000) {
+        while (
+          !searchService.schemeHasFileSearchProvider("file") &&
+          Date.now() - start < 5000
+        ) {
           await delay(100);
         }
 
@@ -1734,14 +2046,14 @@ export class WebIDEHost {
 
             if (options.includePattern) {
               const patterns: Record<string, boolean> = {};
-              for (const p of options.includePattern.split(',')) {
+              for (const p of options.includePattern.split(",")) {
                 if (p.trim()) patterns[p.trim()] = true;
               }
               query.includePattern = patterns;
             }
             if (options.excludePattern) {
               const patterns: Record<string, boolean> = {};
-              for (const p of options.excludePattern.split(',')) {
+              for (const p of options.excludePattern.split(",")) {
                 if (p.trim()) patterns[p.trim()] = true;
               }
               query.excludePattern = patterns;
@@ -1773,8 +2085,21 @@ export class WebIDEHost {
                 for (const textResult of fileMatch.results) {
                   // ITextSearchMatch has rangeLocations + previewText
                   // ITextSearchContext has text + lineNumber
-                  if ('rangeLocations' in textResult && textResult.rangeLocations) {
-                    const match = textResult as { rangeLocations: Array<{ source: { startLineNumber: number; startColumn: number; endColumn: number }; preview: { startColumn: number; endColumn: number } }>; previewText: string };
+                  if (
+                    "rangeLocations" in textResult &&
+                    textResult.rangeLocations
+                  ) {
+                    const match = textResult as {
+                      rangeLocations: Array<{
+                        source: {
+                          startLineNumber: number;
+                          startColumn: number;
+                          endColumn: number;
+                        };
+                        preview: { startColumn: number; endColumn: number };
+                      }>;
+                      previewText: string;
+                    };
                     for (const rangePair of match.rangeLocations) {
                       matches.push({
                         lineNumber: rangePair.source.startLineNumber,
@@ -1798,8 +2123,9 @@ export class WebIDEHost {
             };
           } catch (error) {
             lastError = error;
-            const message = error instanceof Error ? error.message : String(error);
-            if (!message.includes('Search provider not initialized')) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            if (!message.includes("Search provider not initialized")) {
               throw error;
             }
             await delay(100);
@@ -1808,13 +2134,13 @@ export class WebIDEHost {
 
         throw lastError instanceof Error
           ? lastError
-          : new Error('Search provider did not initialize.');
+          : new Error("Search provider did not initialize.");
       },
     };
   }
 
   private bindTerminal(tab: TerminalTabState): void {
-    if (tab.inputMode === 'passthrough') {
+    if (tab.inputMode === "passthrough") {
       tab.terminal.onData((data) => {
         tab.session.sendInput(data);
       });
@@ -1824,10 +2150,10 @@ export class WebIDEHost {
     tab.terminal.onData((data) => {
       // Interactive CLIs need raw input passthrough while they own the terminal.
       if (tab.runningAbortController) {
-        if (data === '\u0003') {
+        if (data === "\u0003") {
           tab.runningAbortController.abort();
           tab.session.sendInput(data);
-          tab.terminal.write('^C');
+          tab.terminal.write("^C");
           return;
         }
 
@@ -1835,47 +2161,53 @@ export class WebIDEHost {
         return;
       }
 
-      if (data === '\u0003') {
-        tab.currentLine = '';
+      if (data === "\u0003") {
+        tab.currentLine = "";
         this.printPrompt(tab);
         return;
       }
 
-      if (data === '\r') {
+      if (data === "\r") {
         const command = tab.currentLine;
-        tab.currentLine = '';
+        tab.currentLine = "";
         tab.historyIndex = -1;
         if (command.trim()) {
           tab.history.unshift(command);
         }
-        tab.terminal.write('\r\n');
+        tab.terminal.write("\r\n");
         void this.runCommand(tab, command);
         return;
       }
 
-      if (data === '\u007F') {
+      if (data === "\u007F") {
         if (tab.currentLine.length > 0) {
           tab.currentLine = tab.currentLine.slice(0, -1);
-          tab.terminal.write('\b \b');
+          tab.terminal.write("\b \b");
         }
         return;
       }
 
-      if (data === '\u001b[A') {
+      if (data === "\u001b[A") {
         if (tab.history.length === 0) return;
-        tab.historyIndex = Math.min(tab.historyIndex + 1, tab.history.length - 1);
-        this.replaceTerminalLine(tab, tab.history[tab.historyIndex] || '');
+        tab.historyIndex = Math.min(
+          tab.historyIndex + 1,
+          tab.history.length - 1,
+        );
+        this.replaceTerminalLine(tab, tab.history[tab.historyIndex] || "");
         return;
       }
 
-      if (data === '\u001b[B') {
+      if (data === "\u001b[B") {
         if (tab.history.length === 0) return;
         tab.historyIndex = Math.max(tab.historyIndex - 1, -1);
-        this.replaceTerminalLine(tab, tab.historyIndex >= 0 ? tab.history[tab.historyIndex] || '' : '');
+        this.replaceTerminalLine(
+          tab,
+          tab.historyIndex >= 0 ? tab.history[tab.historyIndex] || "" : "",
+        );
         return;
       }
 
-      if (data >= ' ') {
+      if (data >= " ") {
         tab.currentLine += data;
         tab.terminal.write(data);
       }
@@ -1884,7 +2216,7 @@ export class WebIDEHost {
 
   private replaceTerminalLine(tab: TerminalTabState, nextValue: string): void {
     while (tab.currentLine.length > 0) {
-      tab.terminal.write('\b \b');
+      tab.terminal.write("\b \b");
       tab.currentLine = tab.currentLine.slice(0, -1);
     }
 
@@ -1900,60 +2232,67 @@ export class WebIDEHost {
         return WORKBENCH_WORKERS[label as keyof typeof WORKBENCH_WORKERS]?.url;
       },
       getWorkerOptions: (_workerId: string, label: string) => {
-        return WORKBENCH_WORKERS[label as keyof typeof WORKBENCH_WORKERS]?.options;
+        return WORKBENCH_WORKERS[label as keyof typeof WORKBENCH_WORKERS]
+          ?.options;
       },
     };
   }
 
-  private buildKeychainStatusEntry(state = this.keychain.getState()): IStatusbarEntry {
+  private buildKeychainStatusEntry(
+    state = this.keychain.getState(),
+  ): IStatusbarEntry {
     if (state.busy) {
       return {
-        name: 'Keychain',
-        text: '$(sync~spin) Keychain',
-        ariaLabel: 'Keychain action in progress',
-        tooltip: 'Keychain action in progress',
-        command: 'almostnode.keychain.primary',
+        name: "Keychain",
+        text: "$(sync~spin) Keychain",
+        ariaLabel: "Keychain action in progress",
+        tooltip: "Keychain action in progress",
+        command: "almostnode.keychain.primary",
       };
     }
 
     if (!state.supported) {
       return {
-        name: 'Keychain',
-        text: '$(shield) Keychain',
-        ariaLabel: 'Keychain unavailable',
-        tooltip: 'Passkey-backed keychain is unavailable in this browser.',
-        command: 'almostnode.keychain.primary',
+        name: "Keychain",
+        text: "$(shield) Keychain",
+        ariaLabel: "Keychain unavailable",
+        tooltip: "Passkey-backed keychain is unavailable in this browser.",
+        command: "almostnode.keychain.primary",
       };
     }
 
     if (state.hasStoredVault && !state.hasLiveCredentials) {
       return {
-        name: 'Keychain',
-        text: '$(lock) Keychain',
-        ariaLabel: 'Unlock saved keychain',
-        tooltip: 'Unlock the saved keychain for this browser.',
-        command: 'almostnode.keychain.primary',
+        name: "Keychain",
+        text: "$(lock) Keychain",
+        ariaLabel: "Unlock saved keychain",
+        tooltip: "Unlock the saved keychain for this browser.",
+        command: "almostnode.keychain.primary",
       };
     }
 
     if (state.hasLiveCredentials && !state.hasStoredVault) {
       return {
-        name: 'Keychain',
-        text: '$(key) Save Keychain',
-        ariaLabel: 'Save keychain',
-        tooltip: 'Save credentials for this browser with a passkey.',
-        command: 'almostnode.keychain.primary',
+        name: "Keychain",
+        text: "$(key) Save Keychain",
+        ariaLabel: "Save keychain",
+        tooltip: "Save credentials for this browser with a passkey.",
+        command: "almostnode.keychain.primary",
       };
     }
 
     return {
-      name: 'Keychain',
-      text: state.hasStoredVault ? '$(shield) Keychain Saved' : '$(shield) Keychain',
-      ariaLabel: state.hasStoredVault ? 'Keychain is saved for this browser' : 'Keychain',
+      name: "Keychain",
+      text: state.hasStoredVault
+        ? "$(shield) Keychain Saved"
+        : "$(shield) Keychain",
+      ariaLabel: state.hasStoredVault
+        ? "Keychain is saved for this browser"
+        : "Keychain",
       tooltip: state.hasStoredVault
-        ? 'Keychain is available for this browser.'
-        : 'No keychain has been saved for this browser.',
-      command: 'almostnode.keychain.primary',
+        ? "Keychain is available for this browser."
+        : "No keychain has been saved for this browser.",
+      command: "almostnode.keychain.primary",
     };
   }
 
@@ -1963,42 +2302,42 @@ export class WebIDEHost {
 
   private async registerStatusbarEntries(): Promise<void> {
     const statusbarService = await getService(IStatusbarService);
-    const agentLabel = 'OpenCode';
+    const agentLabel = "OpenCode";
     statusbarService.addEntry(
       {
-        name: 'Run',
-        text: '$(play) Run',
-        ariaLabel: 'Run workspace command',
-        tooltip: 'Run a workspace command',
-        command: 'almostnode.run',
+        name: "Run",
+        text: "$(play) Run",
+        ariaLabel: "Run workspace command",
+        tooltip: "Run a workspace command",
+        command: "almostnode.run",
       },
-      'almostnode.status.run',
+      "almostnode.status.run",
       StatusbarAlignment.LEFT,
       { primary: 1000, secondary: 1000 },
     );
 
     statusbarService.addEntry(
       {
-        name: 'Preview',
-        text: '$(globe) Preview',
-        ariaLabel: 'Open preview',
-        tooltip: 'Open the preview tab',
-        command: 'almostnode.preview.open',
+        name: "Preview",
+        text: "$(globe) Preview",
+        ariaLabel: "Open preview",
+        tooltip: "Open the preview tab",
+        command: "almostnode.preview.open",
       },
-      'almostnode.status.preview',
+      "almostnode.status.preview",
       StatusbarAlignment.LEFT,
       { primary: 999, secondary: 999 },
     );
 
     statusbarService.addEntry(
       {
-        name: 'Terminal',
-        text: '$(terminal) Terminal',
-        ariaLabel: 'Focus terminal',
-        tooltip: 'Focus the terminal panel',
-        command: 'almostnode.terminal.focus',
+        name: "Terminal",
+        text: "$(terminal) Terminal",
+        ariaLabel: "Focus terminal",
+        tooltip: "Focus the terminal panel",
+        command: "almostnode.terminal.focus",
       },
-      'almostnode.status.terminal',
+      "almostnode.status.terminal",
       StatusbarAlignment.LEFT,
       { primary: 998, secondary: 998 },
     );
@@ -2008,18 +2347,21 @@ export class WebIDEHost {
         name: agentLabel,
         text: `$(sparkle) ${agentLabel}`,
         ariaLabel: `Open ${agentLabel}`,
-        tooltip: this.agentMode === 'host' ? 'Open the host OpenCode terminal' : 'Open OpenCode',
-        command: 'almostnode.opencode.open',
+        tooltip:
+          this.agentMode === "host"
+            ? "Open the host OpenCode terminal"
+            : "Open OpenCode",
+        command: "almostnode.opencode.open",
       },
-      'almostnode.status.opencode',
+      "almostnode.status.opencode",
       StatusbarAlignment.LEFT,
       { primary: 997, secondary: 997 },
     );
 
-    if (this.agentMode === 'browser') {
+    if (this.agentMode === "browser") {
       this.keychainStatusEntry = statusbarService.addEntry(
         this.buildKeychainStatusEntry(),
-        'almostnode.status.keychain',
+        "almostnode.status.keychain",
         StatusbarAlignment.LEFT,
         { primary: 996, secondary: 996 },
       );
@@ -2027,16 +2369,16 @@ export class WebIDEHost {
   }
 
   private resolveMarketplaceClient() {
-    if (this.marketplaceMode === 'fixtures') {
+    if (this.marketplaceMode === "fixtures") {
       return {
         client: new FixtureMarketplaceClient(),
-        baseUrl: 'https://fixtures.almostnode.invalid',
+        baseUrl: "https://fixtures.almostnode.invalid",
       };
     }
 
     return {
       client: new OpenVSXClient(),
-      baseUrl: 'https://open-vsx.org',
+      baseUrl: "https://open-vsx.org",
     };
   }
 
@@ -2045,7 +2387,10 @@ export class WebIDEHost {
     await prunePersistedWorkbenchExtensions(userDataProvider);
     registerWorkbenchLanguages();
 
-    const provider = new VfsFileSystemProvider(this.container.vfs, WORKSPACE_ROOT);
+    const provider = new VfsFileSystemProvider(
+      this.container.vfs,
+      WORKSPACE_ROOT,
+    );
     registerFileSystemOverlay(1, provider);
 
     const { client, baseUrl } = this.resolveMarketplaceClient();
@@ -2074,7 +2419,7 @@ export class WebIDEHost {
           trusted: true,
           open: async () => false,
         },
-        additionalTrustedDomains: ['https://open-vsx.org'],
+        additionalTrustedDomains: ["https://open-vsx.org"],
         enableWorkspaceTrust: true,
         defaultLayout: {
           force: true,
@@ -2084,16 +2429,16 @@ export class WebIDEHost {
           ],
         },
         configurationDefaults: {
-          'workbench.startupEditor': 'none',
-          'editor.minimap.enabled': false,
-          'files.autoSave': 'afterDelay',
-          'extensions.autoCheckUpdates': false,
-          'extensions.autoUpdate': false,
+          "workbench.startupEditor": "none",
+          "editor.minimap.enabled": false,
+          "files.autoSave": "afterDelay",
+          "extensions.autoCheckUpdates": false,
+          "extensions.autoUpdate": false,
         },
         productConfiguration: {
-          nameShort: 'almostnode',
-          nameLong: 'almostnode webide',
-          applicationName: 'almostnode-webide',
+          nameShort: "almostnode",
+          nameLong: "almostnode webide",
+          applicationName: "almostnode-webide",
           extensionsGallery: {
             serviceUrl: `${baseUrl}/vscode/gallery`,
             controlUrl: `${baseUrl}/vscode/item`,
@@ -2104,55 +2449,58 @@ export class WebIDEHost {
         },
         commands: [
           {
-            id: 'almostnode.run',
-            label: 'Almostnode: Run Command',
+            id: "almostnode.run",
+            label: "Almostnode: Run Command",
             menu: Menu.CommandPalette,
-            handler: (...args: unknown[]) => this.executeHostCommand(typeof args[0] === 'string' ? args[0] : undefined),
+            handler: (...args: unknown[]) =>
+              this.executeHostCommand(
+                typeof args[0] === "string" ? args[0] : undefined,
+              ),
           },
           {
-            id: 'almostnode.preview.open',
-            label: 'Almostnode: Open Preview',
+            id: "almostnode.preview.open",
+            label: "Almostnode: Open Preview",
             menu: Menu.CommandPalette,
             handler: () => this.openPreview(),
           },
           {
-            id: 'almostnode.preview.refresh',
-            label: 'Almostnode: Refresh Preview',
+            id: "almostnode.preview.refresh",
+            label: "Almostnode: Refresh Preview",
             menu: Menu.CommandPalette,
             handler: () => this.refreshPreview(),
           },
           {
-            id: 'almostnode.terminal.focus',
-            label: 'Almostnode: Focus Terminal',
+            id: "almostnode.terminal.focus",
+            label: "Almostnode: Focus Terminal",
             menu: Menu.CommandPalette,
             handler: () => this.focusTerminal(),
           },
           {
-            id: 'almostnode.opencode.open',
-            label: 'Almostnode: Open OpenCode',
+            id: "almostnode.opencode.open",
+            label: "Almostnode: Open OpenCode",
             menu: Menu.CommandPalette,
             handler: () => this.revealOpenCodePanel(true),
           },
           {
-            id: 'almostnode.claude.open',
-            label: 'Almostnode: Open OpenCode',
+            id: "almostnode.claude.open",
+            label: "Almostnode: Open OpenCode",
             menu: Menu.CommandPalette,
             handler: () => this.revealOpenCodePanel(true),
           },
           {
-            id: 'almostnode.keychain.primary',
-            label: 'Almostnode: Open Keychain',
+            id: "almostnode.keychain.primary",
+            label: "Almostnode: Open Keychain",
             handler: () => this.revealKeychainPanel(),
           },
           {
-            id: 'almostnode.keychain.unlock',
-            label: 'Almostnode: Unlock Keychain',
+            id: "almostnode.keychain.unlock",
+            label: "Almostnode: Unlock Keychain",
             menu: Menu.CommandPalette,
             handler: () => this.unlockKeychain(),
           },
           {
-            id: 'almostnode.keychain.forget',
-            label: 'Almostnode: Forget Keychain',
+            id: "almostnode.keychain.forget",
+            label: "Almostnode: Forget Keychain",
             menu: Menu.CommandPalette,
             handler: () => this.forgetKeychain(),
           },
@@ -2165,13 +2513,10 @@ export class WebIDEHost {
     const editorService = await getService(IEditorService);
 
     // Open preview as the only editor (no default source file)
-    await editorService.openEditor(
-      this.workbenchSurfaces.previewInput,
-      {
-        pinned: true,
-        preserveFocus: true,
-      },
-    );
+    await editorService.openEditor(this.workbenchSurfaces.previewInput, {
+      pinned: true,
+      preserveFocus: true,
+    });
 
     // Keep terminal collapsed by default
     setPartVisibility(Parts.PANEL_PART, false);
@@ -2179,66 +2524,179 @@ export class WebIDEHost {
     // Set sidebar to 600px initial width
     const layoutService = await getService(IWorkbenchLayoutService);
     const currentSize = layoutService.getSize(Parts.SIDEBAR_PART);
-    layoutService.setSize(Parts.SIDEBAR_PART, { width: 600, height: currentSize.height });
+    layoutService.setSize(Parts.SIDEBAR_PART, {
+      width: 600,
+      height: currentSize.height,
+    });
 
     // Inject custom-ui-style.stylesheet CSS from workspace settings
     this.injectCustomUiStylesheet();
 
-    // Apply theme matching system color scheme preference
-    await this.applyColorSchemePreference();
-    this.listenForColorSchemeChanges();
+    await this.applyConfiguredWorkbenchTheme();
+    this.listenForWorkbenchThemeChanges();
+  }
+
+  private readWorkspaceSettings(): Record<string, unknown> | null {
+    try {
+      const settingsPath = `${WORKSPACE_ROOT}/.vscode/settings.json`;
+      const raw = this.container.vfs.readFileSync(settingsPath, "utf8");
+      return JSON.parse(raw as string) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  private primeWorkbenchThemeFromWorkspaceSettings(): void {
+    const configuredTheme = this.readConfiguredWorkbenchTheme();
+    this.applyWorkbenchThemeKind(
+      inferThemeKindFromThemeName(configuredTheme) ?? "dark",
+    );
+  }
+
+  private readConfiguredWorkbenchTheme(): string | null {
+    const settings = this.readWorkspaceSettings();
+    return typeof settings?.["workbench.colorTheme"] === "string"
+      ? settings["workbench.colorTheme"]
+      : null;
   }
 
   private injectCustomUiStylesheet(): void {
-    try {
-      const settingsPath = `${WORKSPACE_ROOT}/.vscode/settings.json`;
-      const raw = this.container.vfs.readFileSync(settingsPath, 'utf8');
-      const settings = JSON.parse(raw as string);
-      const stylesheet = settings['custom-ui-style.stylesheet'];
-      if (!stylesheet || typeof stylesheet !== 'object') return;
+    const settings = this.readWorkspaceSettings();
+    const stylesheet = settings?.["custom-ui-style.stylesheet"];
+    const cssRules: string[] = [];
 
-      const cssRules: string[] = [];
+    if (stylesheet && typeof stylesheet === "object") {
       for (const [selector, properties] of Object.entries(stylesheet)) {
-        if (!properties || typeof properties !== 'object') continue;
-        const declarations = Object.entries(properties as Record<string, string>)
+        if (!properties || typeof properties !== "object") continue;
+        const declarations = Object.entries(
+          properties as Record<string, string>,
+        )
           .map(([prop, value]) => `  ${prop}: ${value};`)
-          .join('\n');
+          .join("\n");
         cssRules.push(`${selector} {\n${declarations}\n}`);
       }
+    }
 
-      if (cssRules.length === 0) return;
+    const style = document.createElement("style");
+    style.id = "almostnode-custom-ui-style";
+    style.textContent =
+      cssRules.join("\n\n") +
+      "\n\n" +
+      LAYOUT_OVERRIDES +
+      "\n\n" +
+      LIGHT_MODE_OVERRIDES;
+    document.head.appendChild(style);
+  }
 
-      const style = document.createElement('style');
-      style.id = 'almostnode-custom-ui-style';
-      style.textContent = cssRules.join('\n\n') + '\n\n' + LAYOUT_OVERRIDES + '\n\n' + LIGHT_MODE_OVERRIDES;
-      document.head.appendChild(style);
-    } catch {
-      // Settings file missing or malformed — skip custom UI styling
+  private applyWorkbenchThemeKind(themeKind: WorkbenchThemeKind): void {
+    this.workbenchThemeKind = themeKind;
+    document.documentElement.dataset.almostnodeTheme = themeKind;
+    document.documentElement.style.colorScheme = themeKind;
+    this.workbench.dataset.almostnodeTheme = themeKind;
+
+    const terminalTheme = getTerminalTheme(themeKind);
+    for (const tab of this.terminalTabs.values()) {
+      tab.terminal.options.theme = terminalTheme;
+    }
+
+    for (const tab of this.openCodeTabs.values()) {
+      tab.session.setThemeMode(themeKind);
+    }
+
+    for (const tab of this.openCodeSidebarTabs.values()) {
+      tab.session.setThemeMode(themeKind);
     }
   }
 
-  private async applyColorSchemePreference(): Promise<void> {
-    if (!prefersLightMode()) return;
+  private async syncWorkbenchTheme(): Promise<void> {
+    const themeService = await getService(IWorkbenchThemeService);
+    const currentTheme = (
+      themeService as IWorkbenchThemeService & {
+        getColorTheme?: () => { type?: string };
+      }
+    ).getColorTheme?.();
+    if (currentTheme) {
+      this.applyWorkbenchThemeKind(normalizeWorkbenchThemeKind(currentTheme));
+    }
+  }
+
+  private async resolveWorkbenchColorThemeId(
+    themeService: IWorkbenchThemeService,
+    themeReference: string,
+  ): Promise<string> {
+    const normalizedReference = themeReference.trim().toLowerCase();
+    if (!normalizedReference) {
+      return themeReference;
+    }
 
     try {
-      const themeService = await getService(IWorkbenchThemeService);
-      await themeService.setColorTheme('Islands Light', undefined);
+      const themes = await themeService.getColorThemes();
+      const resolvedTheme = themes.find((theme) =>
+        [theme.id, theme.label, theme.settingsId].some((value) => {
+          return value?.trim().toLowerCase() === normalizedReference;
+        }),
+      );
+      return resolvedTheme?.id ?? themeReference;
     } catch {
-      // Theme switch failed — fall back to dark
+      return themeReference;
     }
   }
 
-  private listenForColorSchemeChanges(): void {
-    // Listen for Monaco theme changes (user toggling via command palette / settings)
-    // and update terminal themes to match
+  private workbenchThemeMatchesReference(
+    theme:
+      | {
+          id?: string | null;
+          label?: string | null;
+          settingsId?: string | null;
+        }
+      | null
+      | undefined,
+    themeReference: string,
+  ): boolean {
+    const normalizedReference = themeReference.trim().toLowerCase();
+    if (!normalizedReference || !theme) {
+      return false;
+    }
+
+    return [theme.id, theme.label, theme.settingsId].some((value) => {
+      return value?.trim().toLowerCase() === normalizedReference;
+    });
+  }
+
+  private async applyConfiguredWorkbenchTheme(): Promise<void> {
+    const configuredTheme = this.readConfiguredWorkbenchTheme();
+    if (!configuredTheme) {
+      await this.syncWorkbenchTheme();
+      return;
+    }
+
+    const themeService = await getService(IWorkbenchThemeService);
+    const currentTheme = themeService.getColorTheme?.();
+
+    if (this.workbenchThemeMatchesReference(currentTheme, configuredTheme)) {
+      this.applyWorkbenchThemeKind(normalizeWorkbenchThemeKind(currentTheme));
+      return;
+    }
+
+    const resolvedThemeId = await this.resolveWorkbenchColorThemeId(
+      themeService,
+      configuredTheme,
+    );
+    const appliedTheme = await themeService.setColorTheme(
+      resolvedThemeId,
+      ConfigurationTarget.WORKSPACE,
+    );
+    this.applyWorkbenchThemeKind(
+      appliedTheme
+        ? normalizeWorkbenchThemeKind(appliedTheme)
+        : (inferThemeKindFromThemeName(configuredTheme) ?? "dark"),
+    );
+  }
+
+  private listenForWorkbenchThemeChanges(): void {
     void getService(IWorkbenchThemeService).then((themeService) => {
       themeService.onDidColorThemeChange((theme) => {
-        const isLight = theme.type === 'light' || theme.type === 'hcLight';
-        const terminalTheme = isLight ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-
-        for (const tab of this.terminalTabs.values()) {
-          tab.terminal.options.theme = terminalTheme;
-        }
+        this.applyWorkbenchThemeKind(normalizeWorkbenchThemeKind(theme));
       });
     });
   }
@@ -2246,10 +2704,26 @@ export class WebIDEHost {
   private async initPGliteIfNeeded(): Promise<void> {
     const schemaPath = `${WORKSPACE_ROOT}/schema.sql`;
     const hasSchema = this.container.vfs.existsSync(schemaPath);
-    const hasDrizzleDir = (() => { try { return this.container.vfs.statSync(`${WORKSPACE_ROOT}/drizzle`).isDirectory(); } catch { return false; } })();
+    const hasDrizzleDir = (() => {
+      try {
+        return this.container.vfs
+          .statSync(`${WORKSPACE_ROOT}/drizzle`)
+          .isDirectory();
+      } catch {
+        return false;
+      }
+    })();
 
     // Import db-manager lazily
-    const { listDatabases, ensureDefaultDatabase, getIdbPath, getActiveDatabase, setActiveDatabase, createDatabase, deleteDatabase } = await import('../../../../packages/almostnode/src/pglite/db-manager');
+    const {
+      listDatabases,
+      ensureDefaultDatabase,
+      getIdbPath,
+      getActiveDatabase,
+      setActiveDatabase,
+      createDatabase,
+      deleteDatabase,
+    } = await import("../../../../packages/almostnode/src/pglite/db-manager");
     const hasExistingDbs = listDatabases().length > 0;
 
     if (!hasSchema && !hasDrizzleDir && !hasExistingDbs) {
@@ -2259,25 +2733,36 @@ export class WebIDEHost {
 
     try {
       // Register database sidebar view (workbench is already initialized at this point)
-      const { registerCustomView } = await import('@codingame/monaco-vscode-workbench-service-override');
+      const { registerCustomView } =
+        await import("@codingame/monaco-vscode-workbench-service-override");
       registerCustomView({
-        id: 'almostnode.sidebar.database',
-        name: 'Database',
+        id: "almostnode.sidebar.database",
+        name: "Database",
         location: ViewContainerLocation.Sidebar,
         order: 1,
-        icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>'),
+        icon:
+          "data:image/svg+xml," +
+          encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>',
+          ),
         renderBody: (container) => this.databaseSurface.attach(container),
       });
 
       const activeName = ensureDefaultDatabase();
 
       // Load PGlite and init instance (with migration support)
-      const { initAndMigrate } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
-      await initAndMigrate(activeName, this.container.vfs, getIdbPath(activeName));
+      const { initAndMigrate } =
+        await import("../../../../packages/almostnode/src/pglite/pglite-database");
+      await initAndMigrate(
+        activeName,
+        this.container.vfs,
+        getIdbPath(activeName),
+      );
       console.log(`[pglite] Database "${activeName}" ready`);
 
       // Register middleware
-      const { createPGliteMiddleware } = await import('../../../../packages/almostnode/src/pglite/bridge-middleware');
+      const { createPGliteMiddleware } =
+        await import("../../../../packages/almostnode/src/pglite/bridge-middleware");
       this.pgliteMiddleware = createPGliteMiddleware();
       this.container.serverBridge.registerMiddleware(this.pgliteMiddleware);
 
@@ -2288,10 +2773,13 @@ export class WebIDEHost {
       this.databaseSurface.update(listDatabases(), activeName);
 
       // Set up database browser query handler
-      this.databaseBrowserSurface.setQueryHandler(async (operation, body, dbName) => {
-        const { handleDatabaseRequest } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
-        return handleDatabaseRequest(operation, body, dbName);
-      });
+      this.databaseBrowserSurface.setQueryHandler(
+        async (operation, body, dbName) => {
+          const { handleDatabaseRequest } =
+            await import("../../../../packages/almostnode/src/pglite/pglite-database");
+          return handleDatabaseRequest(operation, body, dbName);
+        },
+      );
 
       // Wire database panel callbacks
       this.databaseSurface.setCallbacks({
@@ -2300,7 +2788,8 @@ export class WebIDEHost {
             // Switch active database if different
             const currentActive = getActiveDatabase();
             if (currentActive !== name) {
-              const { closePGliteInstance, initAndMigrate: initMigrate } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
+              const { closePGliteInstance, initAndMigrate: initMigrate } =
+                await import("../../../../packages/almostnode/src/pglite/pglite-database");
               if (currentActive) await closePGliteInstance(currentActive);
               setActiveDatabase(name);
               await initMigrate(name, this.container.vfs, getIdbPath(name));
@@ -2311,12 +2800,13 @@ export class WebIDEHost {
             this.databaseBrowserSurface.setDatabase(name);
             await this.revealDatabaseEditor();
           } catch (err) {
-            console.error('[pglite] Open database browser failed:', err);
+            console.error("[pglite] Open database browser failed:", err);
           }
         },
         onSwitch: async (name: string) => {
           try {
-            const { closePGliteInstance, initAndMigrate: initMigrate } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
+            const { closePGliteInstance, initAndMigrate: initMigrate } =
+              await import("../../../../packages/almostnode/src/pglite/pglite-database");
             const oldActive = getActiveDatabase();
             if (oldActive) await closePGliteInstance(oldActive);
             setActiveDatabase(name);
@@ -2325,49 +2815,58 @@ export class WebIDEHost {
             this.databaseSurface.update(listDatabases(), name);
             console.log(`[pglite] Switched to database "${name}"`);
           } catch (err) {
-            console.error('[pglite] Switch failed:', err);
+            console.error("[pglite] Switch failed:", err);
           }
         },
         onCreate: async (name: string) => {
           try {
             createDatabase(name);
-            const { initAndMigrate: initMigrate } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
+            const { initAndMigrate: initMigrate } =
+              await import("../../../../packages/almostnode/src/pglite/pglite-database");
             await initMigrate(name, this.container.vfs, getIdbPath(name));
             this.databaseSurface.update(listDatabases(), getActiveDatabase());
             console.log(`[pglite] Created database "${name}"`);
           } catch (err) {
-            console.error('[pglite] Create failed:', err);
+            console.error("[pglite] Create failed:", err);
           }
         },
         onDelete: async (name: string) => {
           try {
-            const { closePGliteInstance: closeInst } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
+            const { closePGliteInstance: closeInst } =
+              await import("../../../../packages/almostnode/src/pglite/pglite-database");
             await closeInst(name);
             deleteDatabase(name);
             const active = getActiveDatabase();
             if (!active || active === name) {
               const newActive = ensureDefaultDatabase();
-              const { initAndMigrate: initMigrate } = await import('../../../../packages/almostnode/src/pglite/pglite-database');
-              await initMigrate(newActive, this.container.vfs, getIdbPath(newActive));
+              const { initAndMigrate: initMigrate } =
+                await import("../../../../packages/almostnode/src/pglite/pglite-database");
+              await initMigrate(
+                newActive,
+                this.container.vfs,
+                getIdbPath(newActive),
+              );
               this.previewSurface.setActiveDb(newActive);
             }
             this.databaseSurface.update(listDatabases(), getActiveDatabase());
             console.log(`[pglite] Deleted database "${name}"`);
           } catch (err) {
-            console.error('[pglite] Delete failed:', err);
+            console.error("[pglite] Delete failed:", err);
           }
         },
       });
     } catch (err) {
-      console.error('[pglite] Init failed:', err);
+      console.error("[pglite] Init failed:", err);
     }
   }
 
   private async ensureGitInitialized(): Promise<void> {
     if (this.container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)) return;
-    await this.container.run('git init', { cwd: WORKSPACE_ROOT });
-    await this.container.run('git add -A', { cwd: WORKSPACE_ROOT });
-    await this.container.run('git commit -m "Initial commit"', { cwd: WORKSPACE_ROOT });
+    await this.container.run("git init", { cwd: WORKSPACE_ROOT });
+    await this.container.run("git add -A", { cwd: WORKSPACE_ROOT });
+    await this.container.run('git commit -m "Initial commit"', {
+      cwd: WORKSPACE_ROOT,
+    });
   }
 
   private migrateLegacyTestsToWorkspace(): void {
@@ -2377,28 +2876,41 @@ export class WebIDEHost {
       return;
     }
 
-    if (vfs.existsSync(LEGACY_TEST_E2E_ROOT) && !vfs.existsSync(WORKSPACE_TEST_E2E_ROOT)) {
+    if (
+      vfs.existsSync(LEGACY_TEST_E2E_ROOT) &&
+      !vfs.existsSync(WORKSPACE_TEST_E2E_ROOT)
+    ) {
       if (!vfs.existsSync(WORKSPACE_TESTS_ROOT)) {
         vfs.mkdirSync(WORKSPACE_TESTS_ROOT, { recursive: true });
       }
       vfs.renameSync(LEGACY_TEST_E2E_ROOT, WORKSPACE_TEST_E2E_ROOT);
     }
 
-    if (vfs.existsSync(LEGACY_TEST_METADATA_PATH) && !vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)) {
-      const raw = vfs.readFileSync(LEGACY_TEST_METADATA_PATH, 'utf8') as string;
+    if (
+      vfs.existsSync(LEGACY_TEST_METADATA_PATH) &&
+      !vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)
+    ) {
+      const raw = vfs.readFileSync(LEGACY_TEST_METADATA_PATH, "utf8") as string;
       try {
         const data = JSON.parse(raw);
         if (Array.isArray(data.tests)) {
           data.tests = data.tests.map((test: Record<string, unknown>) => {
-            const specPath = typeof test.specPath === 'string'
-              ? test.specPath.replace(LEGACY_TEST_E2E_ROOT, WORKSPACE_TEST_E2E_ROOT)
-              : test.specPath;
+            const specPath =
+              typeof test.specPath === "string"
+                ? test.specPath.replace(
+                    LEGACY_TEST_E2E_ROOT,
+                    WORKSPACE_TEST_E2E_ROOT,
+                  )
+                : test.specPath;
             return { ...test, specPath };
           });
           if (!vfs.existsSync(WORKSPACE_TESTS_ROOT)) {
             vfs.mkdirSync(WORKSPACE_TESTS_ROOT, { recursive: true });
           }
-          vfs.writeFileSync(WORKSPACE_TEST_METADATA_PATH, JSON.stringify(data, null, 2));
+          vfs.writeFileSync(
+            WORKSPACE_TEST_METADATA_PATH,
+            JSON.stringify(data, null, 2),
+          );
         }
       } catch {
         // Ignore malformed legacy metadata and leave it in place.
@@ -2406,7 +2918,10 @@ export class WebIDEHost {
     }
 
     try {
-      if (vfs.existsSync(LEGACY_TEST_METADATA_PATH) && vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)) {
+      if (
+        vfs.existsSync(LEGACY_TEST_METADATA_PATH) &&
+        vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)
+      ) {
         vfs.unlinkSync(LEGACY_TEST_METADATA_PATH);
       }
     } catch {
@@ -2414,7 +2929,10 @@ export class WebIDEHost {
     }
 
     try {
-      if (vfs.existsSync(LEGACY_TESTS_ROOT) && vfs.readdirSync(LEGACY_TESTS_ROOT).length === 0) {
+      if (
+        vfs.existsSync(LEGACY_TESTS_ROOT) &&
+        vfs.readdirSync(LEGACY_TESTS_ROOT).length === 0
+      ) {
         vfs.rmdirSync(LEGACY_TESTS_ROOT);
       }
     } catch {
@@ -2426,11 +2944,13 @@ export class WebIDEHost {
     const logMemory = (label: string) => {
       if ((performance as any).memory) {
         const m = (performance as any).memory;
-        console.log(`[memory] ${label}: ${(m.usedJSHeapSize / 1024 / 1024).toFixed(1)}MB / ${(m.jsHeapSizeLimit / 1024 / 1024).toFixed(1)}MB`);
+        console.log(
+          `[memory] ${label}: ${(m.usedJSHeapSize / 1024 / 1024).toFixed(1)}MB / ${(m.jsHeapSizeLimit / 1024 / 1024).toFixed(1)}MB`,
+        );
       }
     };
 
-    logMemory('before workspace seed');
+    logMemory("before workspace seed");
     if (this.initialProjectFiles && this.initialProjectFiles.length > 0) {
       loadProjectFilesIntoVfs(this.container.vfs, this.initialProjectFiles);
     } else if (this.skipWorkspaceSeed) {
@@ -2442,35 +2962,39 @@ export class WebIDEHost {
     }
     this.migrateLegacyTestsToWorkspace();
     await this.ensureGitInitialized();
+    this.primeWorkbenchThemeFromWorkspaceSettings();
 
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
     await this.keychain.init();
     this.container.setKeychain(this.keychain);
     this.container.setSearchProvider(this.createSearchProvider());
-    this.updatePreviewStatus('Waiting for a preview server');
-    this.updateTerminalStatus(initialTab, 'Idle');
+    this.updatePreviewStatus("Waiting for a preview server");
+    this.updateTerminalStatus(initialTab, "Idle");
 
     // Add Console tab as a custom (non-terminal) tab in the terminal panel
     this.terminalSurface.addCustomTab({
       id: this.consoleTabId,
-      title: 'Console',
+      title: "Console",
       element: this.consolePanel.root,
       closable: false,
     });
 
     // Listen for console messages from the preview iframe
-    window.addEventListener('message', (event) => {
-      if (!event.data || event.data.type !== 'almostnode-console') return;
+    window.addEventListener("message", (event) => {
+      if (!event.data || event.data.type !== "almostnode-console") return;
       const { level, args, timestamp } = event.data;
       if (!level || !Array.isArray(args)) return;
       this.consolePanel.addEntry(level, args, timestamp || Date.now());
       this.consoleMessageCount++;
-      this.terminalSurface.updateTabStatus(this.consoleTabId, `${this.consoleMessageCount} messages`);
+      this.terminalSurface.updateTabStatus(
+        this.consoleTabId,
+        `${this.consoleMessageCount} messages`,
+      );
     });
 
-    this.container.on('server-ready', (_port: unknown, url: unknown) => {
-      if (typeof _port !== 'number' || typeof url !== 'string') {
+    this.container.on("server-ready", (_port: unknown, url: unknown) => {
+      if (typeof _port !== "number" || typeof url !== "string") {
         return;
       }
       this.previewPort = _port;
@@ -2481,45 +3005,60 @@ export class WebIDEHost {
       const iframe = this.previewSurface.getIframe();
       const registerHMRTarget = () => {
         if (iframe.contentWindow && this.previewPort !== null) {
-          this.container.setHMRTargetForPort(this.previewPort, iframe.contentWindow);
+          this.container.setHMRTargetForPort(
+            this.previewPort,
+            iframe.contentWindow,
+          );
         }
       };
-      iframe.addEventListener('load', registerHMRTarget, { once: true });
+      iframe.addEventListener("load", registerHMRTarget, { once: true });
       // Also register immediately if iframe is already loaded
       registerHMRTarget();
 
-      const previewTab = this.previewTerminalTabId ? this.terminalTabs.get(this.previewTerminalTabId) : null;
+      const previewTab = this.previewTerminalTabId
+        ? this.terminalTabs.get(this.previewTerminalTabId)
+        : null;
       if (previewTab) {
-        this.updateTerminalStatus(previewTab, `Preview ready: ${this.previewUrl}`);
+        this.updateTerminalStatus(
+          previewTab,
+          `Preview ready: ${this.previewUrl}`,
+        );
       }
     });
 
-    this.container.on('server-unregistered', (port: unknown) => {
-      if (typeof port !== 'number' || port !== this.previewPort) {
+    this.container.on("server-unregistered", (port: unknown) => {
+      if (typeof port !== "number" || port !== this.previewPort) {
         return;
       }
 
       this.previewPort = null;
       this.previewUrl = null;
       this.previewStartRequested = false;
-      this.previewSurface.clear('Preview server stopped. Run the workspace to start it again.');
-      const previewTab = this.previewTerminalTabId ? this.terminalTabs.get(this.previewTerminalTabId) : null;
+      this.previewSurface.clear(
+        "Preview server stopped. Run the workspace to start it again.",
+      );
+      const previewTab = this.previewTerminalTabId
+        ? this.terminalTabs.get(this.previewTerminalTabId)
+        : null;
       if (previewTab) {
-        this.updateTerminalStatus(previewTab, 'Preview server stopped');
+        this.updateTerminalStatus(previewTab, "Preview server stopped");
       }
     });
 
-    logMemory('before service worker init');
+    logMemory("before service worker init");
     try {
       await this.container.serverBridge.initServiceWorker();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to initialize service worker';
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unable to initialize service worker";
       this.updatePreviewStatus(message);
     }
 
-    logMemory('before workbench init');
+    logMemory("before workbench init");
     await this.initWorkbench();
-    logMemory('after workbench init');
+    logMemory("after workbench init");
 
     // ── PGlite database initialization (after workbench is ready) ──
     void this.initPGliteIfNeeded();
@@ -2532,13 +3071,13 @@ export class WebIDEHost {
     }
     window.__almostnodeWebIDE = this;
 
-    logMemory('before opencode boot');
+    logMemory("before opencode boot");
     const searchParams = new URLSearchParams(window.location.search);
-    const skipOpenCode = searchParams.has('no-opencode') || searchParams.has('no-claude');
+    const skipOpenCode =
+      searchParams.has("no-opencode") || searchParams.has("no-claude");
     if (!skipOpenCode) {
       void this.revealOpenCodePanel(false);
     }
-
   }
 
   private async ensureWorkspaceDependenciesInstalled(): Promise<void> {
@@ -2553,17 +3092,22 @@ export class WebIDEHost {
     }
 
     if (!this.workspaceDependencyInstallPromise) {
-      this.workspaceDependencyInstallPromise = this.container.npm.installFromPackageJson({
-        onProgress: (message) => {
-          const previewTab = this.previewTerminalTabId ? this.terminalTabs.get(this.previewTerminalTabId) : null;
-          if (previewTab) {
-            this.updateTerminalStatus(previewTab, message);
-          }
-        },
-      }).then(() => undefined).catch((error) => {
-        this.workspaceDependencyInstallPromise = null;
-        throw error;
-      });
+      this.workspaceDependencyInstallPromise = this.container.npm
+        .installFromPackageJson({
+          onProgress: (message) => {
+            const previewTab = this.previewTerminalTabId
+              ? this.terminalTabs.get(this.previewTerminalTabId)
+              : null;
+            if (previewTab) {
+              this.updateTerminalStatus(previewTab, message);
+            }
+          },
+        })
+        .then(() => undefined)
+        .catch((error) => {
+          this.workspaceDependencyInstallPromise = null;
+          throw error;
+        });
     }
 
     await this.workspaceDependencyInstallPromise;
@@ -2572,9 +3116,15 @@ export class WebIDEHost {
   // ── Test Recorder / Runner ──────────────────────────────────────────────────
 
   private async initTestRecorder(): Promise<void> {
-    const { TestRecorder } = await import('../features/test-recorder');
-    const { onPlaywrightCommand } = await import('../../../../packages/almostnode/src/shims/playwright-command');
-    const { initToasts, showTestDetectedToast, showTestSavedToast, showTestResultToast } = await import('../features/toast');
+    const { TestRecorder } = await import("../features/test-recorder");
+    const { onPlaywrightCommand } =
+      await import("../../../../packages/almostnode/src/shims/playwright-command");
+    const {
+      initToasts,
+      showTestDetectedToast,
+      showTestSavedToast,
+      showTestResultToast,
+    } = await import("../features/toast");
 
     // Mount toast system
     const workbenchEl = this.options.elements.workbench;
@@ -2597,25 +3147,32 @@ export class WebIDEHost {
     });
 
     // Subscribe to playwright commands
-    this.removePlaywrightListener = onPlaywrightCommand((subcommand, args, result, selectorContext) => {
-      recorder.recordCommand(subcommand, args, result, selectorContext);
-    });
+    this.removePlaywrightListener = onPlaywrightCommand(
+      (subcommand, args, result, selectorContext) => {
+        recorder.recordCommand(subcommand, args, result, selectorContext);
+      },
+    );
 
     // Cursor overlay — animated agent cursor on preview
-    const { initCursorOverlay } = await import('../features/cursor-overlay');
+    const { initCursorOverlay } = await import("../features/cursor-overlay");
     this.removeCursorOverlay = initCursorOverlay(
       this.previewSurface.getBody(),
       onPlaywrightCommand,
     );
 
     // Register tests sidebar view (workbench is already initialized)
-    const { registerCustomView } = await import('@codingame/monaco-vscode-workbench-service-override');
+    const { registerCustomView } =
+      await import("@codingame/monaco-vscode-workbench-service-override");
     registerCustomView({
-      id: 'almostnode.sidebar.tests',
-      name: 'Tests',
+      id: "almostnode.sidebar.tests",
+      name: "Tests",
       location: ViewContainerLocation.Sidebar,
       order: 2,
-      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>'),
+      icon:
+        "data:image/svg+xml," +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>',
+        ),
       renderBody: (container) => this.testsSurface.attach(container),
     });
 
@@ -2630,13 +3187,13 @@ export class WebIDEHost {
     // Load saved test metadata
     this.loadTestMetadata();
 
-    const { registerTestCodeLens } = await import('../features/test-codelens');
+    const { registerTestCodeLens } = await import("../features/test-codelens");
     registerTestCodeLens({
       getTests: () => this.testMetadataList,
       onRunTest: (id) => void this.runTest(id),
     });
 
-    console.log('[test-recorder] Initialized');
+    console.log("[test-recorder] Initialized");
   }
 
   private async saveDetectedTest(name: string): Promise<void> {
@@ -2645,15 +3202,16 @@ export class WebIDEHost {
     const steps = this.testRecorder.finalize();
     if (steps.length === 0) return;
 
-    const { generateTestSpec, generateTestId } = await import('../features/test-spec-generator');
-    const { showTestSavedToast } = await import('../features/toast');
+    const { generateTestSpec, generateTestId } =
+      await import("../features/test-spec-generator");
+    const { showTestSavedToast } = await import("../features/toast");
 
     const testId = generateTestId();
     const specContent = generateTestSpec(name, steps);
-    const specPath = `${WORKSPACE_TEST_E2E_ROOT}/${name.replace(/[^a-zA-Z0-9_-]/g, '-')}.spec.ts`;
+    const specPath = `${WORKSPACE_TEST_E2E_ROOT}/${name.replace(/[^a-zA-Z0-9_-]/g, "-")}.spec.ts`;
 
     // Ensure directory exists
-    const dir = specPath.substring(0, specPath.lastIndexOf('/'));
+    const dir = specPath.substring(0, specPath.lastIndexOf("/"));
     if (!this.container.vfs.existsSync(dir)) {
       this.container.vfs.mkdirSync(dir, { recursive: true });
     }
@@ -2662,12 +3220,12 @@ export class WebIDEHost {
     this.container.vfs.writeFileSync(specPath, specContent);
 
     // Store metadata (no steps — pw-web.js reads spec files directly)
-    const metadata: import('../features/test-spec-generator').TestMetadata = {
+    const metadata: import("../features/test-spec-generator").TestMetadata = {
       id: testId,
       name,
       specPath,
       createdAt: new Date().toISOString(),
-      status: 'pending',
+      status: "pending",
     };
     this.testMetadataList.push(metadata);
 
@@ -2676,7 +3234,11 @@ export class WebIDEHost {
 
     // Update sidebar
     this.testsSurface.update(
-      this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+      this.testMetadataList.map((m) => ({
+        id: m.id,
+        name: m.name,
+        status: m.status,
+      })),
     );
 
     showTestSavedToast(name, specPath);
@@ -2692,17 +3254,19 @@ export class WebIDEHost {
 
     // Ensure runner exists
     if (!this.testRunner) {
-      const { TestRunner } = await import('../features/test-runner');
-      const devUrl = this.previewUrl || `/__virtual__/${this.previewPort || 5173}/`;
+      const { TestRunner } = await import("../features/test-runner");
+      const devUrl =
+        this.previewUrl || `/__virtual__/${this.previewPort || 5173}/`;
       this.testRunner = new TestRunner(this.container.vfs, devUrl);
     }
 
     // Create a test runner tab in the terminal panel
-    const runnerEl = document.createElement('div');
-    runnerEl.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;padding:8px;height:100%;overflow:auto;align-content:start;background:#071018;color:#ccc;font-family:monospace;font-size:12px;';
+    const runnerEl = document.createElement("div");
+    runnerEl.style.cssText =
+      "display:flex;flex-wrap:wrap;gap:8px;padding:8px;height:100%;overflow:auto;align-content:start;background:var(--almostnode-editor-bg);color:var(--text);font-family:monospace;font-size:12px;";
 
-    const statusLine = document.createElement('div');
-    statusLine.style.cssText = 'width:100%;padding:4px 8px;';
+    const statusLine = document.createElement("div");
+    statusLine.style.cssText = "width:100%;padding:4px 8px;";
     statusLine.textContent = `Running test: ${metadata.name}...`;
     runnerEl.appendChild(statusLine);
 
@@ -2716,15 +3280,15 @@ export class WebIDEHost {
     this.setActiveTerminalTab(tabId);
 
     // Update status
-    metadata.status = 'running';
-    this.testsSurface.updateTestStatus(testId, 'running');
+    metadata.status = "running";
+    this.testsSurface.updateTestStatus(testId, "running");
 
     this.testRunner.setCallbacks({
       onTestStart: () => {
         statusLine.textContent = `Running: ${metadata.name}`;
       },
       onTestComplete: (id, result) => {
-        const status = result.passed ? 'passed' : 'failed';
+        const status = result.passed ? "passed" : "failed";
         metadata.status = status;
         metadata.lastRunAt = new Date().toISOString();
         if (result.error) metadata.error = result.error;
@@ -2732,22 +3296,23 @@ export class WebIDEHost {
         this.saveTestMetadata();
 
         // Show result in the tab
-        statusLine.textContent = '';
-        const resultEl = document.createElement('div');
-        resultEl.style.cssText = 'width:100%;';
+        statusLine.textContent = "";
+        const resultEl = document.createElement("div");
+        resultEl.style.cssText = "width:100%;";
 
-        const header = document.createElement('div');
-        header.style.cssText = `padding:8px;font-weight:bold;color:${result.passed ? '#4ec9b0' : '#e06c75'};`;
-        header.textContent = `${result.passed ? 'PASSED' : 'FAILED'} - ${metadata.name} (${result.duration}ms)`;
+        const header = document.createElement("div");
+        header.style.cssText = `padding:8px;font-weight:bold;color:${result.passed ? "var(--almostnode-success)" : "var(--almostnode-danger)"};`;
+        header.textContent = `${result.passed ? "PASSED" : "FAILED"} - ${metadata.name} (${result.duration}ms)`;
         resultEl.appendChild(header);
 
         for (const step of result.steps) {
-          const stepEl = document.createElement('div');
-          stepEl.style.cssText = `padding:2px 16px;color:${step.status === 'passed' ? '#98c379' : '#e06c75'};`;
-          stepEl.textContent = `${step.status === 'passed' ? '\u2713' : '\u2717'} ${step.description}`;
+          const stepEl = document.createElement("div");
+          stepEl.style.cssText = `padding:2px 16px;color:${step.status === "passed" ? "var(--almostnode-success)" : "var(--almostnode-danger)"};`;
+          stepEl.textContent = `${step.status === "passed" ? "\u2713" : "\u2717"} ${step.description}`;
           if (step.error) {
-            const errEl = document.createElement('div');
-            errEl.style.cssText = 'padding:2px 32px;color:#e06c75;font-style:italic;';
+            const errEl = document.createElement("div");
+            errEl.style.cssText =
+              "padding:2px 32px;color:var(--almostnode-danger);font-style:italic;";
             errEl.textContent = step.error;
             stepEl.appendChild(errEl);
           }
@@ -2755,8 +3320,9 @@ export class WebIDEHost {
         }
 
         if (result.error) {
-          const errSummary = document.createElement('div');
-          errSummary.style.cssText = 'padding:8px;color:#e06c75;';
+          const errSummary = document.createElement("div");
+          errSummary.style.cssText =
+            "padding:8px;color:var(--almostnode-danger);";
           errSummary.textContent = `Error: ${result.error}`;
           resultEl.appendChild(errSummary);
         }
@@ -2768,8 +3334,12 @@ export class WebIDEHost {
 
     this.testRunner.setHostContainer(runnerEl);
 
-    const { showTestResultToast } = await import('../features/toast');
-    const result = await this.testRunner.runTest(metadata.specPath, metadata.name, testId);
+    const { showTestResultToast } = await import("../features/toast");
+    const result = await this.testRunner.runTest(
+      metadata.specPath,
+      metadata.name,
+      testId,
+    );
     showTestResultToast(metadata.name, result.passed, result.error);
   }
 
@@ -2788,13 +3358,19 @@ export class WebIDEHost {
     // Remove spec file from VFS
     try {
       this.container.vfs.unlinkSync(metadata.specPath);
-    } catch { /* file may already be gone */ }
+    } catch {
+      /* file may already be gone */
+    }
 
     this.testMetadataList.splice(idx, 1);
     this.saveTestMetadata();
 
     this.testsSurface.update(
-      this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+      this.testMetadataList.map((m) => ({
+        id: m.id,
+        name: m.name,
+        status: m.status,
+      })),
     );
   }
 
@@ -2808,12 +3384,16 @@ export class WebIDEHost {
     const metaPath = WORKSPACE_TEST_METADATA_PATH;
     try {
       if (this.container.vfs.existsSync(metaPath)) {
-        const raw = this.container.vfs.readFileSync(metaPath, 'utf8') as string;
+        const raw = this.container.vfs.readFileSync(metaPath, "utf8") as string;
         const data = JSON.parse(raw);
         if (Array.isArray(data.tests)) {
           this.testMetadataList = data.tests;
           this.testsSurface.update(
-            this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+            this.testMetadataList.map((m) => ({
+              id: m.id,
+              name: m.name,
+              status: m.status,
+            })),
           );
         }
       }
@@ -2835,12 +3415,12 @@ export class WebIDEHost {
       let added = false;
 
       for (const entry of entries) {
-        if (!entry.endsWith('.spec.ts')) continue;
+        if (!entry.endsWith(".spec.ts")) continue;
         const specPath = `${testDir}/${entry}`;
         if (knownPaths.has(specPath)) continue;
 
         // Extract test name from filename
-        const name = entry.replace(/\.spec\.ts$/, '');
+        const name = entry.replace(/\.spec\.ts$/, "");
 
         // Generate a unique ID inline (same logic as generateTestId)
         const id = `test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2849,7 +3429,7 @@ export class WebIDEHost {
           name,
           specPath,
           createdAt: new Date().toISOString(),
-          status: 'pending',
+          status: "pending",
         });
         added = true;
       }
@@ -2857,7 +3437,11 @@ export class WebIDEHost {
       if (added) {
         this.saveTestMetadata();
         this.testsSurface.update(
-          this.testMetadataList.map((m) => ({ id: m.id, name: m.name, status: m.status })),
+          this.testMetadataList.map((m) => ({
+            id: m.id,
+            name: m.name,
+            status: m.status,
+          })),
         );
       }
     } catch {
@@ -2872,8 +3456,15 @@ export class WebIDEHost {
       this.container.vfs.mkdirSync(dir, { recursive: true });
     }
 
-    this.container.vfs.writeFileSync(metaPath, JSON.stringify({
-      tests: this.testMetadataList,
-    }, null, 2));
+    this.container.vfs.writeFileSync(
+      metaPath,
+      JSON.stringify(
+        {
+          tests: this.testMetadataList,
+        },
+        null,
+        2,
+      ),
+    );
   }
 }

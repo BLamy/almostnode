@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenSandbox</title>
+    <script>
+      const url = new URL(window.location.href);
+      const segments = url.pathname.split("/").filter(Boolean);
+      const basePath = segments[0] === "almostnode" ? "/almostnode" : "";
+      const routePath = `/${segments.slice(basePath ? 1 : 0).join("/")}`;
+      const params = new URLSearchParams(url.search);
+
+      if (routePath === "/ide") {
+        if (!params.has("template")) {
+          params.set("template", "vite");
+        }
+
+        url.pathname = `${basePath}/`;
+        url.search = params.toString();
+      } else {
+        url.pathname = `${basePath}/`;
+        url.search = "";
+      }
+
+      url.hash = "";
+      window.location.replace(url.toString());
+    </script>
+  </head>
+  <body></body>
+</html>

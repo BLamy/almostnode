@@ -1,5 +1,8 @@
-import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
-import { DisposableStore, type IDisposable } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle';
+import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import {
+  DisposableStore,
+  type IDisposable,
+} from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
 import {
   EditorInputCapabilities,
   SimpleEditorInput,
@@ -7,32 +10,38 @@ import {
   ViewContainerLocation,
   registerCustomView,
   registerEditorPane,
-} from '@codingame/monaco-vscode-workbench-service-override';
-import type { IEditorGroup } from '@codingame/monaco-vscode-api/services';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { strToU8, zipSync } from 'fflate';
-import type { VirtualFS } from 'almostnode';
-import { registerRenderedEditors, type RenderedEditorFactories } from '../features/rendered-editors';
+} from "@codingame/monaco-vscode-workbench-service-override";
+import type { IEditorGroup } from "@codingame/monaco-vscode-api/services";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { strToU8, zipSync } from "fflate";
+import type { VirtualFS } from "almostnode";
+import {
+  registerRenderedEditors,
+  type RenderedEditorFactories,
+} from "../features/rendered-editors";
 
-const PREVIEW_EDITOR_TYPE_ID = 'almostnode.editor.preview';
+const PREVIEW_EDITOR_TYPE_ID = "almostnode.editor.preview";
 const PREVIEW_EDITOR_RESOURCE = URI.from({
-  scheme: 'almostnode-preview',
-  path: '/workspace',
+  scheme: "almostnode-preview",
+  path: "/workspace",
 });
-const DATABASE_EDITOR_TYPE_ID = 'almostnode.editor.database';
+const DATABASE_EDITOR_TYPE_ID = "almostnode.editor.database";
 const DATABASE_EDITOR_RESOURCE = URI.from({
-  scheme: 'almostnode-database',
-  path: '/browser',
+  scheme: "almostnode-database",
+  path: "/browser",
 });
-const FILES_VIEW_ID = 'almostnode.sidebar.files';
-const OPEN_CODE_VIEW_ID = 'almostnode.sidebar.opencode';
-const TERMINAL_VIEW_ID = 'almostnode.panel.terminal';
-const DATABASE_VIEW_ID = 'almostnode.sidebar.database';
+const FILES_VIEW_ID = "almostnode.sidebar.files";
+const OPEN_CODE_VIEW_ID = "almostnode.sidebar.opencode";
+const TERMINAL_VIEW_ID = "almostnode.panel.terminal";
+const DATABASE_VIEW_ID = "almostnode.sidebar.database";
 const NODE_MODULES_REFRESH_DELAY_MS = 48;
 
 function scheduleUiFrame(callback: () => void): { cancel: () => void } {
-  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+  if (
+    typeof window !== "undefined" &&
+    typeof window.requestAnimationFrame === "function"
+  ) {
     const handle = window.requestAnimationFrame(() => callback());
     return {
       cancel: () => window.cancelAnimationFrame(handle),
@@ -48,40 +57,52 @@ function scheduleUiFrame(callback: () => void): { cancel: () => void } {
 function queueTerminalFit(callback: () => void): void {
   scheduleUiFrame(callback);
 
-  if (typeof window !== 'undefined') {
+  if (typeof window !== "undefined") {
     window.setTimeout(callback, 0);
     window.setTimeout(callback, 120);
     window.setTimeout(callback, 400);
   }
 
   // Xterm can calculate stale rows before the web fonts finish loading.
-  if (typeof document !== 'undefined' && 'fonts' in document) {
-    void document.fonts.ready.then(() => {
-      callback();
-    }).catch(() => undefined);
+  if (typeof document !== "undefined" && "fonts" in document) {
+    void document.fonts.ready
+      .then(() => {
+        callback();
+      })
+      .catch(() => undefined);
   }
 }
 
 function normalizeWorkbenchPath(path: string): string {
-  if (!path) return '/';
-  return path.startsWith('/') ? path.replace(/\/+/g, '/') : `/${path}`.replace(/\/+/g, '/');
+  if (!path) return "/";
+  return path.startsWith("/")
+    ? path.replace(/\/+/g, "/")
+    : `/${path}`.replace(/\/+/g, "/");
 }
 
 function getWorkspaceNodeModulesPath(workspaceRoot: string): string {
   const normalizedRoot = normalizeWorkbenchPath(workspaceRoot);
-  return normalizedRoot === '/' ? '/node_modules' : `${normalizedRoot}/node_modules`;
+  return normalizedRoot === "/"
+    ? "/node_modules"
+    : `${normalizedRoot}/node_modules`;
 }
 
 function isWorkspaceChangePath(path: string, workspaceRoot: string): boolean {
   const normalizedPath = normalizeWorkbenchPath(path);
   const normalizedRoot = normalizeWorkbenchPath(workspaceRoot);
-  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+  return (
+    normalizedPath === normalizedRoot ||
+    normalizedPath.startsWith(`${normalizedRoot}/`)
+  );
 }
 
 function isNodeModulesChangePath(path: string, workspaceRoot: string): boolean {
   const normalizedPath = normalizeWorkbenchPath(path);
   const nodeModulesPath = getWorkspaceNodeModulesPath(workspaceRoot);
-  return normalizedPath === nodeModulesPath || normalizedPath.startsWith(`${nodeModulesPath}/`);
+  return (
+    normalizedPath === nodeModulesPath ||
+    normalizedPath.startsWith(`${nodeModulesPath}/`)
+  );
 }
 
 interface PreviewSurfaceCommands {
@@ -102,16 +123,19 @@ export interface RegisteredWorkbenchSurfaces {
 }
 
 export class FilesSidebarSurface {
-  private readonly root = document.createElement('div');
+  private readonly root = document.createElement("div");
   private readonly directoryOpenState = new Map<string, boolean>();
   private selectedPath: string | null = null;
   private contextMenu: HTMLDivElement | null = null;
   private autoExpandTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingRefresh: { cancel: () => void } | null = null;
-  private pendingNodeModulesRefresh: ReturnType<typeof setTimeout> | null = null;
+  private pendingNodeModulesRefresh: ReturnType<typeof setTimeout> | null =
+    null;
   private renderedNodeModulesExists = false;
-  private readonly changeListener = (path: string) => this.handleWorkspaceMutation(path);
-  private readonly deleteListener = (path: string) => this.handleWorkspaceMutation(path);
+  private readonly changeListener = (path: string) =>
+    this.handleWorkspaceMutation(path);
+  private readonly deleteListener = (path: string) =>
+    this.handleWorkspaceMutation(path);
 
   /* Lucide-compatible SVG paths (viewBox 0 0 24 24) */
   private static readonly P = {
@@ -137,50 +161,56 @@ export class FilesSidebarSurface {
     box: '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
   } as const;
 
-  private static readonly EXT: Record<string, [keyof typeof FilesSidebarSurface.P, string]> = {
-    ts: ['fileCode', '#3178C6'],
-    tsx: ['fileCode', '#3178C6'],
-    js: ['fileCode', '#CBCB41'],
-    jsx: ['fileCode', '#CBCB41'],
-    mjs: ['fileCode', '#CBCB41'],
-    cjs: ['fileCode', '#CBCB41'],
-    json: ['fileJson', '#CBCB41'],
-    css: ['hash', '#519ABA'],
-    scss: ['hash', '#F55385'],
-    less: ['hash', '#563D7C'],
-    html: ['globe', '#E44D26'],
-    htm: ['globe', '#E44D26'],
-    svg: ['image', '#F7B93E'],
-    png: ['image', '#A074C4'],
-    jpg: ['image', '#A074C4'],
-    jpeg: ['image', '#A074C4'],
-    gif: ['image', '#A074C4'],
-    ico: ['image', '#A074C4'],
-    md: ['fileText', '#519ABA'],
-    txt: ['fileText', '#8ca0bb'],
-    yaml: ['settings', '#CB171E'],
-    yml: ['settings', '#CB171E'],
-    toml: ['settings', '#6D8086'],
-    env: ['settings', '#ECD53F'],
-    sh: ['fileCode', '#4EAA25'],
-    py: ['fileCode', '#3572A5'],
+  private static readonly EXT: Record<
+    string,
+    [keyof typeof FilesSidebarSurface.P, string]
+  > = {
+    ts: ["fileCode", "#3178C6"],
+    tsx: ["fileCode", "#3178C6"],
+    js: ["fileCode", "#CBCB41"],
+    jsx: ["fileCode", "#CBCB41"],
+    mjs: ["fileCode", "#CBCB41"],
+    cjs: ["fileCode", "#CBCB41"],
+    json: ["fileJson", "#CBCB41"],
+    css: ["hash", "#519ABA"],
+    scss: ["hash", "#F55385"],
+    less: ["hash", "#563D7C"],
+    html: ["globe", "#E44D26"],
+    htm: ["globe", "#E44D26"],
+    svg: ["image", "#F7B93E"],
+    png: ["image", "#A074C4"],
+    jpg: ["image", "#A074C4"],
+    jpeg: ["image", "#A074C4"],
+    gif: ["image", "#A074C4"],
+    ico: ["image", "#A074C4"],
+    md: ["fileText", "#519ABA"],
+    txt: ["fileText", "#8ca0bb"],
+    yaml: ["settings", "#CB171E"],
+    yml: ["settings", "#CB171E"],
+    toml: ["settings", "#6D8086"],
+    env: ["settings", "#ECD53F"],
+    sh: ["fileCode", "#4EAA25"],
+    py: ["fileCode", "#3572A5"],
   };
 
-  private static readonly NAMES: Record<string, [keyof typeof FilesSidebarSurface.P, string]> = {
-    'package.json': ['box', '#E8274B'],
-    'package-lock.json': ['box', '#E8274B'],
-    'tsconfig.json': ['settings', '#3178C6'],
-    'tsconfig.node.json': ['settings', '#3178C6'],
-    '.gitignore': ['settings', '#F05032'],
-    '.eslintrc.json': ['settings', '#4B32C3'],
-    '.prettierrc': ['settings', '#F7B93E'],
-    'vite.config.ts': ['settings', '#646CFF'],
-    'vite.config.js': ['settings', '#646CFF'],
-    'next.config.js': ['settings', '#e6edf7'],
-    'next.config.mjs': ['settings', '#e6edf7'],
-    'tailwind.config.js': ['settings', '#38BDF8'],
-    'tailwind.config.ts': ['settings', '#38BDF8'],
-    'postcss.config.js': ['settings', '#DD3A0A'],
+  private static readonly NAMES: Record<
+    string,
+    [keyof typeof FilesSidebarSurface.P, string]
+  > = {
+    "package.json": ["box", "#E8274B"],
+    "package-lock.json": ["box", "#E8274B"],
+    "tsconfig.json": ["settings", "#3178C6"],
+    "tsconfig.node.json": ["settings", "#3178C6"],
+    ".gitignore": ["settings", "#F05032"],
+    ".eslintrc.json": ["settings", "#4B32C3"],
+    ".prettierrc": ["settings", "#F7B93E"],
+    "vite.config.ts": ["settings", "#646CFF"],
+    "vite.config.js": ["settings", "#646CFF"],
+    "next.config.js": ["settings", "#e6edf7"],
+    "next.config.mjs": ["settings", "#e6edf7"],
+    "tailwind.config.js": ["settings", "#38BDF8"],
+    "tailwind.config.ts": ["settings", "#38BDF8"],
+    "postcss.config.js": ["settings", "#DD3A0A"],
   };
 
   constructor(
@@ -189,57 +219,68 @@ export class FilesSidebarSurface {
     private readonly openFile: (path: string) => void,
     private readonly openFileAsText?: (path: string) => void,
   ) {
-    this.root.id = 'webideFilesTree';
-    this.root.className = 'almostnode-files-tree';
+    this.root.id = "webideFilesTree";
+    this.root.className = "almostnode-files-tree";
     this.directoryOpenState.set(this.workspaceRoot, true);
 
-    this.vfs.on('change', this.changeListener);
-    this.vfs.on('delete', this.deleteListener);
+    this.vfs.on("change", this.changeListener);
+    this.vfs.on("delete", this.deleteListener);
     this.render();
 
     // Right-click on empty space in tree root
-    this.root.addEventListener('contextmenu', (e) => {
+    this.root.addEventListener("contextmenu", (e) => {
       // Only handle clicks on the root itself, not on items within it
       if (e.target === this.root) {
         e.preventDefault();
         this.showContextMenu(e.clientX, e.clientY, [
-          { label: 'New File', action: () => this.startInlineInput(this.workspaceRoot, 'file') },
-          { label: 'New Folder', action: () => this.startInlineInput(this.workspaceRoot, 'folder') },
+          {
+            label: "New File",
+            action: () => this.startInlineInput(this.workspaceRoot, "file"),
+          },
+          {
+            label: "New Folder",
+            action: () => this.startInlineInput(this.workspaceRoot, "folder"),
+          },
         ]);
       }
     });
 
     // Root tree as drop target (move to workspace root)
-    this.root.addEventListener('dragover', (e) => {
+    this.root.addEventListener("dragover", (e) => {
       e.preventDefault();
-      e.dataTransfer!.dropEffect = 'move';
-      this.root.classList.add('is-drag-over');
+      e.dataTransfer!.dropEffect = "move";
+      this.root.classList.add("is-drag-over");
     });
-    this.root.addEventListener('dragleave', (e) => {
-      if (e.relatedTarget && this.root.contains(e.relatedTarget as Node)) return;
-      this.root.classList.remove('is-drag-over');
+    this.root.addEventListener("dragleave", (e) => {
+      if (e.relatedTarget && this.root.contains(e.relatedTarget as Node))
+        return;
+      this.root.classList.remove("is-drag-over");
     });
-    this.root.addEventListener('drop', (e) => {
+    this.root.addEventListener("drop", (e) => {
       e.preventDefault();
-      this.root.classList.remove('is-drag-over');
+      this.root.classList.remove("is-drag-over");
       this.clearAutoExpand();
-      const sourcePath = e.dataTransfer?.getData('text/plain');
-      if (!sourcePath || !this.canMoveTo(sourcePath, this.workspaceRoot)) return;
-      const newPath = this.joinPath(this.workspaceRoot, this.nameOf(sourcePath));
+      const sourcePath = e.dataTransfer?.getData("text/plain");
+      if (!sourcePath || !this.canMoveTo(sourcePath, this.workspaceRoot))
+        return;
+      const newPath = this.joinPath(
+        this.workspaceRoot,
+        this.nameOf(sourcePath),
+      );
       this.vfs.renameSync(sourcePath, newPath);
       if (this.selectedPath === sourcePath) this.selectedPath = newPath;
       this.scheduleRefresh();
     });
 
     // Dismiss context menu on click outside or Escape
-    document.addEventListener('click', () => this.dismissContextMenu());
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.dismissContextMenu();
+    document.addEventListener("click", () => this.dismissContextMenu());
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this.dismissContextMenu();
     });
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add('almostnode-files-tree-host');
+    container.classList.add("almostnode-files-tree-host");
     container.appendChild(this.root);
     return {
       dispose: () => {
@@ -253,11 +294,13 @@ export class FilesSidebarSurface {
   private render(): void {
     try {
       this.root.replaceChildren(this.renderDirectory(this.workspaceRoot, 0));
-      this.renderedNodeModulesExists = this.vfs.existsSync(getWorkspaceNodeModulesPath(this.workspaceRoot));
+      this.renderedNodeModulesExists = this.vfs.existsSync(
+        getWorkspaceNodeModulesPath(this.workspaceRoot),
+      );
     } catch {
-      const empty = document.createElement('div');
-      empty.className = 'almostnode-files-tree__empty';
-      empty.textContent = 'Waiting for the workspace tree...';
+      const empty = document.createElement("div");
+      empty.className = "almostnode-files-tree__empty";
+      empty.textContent = "Waiting for the workspace tree...";
       this.root.replaceChildren(empty);
       this.renderedNodeModulesExists = false;
     }
@@ -293,9 +336,10 @@ export class FilesSidebarSurface {
     const nodeModulesExists = this.vfs.existsSync(nodeModulesPath);
     const isNodeModulesRootChange = normalizedPath === nodeModulesPath;
     const isNodeModulesExpanded = this.isDirectoryOpen(nodeModulesPath, 1);
-    const shouldRefresh = isNodeModulesRootChange
-      || nodeModulesExists !== this.renderedNodeModulesExists
-      || isNodeModulesExpanded;
+    const shouldRefresh =
+      isNodeModulesRootChange ||
+      nodeModulesExists !== this.renderedNodeModulesExists ||
+      isNodeModulesExpanded;
 
     if (!shouldRefresh) {
       return;
@@ -311,33 +355,43 @@ export class FilesSidebarSurface {
     }, NODE_MODULES_REFRESH_DELAY_MS);
   }
 
-  private svg(pathKey: keyof typeof FilesSidebarSurface.P, color: string, sw: number, ...cls: string[]): SVGSVGElement {
-    const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    el.setAttribute('viewBox', '0 0 24 24');
-    el.setAttribute('width', '16');
-    el.setAttribute('height', '16');
-    el.setAttribute('fill', 'none');
-    el.setAttribute('stroke', color);
-    el.setAttribute('stroke-width', String(sw));
-    el.setAttribute('stroke-linecap', 'round');
-    el.setAttribute('stroke-linejoin', 'round');
+  private svg(
+    pathKey: keyof typeof FilesSidebarSurface.P,
+    color: string,
+    sw: number,
+    ...cls: string[]
+  ): SVGSVGElement {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    el.setAttribute("viewBox", "0 0 24 24");
+    el.setAttribute("width", "16");
+    el.setAttribute("height", "16");
+    el.setAttribute("fill", "none");
+    el.setAttribute("stroke", color);
+    el.setAttribute("stroke-width", String(sw));
+    el.setAttribute("stroke-linecap", "round");
+    el.setAttribute("stroke-linejoin", "round");
     for (const c of cls) el.classList.add(c);
     el.innerHTML = FilesSidebarSurface.P[pathKey];
     return el;
   }
 
-  private folderSvg(pathKey: 'folder' | 'folderOpen', ...cls: string[]): SVGSVGElement {
-    const color = '#C09553';
+  private folderSvg(
+    pathKey: "folder" | "folderOpen",
+    ...cls: string[]
+  ): SVGSVGElement {
+    const color = "#C09553";
     const el = this.svg(pathKey, color, 1.5, ...cls);
-    el.setAttribute('fill', color);
-    el.setAttribute('fill-opacity', '0.2');
+    el.setAttribute("fill", color);
+    el.setAttribute("fill-opacity", "0.2");
     return el;
   }
 
   private fileIcon(name: string): SVGSVGElement {
-    const match = FilesSidebarSurface.NAMES[name] ?? FilesSidebarSurface.EXT[name.split('.').pop()?.toLowerCase() ?? ''];
-    const [key, color] = match ?? (['file', '#8ca0bb'] as const);
-    return this.svg(key, color, 1.5, 'almostnode-files-tree__icon');
+    const match =
+      FilesSidebarSurface.NAMES[name] ??
+      FilesSidebarSurface.EXT[name.split(".").pop()?.toLowerCase() ?? ""];
+    const [key, color] = match ?? (["file", "#8ca0bb"] as const);
+    return this.svg(key, color, 1.5, "almostnode-files-tree__icon");
   }
 
   private getDefaultDirectoryOpen(path: string, depth: number): boolean {
@@ -353,10 +407,17 @@ export class FilesSidebarSurface {
   }
 
   private isDirectoryOpen(path: string, depth: number): boolean {
-    return this.directoryOpenState.get(path) ?? this.getDefaultDirectoryOpen(path, depth);
+    return (
+      this.directoryOpenState.get(path) ??
+      this.getDefaultDirectoryOpen(path, depth)
+    );
   }
 
-  private populateDirectoryChildren(children: HTMLElement, path: string, depth: number): void {
+  private populateDirectoryChildren(
+    children: HTMLElement,
+    path: string,
+    depth: number,
+  ): void {
     children.replaceChildren();
 
     const entries = this.vfs.readdirSync(path).sort((left, right) => {
@@ -373,7 +434,7 @@ export class FilesSidebarSurface {
     });
 
     for (const entry of entries) {
-      if (entry === '.git') continue;
+      if (entry === ".git") continue;
       const fullPath = this.joinPath(path, entry);
       const stats = this.vfs.statSync(fullPath);
       if (stats.isDirectory()) {
@@ -381,50 +442,70 @@ export class FilesSidebarSurface {
         continue;
       }
 
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'almostnode-files-tree__file';
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "almostnode-files-tree__file";
       button.dataset.path = fullPath;
-      if (fullPath === this.selectedPath) button.classList.add('is-selected');
+      if (fullPath === this.selectedPath) button.classList.add("is-selected");
 
       const icon = this.fileIcon(entry);
-      const fileLabel = document.createElement('span');
-      fileLabel.className = 'almostnode-files-tree__label';
+      const fileLabel = document.createElement("span");
+      fileLabel.className = "almostnode-files-tree__label";
       fileLabel.textContent = entry;
 
       button.append(icon, fileLabel);
-      button.setAttribute('draggable', 'true');
-      button.addEventListener('dragstart', (e) => {
-        e.dataTransfer!.setData('text/plain', fullPath);
-        e.dataTransfer!.effectAllowed = 'move';
-        button.classList.add('is-dragging');
+      button.setAttribute("draggable", "true");
+      button.addEventListener("dragstart", (e) => {
+        e.dataTransfer!.setData("text/plain", fullPath);
+        e.dataTransfer!.effectAllowed = "move";
+        button.classList.add("is-dragging");
       });
-      button.addEventListener('dragend', () => {
-        button.classList.remove('is-dragging');
+      button.addEventListener("dragend", () => {
+        button.classList.remove("is-dragging");
       });
-      button.addEventListener('click', () => {
+      button.addEventListener("click", () => {
         this.selectedPath = fullPath;
-        this.root.querySelectorAll('.is-selected').forEach((el) => el.classList.remove('is-selected'));
-        button.classList.add('is-selected');
+        this.root
+          .querySelectorAll(".is-selected")
+          .forEach((el) => el.classList.remove("is-selected"));
+        button.classList.add("is-selected");
         this.openFile(fullPath);
       });
 
-      button.addEventListener('contextmenu', (e) => {
+      button.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const menuItems: Array<{ label: string; action: () => void } | 'separator'> = [];
+        const menuItems: Array<
+          { label: string; action: () => void } | "separator"
+        > = [];
         const lowerEntry = entry.toLowerCase();
-        if (this.openFileAsText && (lowerEntry.endsWith('.md') || lowerEntry.endsWith('.json'))) {
-          menuItems.push({ label: 'Open as Text', action: () => this.openFileAsText!(fullPath) });
-          menuItems.push('separator');
+        if (
+          this.openFileAsText &&
+          (lowerEntry.endsWith(".md") || lowerEntry.endsWith(".json"))
+        ) {
+          menuItems.push({
+            label: "Open as Text",
+            action: () => this.openFileAsText!(fullPath),
+          });
+          menuItems.push("separator");
         }
         menuItems.push(
-          { label: 'Rename', action: () => this.startInlineInput(path, 'file', fullPath) },
-          { label: 'Delete', action: () => {
-            try { this.vfs.unlinkSync(fullPath); } catch { /* ignore */ }
-          }},
-          'separator',
-          { label: 'Download', action: () => this.downloadFile(fullPath) },
+          {
+            label: "Rename",
+            action: () => this.startInlineInput(path, "file", fullPath),
+          },
+          {
+            label: "Delete",
+            action: () => {
+              try {
+                this.vfs.unlinkSync(fullPath);
+              } catch {
+                /* ignore */
+              }
+            },
+          },
+          "separator",
+          { label: "Download", action: () => this.downloadFile(fullPath) },
         );
         this.showContextMenu(e.clientX, e.clientY, menuItems);
       });
@@ -434,44 +515,58 @@ export class FilesSidebarSurface {
   }
 
   private renderDirectory(path: string, depth: number): HTMLElement {
-    const details = document.createElement('details');
-    details.className = 'almostnode-files-tree__directory';
+    const details = document.createElement("details");
+    details.className = "almostnode-files-tree__directory";
     details.dataset.path = path;
     details.open = this.isDirectoryOpen(path, depth);
 
-    const summary = document.createElement('summary');
-    summary.className = 'almostnode-files-tree__summary';
+    const summary = document.createElement("summary");
+    summary.className = "almostnode-files-tree__summary";
 
-    const chevron = this.svg('chevron', '#8ca0bb', 2, 'almostnode-files-tree__chevron');
-    const closed = this.folderSvg('folder', 'almostnode-files-tree__icon', 'almostnode-files-tree__icon--closed');
-    const open = this.folderSvg('folderOpen', 'almostnode-files-tree__icon', 'almostnode-files-tree__icon--open');
+    const chevron = this.svg(
+      "chevron",
+      "#8ca0bb",
+      2,
+      "almostnode-files-tree__chevron",
+    );
+    const closed = this.folderSvg(
+      "folder",
+      "almostnode-files-tree__icon",
+      "almostnode-files-tree__icon--closed",
+    );
+    const open = this.folderSvg(
+      "folderOpen",
+      "almostnode-files-tree__icon",
+      "almostnode-files-tree__icon--open",
+    );
 
-    const label = document.createElement('span');
-    label.className = 'almostnode-files-tree__label';
-    label.textContent = path === this.workspaceRoot ? 'project' : this.nameOf(path);
+    const label = document.createElement("span");
+    label.className = "almostnode-files-tree__label";
+    label.textContent =
+      path === this.workspaceRoot ? "project" : this.nameOf(path);
 
     summary.append(chevron, closed, open, label);
     details.appendChild(summary);
 
     // Drag source (skip workspace root)
     if (path !== this.workspaceRoot) {
-      summary.setAttribute('draggable', 'true');
-      summary.addEventListener('dragstart', (e) => {
-        e.dataTransfer!.setData('text/plain', path);
-        e.dataTransfer!.effectAllowed = 'move';
-        details.classList.add('is-dragging');
+      summary.setAttribute("draggable", "true");
+      summary.addEventListener("dragstart", (e) => {
+        e.dataTransfer!.setData("text/plain", path);
+        e.dataTransfer!.effectAllowed = "move";
+        details.classList.add("is-dragging");
       });
-      summary.addEventListener('dragend', () => {
-        details.classList.remove('is-dragging');
+      summary.addEventListener("dragend", () => {
+        details.classList.remove("is-dragging");
       });
     }
 
     // Drop target on folder summary
-    summary.addEventListener('dragover', (e) => {
+    summary.addEventListener("dragover", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      e.dataTransfer!.dropEffect = 'move';
-      summary.classList.add('is-drag-over');
+      e.dataTransfer!.dropEffect = "move";
+      summary.classList.add("is-drag-over");
       // Auto-expand closed folder after 600ms
       if (!details.open && !this.autoExpandTimer) {
         this.autoExpandTimer = setTimeout(() => {
@@ -480,17 +575,17 @@ export class FilesSidebarSurface {
         }, 600);
       }
     });
-    summary.addEventListener('dragleave', (e) => {
+    summary.addEventListener("dragleave", (e) => {
       if (e.relatedTarget && summary.contains(e.relatedTarget as Node)) return;
-      summary.classList.remove('is-drag-over');
+      summary.classList.remove("is-drag-over");
       this.clearAutoExpand();
     });
-    summary.addEventListener('drop', (e) => {
+    summary.addEventListener("drop", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      summary.classList.remove('is-drag-over');
+      summary.classList.remove("is-drag-over");
       this.clearAutoExpand();
-      const sourcePath = e.dataTransfer?.getData('text/plain');
+      const sourcePath = e.dataTransfer?.getData("text/plain");
       if (!sourcePath || !this.canMoveTo(sourcePath, path)) return;
       const newPath = this.joinPath(path, this.nameOf(sourcePath));
       this.vfs.renameSync(sourcePath, newPath);
@@ -499,40 +594,63 @@ export class FilesSidebarSurface {
     });
 
     // Context menu on folder summary
-    summary.addEventListener('contextmenu', (e) => {
+    summary.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const menuItems: Array<{ label: string; action: () => void } | 'separator'> = [
-        { label: 'New File', action: () => this.startInlineInput(path, 'file') },
-        { label: 'New Folder', action: () => this.startInlineInput(path, 'folder') },
+      const menuItems: Array<
+        { label: string; action: () => void } | "separator"
+      > = [
+        {
+          label: "New File",
+          action: () => this.startInlineInput(path, "file"),
+        },
+        {
+          label: "New Folder",
+          action: () => this.startInlineInput(path, "folder"),
+        },
       ];
       // Don't allow rename/delete on workspace root
       if (path !== this.workspaceRoot) {
         menuItems.push(
-          'separator',
-          { label: 'Rename', action: () => this.startInlineInput(path, 'folder', path) },
-          { label: 'Delete', action: () => {
-            if (confirm(`Delete folder "${this.nameOf(path)}" and all its contents?`)) {
-              try { this.deleteRecursive(path); } catch { /* ignore */ }
-            }
-          }},
+          "separator",
+          {
+            label: "Rename",
+            action: () => this.startInlineInput(path, "folder", path),
+          },
+          {
+            label: "Delete",
+            action: () => {
+              if (
+                confirm(
+                  `Delete folder "${this.nameOf(path)}" and all its contents?`,
+                )
+              ) {
+                try {
+                  this.deleteRecursive(path);
+                } catch {
+                  /* ignore */
+                }
+              }
+            },
+          },
         );
       }
-      menuItems.push(
-        'separator',
-        { label: 'Download as ZIP', action: () => this.downloadFolder(path) },
-      );
+      menuItems.push("separator", {
+        label: "Download as ZIP",
+        action: () => this.downloadFolder(path),
+      });
       this.showContextMenu(e.clientX, e.clientY, menuItems);
     });
 
-    const children = document.createElement('div');
-    children.className = 'almostnode-files-tree__children';
-    const isLazyDirectory = path === getWorkspaceNodeModulesPath(this.workspaceRoot);
+    const children = document.createElement("div");
+    children.className = "almostnode-files-tree__children";
+    const isLazyDirectory =
+      path === getWorkspaceNodeModulesPath(this.workspaceRoot);
     if (!isLazyDirectory || details.open) {
       this.populateDirectoryChildren(children, path, depth);
     }
 
-    details.addEventListener('toggle', () => {
+    details.addEventListener("toggle", () => {
       this.directoryOpenState.set(path, details.open);
       if (details.open && isLazyDirectory && children.childElementCount === 0) {
         this.populateDirectoryChildren(children, path, depth);
@@ -543,26 +661,30 @@ export class FilesSidebarSurface {
     return details;
   }
 
-  private showContextMenu(x: number, y: number, items: Array<{ label: string; action: () => void } | 'separator'>): void {
+  private showContextMenu(
+    x: number,
+    y: number,
+    items: Array<{ label: string; action: () => void } | "separator">,
+  ): void {
     this.dismissContextMenu();
 
-    const menu = document.createElement('div');
-    menu.className = 'almostnode-files-tree__context-menu';
+    const menu = document.createElement("div");
+    menu.className = "almostnode-files-tree__context-menu";
     menu.style.left = `${x}px`;
     menu.style.top = `${y}px`;
 
     for (const item of items) {
-      if (item === 'separator') {
-        const sep = document.createElement('div');
-        sep.className = 'almostnode-files-tree__context-separator';
+      if (item === "separator") {
+        const sep = document.createElement("div");
+        sep.className = "almostnode-files-tree__context-separator";
         menu.appendChild(sep);
         continue;
       }
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'almostnode-files-tree__context-item';
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "almostnode-files-tree__context-item";
       btn.textContent = item.label;
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.dismissContextMenu();
         item.action();
@@ -575,8 +697,10 @@ export class FilesSidebarSurface {
 
     // Adjust if menu goes off-screen
     const rect = menu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 4}px`;
-    if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 4}px`;
+    if (rect.right > window.innerWidth)
+      menu.style.left = `${window.innerWidth - rect.width - 4}px`;
+    if (rect.bottom > window.innerHeight)
+      menu.style.top = `${window.innerHeight - rect.height - 4}px`;
   }
 
   private dismissContextMenu(): void {
@@ -586,24 +710,36 @@ export class FilesSidebarSurface {
     }
   }
 
-  private startInlineInput(parentDir: string, type: 'file' | 'folder', renamePath?: string): void {
+  private startInlineInput(
+    parentDir: string,
+    type: "file" | "folder",
+    renamePath?: string,
+  ): void {
     // Find the children container for the parent directory
-    const detailsEls = Array.from(this.root.querySelectorAll('.almostnode-files-tree__directory')) as HTMLDetailsElement[];
+    const detailsEls = Array.from(
+      this.root.querySelectorAll(".almostnode-files-tree__directory"),
+    ) as HTMLDetailsElement[];
     let targetChildren: HTMLElement | null = null;
 
     if (parentDir === this.workspaceRoot) {
       // Root-level: the root itself is the top-level <details>
-      const topDetails = this.root.querySelector('.almostnode-files-tree__directory') as HTMLDetailsElement | null;
+      const topDetails = this.root.querySelector(
+        ".almostnode-files-tree__directory",
+      ) as HTMLDetailsElement | null;
       if (topDetails) {
         topDetails.open = true;
-        targetChildren = topDetails.querySelector(':scope > .almostnode-files-tree__children') as HTMLElement | null;
+        targetChildren = topDetails.querySelector(
+          ":scope > .almostnode-files-tree__children",
+        ) as HTMLElement | null;
       }
     } else {
       for (let i = 0; i < detailsEls.length; i++) {
         const d = detailsEls[i];
         if (d.dataset.path === parentDir) {
           d.open = true;
-          targetChildren = d.querySelector(':scope > .almostnode-files-tree__children') as HTMLElement | null;
+          targetChildren = d.querySelector(
+            ":scope > .almostnode-files-tree__children",
+          ) as HTMLElement | null;
           break;
         }
       }
@@ -618,18 +754,19 @@ export class FilesSidebarSurface {
     if (!targetChildren) return;
 
     // Create inline input row
-    const row = document.createElement('div');
-    row.className = 'almostnode-files-tree__file';
-    row.style.paddingLeft = type === 'folder' ? '0.45rem' : '';
+    const row = document.createElement("div");
+    row.className = "almostnode-files-tree__file";
+    row.style.paddingLeft = type === "folder" ? "0.45rem" : "";
 
-    const icon = type === 'folder'
-      ? this.folderSvg('folder', 'almostnode-files-tree__icon')
-      : this.svg('file', '#8ca0bb', 1.5, 'almostnode-files-tree__icon');
+    const icon =
+      type === "folder"
+        ? this.folderSvg("folder", "almostnode-files-tree__icon")
+        : this.svg("file", "#8ca0bb", 1.5, "almostnode-files-tree__icon");
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'almostnode-files-tree__inline-input';
-    input.placeholder = type === 'file' ? 'filename' : 'folder name';
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "almostnode-files-tree__inline-input";
+    input.placeholder = type === "file" ? "filename" : "folder name";
 
     row.append(icon, input);
     targetChildren.insertBefore(row, targetChildren.firstChild);
@@ -642,10 +779,10 @@ export class FilesSidebarSurface {
       if (!name) return;
       const fullPath = this.joinPath(parentDir, name);
       try {
-        if (type === 'folder') {
+        if (type === "folder") {
           this.vfs.mkdirSync(fullPath);
         } else {
-          this.vfs.writeFileSync(fullPath, '');
+          this.vfs.writeFileSync(fullPath, "");
           this.openFile(fullPath);
         }
       } catch {
@@ -654,39 +791,52 @@ export class FilesSidebarSurface {
     };
 
     let committed = false;
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
         e.preventDefault();
         committed = true;
         commit();
-      } else if (e.key === 'Escape') {
+      } else if (e.key === "Escape") {
         committed = true;
         row.remove();
       }
     });
-    input.addEventListener('blur', () => {
+    input.addEventListener("blur", () => {
       if (!committed) commit();
     });
   }
 
   private startRenameInput(filePath: string): void {
-    const isDir = (() => { try { return this.vfs.statSync(filePath).isDirectory(); } catch { return false; } })();
+    const isDir = (() => {
+      try {
+        return this.vfs.statSync(filePath).isDirectory();
+      } catch {
+        return false;
+      }
+    })();
     const name = this.nameOf(filePath);
-    const parentDir = filePath.substring(0, filePath.length - name.length - 1) || '/';
+    const parentDir =
+      filePath.substring(0, filePath.length - name.length - 1) || "/";
 
     // Find the element in the tree by data-path
     let targetEl: HTMLElement | null = null;
 
     if (isDir) {
-      const allDetails = Array.from(this.root.querySelectorAll('.almostnode-files-tree__directory')) as HTMLElement[];
+      const allDetails = Array.from(
+        this.root.querySelectorAll(".almostnode-files-tree__directory"),
+      ) as HTMLElement[];
       for (let i = 0; i < allDetails.length; i++) {
         if (allDetails[i].dataset.path === filePath) {
-          targetEl = allDetails[i].querySelector(':scope > .almostnode-files-tree__summary') as HTMLElement | null;
+          targetEl = allDetails[i].querySelector(
+            ":scope > .almostnode-files-tree__summary",
+          ) as HTMLElement | null;
           break;
         }
       }
     } else {
-      const allFiles = Array.from(this.root.querySelectorAll('.almostnode-files-tree__file')) as HTMLElement[];
+      const allFiles = Array.from(
+        this.root.querySelectorAll(".almostnode-files-tree__file"),
+      ) as HTMLElement[];
       for (let i = 0; i < allFiles.length; i++) {
         if (allFiles[i].dataset.path === filePath) {
           targetEl = allFiles[i];
@@ -697,19 +847,21 @@ export class FilesSidebarSurface {
 
     if (!targetEl) return;
 
-    const labelEl = targetEl.querySelector('.almostnode-files-tree__label') as HTMLElement | null;
+    const labelEl = targetEl.querySelector(
+      ".almostnode-files-tree__label",
+    ) as HTMLElement | null;
     if (!labelEl) return;
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'almostnode-files-tree__inline-input';
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "almostnode-files-tree__inline-input";
     input.value = name;
 
     labelEl.replaceWith(input);
     input.focus();
     // Select the name part before the extension for files
     if (!isDir) {
-      const dotIndex = name.lastIndexOf('.');
+      const dotIndex = name.lastIndexOf(".");
       input.setSelectionRange(0, dotIndex > 0 ? dotIndex : name.length);
     } else {
       input.select();
@@ -733,17 +885,17 @@ export class FilesSidebarSurface {
     };
 
     let committed = false;
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
         e.preventDefault();
         committed = true;
         commit();
-      } else if (e.key === 'Escape') {
+      } else if (e.key === "Escape") {
         committed = true;
         this.scheduleRefresh();
       }
     });
-    input.addEventListener('blur', () => {
+    input.addEventListener("blur", () => {
       if (!committed) commit();
     });
   }
@@ -764,22 +916,26 @@ export class FilesSidebarSurface {
   private downloadFile(filePath: string): void {
     try {
       const data = this.vfs.readFileSync(filePath);
-      const blob = new Blob([typeof data === 'string' ? data : data], { type: 'application/octet-stream' });
+      const blob = new Blob([typeof data === "string" ? data : data], {
+        type: "application/octet-stream",
+      });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
       a.download = this.nameOf(filePath);
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   private downloadFolder(folderPath: string): void {
     try {
       const files: Record<string, Uint8Array> = {};
-      const prefix = folderPath.endsWith('/') ? folderPath : folderPath + '/';
+      const prefix = folderPath.endsWith("/") ? folderPath : folderPath + "/";
       const collect = (dir: string): void => {
         const entries = this.vfs.readdirSync(dir);
         for (const entry of entries) {
@@ -788,36 +944,49 @@ export class FilesSidebarSurface {
           if (stat.isDirectory()) {
             collect(full);
           } else {
-            const relative = full.startsWith(prefix) ? full.slice(prefix.length) : full;
+            const relative = full.startsWith(prefix)
+              ? full.slice(prefix.length)
+              : full;
             const data = this.vfs.readFileSync(full);
-            files[relative] = typeof data === 'string' ? strToU8(data) : new Uint8Array(data as ArrayBuffer);
+            files[relative] =
+              typeof data === "string"
+                ? strToU8(data)
+                : new Uint8Array(data as ArrayBuffer);
           }
         }
       };
       collect(folderPath);
       const zipped = zipSync(files);
-      const blob = new Blob([zipped], { type: 'application/zip' });
+      const blob = new Blob([zipped], { type: "application/zip" });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
-      a.download = this.nameOf(folderPath) + '.zip';
+      a.download = this.nameOf(folderPath) + ".zip";
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   private canMoveTo(sourcePath: string, targetDir: string): boolean {
     const basename = this.nameOf(sourcePath);
-    const currentParent = sourcePath.substring(0, sourcePath.length - basename.length - 1) || '/';
+    const currentParent =
+      sourcePath.substring(0, sourcePath.length - basename.length - 1) || "/";
     // Same parent — no-op
     if (currentParent === targetDir) return false;
     // Can't move folder into itself or descendant
-    if (targetDir.startsWith(sourcePath + '/') || targetDir === sourcePath) return false;
+    if (targetDir.startsWith(sourcePath + "/") || targetDir === sourcePath)
+      return false;
     // Name conflict
     const newPath = this.joinPath(targetDir, basename);
-    try { if (this.vfs.statSync(newPath)) return false; } catch { /* doesn't exist — good */ }
+    try {
+      if (this.vfs.statSync(newPath)) return false;
+    } catch {
+      /* doesn't exist — good */
+    }
     return true;
   }
 
@@ -829,83 +998,88 @@ export class FilesSidebarSurface {
   }
 
   private joinPath(parent: string, child: string): string {
-    return parent === '/' ? `/${child}` : `${parent}/${child}`;
+    return parent === "/" ? `/${child}` : `${parent}/${child}`;
   }
 
   private nameOf(path: string): string {
-    return path.split('/').filter(Boolean).pop() || path;
+    return path.split("/").filter(Boolean).pop() || path;
   }
 }
 
 export class PreviewSurface {
-  private readonly root = document.createElement('div');
-  private readonly toolbar = document.createElement('div');
-  private readonly status = document.createElement('div');
-  private readonly actions = document.createElement('div');
-  private readonly runButton = document.createElement('button');
-  private readonly refreshButton = document.createElement('button');
-  private readonly devtoolsButton = document.createElement('button');
-  private readonly body = document.createElement('div');
-  private readonly emptyState = document.createElement('div');
-  private readonly iframe = document.createElement('iframe');
+  private readonly root = document.createElement("div");
+  private readonly toolbar = document.createElement("div");
+  private readonly status = document.createElement("div");
+  private readonly actions = document.createElement("div");
+  private readonly runButton = document.createElement("button");
+  private readonly refreshButton = document.createElement("button");
+  private readonly devtoolsButton = document.createElement("button");
+  private readonly body = document.createElement("div");
+  private readonly emptyState = document.createElement("div");
+  private readonly iframe = document.createElement("iframe");
   private currentUrl: string | null = null;
   private activeDbName: string | null = null;
   private erudaVisible = false;
 
   constructor(commands: PreviewSurfaceCommands) {
-    this.root.className = 'almostnode-preview-surface';
+    this.root.className = "almostnode-preview-surface";
     this.root.tabIndex = -1;
 
-    this.toolbar.className = 'almostnode-preview-surface__toolbar';
+    this.toolbar.className = "almostnode-preview-surface__toolbar";
 
-    this.status.className = 'almostnode-preview-surface__status';
-    this.status.id = 'webidePreviewStatus';
-    this.status.textContent = 'Waiting for a preview server';
+    this.status.className = "almostnode-preview-surface__status";
+    this.status.id = "webidePreviewStatus";
+    this.status.textContent = "Waiting for a preview server";
 
-    this.actions.className = 'almostnode-preview-surface__actions';
+    this.actions.className = "almostnode-preview-surface__actions";
 
-    this.runButton.type = 'button';
-    this.runButton.className = 'almostnode-preview-surface__button';
-    this.runButton.textContent = 'Run';
-    this.runButton.addEventListener('click', () => {
+    this.runButton.type = "button";
+    this.runButton.className = "almostnode-preview-surface__button";
+    this.runButton.textContent = "Run";
+    this.runButton.addEventListener("click", () => {
       commands.run();
     });
 
-    this.refreshButton.type = 'button';
-    this.refreshButton.className = 'almostnode-preview-surface__button';
-    this.refreshButton.textContent = 'Refresh';
-    this.refreshButton.addEventListener('click', () => {
+    this.refreshButton.type = "button";
+    this.refreshButton.className = "almostnode-preview-surface__button";
+    this.refreshButton.textContent = "Refresh";
+    this.refreshButton.addEventListener("click", () => {
       commands.refresh();
     });
 
-    this.devtoolsButton.type = 'button';
-    this.devtoolsButton.className = 'almostnode-preview-surface__button';
-    this.devtoolsButton.textContent = 'DevTools';
-    this.devtoolsButton.addEventListener('click', () => {
+    this.devtoolsButton.type = "button";
+    this.devtoolsButton.className = "almostnode-preview-surface__button";
+    this.devtoolsButton.textContent = "DevTools";
+    this.devtoolsButton.addEventListener("click", () => {
       this.toggleDevtools();
     });
 
-    this.actions.append(this.runButton, this.refreshButton, this.devtoolsButton);
+    this.actions.append(
+      this.runButton,
+      this.refreshButton,
+      this.devtoolsButton,
+    );
     this.toolbar.append(this.status, this.actions);
 
-    this.body.className = 'almostnode-preview-surface__body';
+    this.body.className = "almostnode-preview-surface__body";
 
-    this.emptyState.className = 'almostnode-preview-surface__empty';
-    this.emptyState.textContent = 'Run the workspace to start a preview server.';
-    this.emptyState.style.display = 'grid';
+    this.emptyState.className = "almostnode-preview-surface__empty";
+    this.emptyState.textContent =
+      "Run the workspace to start a preview server.";
+    this.emptyState.style.display = "grid";
 
-    this.iframe.id = 'webidePreview';
-    this.iframe.className = 'almostnode-preview-surface__frame';
-    this.iframe.title = 'Preview';
+    this.iframe.id = "webidePreview";
+    this.iframe.className = "almostnode-preview-surface__frame";
+    this.iframe.title = "Preview";
     this.iframe.hidden = true;
-    this.iframe.style.display = 'none';
+    this.iframe.style.display = "none";
 
     this.body.append(this.emptyState, this.iframe);
     this.root.append(this.toolbar, this.body);
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add('almostnode-preview-editor-host');
+    container.classList.add("almostnode-preview-editor-host");
     container.appendChild(this.root);
     return {
       dispose: () => {
@@ -925,19 +1099,23 @@ export class PreviewSurface {
 
   setUrl(url: string): void {
     this.currentUrl = url;
-    const displayUrl = this.activeDbName ? `${url}?db=${this.activeDbName}` : url;
+    const displayUrl = this.activeDbName
+      ? `${url}?db=${this.activeDbName}`
+      : url;
     this.status.textContent = displayUrl;
     this.emptyState.hidden = true;
-    this.emptyState.style.display = 'none';
+    this.emptyState.style.display = "none";
     this.iframe.hidden = false;
-    this.iframe.style.display = 'block';
+    this.iframe.style.display = "block";
     this.iframe.src = displayUrl;
   }
 
   setActiveDb(name: string | null): void {
     this.activeDbName = name;
     if (this.currentUrl) {
-      const displayUrl = name ? `${this.currentUrl}?db=${name}` : this.currentUrl;
+      const displayUrl = name
+        ? `${this.currentUrl}?db=${name}`
+        : this.currentUrl;
       this.status.textContent = displayUrl;
       this.iframe.src = displayUrl;
     }
@@ -948,10 +1126,10 @@ export class PreviewSurface {
     this.status.textContent = text;
     this.emptyState.textContent = text;
     this.emptyState.hidden = false;
-    this.emptyState.style.display = 'grid';
+    this.emptyState.style.display = "grid";
     this.iframe.hidden = true;
-    this.iframe.style.display = 'none';
-    this.iframe.removeAttribute('src');
+    this.iframe.style.display = "none";
+    this.iframe.removeAttribute("src");
   }
 
   reload(): void {
@@ -959,7 +1137,9 @@ export class PreviewSurface {
       return;
     }
 
-    const url = this.activeDbName ? `${this.currentUrl}?db=${this.activeDbName}` : this.currentUrl;
+    const url = this.activeDbName
+      ? `${this.currentUrl}?db=${this.activeDbName}`
+      : this.currentUrl;
     this.iframe.src = url;
   }
 
@@ -975,11 +1155,14 @@ export class PreviewSurface {
   toggleDevtools(): void {
     if (!this.iframe.contentWindow) return;
     this.erudaVisible = !this.erudaVisible;
-    this.devtoolsButton.classList.toggle('is-active', this.erudaVisible);
-    this.iframe.contentWindow.postMessage({
-      type: 'almostnode-devtools',
-      action: this.erudaVisible ? 'show' : 'hide',
-    }, '*');
+    this.devtoolsButton.classList.toggle("is-active", this.erudaVisible);
+    this.iframe.contentWindow.postMessage(
+      {
+        type: "almostnode-devtools",
+        action: this.erudaVisible ? "show" : "hide",
+      },
+      "*",
+    );
   }
 
   getIframe(): HTMLIFrameElement {
@@ -992,26 +1175,26 @@ export class PreviewSurface {
 }
 
 export class ConsolePanelElement {
-  readonly root = document.createElement('div');
-  private readonly toolbar = document.createElement('div');
-  private readonly clearButton = document.createElement('button');
-  private readonly entries = document.createElement('div');
+  readonly root = document.createElement("div");
+  private readonly toolbar = document.createElement("div");
+  private readonly clearButton = document.createElement("button");
+  private readonly entries = document.createElement("div");
   private entryCount = 0;
   private static readonly MAX_ENTRIES = 1000;
 
   constructor() {
-    this.root.className = 'almostnode-console-panel';
+    this.root.className = "almostnode-console-panel";
 
-    this.toolbar.className = 'almostnode-console-panel__toolbar';
+    this.toolbar.className = "almostnode-console-panel__toolbar";
 
-    this.clearButton.type = 'button';
-    this.clearButton.className = 'almostnode-console-panel__clear';
-    this.clearButton.textContent = 'Clear';
-    this.clearButton.addEventListener('click', () => this.clear());
+    this.clearButton.type = "button";
+    this.clearButton.className = "almostnode-console-panel__clear";
+    this.clearButton.textContent = "Clear";
+    this.clearButton.addEventListener("click", () => this.clear());
 
     this.toolbar.appendChild(this.clearButton);
 
-    this.entries.className = 'almostnode-console-panel__entries';
+    this.entries.className = "almostnode-console-panel__entries";
 
     this.root.append(this.toolbar, this.entries);
   }
@@ -1025,21 +1208,21 @@ export class ConsolePanelElement {
       this.entryCount--;
     }
 
-    const row = document.createElement('div');
+    const row = document.createElement("div");
     row.className = `almostnode-console-entry almostnode-console-entry--${level}`;
 
-    const badge = document.createElement('span');
-    badge.className = 'almostnode-console-entry__level';
+    const badge = document.createElement("span");
+    badge.className = "almostnode-console-entry__level";
     badge.textContent = level;
 
-    const time = document.createElement('span');
-    time.className = 'almostnode-console-entry__time';
+    const time = document.createElement("span");
+    time.className = "almostnode-console-entry__time";
     const d = new Date(timestamp);
-    time.textContent = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+    time.textContent = `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
 
-    const msg = document.createElement('span');
-    msg.className = 'almostnode-console-entry__message';
-    msg.textContent = args.join(' ');
+    const msg = document.createElement("span");
+    msg.className = "almostnode-console-entry__message";
+    msg.textContent = args.join(" ");
 
     row.append(badge, time, msg);
     this.entries.appendChild(row);
@@ -1050,26 +1233,29 @@ export class ConsolePanelElement {
   }
 
   clear(): void {
-    this.entries.innerHTML = '';
+    this.entries.innerHTML = "";
     this.entryCount = 0;
   }
 }
 
 export class TerminalPanelSurface {
-  private readonly root = document.createElement('div');
-  private readonly statusRow = document.createElement('div');
-  private readonly tabs = document.createElement('div');
-  private readonly status = document.createElement('div');
-  private readonly actions = document.createElement('div');
-  private readonly newTabButton = document.createElement('button');
-  private readonly body = document.createElement('div');
+  private readonly root = document.createElement("div");
+  private readonly statusRow = document.createElement("div");
+  private readonly tabs = document.createElement("div");
+  private readonly status = document.createElement("div");
+  private readonly actions = document.createElement("div");
+  private readonly newTabButton = document.createElement("button");
+  private readonly body = document.createElement("div");
   private readonly resizeObserver: ResizeObserver;
   private opened = false;
   private activeTabId: string | null = null;
   private readonly tabButtons = new Map<string, HTMLButtonElement>();
   private readonly tabBodies = new Map<string, HTMLDivElement>();
   private readonly tabStatuses = new Map<string, string>();
-  private readonly terminals = new Map<string, { terminal: Terminal; fitAddon: FitAddon }>();
+  private readonly terminals = new Map<
+    string,
+    { terminal: Terminal; fitAddon: FitAddon }
+  >();
   private readonly customTabs = new Set<string>();
 
   constructor(
@@ -1080,24 +1266,24 @@ export class TerminalPanelSurface {
       onResize?: (id: string, cols: number, rows: number) => void;
     },
   ) {
-    this.root.className = 'almostnode-terminal-surface';
-    this.statusRow.className = 'almostnode-terminal-surface__status-row';
-    this.tabs.className = 'almostnode-terminal-surface__tabs';
-    this.actions.className = 'almostnode-terminal-surface__actions';
+    this.root.className = "almostnode-terminal-surface";
+    this.statusRow.className = "almostnode-terminal-surface__status-row";
+    this.tabs.className = "almostnode-terminal-surface__tabs";
+    this.actions.className = "almostnode-terminal-surface__actions";
 
-    this.status.className = 'almostnode-terminal-surface__status';
-    this.status.id = 'webideTerminalStatus';
-    this.status.textContent = 'Idle';
+    this.status.className = "almostnode-terminal-surface__status";
+    this.status.id = "webideTerminalStatus";
+    this.status.textContent = "Idle";
 
-    this.newTabButton.type = 'button';
-    this.newTabButton.className = 'almostnode-terminal-surface__new-tab';
-    this.newTabButton.textContent = '+';
-    this.newTabButton.setAttribute('aria-label', 'New terminal');
-    this.newTabButton.addEventListener('click', () => {
+    this.newTabButton.type = "button";
+    this.newTabButton.className = "almostnode-terminal-surface__new-tab";
+    this.newTabButton.textContent = "+";
+    this.newTabButton.setAttribute("aria-label", "New terminal");
+    this.newTabButton.addEventListener("click", () => {
       this.callbacks.onCreateTab();
     });
 
-    this.body.className = 'almostnode-terminal-surface__body';
+    this.body.className = "almostnode-terminal-surface__body";
 
     this.actions.append(this.newTabButton);
     this.statusRow.append(this.tabs, this.status, this.actions);
@@ -1111,7 +1297,7 @@ export class TerminalPanelSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add('almostnode-terminal-panel-host');
+    container.classList.add("almostnode-terminal-panel-host");
     container.appendChild(this.root);
 
     if (!this.opened) {
@@ -1145,7 +1331,9 @@ export class TerminalPanelSurface {
   }
 
   focus(): void {
-    const active = this.activeTabId ? this.terminals.get(this.activeTabId) : null;
+    const active = this.activeTabId
+      ? this.terminals.get(this.activeTabId)
+      : null;
     active?.terminal.focus();
   }
 
@@ -1162,43 +1350,46 @@ export class TerminalPanelSurface {
     }
 
     tab.terminal.loadAddon(tab.fitAddon);
-    this.terminals.set(tab.id, { terminal: tab.terminal, fitAddon: tab.fitAddon });
+    this.terminals.set(tab.id, {
+      terminal: tab.terminal,
+      fitAddon: tab.fitAddon,
+    });
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'almostnode-terminal-surface__tab';
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "almostnode-terminal-surface__tab";
     button.dataset.terminalId = tab.id;
-    button.addEventListener('click', () => {
+    button.addEventListener("click", () => {
       this.callbacks.onSelectTab(tab.id);
     });
 
-    const label = document.createElement('span');
-    label.className = 'almostnode-terminal-surface__tab-label';
+    const label = document.createElement("span");
+    label.className = "almostnode-terminal-surface__tab-label";
     label.textContent = tab.title;
     button.appendChild(label);
 
     if (tab.closable) {
-      const closeButton = document.createElement('button');
-      closeButton.type = 'button';
-      closeButton.className = 'almostnode-terminal-surface__tab-close';
-      closeButton.textContent = 'x';
-      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
-      closeButton.addEventListener('click', (event) => {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "almostnode-terminal-surface__tab-close";
+      closeButton.textContent = "x";
+      closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+      closeButton.addEventListener("click", (event) => {
         event.stopPropagation();
         this.callbacks.onCloseTab(tab.id);
       });
       button.appendChild(closeButton);
     }
 
-    const body = document.createElement('div');
-    body.className = 'almostnode-terminal-surface__terminal';
+    const body = document.createElement("div");
+    body.className = "almostnode-terminal-surface__terminal";
     body.dataset.terminalId = tab.id;
     body.hidden = true;
-    body.style.display = 'none';
+    body.style.display = "none";
 
     this.tabButtons.set(tab.id, button);
     this.tabBodies.set(tab.id, body);
-    this.tabStatuses.set(tab.id, 'Idle');
+    this.tabStatuses.set(tab.id, "Idle");
     this.tabs.appendChild(button);
     this.body.appendChild(body);
 
@@ -1219,42 +1410,42 @@ export class TerminalPanelSurface {
 
     this.customTabs.add(tab.id);
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'almostnode-terminal-surface__tab';
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "almostnode-terminal-surface__tab";
     button.dataset.terminalId = tab.id;
-    button.addEventListener('click', () => {
+    button.addEventListener("click", () => {
       this.callbacks.onSelectTab(tab.id);
     });
 
-    const label = document.createElement('span');
-    label.className = 'almostnode-terminal-surface__tab-label';
+    const label = document.createElement("span");
+    label.className = "almostnode-terminal-surface__tab-label";
     label.textContent = tab.title;
     button.appendChild(label);
 
     if (tab.closable) {
-      const closeButton = document.createElement('button');
-      closeButton.type = 'button';
-      closeButton.className = 'almostnode-terminal-surface__tab-close';
-      closeButton.textContent = 'x';
-      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
-      closeButton.addEventListener('click', (event) => {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "almostnode-terminal-surface__tab-close";
+      closeButton.textContent = "x";
+      closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+      closeButton.addEventListener("click", (event) => {
         event.stopPropagation();
         this.callbacks.onCloseTab(tab.id);
       });
       button.appendChild(closeButton);
     }
 
-    const body = document.createElement('div');
-    body.className = 'almostnode-terminal-surface__terminal';
+    const body = document.createElement("div");
+    body.className = "almostnode-terminal-surface__terminal";
     body.dataset.terminalId = tab.id;
     body.hidden = true;
-    body.style.display = 'none';
+    body.style.display = "none";
     body.appendChild(tab.element);
 
     this.tabButtons.set(tab.id, button);
     this.tabBodies.set(tab.id, body);
-    this.tabStatuses.set(tab.id, '');
+    this.tabStatuses.set(tab.id, "");
     this.tabs.appendChild(button);
     this.body.appendChild(body);
   }
@@ -1270,13 +1461,15 @@ export class TerminalPanelSurface {
 
     if (this.activeTabId === id) {
       this.activeTabId = null;
-      this.status.textContent = 'Idle';
+      this.status.textContent = "Idle";
     }
   }
 
   updateTabTitle(id: string, title: string): void {
     const button = this.tabButtons.get(id);
-    const label = button?.querySelector('.almostnode-terminal-surface__tab-label');
+    const label = button?.querySelector(
+      ".almostnode-terminal-surface__tab-label",
+    );
     if (label) {
       label.textContent = title;
     }
@@ -1292,22 +1485,22 @@ export class TerminalPanelSurface {
   setActiveTab(id: string): void {
     this.activeTabId = id;
     for (const [tabId, button] of this.tabButtons.entries()) {
-      button.classList.toggle('is-active', tabId === id);
+      button.classList.toggle("is-active", tabId === id);
     }
     for (const [tabId, body] of this.tabBodies.entries()) {
       const isActive = tabId === id;
       body.hidden = !isActive;
-      body.style.display = isActive ? 'block' : 'none';
+      body.style.display = isActive ? "block" : "none";
       // Only assign webideTerminal id to non-custom tabs
       if (!this.customTabs.has(tabId)) {
         if (isActive) {
-          body.id = 'webideTerminal';
-        } else if (body.id === 'webideTerminal') {
-          body.removeAttribute('id');
+          body.id = "webideTerminal";
+        } else if (body.id === "webideTerminal") {
+          body.removeAttribute("id");
         }
       }
     }
-    this.status.textContent = this.tabStatuses.get(id) || 'Idle';
+    this.status.textContent = this.tabStatuses.get(id) || "Idle";
     this.fit();
     queueTerminalFit(() => this.fit());
   }
@@ -1330,26 +1523,33 @@ export class TerminalPanelSurface {
     }
 
     activeTerminal.fitAddon.fit();
-    this.callbacks.onResize?.(this.activeTabId, activeTerminal.terminal.cols, activeTerminal.terminal.rows);
+    this.callbacks.onResize?.(
+      this.activeTabId,
+      activeTerminal.terminal.cols,
+      activeTerminal.terminal.rows,
+    );
     activeTerminal.terminal.scrollToBottom();
   }
 }
 
 export class OpenCodeTerminalSurface {
-  private readonly root = document.createElement('div');
-  private readonly statusRow = document.createElement('div');
-  private readonly tabs = document.createElement('div');
-  private readonly actions = document.createElement('div');
-  private readonly newTabButton = document.createElement('button');
-  private readonly body = document.createElement('div');
-  private readonly loading = document.createElement('div');
+  private readonly root = document.createElement("div");
+  private readonly statusRow = document.createElement("div");
+  private readonly tabs = document.createElement("div");
+  private readonly actions = document.createElement("div");
+  private readonly newTabButton = document.createElement("button");
+  private readonly body = document.createElement("div");
+  private readonly loading = document.createElement("div");
   private readonly resizeObserver: ResizeObserver;
   private opened = false;
   private activeTabId: string | null = null;
   private readonly tabButtons = new Map<string, HTMLButtonElement>();
   private readonly tabBodies = new Map<string, HTMLDivElement>();
   private readonly tabStatuses = new Map<string, string>();
-  private readonly terminals = new Map<string, { terminal: Terminal; fitAddon: FitAddon }>();
+  private readonly terminals = new Map<
+    string,
+    { terminal: Terminal; fitAddon: FitAddon }
+  >();
   private readonly customTabs = new Set<string>();
   private readonly customHosts = new Map<string, HTMLElement>();
 
@@ -1361,29 +1561,29 @@ export class OpenCodeTerminalSurface {
       onResize?: (id: string, cols: number, rows: number) => void;
     },
   ) {
-    this.root.className = 'almostnode-opencode-surface';
-    this.statusRow.className = 'almostnode-opencode-surface__status-row';
-    this.tabs.className = 'almostnode-opencode-surface__tabs';
-    this.actions.className = 'almostnode-opencode-surface__actions';
+    this.root.className = "almostnode-opencode-surface";
+    this.statusRow.className = "almostnode-opencode-surface__status-row";
+    this.tabs.className = "almostnode-opencode-surface__tabs";
+    this.actions.className = "almostnode-opencode-surface__actions";
 
-    this.newTabButton.type = 'button';
-    this.newTabButton.className = 'almostnode-opencode-surface__new-tab';
-    this.newTabButton.textContent = '+';
-    this.newTabButton.setAttribute('aria-label', 'New OpenCode session');
-    this.newTabButton.addEventListener('click', () => {
+    this.newTabButton.type = "button";
+    this.newTabButton.className = "almostnode-opencode-surface__new-tab";
+    this.newTabButton.textContent = "+";
+    this.newTabButton.setAttribute("aria-label", "New OpenCode session");
+    this.newTabButton.addEventListener("click", () => {
       this.callbacks.onCreateTab();
     });
 
-    this.body.className = 'almostnode-opencode-surface__body';
+    this.body.className = "almostnode-opencode-surface__body";
 
-    this.loading.className = 'almostnode-opencode-surface__loading';
+    this.loading.className = "almostnode-opencode-surface__loading";
     this.loading.innerHTML =
-      '<div class="almostnode-opencode-surface__loading-content">'
-      + '<div class="almostnode-opencode-surface__loading-icon">✦</div>'
-      + '<div class="almostnode-opencode-surface__loading-text">Starting OpenCode...</div>'
-      + '</div>';
+      '<div class="almostnode-opencode-surface__loading-content">' +
+      '<div class="almostnode-opencode-surface__loading-icon">✦</div>' +
+      '<div class="almostnode-opencode-surface__loading-text">Starting OpenCode...</div>' +
+      "</div>";
     this.loading.hidden = true;
-    this.loading.style.display = 'none';
+    this.loading.style.display = "none";
 
     this.actions.append(this.newTabButton);
     this.statusRow.append(this.tabs, this.actions);
@@ -1397,7 +1597,7 @@ export class OpenCodeTerminalSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add('almostnode-opencode-panel-host');
+    container.classList.add("almostnode-opencode-panel-host");
     container.appendChild(this.root);
 
     if (!this.opened) {
@@ -1424,18 +1624,18 @@ export class OpenCodeTerminalSurface {
 
   showLoading(): void {
     this.loading.hidden = false;
-    this.loading.style.display = 'flex';
+    this.loading.style.display = "flex";
   }
 
   hideLoading(): void {
-    this.loading.classList.add('is-hiding');
+    this.loading.classList.add("is-hiding");
     const onEnd = () => {
-      this.loading.removeEventListener('transitionend', onEnd);
+      this.loading.removeEventListener("transitionend", onEnd);
       this.loading.hidden = true;
-      this.loading.style.display = 'none';
-      this.loading.classList.remove('is-hiding');
+      this.loading.style.display = "none";
+      this.loading.classList.remove("is-hiding");
     };
-    this.loading.addEventListener('transitionend', onEnd);
+    this.loading.addEventListener("transitionend", onEnd);
     // Fallback if transition doesn't fire
     window.setTimeout(onEnd, 500);
   }
@@ -1448,7 +1648,9 @@ export class OpenCodeTerminalSurface {
   }
 
   focus(): void {
-    const active = this.activeTabId ? this.terminals.get(this.activeTabId) : null;
+    const active = this.activeTabId
+      ? this.terminals.get(this.activeTabId)
+      : null;
     if (active) {
       active.terminal.focus();
       return;
@@ -1470,43 +1672,46 @@ export class OpenCodeTerminalSurface {
     }
 
     tab.terminal.loadAddon(tab.fitAddon);
-    this.terminals.set(tab.id, { terminal: tab.terminal, fitAddon: tab.fitAddon });
+    this.terminals.set(tab.id, {
+      terminal: tab.terminal,
+      fitAddon: tab.fitAddon,
+    });
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'almostnode-opencode-surface__tab';
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "almostnode-opencode-surface__tab";
     button.dataset.terminalId = tab.id;
-    button.addEventListener('click', () => {
+    button.addEventListener("click", () => {
       this.callbacks.onSelectTab(tab.id);
     });
 
-    const label = document.createElement('span');
-    label.className = 'almostnode-opencode-surface__tab-label';
+    const label = document.createElement("span");
+    label.className = "almostnode-opencode-surface__tab-label";
     label.textContent = tab.title;
     button.appendChild(label);
 
     if (tab.closable) {
-      const closeButton = document.createElement('button');
-      closeButton.type = 'button';
-      closeButton.className = 'almostnode-opencode-surface__tab-close';
-      closeButton.textContent = 'x';
-      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
-      closeButton.addEventListener('click', (event) => {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "almostnode-opencode-surface__tab-close";
+      closeButton.textContent = "x";
+      closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+      closeButton.addEventListener("click", (event) => {
         event.stopPropagation();
         this.callbacks.onCloseTab(tab.id);
       });
       button.appendChild(closeButton);
     }
 
-    const body = document.createElement('div');
-    body.className = 'almostnode-opencode-surface__terminal';
+    const body = document.createElement("div");
+    body.className = "almostnode-opencode-surface__terminal";
     body.dataset.terminalId = tab.id;
     body.hidden = true;
-    body.style.display = 'none';
+    body.style.display = "none";
 
     this.tabButtons.set(tab.id, button);
     this.tabBodies.set(tab.id, body);
-    this.tabStatuses.set(tab.id, 'Idle');
+    this.tabStatuses.set(tab.id, "Idle");
     this.tabs.appendChild(button);
     this.body.appendChild(body);
 
@@ -1531,42 +1736,42 @@ export class OpenCodeTerminalSurface {
     this.customTabs.add(tab.id);
     this.customHosts.set(tab.id, tab.element);
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'almostnode-opencode-surface__tab';
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "almostnode-opencode-surface__tab";
     button.dataset.terminalId = tab.id;
-    button.addEventListener('click', () => {
+    button.addEventListener("click", () => {
       this.callbacks.onSelectTab(tab.id);
     });
 
-    const label = document.createElement('span');
-    label.className = 'almostnode-opencode-surface__tab-label';
+    const label = document.createElement("span");
+    label.className = "almostnode-opencode-surface__tab-label";
     label.textContent = tab.title;
     button.appendChild(label);
 
     if (tab.closable) {
-      const closeButton = document.createElement('button');
-      closeButton.type = 'button';
-      closeButton.className = 'almostnode-opencode-surface__tab-close';
-      closeButton.textContent = 'x';
-      closeButton.setAttribute('aria-label', `Close ${tab.title}`);
-      closeButton.addEventListener('click', (event) => {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "almostnode-opencode-surface__tab-close";
+      closeButton.textContent = "x";
+      closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+      closeButton.addEventListener("click", (event) => {
         event.stopPropagation();
         this.callbacks.onCloseTab(tab.id);
       });
       button.appendChild(closeButton);
     }
 
-    const body = document.createElement('div');
-    body.className = 'almostnode-opencode-surface__terminal';
+    const body = document.createElement("div");
+    body.className = "almostnode-opencode-surface__terminal";
     body.dataset.terminalId = tab.id;
     body.hidden = true;
-    body.style.display = 'none';
+    body.style.display = "none";
     body.appendChild(tab.element);
 
     this.tabButtons.set(tab.id, button);
     this.tabBodies.set(tab.id, body);
-    this.tabStatuses.set(tab.id, 'Idle');
+    this.tabStatuses.set(tab.id, "Idle");
     this.tabs.appendChild(button);
     this.body.appendChild(body);
   }
@@ -1588,7 +1793,9 @@ export class OpenCodeTerminalSurface {
 
   updateTabTitle(id: string, title: string): void {
     const button = this.tabButtons.get(id);
-    const label = button?.querySelector('.almostnode-opencode-surface__tab-label');
+    const label = button?.querySelector(
+      ".almostnode-opencode-surface__tab-label",
+    );
     if (label) {
       label.textContent = title;
     }
@@ -1601,12 +1808,12 @@ export class OpenCodeTerminalSurface {
   setActiveTab(id: string): void {
     this.activeTabId = id;
     for (const [tabId, button] of this.tabButtons.entries()) {
-      button.classList.toggle('is-active', tabId === id);
+      button.classList.toggle("is-active", tabId === id);
     }
     for (const [tabId, body] of this.tabBodies.entries()) {
       const isActive = tabId === id;
       body.hidden = !isActive;
-      body.style.display = isActive ? 'block' : 'none';
+      body.style.display = isActive ? "" : "none";
     }
     this.fit();
     queueTerminalFit(() => this.fit());
@@ -1629,7 +1836,11 @@ export class OpenCodeTerminalSurface {
     }
 
     activeTerminal.fitAddon.fit();
-    this.callbacks.onResize?.(this.activeTabId, activeTerminal.terminal.cols, activeTerminal.terminal.rows);
+    this.callbacks.onResize?.(
+      this.activeTabId,
+      activeTerminal.terminal.cols,
+      activeTerminal.terminal.rows,
+    );
     activeTerminal.terminal.scrollToBottom();
   }
 }
@@ -1642,41 +1853,45 @@ export interface DatabaseSidebarCallbacks {
 }
 
 export class DatabaseSidebarSurface {
-  private readonly root = document.createElement('div');
-  private readonly listEl = document.createElement('div');
-  private readonly formEl = document.createElement('div');
-  private readonly input = document.createElement('input');
+  private readonly root = document.createElement("div");
+  private readonly listEl = document.createElement("div");
+  private readonly formEl = document.createElement("div");
+  private readonly input = document.createElement("input");
   private activeName: string | null = null;
   private databases: { name: string; createdAt: string }[] = [];
   private callbacks: DatabaseSidebarCallbacks | null = null;
 
   constructor() {
-    this.root.className = 'almostnode-db-sidebar';
-    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:#ccc;font-size:13px;';
+    this.root.className = "almostnode-db-sidebar";
+    this.root.style.cssText =
+      "display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:var(--text);font-size:13px;background:var(--almostnode-surface-alt-bg);";
 
-    const header = document.createElement('div');
-    header.style.cssText = 'font-weight:600;margin-bottom:4px;';
-    header.textContent = 'Databases';
+    const header = document.createElement("div");
+    header.style.cssText = "font-weight:600;margin-bottom:4px;";
+    header.textContent = "Databases";
 
-    this.listEl.style.cssText = 'flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;';
+    this.listEl.style.cssText =
+      "flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;";
 
-    this.formEl.style.cssText = 'display:flex;gap:4px;';
-    this.input.type = 'text';
-    this.input.placeholder = 'New database name';
-    this.input.style.cssText = 'flex:1;background:#1e1e1e;border:1px solid #444;color:#ccc;padding:4px 8px;border-radius:3px;font-size:12px;';
+    this.formEl.style.cssText = "display:flex;gap:4px;";
+    this.input.type = "text";
+    this.input.placeholder = "New database name";
+    this.input.style.cssText =
+      "flex:1;background:var(--almostnode-input-bg);border:1px solid var(--almostnode-input-border);color:var(--almostnode-input-fg);padding:4px 8px;border-radius:3px;font-size:12px;";
 
-    const createBtn = document.createElement('button');
-    createBtn.textContent = 'Create';
-    createBtn.style.cssText = 'background:#0e639c;color:#fff;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
-    createBtn.addEventListener('click', () => {
+    const createBtn = document.createElement("button");
+    createBtn.textContent = "Create";
+    createBtn.style.cssText =
+      "background:var(--almostnode-primary-button-bg);color:var(--almostnode-primary-button-fg);border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;";
+    createBtn.addEventListener("click", () => {
       const name = this.input.value.trim();
       if (name && this.callbacks) {
         this.callbacks.onCreate(name);
-        this.input.value = '';
+        this.input.value = "";
       }
     });
-    this.input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') createBtn.click();
+    this.input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") createBtn.click();
     });
 
     this.formEl.append(this.input, createBtn);
@@ -1687,7 +1902,10 @@ export class DatabaseSidebarSurface {
     this.callbacks = callbacks;
   }
 
-  update(databases: { name: string; createdAt: string }[], activeName: string | null): void {
+  update(
+    databases: { name: string; createdAt: string }[],
+    activeName: string | null,
+  ): void {
     this.databases = databases;
     this.activeName = activeName;
     this.render();
@@ -1705,25 +1923,32 @@ export class DatabaseSidebarSurface {
   }
 
   private render(): void {
-    this.listEl.innerHTML = '';
+    this.listEl.innerHTML = "";
     for (const db of this.databases) {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;';
+      const row = document.createElement("div");
+      row.style.cssText =
+        "display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;color:var(--text);";
       const isActive = db.name === this.activeName;
       if (isActive) {
-        row.style.background = '#094771';
+        row.style.background = "var(--almostnode-list-active-bg)";
+        row.style.color = "var(--almostnode-list-active-fg)";
       }
-      row.addEventListener('mouseenter', () => { if (!isActive) row.style.background = '#2a2d2e'; });
-      row.addEventListener('mouseleave', () => { if (!isActive) row.style.background = 'transparent'; });
+      row.addEventListener("mouseenter", () => {
+        if (!isActive) row.style.background = "var(--almostnode-list-hover-bg)";
+      });
+      row.addEventListener("mouseleave", () => {
+        if (!isActive) row.style.background = "transparent";
+      });
 
-      const indicator = document.createElement('span');
-      indicator.style.cssText = `width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${isActive ? '#4ec9b0' : '#555'};`;
+      const indicator = document.createElement("span");
+      indicator.style.cssText = `width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${isActive ? "var(--almostnode-success)" : "var(--almostnode-quiet)"};`;
 
-      const label = document.createElement('span');
-      label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      const label = document.createElement("span");
+      label.style.cssText =
+        "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
       label.textContent = db.name;
 
-      row.addEventListener('click', () => {
+      row.addEventListener("click", () => {
         if (this.callbacks) {
           this.callbacks.onOpen(db.name);
         }
@@ -1733,13 +1958,18 @@ export class DatabaseSidebarSurface {
 
       // Delete button (disabled when only 1 database)
       if (this.databases.length > 1) {
-        const delBtn = document.createElement('button');
-        delBtn.textContent = '\u00d7';
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "\u00d7";
         delBtn.title = `Delete ${db.name}`;
-        delBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:16px;padding:0 2px;line-height:1;';
-        delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#e06c75'; });
-        delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#888'; });
-        delBtn.addEventListener('click', (e) => {
+        delBtn.style.cssText =
+          "background:none;border:none;color:var(--almostnode-quiet);cursor:pointer;font-size:16px;padding:0 2px;line-height:1;";
+        delBtn.addEventListener("mouseenter", () => {
+          delBtn.style.color = "var(--almostnode-danger)";
+        });
+        delBtn.addEventListener("mouseleave", () => {
+          delBtn.style.color = "var(--almostnode-quiet)";
+        });
+        delBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           if (this.callbacks) this.callbacks.onDelete(db.name);
         });
@@ -1751,66 +1981,82 @@ export class DatabaseSidebarSurface {
   }
 }
 
-export type DatabaseQueryHandler = (operation: string, body: any, dbName?: string) => Promise<{ statusCode: number; body: string }>;
+export type DatabaseQueryHandler = (
+  operation: string,
+  body: any,
+  dbName?: string,
+) => Promise<{ statusCode: number; body: string }>;
 
 export class DatabaseBrowserSurface {
-  private readonly root = document.createElement('div');
-  private readonly tableList = document.createElement('div');
-  private readonly sqlTextarea = document.createElement('textarea');
-  private readonly resultsArea = document.createElement('div');
-  private readonly statusBar = document.createElement('div');
-  private readonly dbLabel = document.createElement('span');
-  private dbName: string = '';
+  private readonly root = document.createElement("div");
+  private readonly tableList = document.createElement("div");
+  private readonly sqlTextarea = document.createElement("textarea");
+  private readonly resultsArea = document.createElement("div");
+  private readonly statusBar = document.createElement("div");
+  private readonly dbLabel = document.createElement("span");
+  private dbName: string = "";
   private queryHandler: DatabaseQueryHandler | null = null;
 
   constructor() {
-    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;background:#1e1e1e;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;';
+    this.root.className = "almostnode-database-browser";
+    this.root.style.cssText =
+      'display:flex;flex-direction:column;height:100%;background:var(--almostnode-surface-bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;';
 
     // Header bar
-    const header = document.createElement('div');
-    header.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #333;flex-shrink:0;';
-    this.dbLabel.style.cssText = 'font-weight:600;flex:1;';
-    const refreshBtn = document.createElement('button');
-    refreshBtn.textContent = 'Refresh';
-    refreshBtn.style.cssText = 'background:#333;border:1px solid #555;color:#ccc;padding:3px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
-    refreshBtn.addEventListener('click', () => this.refreshTables());
+    const header = document.createElement("div");
+    header.style.cssText =
+      "display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--almostnode-toolbar-border);background:var(--almostnode-toolbar-bg);flex-shrink:0;";
+    this.dbLabel.style.cssText = "font-weight:600;flex:1;";
+    const refreshBtn = document.createElement("button");
+    refreshBtn.textContent = "Refresh";
+    refreshBtn.style.cssText =
+      "background:var(--almostnode-button-bg);border:1px solid var(--almostnode-toolbar-border);color:var(--almostnode-button-fg);padding:3px 10px;border-radius:3px;cursor:pointer;font-size:12px;";
+    refreshBtn.addEventListener("click", () => this.refreshTables());
     header.append(this.dbLabel, refreshBtn);
 
     // Body: left panel (table list) + right panel (SQL + results)
-    const body = document.createElement('div');
-    body.style.cssText = 'display:flex;flex:1;overflow:hidden;';
+    const body = document.createElement("div");
+    body.style.cssText = "display:flex;flex:1;overflow:hidden;";
 
     // Left panel — table list
-    const leftPanel = document.createElement('div');
-    leftPanel.style.cssText = 'width:25%;min-width:140px;border-right:1px solid #333;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:2px;';
-    const tableHeader = document.createElement('div');
-    tableHeader.textContent = 'Tables';
-    tableHeader.style.cssText = 'font-weight:600;margin-bottom:4px;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:.5px;';
+    const leftPanel = document.createElement("div");
+    leftPanel.style.cssText =
+      "width:25%;min-width:140px;border-right:1px solid var(--almostnode-toolbar-border);overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:2px;background:var(--almostnode-surface-alt-bg);";
+    const tableHeader = document.createElement("div");
+    tableHeader.textContent = "Tables";
+    tableHeader.style.cssText =
+      "font-weight:600;margin-bottom:4px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;";
     leftPanel.append(tableHeader, this.tableList);
 
     // Right panel — SQL editor + results
-    const rightPanel = document.createElement('div');
-    rightPanel.style.cssText = 'flex:1;display:flex;flex-direction:column;overflow:hidden;';
+    const rightPanel = document.createElement("div");
+    rightPanel.style.cssText =
+      "flex:1;display:flex;flex-direction:column;overflow:hidden;";
 
     // SQL editor area
-    const sqlArea = document.createElement('div');
-    sqlArea.style.cssText = 'display:flex;flex-direction:column;border-bottom:1px solid #333;flex-shrink:0;';
-    const sqlHeader = document.createElement('div');
-    sqlHeader.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:4px 8px;background:#252526;';
-    const sqlLabel = document.createElement('span');
-    sqlLabel.textContent = 'SQL Query';
-    sqlLabel.style.cssText = 'font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;';
-    const runBtn = document.createElement('button');
-    runBtn.textContent = 'Run';
-    runBtn.style.cssText = 'background:#0e639c;border:none;color:#fff;padding:3px 14px;border-radius:3px;cursor:pointer;font-size:12px;';
-    runBtn.addEventListener('click', () => this.runQuery());
+    const sqlArea = document.createElement("div");
+    sqlArea.style.cssText =
+      "display:flex;flex-direction:column;border-bottom:1px solid var(--almostnode-toolbar-border);flex-shrink:0;";
+    const sqlHeader = document.createElement("div");
+    sqlHeader.style.cssText =
+      "display:flex;align-items:center;justify-content:space-between;padding:4px 8px;background:var(--almostnode-toolbar-bg);";
+    const sqlLabel = document.createElement("span");
+    sqlLabel.textContent = "SQL Query";
+    sqlLabel.style.cssText =
+      "font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;";
+    const runBtn = document.createElement("button");
+    runBtn.textContent = "Run";
+    runBtn.style.cssText =
+      "background:var(--almostnode-primary-button-bg);border:none;color:var(--almostnode-primary-button-fg);padding:3px 14px;border-radius:3px;cursor:pointer;font-size:12px;";
+    runBtn.addEventListener("click", () => this.runQuery());
     sqlHeader.append(sqlLabel, runBtn);
 
-    this.sqlTextarea.style.cssText = 'width:100%;height:80px;background:#1e1e1e;color:#d4d4d4;border:none;padding:8px;font-family:"Cascadia Code","Fira Code",Consolas,monospace;font-size:13px;resize:vertical;outline:none;box-sizing:border-box;';
-    this.sqlTextarea.placeholder = 'Enter SQL query...';
+    this.sqlTextarea.style.cssText =
+      'width:100%;height:80px;background:var(--almostnode-editor-bg);color:var(--almostnode-editor-fg);border:none;padding:8px;font-family:"Cascadia Code","Fira Code",Consolas,monospace;font-size:13px;resize:vertical;outline:none;box-sizing:border-box;';
+    this.sqlTextarea.placeholder = "Enter SQL query...";
     this.sqlTextarea.spellcheck = false;
-    this.sqlTextarea.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    this.sqlTextarea.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
         this.runQuery();
       }
@@ -1818,11 +2064,12 @@ export class DatabaseBrowserSurface {
     sqlArea.append(sqlHeader, this.sqlTextarea);
 
     // Results area
-    this.resultsArea.style.cssText = 'flex:1;overflow:auto;padding:0;';
+    this.resultsArea.style.cssText = "flex:1;overflow:auto;padding:0;";
 
     // Status bar
-    this.statusBar.style.cssText = 'padding:4px 8px;border-top:1px solid #333;font-size:11px;color:#888;flex-shrink:0;';
-    this.statusBar.textContent = 'Ready';
+    this.statusBar.style.cssText =
+      "padding:4px 8px;border-top:1px solid var(--almostnode-toolbar-border);font-size:11px;color:var(--muted);flex-shrink:0;";
+    this.statusBar.textContent = "Ready";
 
     rightPanel.append(sqlArea, this.resultsArea, this.statusBar);
     body.append(leftPanel, rightPanel);
@@ -1844,7 +2091,7 @@ export class DatabaseBrowserSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.style.overflow = 'hidden';
+    container.style.overflow = "hidden";
     container.appendChild(this.root);
     return {
       dispose: () => {
@@ -1857,33 +2104,40 @@ export class DatabaseBrowserSurface {
 
   private async refreshTables(): Promise<void> {
     if (!this.queryHandler || !this.dbName) return;
-    this.tableList.innerHTML = '';
+    this.tableList.innerHTML = "";
     try {
-      const result = await this.queryHandler('tables', {}, this.dbName);
+      const result = await this.queryHandler("tables", {}, this.dbName);
       const data = JSON.parse(result.body);
       if (data.tables && data.tables.length > 0) {
         for (const tableName of data.tables) {
-          const row = document.createElement('div');
-          row.style.cssText = 'padding:4px 8px;cursor:pointer;border-radius:3px;display:flex;align-items:center;gap:6px;';
-          row.addEventListener('mouseenter', () => { row.style.background = '#2a2d2e'; });
-          row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
-          const icon = document.createElement('span');
-          icon.textContent = '\u{1f4cb}';
-          icon.style.cssText = 'font-size:11px;';
-          const label = document.createElement('span');
+          const row = document.createElement("div");
+          row.style.cssText =
+            "padding:4px 8px;cursor:pointer;border-radius:3px;display:flex;align-items:center;gap:6px;";
+          row.addEventListener("mouseenter", () => {
+            row.style.background = "var(--almostnode-list-hover-bg)";
+          });
+          row.addEventListener("mouseleave", () => {
+            row.style.background = "transparent";
+          });
+          const icon = document.createElement("span");
+          icon.textContent = "\u{1f4cb}";
+          icon.style.cssText = "font-size:11px;";
+          const label = document.createElement("span");
           label.textContent = tableName;
           row.append(icon, label);
-          row.addEventListener('click', () => this.loadTable(tableName));
+          row.addEventListener("click", () => this.loadTable(tableName));
           this.tableList.appendChild(row);
         }
       } else {
-        const empty = document.createElement('div');
-        empty.style.cssText = 'color:#666;font-style:italic;padding:4px 8px;';
-        empty.textContent = 'No tables';
+        const empty = document.createElement("div");
+        empty.style.cssText =
+          "color:var(--almostnode-quiet);font-style:italic;padding:4px 8px;";
+        empty.textContent = "No tables";
         this.tableList.appendChild(empty);
       }
     } catch (err: any) {
       this.statusBar.textContent = `Error loading tables: ${err.message}`;
+      this.statusBar.style.color = "var(--almostnode-danger)";
     }
   }
 
@@ -1891,79 +2145,93 @@ export class DatabaseBrowserSurface {
     if (!this.queryHandler || !this.dbName) return;
     this.statusBar.textContent = `Loading ${tableName}...`;
     try {
-      const result = await this.queryHandler('query', { sql: `SELECT * FROM "${tableName}" LIMIT 100` }, this.dbName);
+      const result = await this.queryHandler(
+        "query",
+        { sql: `SELECT * FROM "${tableName}" LIMIT 100` },
+        this.dbName,
+      );
       const data = JSON.parse(result.body);
       if (data.error) {
         this.statusBar.textContent = `Error: ${data.error}`;
+        this.statusBar.style.color = "var(--almostnode-danger)";
         return;
       }
       this.sqlTextarea.value = `SELECT * FROM "${tableName}" LIMIT 100`;
       this.renderResults(data.fields, data.rows);
       this.statusBar.textContent = `${data.rows.length} row(s) returned`;
+      this.statusBar.style.color = "var(--muted)";
     } catch (err: any) {
       this.statusBar.textContent = `Error: ${err.message}`;
+      this.statusBar.style.color = "var(--almostnode-danger)";
     }
   }
 
   private async runQuery(): Promise<void> {
     const sql = this.sqlTextarea.value.trim();
     if (!sql || !this.queryHandler || !this.dbName) return;
-    this.statusBar.textContent = 'Running query...';
+    this.statusBar.textContent = "Running query...";
     const start = performance.now();
     try {
-      const result = await this.queryHandler('query', { sql }, this.dbName);
+      const result = await this.queryHandler("query", { sql }, this.dbName);
       const elapsed = Math.round(performance.now() - start);
       const data = JSON.parse(result.body);
       if (data.error) {
-        this.resultsArea.innerHTML = '';
+        this.resultsArea.innerHTML = "";
         this.statusBar.textContent = `Error: ${data.error}`;
-        this.statusBar.style.color = '#e06c75';
+        this.statusBar.style.color = "var(--almostnode-danger)";
         return;
       }
-      this.statusBar.style.color = '#888';
+      this.statusBar.style.color = "var(--muted)";
       this.renderResults(data.fields, data.rows);
       this.statusBar.textContent = `${data.rows.length} row(s) returned in ${elapsed}ms`;
     } catch (err: any) {
-      this.statusBar.style.color = '#e06c75';
+      this.statusBar.style.color = "var(--almostnode-danger)";
       this.statusBar.textContent = `Error: ${err.message}`;
     }
   }
 
   private renderResults(fields: any[] | undefined, rows: any[]): void {
-    this.resultsArea.innerHTML = '';
+    this.resultsArea.innerHTML = "";
     if (!fields || fields.length === 0) {
-      const msg = document.createElement('div');
-      msg.style.cssText = 'padding:12px;color:#888;';
-      msg.textContent = rows.length > 0 ? 'Query executed successfully.' : 'No results.';
+      const msg = document.createElement("div");
+      msg.style.cssText = "padding:12px;color:var(--muted);";
+      msg.textContent =
+        rows.length > 0 ? "Query executed successfully." : "No results.";
       this.resultsArea.appendChild(msg);
       return;
     }
 
-    const table = document.createElement('table');
-    table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;';
+    const table = document.createElement("table");
+    table.style.cssText = "width:100%;border-collapse:collapse;font-size:12px;";
 
-    const thead = document.createElement('thead');
-    const headerRow = document.createElement('tr');
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
     for (const field of fields) {
-      const th = document.createElement('th');
+      const th = document.createElement("th");
       th.textContent = field.name;
-      th.style.cssText = 'text-align:left;padding:6px 10px;background:#252526;border-bottom:1px solid #333;position:sticky;top:0;white-space:nowrap;font-weight:600;color:#4ec9b0;';
+      th.style.cssText =
+        "text-align:left;padding:6px 10px;background:var(--almostnode-toolbar-bg);border-bottom:1px solid var(--almostnode-toolbar-border);position:sticky;top:0;white-space:nowrap;font-weight:600;color:var(--accent);";
       headerRow.appendChild(th);
     }
     thead.appendChild(headerRow);
     table.appendChild(thead);
 
-    const tbody = document.createElement('tbody');
+    const tbody = document.createElement("tbody");
     for (const row of rows) {
-      const tr = document.createElement('tr');
-      tr.addEventListener('mouseenter', () => { tr.style.background = '#2a2d2e'; });
-      tr.addEventListener('mouseleave', () => { tr.style.background = 'transparent'; });
+      const tr = document.createElement("tr");
+      tr.addEventListener("mouseenter", () => {
+        tr.style.background = "var(--almostnode-list-hover-bg)";
+      });
+      tr.addEventListener("mouseleave", () => {
+        tr.style.background = "transparent";
+      });
       for (const field of fields) {
-        const td = document.createElement('td');
+        const td = document.createElement("td");
         const val = row[field.name];
-        td.textContent = val === null ? 'NULL' : String(val);
-        td.style.cssText = 'padding:4px 10px;border-bottom:1px solid #2a2d2e;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis;';
-        if (val === null) td.style.color = '#666';
+        td.textContent = val === null ? "NULL" : String(val);
+        td.style.cssText =
+          "padding:4px 10px;border-bottom:1px solid var(--almostnode-toolbar-border);white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis;";
+        if (val === null) td.style.color = "var(--almostnode-quiet)";
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -1975,7 +2243,7 @@ export class DatabaseBrowserSurface {
 
 // ── Keychain Sidebar ────────────────────────────────────────────────────────
 
-const KEYCHAIN_VIEW_ID = 'almostnode.sidebar.keychain';
+const KEYCHAIN_VIEW_ID = "almostnode.sidebar.keychain";
 
 export interface KeychainSlotStatus {
   name: string;
@@ -1994,51 +2262,59 @@ const ICON_KEY = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentC
 
 function getSlotIcon(name: string): string {
   switch (name) {
-    case 'github': return ICON_GITHUB;
-    case 'replay': return ICON_REPLAY;
-    case 'claude': return ICON_CLAUDE;
-    default: return ICON_KEY;
+    case "github":
+      return ICON_GITHUB;
+    case "replay":
+      return ICON_REPLAY;
+    case "claude":
+      return ICON_CLAUDE;
+    default:
+      return ICON_KEY;
   }
 }
 
 export class KeychainSidebarSurface {
-  private readonly root = document.createElement('div');
-  private readonly listEl = document.createElement('div');
-  private readonly footerEl = document.createElement('div');
+  private readonly root = document.createElement("div");
+  private readonly listEl = document.createElement("div");
+  private readonly footerEl = document.createElement("div");
   private slots: KeychainSlotStatus[] = [];
   private onAction: ((action: string) => void) | null = null;
 
   constructor() {
-    this.root.className = 'almostnode-keychain-sidebar';
+    this.root.className = "almostnode-keychain-sidebar";
     this.root.style.cssText = `
       display: flex; flex-direction: column; height: 100%;
-      padding: 12px; gap: 0; color: #ccc; font-size: 13px;
+      padding: 12px; gap: 0; color: var(--text); font-size: 13px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    `.replace(/\n\s*/g, '');
+      background: var(--almostnode-surface-alt-bg);
+    `.replace(/\n\s*/g, "");
 
-    const headerRow = document.createElement('div');
+    const headerRow = document.createElement("div");
     headerRow.style.cssText = `
       display: flex; align-items: center; gap: 8px;
       margin-bottom: 16px; padding-bottom: 10px;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-    `.replace(/\n\s*/g, '');
+      border-bottom: 1px solid var(--almostnode-toolbar-border);
+    `.replace(/\n\s*/g, "");
 
-    const headerIcon = document.createElement('span');
+    const headerIcon = document.createElement("span");
     headerIcon.innerHTML = ICON_KEY;
-    headerIcon.style.cssText = 'color: #e0a458; display: flex; align-items: center;';
+    headerIcon.style.cssText =
+      "color: var(--accent); display: flex; align-items: center;";
 
-    const headerText = document.createElement('span');
-    headerText.style.cssText = 'font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #999;';
-    headerText.textContent = 'Credentials';
+    const headerText = document.createElement("span");
+    headerText.style.cssText =
+      "font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);";
+    headerText.textContent = "Credentials";
 
     headerRow.append(headerIcon, headerText);
 
-    this.listEl.style.cssText = 'flex: 1; display: flex; flex-direction: column; gap: 6px;';
+    this.listEl.style.cssText =
+      "flex: 1; display: flex; flex-direction: column; gap: 6px;";
 
     this.footerEl.style.cssText = `
       display: flex; gap: 6px; padding-top: 12px; margin-top: 8px;
-      border-top: 1px solid rgba(255,255,255,0.08);
-    `.replace(/\n\s*/g, '');
+      border-top: 1px solid var(--almostnode-toolbar-border);
+    `.replace(/\n\s*/g, "");
 
     this.root.append(headerRow, this.listEl, this.footerEl);
   }
@@ -2047,7 +2323,10 @@ export class KeychainSidebarSurface {
     this.onAction = handler;
   }
 
-  update(slots: KeychainSlotStatus[], options?: { hasStoredVault: boolean; supported: boolean }): void {
+  update(
+    slots: KeychainSlotStatus[],
+    options?: { hasStoredVault: boolean; supported: boolean },
+  ): void {
     this.slots = slots;
     this.render();
     this.renderFooter(options);
@@ -2065,38 +2344,43 @@ export class KeychainSidebarSurface {
   }
 
   private render(): void {
-    this.listEl.innerHTML = '';
+    this.listEl.innerHTML = "";
     for (const slot of this.slots) {
-      const card = document.createElement('div');
+      const card = document.createElement("div");
       card.style.cssText = `
         display: flex; align-items: center; gap: 10px;
         padding: 8px 10px; border-radius: 6px;
-        background: rgba(255,255,255,0.04);
-        border: 1px solid rgba(255,255,255,0.06);
+        background: var(--almostnode-card-bg);
+        border: 1px solid var(--almostnode-border-subtle);
         transition: background 0.15s;
-      `.replace(/\n\s*/g, '');
-      card.addEventListener('mouseenter', () => { card.style.background = 'rgba(255,255,255,0.07)'; });
-      card.addEventListener('mouseleave', () => { card.style.background = 'rgba(255,255,255,0.04)'; });
+      `.replace(/\n\s*/g, "");
+      card.addEventListener("mouseenter", () => {
+        card.style.background = "var(--almostnode-card-hover-bg)";
+      });
+      card.addEventListener("mouseleave", () => {
+        card.style.background = "var(--almostnode-card-bg)";
+      });
 
-      const iconWrap = document.createElement('span');
+      const iconWrap = document.createElement("span");
       iconWrap.innerHTML = getSlotIcon(slot.name);
       iconWrap.style.cssText = `
         display: flex; align-items: center; justify-content: center;
         width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
-        background: ${slot.active ? 'rgba(78,201,176,0.12)' : 'rgba(255,255,255,0.06)'};
-        color: ${slot.active ? '#4ec9b0' : '#888'};
-      `.replace(/\n\s*/g, '');
+        background: ${slot.active ? "color-mix(in srgb, var(--almostnode-success) 18%, transparent)" : "var(--almostnode-button-bg)"};
+        color: ${slot.active ? "var(--almostnode-success)" : "var(--almostnode-quiet)"};
+      `.replace(/\n\s*/g, "");
 
-      const info = document.createElement('div');
-      info.style.cssText = 'flex: 1; min-width: 0;';
+      const info = document.createElement("div");
+      info.style.cssText = "flex: 1; min-width: 0;";
 
-      const label = document.createElement('div');
-      label.style.cssText = 'font-size: 13px; font-weight: 500; color: #e0e0e0; line-height: 1.3;';
+      const label = document.createElement("div");
+      label.style.cssText =
+        "font-size: 13px; font-weight: 500; color: var(--text); line-height: 1.3;";
       label.textContent = slot.label;
 
-      const statusText = document.createElement('div');
-      statusText.style.cssText = `font-size: 11px; color: ${slot.active ? '#4ec9b0' : '#666'}; line-height: 1.3;`;
-      statusText.textContent = slot.active ? 'Connected' : 'Not connected';
+      const statusText = document.createElement("div");
+      statusText.style.cssText = `font-size: 11px; color: ${slot.active ? "var(--almostnode-success)" : "var(--almostnode-quiet)"}; line-height: 1.3;`;
+      statusText.textContent = slot.active ? "Connected" : "Not connected";
 
       info.append(label, statusText);
 
@@ -2104,32 +2388,46 @@ export class KeychainSidebarSurface {
 
       // Add login/logout button for services that support direct auth actions.
       if (slot.canAuth) {
-        const authBtn = document.createElement('button');
-        authBtn.textContent = slot.active ? 'Logout' : 'Login';
+        const authBtn = document.createElement("button");
+        authBtn.textContent = slot.active ? "Logout" : "Login";
         const isLogout = slot.active;
         authBtn.style.cssText = `
-          background: ${isLogout ? 'rgba(255,255,255,0.06)' : 'rgba(78,201,176,0.15)'};
-          color: ${isLogout ? '#999' : '#4ec9b0'};
-          border: 1px solid ${isLogout ? 'rgba(255,255,255,0.1)' : 'rgba(78,201,176,0.3)'};
+          background: ${isLogout ? "var(--almostnode-button-bg)" : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)"};
+          color: ${isLogout ? "var(--muted)" : "var(--almostnode-success)"};
+          border: 1px solid ${isLogout ? "var(--almostnode-border-subtle)" : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)"};
           padding: 3px 10px; border-radius: 4px; cursor: pointer;
           font-size: 11px; font-weight: 500; flex-shrink: 0;
           transition: all 0.15s;
-        `.replace(/\n\s*/g, '');
-        const hoverBg = isLogout ? 'rgba(224,108,117,0.15)' : 'rgba(78,201,176,0.25)';
-        const hoverColor = isLogout ? '#e06c75' : '#4ec9b0';
-        const hoverBorder = isLogout ? 'rgba(224,108,117,0.3)' : 'rgba(78,201,176,0.4)';
-        authBtn.addEventListener('mouseenter', () => {
+        `.replace(/\n\s*/g, "");
+        const hoverBg = isLogout
+          ? "color-mix(in srgb, var(--almostnode-danger) 16%, transparent)"
+          : "color-mix(in srgb, var(--almostnode-success) 25%, transparent)";
+        const hoverColor = isLogout
+          ? "var(--almostnode-danger)"
+          : "var(--almostnode-success)";
+        const hoverBorder = isLogout
+          ? "color-mix(in srgb, var(--almostnode-danger) 35%, transparent)"
+          : "color-mix(in srgb, var(--almostnode-success) 40%, transparent)";
+        authBtn.addEventListener("mouseenter", () => {
           authBtn.style.background = hoverBg;
           authBtn.style.color = hoverColor;
           authBtn.style.borderColor = hoverBorder;
         });
-        authBtn.addEventListener('mouseleave', () => {
-          authBtn.style.background = isLogout ? 'rgba(255,255,255,0.06)' : 'rgba(78,201,176,0.15)';
-          authBtn.style.color = isLogout ? '#999' : '#4ec9b0';
-          authBtn.style.borderColor = isLogout ? 'rgba(255,255,255,0.1)' : 'rgba(78,201,176,0.3)';
+        authBtn.addEventListener("mouseleave", () => {
+          authBtn.style.background = isLogout
+            ? "var(--almostnode-button-bg)"
+            : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)";
+          authBtn.style.color = isLogout
+            ? "var(--muted)"
+            : "var(--almostnode-success)";
+          authBtn.style.borderColor = isLogout
+            ? "var(--almostnode-border-subtle)"
+            : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)";
         });
-        const action = slot.active ? `logout:${slot.name}` : `login:${slot.name}`;
-        authBtn.addEventListener('click', (e) => {
+        const action = slot.active
+          ? `logout:${slot.name}`
+          : `login:${slot.name}`;
+        authBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           this.onAction?.(action);
         });
@@ -2140,41 +2438,62 @@ export class KeychainSidebarSurface {
     }
   }
 
-  private renderFooter(options?: { hasStoredVault: boolean; supported: boolean }): void {
-    this.footerEl.innerHTML = '';
+  private renderFooter(options?: {
+    hasStoredVault: boolean;
+    supported: boolean;
+  }): void {
+    this.footerEl.innerHTML = "";
     if (!options?.supported) {
-      const note = document.createElement('span');
-      note.style.cssText = 'font-size: 11px; color: #666;';
-      note.textContent = 'Passkey not supported in this browser';
+      const note = document.createElement("span");
+      note.style.cssText = "font-size: 11px; color: var(--almostnode-quiet);";
+      note.textContent = "Passkey not supported in this browser";
       this.footerEl.appendChild(note);
       return;
     }
 
     if (options.hasStoredVault) {
-      const unlockBtn = this.createFooterButton('Unlock Vault', 'unlock', true);
-      const forgetBtn = this.createFooterButton('Forget', 'forget', false);
+      const unlockBtn = this.createFooterButton("Unlock Vault", "unlock", true);
+      const forgetBtn = this.createFooterButton("Forget", "forget", false);
       this.footerEl.append(unlockBtn, forgetBtn);
     } else {
-      const saveBtn = this.createFooterButton('Save with Passkey', 'save', true);
+      const saveBtn = this.createFooterButton(
+        "Save with Passkey",
+        "save",
+        true,
+      );
       this.footerEl.appendChild(saveBtn);
     }
   }
 
-  private createFooterButton(text: string, action: string, primary: boolean): HTMLButtonElement {
-    const btn = document.createElement('button');
+  private createFooterButton(
+    text: string,
+    action: string,
+    primary: boolean,
+  ): HTMLButtonElement {
+    const btn = document.createElement("button");
     btn.textContent = text;
-    const bg = primary ? '#0e639c' : 'rgba(255,255,255,0.06)';
-    const hoverBg = primary ? '#1177bb' : 'rgba(255,255,255,0.1)';
-    const color = primary ? '#fff' : '#999';
+    const bg = primary
+      ? "var(--almostnode-primary-button-bg)"
+      : "var(--almostnode-button-bg)";
+    const hoverBg = primary
+      ? "var(--almostnode-primary-button-hover-bg)"
+      : "var(--almostnode-button-hover-bg)";
+    const color = primary
+      ? "var(--almostnode-primary-button-fg)"
+      : "var(--muted)";
     btn.style.cssText = `
       background: ${bg}; color: ${color};
-      border: 1px solid ${primary ? 'transparent' : 'rgba(255,255,255,0.1)'};
+      border: 1px solid ${primary ? "transparent" : "var(--almostnode-border-subtle)"};
       padding: 5px 12px; border-radius: 4px; cursor: pointer;
       font-size: 12px; font-weight: 500; transition: all 0.15s;
-    `.replace(/\n\s*/g, '');
-    btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = bg; });
-    btn.addEventListener('click', () => {
+    `.replace(/\n\s*/g, "");
+    btn.addEventListener("mouseenter", () => {
+      btn.style.background = hoverBg;
+    });
+    btn.addEventListener("mouseleave", () => {
+      btn.style.background = bg;
+    });
+    btn.addEventListener("click", () => {
       this.onAction?.(action);
     });
     return btn;
@@ -2183,12 +2502,12 @@ export class KeychainSidebarSurface {
 
 // ── Tests Sidebar ────────────────────────────────────────────────────────────
 
-const TESTS_VIEW_ID = 'almostnode.sidebar.tests';
+const TESTS_VIEW_ID = "almostnode.sidebar.tests";
 
 export interface TestEntry {
   id: string;
   name: string;
-  status: 'pending' | 'passed' | 'failed' | 'running';
+  status: "pending" | "passed" | "failed" | "running";
 }
 
 export interface TestsSidebarCallbacks {
@@ -2199,28 +2518,32 @@ export interface TestsSidebarCallbacks {
 }
 
 export class TestsSidebarSurface {
-  private readonly root = document.createElement('div');
-  private readonly listEl = document.createElement('div');
-  private readonly actionsEl = document.createElement('div');
+  private readonly root = document.createElement("div");
+  private readonly listEl = document.createElement("div");
+  private readonly actionsEl = document.createElement("div");
   private tests: TestEntry[] = [];
   private callbacks: TestsSidebarCallbacks | null = null;
 
   constructor() {
-    this.root.className = 'almostnode-tests-sidebar';
-    this.root.style.cssText = 'display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:#ccc;font-size:13px;';
+    this.root.className = "almostnode-tests-sidebar";
+    this.root.style.cssText =
+      "display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:var(--text);font-size:13px;background:var(--almostnode-surface-alt-bg);";
 
-    const header = document.createElement('div');
-    header.style.cssText = 'font-weight:600;margin-bottom:4px;';
-    header.textContent = 'Tests';
+    const header = document.createElement("div");
+    header.style.cssText = "font-weight:600;margin-bottom:4px;";
+    header.textContent = "Tests";
 
-    this.listEl.style.cssText = 'flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;';
+    this.listEl.style.cssText =
+      "flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;";
 
-    this.actionsEl.style.cssText = 'display:flex;gap:4px;padding-top:8px;border-top:1px solid #333;';
+    this.actionsEl.style.cssText =
+      "display:flex;gap:4px;padding-top:8px;border-top:1px solid var(--almostnode-toolbar-border);";
 
-    const runAllBtn = document.createElement('button');
-    runAllBtn.textContent = 'Run All';
-    runAllBtn.style.cssText = 'flex:1;background:#0e639c;color:#fff;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;';
-    runAllBtn.addEventListener('click', () => {
+    const runAllBtn = document.createElement("button");
+    runAllBtn.textContent = "Run All";
+    runAllBtn.style.cssText =
+      "flex:1;background:var(--almostnode-primary-button-bg);color:var(--almostnode-primary-button-fg);border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;";
+    runAllBtn.addEventListener("click", () => {
       this.callbacks?.onRunAll();
     });
     this.actionsEl.appendChild(runAllBtn);
@@ -2237,7 +2560,7 @@ export class TestsSidebarSurface {
     this.render();
   }
 
-  updateTestStatus(testId: string, status: TestEntry['status']): void {
+  updateTestStatus(testId: string, status: TestEntry["status"]): void {
     const test = this.tests.find((t) => t.id === testId);
     if (test) {
       test.status = status;
@@ -2256,67 +2579,90 @@ export class TestsSidebarSurface {
     };
   }
 
-  private statusColor(status: TestEntry['status']): string {
+  private statusColor(status: TestEntry["status"]): string {
     switch (status) {
-      case 'passed': return '#4ec9b0';
-      case 'failed': return '#e06c75';
-      case 'running': return '#dcdcaa';
-      default: return '#555';
+      case "passed":
+        return "var(--almostnode-success)";
+      case "failed":
+        return "var(--almostnode-danger)";
+      case "running":
+        return "var(--almostnode-warning)";
+      default:
+        return "var(--almostnode-quiet)";
     }
   }
 
   private render(): void {
-    this.listEl.innerHTML = '';
+    this.listEl.innerHTML = "";
 
     if (this.tests.length === 0) {
-      const empty = document.createElement('div');
-      empty.style.cssText = 'color:#666;font-style:italic;padding:4px 8px;font-size:12px;';
-      empty.textContent = 'No tests recorded yet. Use OpenCode to interact with the preview and tests will be auto-detected.';
+      const empty = document.createElement("div");
+      empty.style.cssText =
+        "color:var(--almostnode-quiet);font-style:italic;padding:4px 8px;font-size:12px;";
+      empty.textContent =
+        "No tests recorded yet. Use OpenCode to interact with the preview and tests will be auto-detected.";
       this.listEl.appendChild(empty);
       return;
     }
 
     for (const test of this.tests) {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;';
-      row.addEventListener('mouseenter', () => { row.style.background = '#2a2d2e'; });
-      row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
+      const row = document.createElement("div");
+      row.style.cssText =
+        "display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;color:var(--text);";
+      row.addEventListener("mouseenter", () => {
+        row.style.background = "var(--almostnode-list-hover-bg)";
+      });
+      row.addEventListener("mouseleave", () => {
+        row.style.background = "transparent";
+      });
 
       // Status dot
-      const indicator = document.createElement('span');
+      const indicator = document.createElement("span");
       indicator.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${this.statusColor(test.status)};`;
-      if (test.status === 'running') {
-        indicator.style.animation = 'almostnode-test-pulse 1s ease-in-out infinite';
+      if (test.status === "running") {
+        indicator.style.animation =
+          "almostnode-test-pulse 1s ease-in-out infinite";
       }
 
       // Test name
-      const label = document.createElement('span');
-      label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;';
+      const label = document.createElement("span");
+      label.style.cssText =
+        "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;";
       label.textContent = test.name;
-      label.addEventListener('click', () => {
+      label.addEventListener("click", () => {
         this.callbacks?.onOpen(test.id);
       });
 
       // Play button
-      const playBtn = document.createElement('button');
-      playBtn.textContent = '\u25b6';
+      const playBtn = document.createElement("button");
+      playBtn.textContent = "\u25b6";
       playBtn.title = `Run ${test.name}`;
-      playBtn.style.cssText = 'background:none;border:none;color:#4ec9b0;cursor:pointer;font-size:12px;padding:0 2px;line-height:1;';
-      playBtn.addEventListener('mouseenter', () => { playBtn.style.color = '#6ee7c7'; });
-      playBtn.addEventListener('mouseleave', () => { playBtn.style.color = '#4ec9b0'; });
-      playBtn.addEventListener('click', (e) => {
+      playBtn.style.cssText =
+        "background:none;border:none;color:var(--almostnode-success);cursor:pointer;font-size:12px;padding:0 2px;line-height:1;";
+      playBtn.addEventListener("mouseenter", () => {
+        playBtn.style.color = "var(--almostnode-success)";
+      });
+      playBtn.addEventListener("mouseleave", () => {
+        playBtn.style.color = "var(--almostnode-success)";
+      });
+      playBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.callbacks?.onRun(test.id);
       });
 
       // Delete button
-      const delBtn = document.createElement('button');
-      delBtn.textContent = '\u00d7';
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "\u00d7";
       delBtn.title = `Delete ${test.name}`;
-      delBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:16px;padding:0 2px;line-height:1;';
-      delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#e06c75'; });
-      delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#888'; });
-      delBtn.addEventListener('click', (e) => {
+      delBtn.style.cssText =
+        "background:none;border:none;color:var(--almostnode-quiet);cursor:pointer;font-size:16px;padding:0 2px;line-height:1;";
+      delBtn.addEventListener("mouseenter", () => {
+        delBtn.style.color = "var(--almostnode-danger)";
+      });
+      delBtn.addEventListener("mouseleave", () => {
+        delBtn.style.color = "var(--almostnode-quiet)";
+      });
+      delBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         this.callbacks?.onDelete(test.id);
       });
@@ -2342,13 +2688,13 @@ export function registerWorkbenchSurfaces(options: {
 
     constructor() {
       super(PREVIEW_EDITOR_RESOURCE);
-      this.setName('Preview');
+      this.setName("Preview");
       this.setTitle({
-        short: 'Preview',
-        medium: 'Preview',
-        long: 'Almostnode Preview',
+        short: "Preview",
+        medium: "Preview",
+        long: "Almostnode Preview",
       });
-      this.setDescription('Live workspace preview');
+      this.setDescription("Live workspace preview");
       this.addCapability(EditorInputCapabilities.Singleton);
     }
   }
@@ -2359,8 +2705,8 @@ export function registerWorkbenchSurfaces(options: {
     }
 
     initialize(): HTMLElement {
-      const element = document.createElement('div');
-      element.className = 'almostnode-preview-editor-pane';
+      const element = document.createElement("div");
+      element.className = "almostnode-preview-editor-pane";
       return element;
     }
 
@@ -2378,9 +2724,13 @@ export function registerWorkbenchSurfaces(options: {
 
     constructor() {
       super(DATABASE_EDITOR_RESOURCE);
-      this.setName('Database');
-      this.setTitle({ short: 'Database', medium: 'Database Browser', long: 'Database Browser' });
-      this.setDescription('Browse and query PGlite databases');
+      this.setName("Database");
+      this.setTitle({
+        short: "Database",
+        medium: "Database Browser",
+        long: "Database Browser",
+      });
+      this.setDescription("Browse and query PGlite databases");
       this.addCapability(EditorInputCapabilities.Singleton);
     }
   }
@@ -2391,8 +2741,8 @@ export function registerWorkbenchSurfaces(options: {
     }
 
     initialize(): HTMLElement {
-      const el = document.createElement('div');
-      el.className = 'almostnode-database-editor-pane';
+      const el = document.createElement("div");
+      el.className = "almostnode-database-editor-pane";
       return el;
     }
 
@@ -2409,8 +2759,19 @@ export function registerWorkbenchSurfaces(options: {
   const databaseInput = new DatabaseEditorInput();
   const disposables = new DisposableStore();
 
-  disposables.add(registerEditorPane(PREVIEW_EDITOR_TYPE_ID, 'Preview', PreviewEditorPane, [PreviewEditorInput]));
-  disposables.add(registerEditorPane(DATABASE_EDITOR_TYPE_ID, 'Database', DatabaseEditorPane, [DatabaseEditorInput]));
+  disposables.add(
+    registerEditorPane(PREVIEW_EDITOR_TYPE_ID, "Preview", PreviewEditorPane, [
+      PreviewEditorInput,
+    ]),
+  );
+  disposables.add(
+    registerEditorPane(
+      DATABASE_EDITOR_TYPE_ID,
+      "Database",
+      DatabaseEditorPane,
+      [DatabaseEditorInput],
+    ),
+  );
 
   const rendered = registerRenderedEditors({
     vfs: options.vfs,
@@ -2420,28 +2781,36 @@ export function registerWorkbenchSurfaces(options: {
   disposables.add(
     registerCustomView({
       id: FILES_VIEW_ID,
-      name: 'Files',
+      name: "Files",
       location: ViewContainerLocation.Sidebar,
       default: true,
       order: -1,
-      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></svg>'),
+      icon:
+        "data:image/svg+xml," +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></svg>',
+        ),
       renderBody: (container) => options.filesSurface.attach(container),
     }),
   );
   disposables.add(
     registerCustomView({
       id: OPEN_CODE_VIEW_ID,
-      name: 'OpenCode',
+      name: "OpenCode",
       location: ViewContainerLocation.Sidebar,
       order: 0,
-      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>'),
+      icon:
+        "data:image/svg+xml," +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>',
+        ),
       renderBody: (container) => options.openCodeSurface.attach(container),
     }),
   );
   disposables.add(
     registerCustomView({
       id: TERMINAL_VIEW_ID,
-      name: 'Terminal',
+      name: "Terminal",
       location: ViewContainerLocation.Panel,
       renderBody: (container) => options.terminalSurface.attach(container),
     }),
@@ -2449,10 +2818,14 @@ export function registerWorkbenchSurfaces(options: {
   disposables.add(
     registerCustomView({
       id: KEYCHAIN_VIEW_ID,
-      name: 'Keychain',
+      name: "Keychain",
       location: ViewContainerLocation.AuxiliaryBar,
       order: 2,
-      icon: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'),
+      icon:
+        "data:image/svg+xml," +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+        ),
       renderBody: (container) => options.keychainSurface.attach(container),
     }),
   );

@@ -51,10 +51,7 @@
   "editor.cursorBlinking": "phase",
   "editor.tabSize": 2,
   "editor.detectIndentation": false,
-  "emmet.excludeLanguages": [
-    "[typescriptreact]",
-    "markdown"
-  ],
+  "emmet.excludeLanguages": ["[typescriptreact]", "markdown"],
   "workbench.colorCustomizations": {
     "[Islands Dark]": {
       "input.background": "#191a1c",
@@ -101,13 +98,8 @@
   },
   "vim.insertModeKeyBindings": [
     {
-      "before": [
-        "j",
-        "k"
-      ],
-      "after": [
-        "<Esc>"
-      ]
+      "before": ["j", "k"],
+      "after": ["<Esc>"]
     }
   ],
   "editor.accessibilitySupport": "off",

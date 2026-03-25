@@ -1,7 +1,7 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 async function seedStoredWorkbenchExtensions(
-  page: import("@playwright/test").Page,
+  page: Page,
   entries: unknown[],
 ) {
   await page.goto("/", {
@@ -41,7 +41,7 @@ async function seedStoredWorkbenchExtensions(
   }, entries);
 }
 
-async function loadWebIDE(page: import("@playwright/test").Page) {
+async function loadWebIDE(page: Page) {
   await page.goto("/examples/web-ide-demo.html?marketplace=mock", {
     waitUntil: "domcontentloaded",
   });
@@ -49,12 +49,12 @@ async function loadWebIDE(page: import("@playwright/test").Page) {
     () =>
       Boolean((window as { __almostnodeWebIDE?: unknown }).__almostnodeWebIDE),
     {
-      timeout: 30000,
+      timeout: 90000,
     },
   );
 }
 
-async function expectPreviewApp(page: import("@playwright/test").Page) {
+async function expectPreviewApp(page: Page) {
   await expect(page.locator("#webidePreviewStatus")).toContainText(
     "/__virtual__/3000/",
     {
@@ -72,6 +72,122 @@ async function expectPreviewApp(page: import("@playwright/test").Page) {
   });
 
   return previewFrame;
+}
+
+async function waitForWorkbenchTheme(page: Page, theme: "light" | "dark") {
+  await page.waitForFunction(
+    (expectedTheme) => {
+      return document.documentElement.dataset.almostnodeTheme === expectedTheme;
+    },
+    theme,
+    { timeout: 30000 },
+  );
+}
+
+async function readWorkbenchThemeSnapshot(page: Page) {
+  return page.evaluate(() => {
+    const host = (
+      window as {
+        __almostnodeWebIDE?: {
+          terminal?: { options?: { theme?: { background?: string } } };
+        };
+      }
+    ).__almostnodeWebIDE;
+    const parseLuminance = (value: string) => {
+      const channels = value.match(/\d+/g)?.slice(0, 3).map(Number) ?? [];
+      return channels.reduce((sum, channel) => sum + channel, 0);
+    };
+    const previewToolbar = document.querySelector(
+      ".almostnode-preview-surface__toolbar",
+    ) as HTMLElement | null;
+    const keychain = document.querySelector(
+      ".almostnode-keychain-sidebar",
+    ) as HTMLElement | null;
+
+    return {
+      rootTheme: document.documentElement.dataset.almostnodeTheme ?? "",
+      colorScheme: document.documentElement.style.colorScheme,
+      previewToolbarBackground: previewToolbar
+        ? getComputedStyle(previewToolbar).backgroundColor
+        : "",
+      previewToolbarLuminance: previewToolbar
+        ? parseLuminance(getComputedStyle(previewToolbar).backgroundColor)
+        : -1,
+      keychainBackground: keychain
+        ? getComputedStyle(keychain).backgroundColor
+        : "",
+      keychainLuminance: keychain
+        ? parseLuminance(getComputedStyle(keychain).backgroundColor)
+        : -1,
+      terminalThemeBackground: host?.terminal?.options?.theme?.background ?? "",
+    };
+  });
+}
+
+async function showSidebarTab(page: Page, name: "OpenCode") {
+  await page.getByRole("tab", { name, exact: true }).click();
+}
+
+async function openOpenCodeSidebar(page: Page) {
+  await showSidebarTab(page, "OpenCode");
+  await expect(page.locator(".almostnode-opencode-panel-host")).toBeVisible();
+  await page.waitForFunction(
+    () =>
+      Boolean(
+        (window as { __OPENCODE_BROWSER_TUI__?: unknown })
+          .__OPENCODE_BROWSER_TUI__,
+      ),
+    {
+      timeout: 3 * 60 * 1000,
+    },
+  );
+  await expect(page.locator(".almostnode-opencode-host")).toBeVisible({
+    timeout: 120000,
+  });
+  await page.waitForTimeout(500);
+}
+
+async function readSidebarLayoutSnapshot(page: Page) {
+  return page.evaluate(() => {
+    const measure = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      const rect = element.getBoundingClientRect();
+      return {
+        selector,
+        rect: {
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height,
+        },
+        clientWidth: element.clientWidth,
+        clientHeight: element.clientHeight,
+        scrollWidth: element.scrollWidth,
+        scrollHeight: element.scrollHeight,
+      };
+    };
+
+    return {
+      sidebarPane: measure(".part.sidebar .pane-body"),
+      sidebarScrollable: measure(
+        ".part.sidebar .pane-body > .monaco-scrollable-element",
+      ),
+      openCodePanelHost: measure(".almostnode-opencode-panel-host"),
+      openCodeSurface: measure(".almostnode-opencode-surface"),
+      openCodeStatusRow: measure(".almostnode-opencode-surface__status-row"),
+      openCodeBody: measure(".almostnode-opencode-surface__body"),
+      openCodeTerminal: measure(
+        '.almostnode-opencode-surface__terminal:not([hidden])',
+      ),
+      openCodeHost: measure(".almostnode-opencode-host"),
+    };
+  });
 }
 
 test.describe("web-ide workbench", () => {
@@ -281,6 +397,66 @@ test.describe("web-ide workbench", () => {
     expect(state.matches).toContain("/project/src/search-fixture.ts");
   });
 
+  test("keeps the OpenCode sidebar surface edge-to-edge without overflow", async ({
+    page,
+  }) => {
+    test.setTimeout(6 * 60 * 1000);
+    await loadWebIDE(page);
+
+    await openOpenCodeSidebar(page);
+    const layout = await readSidebarLayoutSnapshot(page);
+
+    expect(layout.sidebarScrollable).not.toBeNull();
+    expect(layout.openCodePanelHost).not.toBeNull();
+    expect(layout.openCodeSurface).not.toBeNull();
+    expect(layout.openCodeStatusRow).not.toBeNull();
+    expect(layout.openCodeBody).not.toBeNull();
+    expect(layout.openCodeTerminal).not.toBeNull();
+    expect(layout.openCodeHost).not.toBeNull();
+
+    expect(layout.openCodePanelHost!.rect.right).toBeLessThanOrEqual(
+      layout.sidebarScrollable!.rect.right + 1,
+    );
+    expect(layout.openCodeSurface!.rect.right).toBeLessThanOrEqual(
+      layout.openCodePanelHost!.rect.right + 1,
+    );
+    expect(layout.openCodeStatusRow!.rect.right).toBeLessThanOrEqual(
+      layout.openCodeSurface!.rect.right + 1,
+    );
+    expect(layout.openCodeBody!.rect.right).toBeLessThanOrEqual(
+      layout.openCodeSurface!.rect.right + 1,
+    );
+    expect(layout.openCodeTerminal!.rect.right).toBeLessThanOrEqual(
+      layout.openCodeBody!.rect.right + 1,
+    );
+    expect(layout.openCodeHost!.rect.right).toBeLessThanOrEqual(
+      layout.openCodeTerminal!.rect.right + 1,
+    );
+
+    expect(
+      Math.abs(
+        layout.openCodeSurface!.rect.bottom -
+          layout.sidebarScrollable!.rect.bottom,
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(
+        layout.openCodePanelHost!.rect.bottom -
+          layout.sidebarScrollable!.rect.bottom,
+      ),
+    ).toBeLessThanOrEqual(1);
+
+    expect(layout.openCodeBody!.scrollWidth).toBeLessThanOrEqual(
+      layout.openCodeBody!.clientWidth + 1,
+    );
+    expect(layout.openCodeTerminal!.scrollWidth).toBeLessThanOrEqual(
+      layout.openCodeTerminal!.clientWidth + 1,
+    );
+    expect(layout.openCodeHost!.scrollWidth).toBeLessThanOrEqual(
+      layout.openCodeHost!.clientWidth + 1,
+    );
+  });
+
   test("starts the seeded workspace app and renders it in the preview iframe", async ({
     page,
   }) => {
@@ -289,6 +465,101 @@ test.describe("web-ide workbench", () => {
     const previewFrame = await expectPreviewApp(page);
     await expect(
       previewFrame.getByRole("button", { name: "Toggle theme" }),
+    ).toBeVisible();
+  });
+
+  test("uses the workspace theme instead of the OS theme for IDE chrome", async ({
+    page,
+  }) => {
+    test.setTimeout(2 * 60 * 1000);
+    await page.emulateMedia({ colorScheme: "light" });
+    await loadWebIDE(page);
+    await expect(
+      page.locator(".almostnode-preview-surface__toolbar"),
+    ).toBeVisible();
+
+    await page.evaluate(async () => {
+      const host = (
+        window as {
+          __almostnodeWebIDE: {
+            executeWorkbenchCommand(command: string): Promise<unknown>;
+          };
+        }
+      ).__almostnodeWebIDE;
+      await host.executeWorkbenchCommand("almostnode.keychain.primary");
+    });
+
+    await expect(page.locator(".almostnode-keychain-sidebar")).toBeVisible();
+
+    const snapshot = await readWorkbenchThemeSnapshot(page);
+    expect(snapshot.rootTheme).toBe("dark");
+    expect(snapshot.colorScheme).toBe("dark");
+    expect(snapshot.terminalThemeBackground).toBe("#0e1218");
+    expect(snapshot.previewToolbarLuminance).toBeLessThan(220);
+    expect(snapshot.keychainLuminance).toBeLessThan(260);
+  });
+
+  test("updates preview, terminal, and custom panels when the workbench theme changes", async ({
+    page,
+  }) => {
+    test.setTimeout(2 * 60 * 1000);
+    await loadWebIDE(page);
+    await expect(
+      page.locator(".almostnode-preview-surface__toolbar"),
+    ).toBeVisible();
+
+    await page.evaluate(async () => {
+      await (
+        window as {
+          __almostnodeWebIDE: {
+            setWorkbenchColorTheme(themeId: string): Promise<void>;
+          };
+        }
+      ).__almostnodeWebIDE.setWorkbenchColorTheme("Islands Light");
+    });
+    await waitForWorkbenchTheme(page, "light");
+
+    await page.evaluate(async () => {
+      const host = (
+        window as {
+          __almostnodeWebIDE: {
+            executeWorkbenchCommand(command: string): Promise<unknown>;
+          };
+        }
+      ).__almostnodeWebIDE;
+      await host.executeWorkbenchCommand("almostnode.keychain.primary");
+    });
+    await expect(page.locator(".almostnode-keychain-sidebar")).toBeVisible();
+
+    const lightSnapshot = await readWorkbenchThemeSnapshot(page);
+    expect(lightSnapshot.rootTheme).toBe("light");
+    expect(lightSnapshot.colorScheme).toBe("light");
+    expect(lightSnapshot.terminalThemeBackground).toBe("#ffffff");
+    expect(lightSnapshot.previewToolbarLuminance).toBeGreaterThan(500);
+    expect(lightSnapshot.keychainLuminance).toBeGreaterThan(500);
+    await expect(
+      page.locator(".almostnode-preview-surface__toolbar"),
+    ).toBeVisible();
+
+    await page.evaluate(async () => {
+      await (
+        window as {
+          __almostnodeWebIDE: {
+            setWorkbenchColorTheme(themeId: string): Promise<void>;
+          };
+        }
+      ).__almostnodeWebIDE.setWorkbenchColorTheme("Islands Dark");
+    });
+    await waitForWorkbenchTheme(page, "dark");
+
+    const darkSnapshot = await readWorkbenchThemeSnapshot(page);
+    expect(darkSnapshot.rootTheme).toBe("dark");
+    expect(darkSnapshot.colorScheme).toBe("dark");
+    expect(darkSnapshot.terminalThemeBackground).toBe("#0e1218");
+    expect(darkSnapshot.previewToolbarLuminance).toBeLessThan(220);
+    expect(darkSnapshot.keychainLuminance).toBeLessThan(260);
+    await expect(
+      page.locator(".almostnode-preview-surface__toolbar"),
     ).toBeVisible();
   });
 

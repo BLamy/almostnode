@@ -7,7 +7,7 @@ import react from "@vitejs/plugin-react";
 import solid from "babel-preset-solid";
 import { build } from "esbuild";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
 import wasm from "vite-plugin-wasm";
 import tailwindcss from "@tailwindcss/vite";
@@ -40,6 +40,7 @@ const workspaceRoot = resolve(__dirname, "../..");
 const opencodeRoot = resolve(workspaceRoot, "vendor/opencode");
 const opentuiRoot = resolve(workspaceRoot, "vendor/opentui");
 const isTest = process.env.VITEST === "true";
+const appBase = process.env.GITHUB_PAGES ? "/almostnode/" : "/";
 
 const opencodeSrc = resolve(opencodeRoot, "packages/opencode/src");
 const opencodeTuiSrc = resolve(opencodeSrc, "cli/cmd/tui");
@@ -135,10 +136,11 @@ const commonJsInteropAliasMap = new Map<string, string>([
 const opentuiCoreSrc = resolve(opentuiRoot, "packages/core/src");
 const opentuiSolidSrc = resolve(opentuiRoot, "packages/solid");
 const solidJsRoot = resolve(opentuiRoot, "node_modules/solid-js");
-const opentuiWasmPath = `/@fs/${resolveFirstExistingPath([
+const opentuiWasmSourcePath = resolveFirstExistingPath([
   resolve(opentuiCoreSrc, "zig/lib/wasm32-freestanding/libopentui.wasm"),
   resolve(opentuiCoreSrc, "zig/lib/wasm32-freestanding/opentui.wasm"),
-])}`;
+]);
+const opentuiWasmPath = `${appBase}opentui/opentui.wasm`;
 
 function migrationTimestamp(tag: string): number {
   const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(tag);
@@ -158,6 +160,39 @@ function migrationTimestamp(tag: string): number {
 
 function resolveFirstExistingPath(paths: string[]): string {
   return paths.find((path) => existsSync(path)) ?? paths[0];
+}
+
+function opentuiWasmAsset(): Plugin {
+  const publicPathname = "/opentui/opentui.wasm";
+
+  return {
+    name: "opentui-wasm-asset",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const requestUrl = req.url;
+        if (!requestUrl) {
+          next();
+          return;
+        }
+
+        const pathname = new URL(requestUrl, "http://127.0.0.1").pathname;
+        if (pathname !== publicPathname) {
+          next();
+          return;
+        }
+
+        res.setHeader("Content-Type", "application/wasm");
+        res.end(readFileSync(opentuiWasmSourcePath));
+      });
+    },
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "opentui/opentui.wasm",
+        source: readFileSync(opentuiWasmSourcePath),
+      });
+    },
+  };
 }
 
 async function loadOpencodeMigrations(): Promise<Array<{ sql: string; timestamp: number; name: string }>> {
@@ -508,7 +543,7 @@ export default defineConfig(async ({ mode }) => {
   const opencodeMigrations = await loadOpencodeMigrations();
 
   return {
-    base: process.env.GITHUB_PAGES ? "/almostnode/" : "/",
+    base: appBase,
     test: {
       exclude: [
         "**/node_modules/**",
@@ -519,6 +554,7 @@ export default defineConfig(async ({ mode }) => {
     plugins: [
       corsProxyPlugin(),
       workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, "src/templates/content") }),
+      opentuiWasmAsset(),
       opentuiSolidTransform(),
       treeSitterQueryLoader(),
       commonJsNodeModulesInterop(),
