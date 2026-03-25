@@ -56,7 +56,8 @@ jobs:
         run: |
           mkdir -p deploy
           cp -R apps/web-ide/dist-site/client/. deploy/
-          cp deploy/index.html deploy/404.html
+          cp apps/web-ide/dist-site/client/_shell.html deploy/index.html
+          cp apps/web-ide/dist-site/client/_shell.html deploy/404.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
