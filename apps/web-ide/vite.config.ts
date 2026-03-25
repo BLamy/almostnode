@@ -55,6 +55,7 @@ const webIdeEventsShimPath = resolve(almostnodeShimsRoot, "events.ts");
 const webIdeBufferShimPath = resolve(__dirname, "src/shims/node-buffer.ts");
 const webIdeGlobalShimPath = resolve(__dirname, "src/shims/node-global.ts");
 const webIdeProcessShimPath = resolve(__dirname, "src/shims/node-process.ts");
+const webIdeGrayMatterShimPath = resolve(__dirname, "src/shims/gray-matter.browser.ts");
 const opencodeChildProcessShimPath = resolve(__dirname, "src/shims/opencode-child-process.ts");
 const opencodeCorsProxyShimPath = resolve(__dirname, "src/shims/opencode-cors-proxy.ts");
 const opencodeRipgrepShimPath = resolve(__dirname, "src/shims/opencode-ripgrep.ts");
@@ -1184,7 +1185,7 @@ export default defineConfig(async ({ mode }) => {
         },
         {
           find: "gray-matter",
-          replacement: resolve(opencodeBrowserSrc, "shims/gray-matter.browser.ts"),
+          replacement: webIdeGrayMatterShimPath,
         },
         {
           find: "ignore",

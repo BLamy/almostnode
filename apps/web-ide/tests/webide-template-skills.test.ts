@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import matter from "../../../vendor/opencode/packages/browser/src/shims/gray-matter.browser";
+import matter from "../src/shims/gray-matter.browser";
 
 describe("Vite template skills", () => {
   it("declare name and description frontmatter for every skill", () => {

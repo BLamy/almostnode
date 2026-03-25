@@ -195,7 +195,7 @@ describe("web-ide vite config", () => {
           && "find" in entry
           && entry.find === "gray-matter"
           && typeof entry.replacement === "string"
-          && entry.replacement.endsWith("vendor/opencode/packages/browser/src/shims/gray-matter.browser.ts"),
+          && entry.replacement.endsWith("apps/web-ide/src/shims/gray-matter.browser.ts"),
       ),
     ).toBe(true);
 

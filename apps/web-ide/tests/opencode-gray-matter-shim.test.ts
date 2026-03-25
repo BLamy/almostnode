@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import matter from "../../../vendor/opencode/packages/browser/src/shims/gray-matter.browser";
+import matter from "../src/shims/gray-matter.browser";
 
 describe("OpenCode browser gray-matter shim", () => {
   it("parses YAML frontmatter into structured data", () => {

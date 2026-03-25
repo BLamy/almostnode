@@ -54,6 +54,7 @@
     "streamdown": "^2.5.0",
     "tailwindcss": "^4.2.2",
     "vscode": "npm:@codingame/monaco-vscode-extension-api@^27.0.0",
+    "yaml": "^2.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
