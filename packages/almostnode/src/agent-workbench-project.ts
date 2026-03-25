@@ -44,7 +44,7 @@ var openai = createOpenAI({
   },
 });
 
-var SYSTEM_PROMPT = 'You are a frontend developer agent. You help users build and modify a Next.js App Router application running in the browser.\\n\\nAvailable tools:\\n- read_file: Read file contents at a given path\\n- write_file: Create or overwrite a file (parent directories are created automatically)\\n- replace_in_file: Make a targeted text replacement in a file (first occurrence)\\n- list_files: List files and directories at a path\\n- run_bash: Run a shell command (e.g. ls, cat, echo, node scripts)\\n\\nThe project uses Next.js App Router. Current structure:\\n- /app/layout.tsx — Root layout\\n- /app/page.tsx — Root page (the chat UI, but you can replace it)\\n- /public/ — Static assets\\n- /package.json — Project config\\n\\nGuidelines:\\n- You can modify ANY file in the project, including the root page (/app/page.tsx) and layout\\n- The only protected file is /pages/api/chat.ts (the agent API route)\\n- Create new pages under /app/ (e.g. /app/about/page.tsx, /app/dashboard/page.tsx)\\n- After creating a page, tell the user to type the path (e.g. /about) in the preview URL bar and click Go\\n- Use inline styles for styling\\n- Write clean, modern React (JSX/TSX) code\\n- Keep responses concise — explain what you did briefly';
+var SYSTEM_PROMPT = 'You are a frontend developer agent. You help users build and modify a Next.js App Router application running in the browser.\\n\\nAvailable tools:\\n- read_file: Read file contents at a given path\\n- write_file: Create a new file or intentionally rewrite a full file\\n- replace_in_file: Replace exact text in an existing file; set replace_all to change every occurrence\\n- list_files: List files and directories at a path\\n- run_bash: Run a shell command (e.g. ls, cat, echo, node scripts)\\n\\nThe project uses Next.js App Router. Current structure:\\n- /app/layout.tsx — Root layout\\n- /app/page.tsx — Root page (the chat UI, but you can replace it)\\n- /public/ — Static assets\\n- /package.json — Project config\\n\\nGuidelines:\\n- You can modify ANY file in the project, including the root page (/app/page.tsx) and layout\\n- The only protected file is /pages/api/chat.ts (the agent API route)\\n- Prefer replace_in_file for existing files; use write_file for new files or explicit full rewrites\\n- Create new pages under /app/ (e.g. /app/about/page.tsx, /app/dashboard/page.tsx)\\n- After creating a page, tell the user to type the path (e.g. /about) in the preview URL bar and click Go\\n- Use inline styles for styling\\n- Write clean, modern React (JSX/TSX) code\\n- Keep responses concise — explain what you did briefly';
 
 function validatePath(path, isWrite) {
   if (!path.startsWith('/')) return 'Path must be absolute (start with /)';
@@ -52,6 +52,18 @@ function validatePath(path, isWrite) {
   if (path.startsWith('/node_modules')) return 'Cannot access /node_modules';
   if (isWrite && path === '/pages/api/chat.ts') return 'Cannot modify the agent API route';
   return null;
+}
+
+function countOccurrences(text, needle) {
+  if (!needle) return 0;
+  var count = 0;
+  var index = 0;
+  while (true) {
+    var next = text.indexOf(needle, index);
+    if (next === -1) return count;
+    count++;
+    index = next + needle.length;
+  }
 }
 
 var agentTools = {
@@ -69,7 +81,7 @@ var agentTools = {
   }),
 
   write_file: tool({
-    description: 'Write content to a file. Creates the file if it does not exist, or overwrites it. Parent directories are created automatically.',
+    description: 'Write content to a file. Use this to create a new file or intentionally rewrite a full file. Parent directories are created automatically.',
     inputSchema: z.object({
       path: z.string().describe('Absolute path to the file'),
       content: z.string().describe('Full file content to write'),
@@ -89,19 +101,26 @@ var agentTools = {
   }),
 
   replace_in_file: tool({
-    description: 'Replace the first occurrence of old_text with new_text in a file. Use this for targeted edits instead of rewriting the whole file.',
+    description: 'Replace exact text in an existing file. Set replace_all only when every occurrence should change.',
     inputSchema: z.object({
       path: z.string().describe('Absolute path to the file'),
-      old_text: z.string().describe('Exact text to find in the file'),
+      old_text: z.string().describe('Exact text to find in the file. Add more surrounding context if only one occurrence should change.'),
       new_text: z.string().describe('Replacement text'),
+      replace_all: z.boolean().optional().describe('Replace every occurrence of old_text. Leave false unless all matches should change.'),
     }),
     execute: async function(args) {
       var err = validatePath(args.path, true);
       if (err) return 'Error: ' + err;
       if (!existsSync(args.path)) return 'Error: File not found: ' + args.path;
       var fileContent = readFile(args.path);
-      if (!fileContent.includes(args.old_text)) return 'Error: old_text not found in file';
-      var newContent = fileContent.replace(args.old_text, args.new_text);
+      var occurrences = countOccurrences(fileContent, args.old_text);
+      if (occurrences === 0) return 'Error: old_text not found in file';
+      if (occurrences > 1 && !args.replace_all) {
+        return 'Error: Found ' + occurrences + ' occurrences of old_text in ' + args.path + '. Add more context or set replace_all=true if every match should change.';
+      }
+      var newContent = args.replace_all
+        ? fileContent.split(args.old_text).join(args.new_text)
+        : fileContent.replace(args.old_text, args.new_text);
       writeFile(args.path, newContent);
       log('File edited: ' + args.path);
       return 'Replacement made successfully';
