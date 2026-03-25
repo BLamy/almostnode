@@ -55,15 +55,8 @@ jobs:
       - name: Prepare web-ide deploy directory
         run: |
           mkdir -p deploy
-          cp apps/web-ide/dist-site/web-ide-demo.html deploy/index.html
-          # Copy all shared assets (JS chunks, CSS, wasm, etc.)
-          cp -r apps/web-ide/dist-site/assets deploy/assets
-          # Copy service worker and other root-level files needed at runtime
-          cp apps/web-ide/dist-site/__sw__.js deploy/__sw__.js
-          cp apps/web-ide/dist-site/favicon.svg deploy/favicon.svg
-          # Copy PGlite WASM assets needed at runtime
-          cp apps/web-ide/dist-site/pglite.wasm deploy/pglite.wasm
-          cp apps/web-ide/dist-site/pglite.data deploy/pglite.data
+          cp -R apps/web-ide/dist-site/client/. deploy/
+          cp apps/web-ide/dist-site/client/examples/web-ide-demo.html deploy/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
