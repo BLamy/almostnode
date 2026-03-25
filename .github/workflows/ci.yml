@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -28,8 +30,16 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'pnpm'
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install vendored OpenCode/OpenTUI dependencies
+        run: pnpm vendor:install:opencode
 
       - name: Build library
         run: pnpm nx build almostnode
@@ -46,6 +56,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -58,8 +70,16 @@ jobs:
           node-version: 22
           cache: 'pnpm'
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install vendored OpenCode/OpenTUI dependencies
+        run: pnpm vendor:install:opencode
 
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
