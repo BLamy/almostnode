@@ -3,6 +3,8 @@
  * Provides stubs that work for basic use cases
  */
 
+import { getDefaultNetworkController } from '../network';
+
 // DNS lookup callback type
 type LookupCallback = (err: Error | null, address?: string, family?: number) => void;
 type LookupAllCallback = (err: Error | null, addresses?: Array<{ address: string; family: number }>) => void;
@@ -32,24 +34,37 @@ export function lookup(
   const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
   const options = typeof optionsOrCallback === 'object' ? optionsOrCallback : {};
 
-  // In browser, we can't do real DNS lookups
-  // Return localhost for localhost, or a fake IP for other hostnames
   setImmediate(() => {
-    if (hostname === 'localhost' || hostname === '127.0.0.1') {
-      if (options.all) {
-        (cb as LookupAllCallback)(null, [{ address: '127.0.0.1', family: 4 }]);
-      } else {
-        (cb as LookupCallback)(null, '127.0.0.1', 4);
-      }
-    } else {
-      // For other hostnames, we can't resolve them in browser
-      // Return an error or a placeholder
-      if (options.all) {
-        (cb as LookupAllCallback)(null, [{ address: '0.0.0.0', family: 4 }]);
-      } else {
-        (cb as LookupCallback)(null, '0.0.0.0', 4);
-      }
-    }
+    void getDefaultNetworkController()
+      .lookup(hostname, options)
+      .then((result) => {
+        const addresses = result.addresses.length > 0
+          ? result.addresses
+          : [{ address: options.family === 6 ? '::1' : '0.0.0.0', family: options.family === 6 ? 6 : 4 }];
+
+        if (options.all) {
+          (cb as LookupAllCallback)(null, addresses);
+        } else {
+          const first = addresses[0];
+          (cb as LookupCallback)(null, first.address, first.family);
+        }
+      })
+      .catch(() => {
+        if (hostname === 'localhost' || hostname === '127.0.0.1') {
+          if (options.all) {
+            (cb as LookupAllCallback)(null, [{ address: '127.0.0.1', family: 4 }]);
+          } else {
+            (cb as LookupCallback)(null, '127.0.0.1', 4);
+          }
+          return;
+        }
+
+        if (options.all) {
+          (cb as LookupAllCallback)(null, [{ address: '0.0.0.0', family: 4 }]);
+        } else {
+          (cb as LookupCallback)(null, '0.0.0.0', 4);
+        }
+      });
   });
 }
 
@@ -61,7 +76,10 @@ export function resolve(
   callback: (err: Error | null, addresses?: string[]) => void
 ): void {
   setImmediate(() => {
-    callback(null, ['0.0.0.0']);
+    void getDefaultNetworkController()
+      .lookup(hostname)
+      .then((result) => callback(null, result.addresses.map((entry) => entry.address)))
+      .catch(() => callback(null, ['0.0.0.0']));
   });
 }
 
@@ -77,7 +95,10 @@ export function resolve6(
   callback: (err: Error | null, addresses?: string[]) => void
 ): void {
   setImmediate(() => {
-    callback(null, ['::1']);
+    void getDefaultNetworkController()
+      .lookup(hostname, { family: 6, all: true })
+      .then((result) => callback(null, result.addresses.map((entry) => entry.address)))
+      .catch(() => callback(null, ['::1']));
   });
 }
 

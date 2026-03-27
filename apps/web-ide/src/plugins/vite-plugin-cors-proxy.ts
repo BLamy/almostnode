@@ -2,6 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { Plugin, PreviewServer, ViteDevServer } from 'vite';
 
 const PROXY_PATH = '/__api/cors-proxy';
+const UPSTREAM_STATUS_HEADER = 'x-almostnode-upstream-status';
+const UPSTREAM_STATUS_TEXT_HEADER = 'x-almostnode-upstream-status-text';
 const HOP_BY_HOP_HEADERS = new Set([
   'accept-encoding',
   'connection',
@@ -72,8 +74,21 @@ function writeResponse(
   upstream: Response,
   body: Buffer,
 ): void {
-  res.statusCode = upstream.status;
-  res.statusMessage = upstream.statusText;
+  const isRedirect =
+    upstream.status >= 300
+    && upstream.status < 400
+    && upstream.headers.has('location');
+
+  // Expose upstream redirects as metadata instead of forwarding a 3xx status.
+  // Browser fetch() turns manual cross-origin redirects into opaqueredirect
+  // responses with status=0, which breaks the runtime redirect loop.
+  res.statusCode = isRedirect ? 200 : upstream.status;
+  res.statusMessage = isRedirect ? 'OK' : upstream.statusText;
+
+  if (isRedirect) {
+    res.setHeader(UPSTREAM_STATUS_HEADER, String(upstream.status));
+    res.setHeader(UPSTREAM_STATUS_TEXT_HEADER, upstream.statusText || '');
+  }
 
   for (const [key, value] of upstream.headers.entries()) {
     const lower = key.toLowerCase();

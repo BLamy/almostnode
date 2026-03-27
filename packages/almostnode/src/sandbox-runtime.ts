@@ -5,6 +5,8 @@
  * sessionStorage, and IndexedDB by running code on a different origin.
  */
 
+import { getDefaultNetworkController } from './network';
+import type { NetworkController } from './network/types';
 import type { VirtualFS } from './virtual-fs';
 import type { IRuntime, IExecuteResult, IRuntimeOptions, VFSSnapshot } from './runtime-interface';
 
@@ -31,6 +33,7 @@ export class SandboxRuntime implements IRuntime {
   private sandboxOrigin: string;
   private vfs: VirtualFS;
   private options: IRuntimeOptions;
+  private networkController: NetworkController;
   private initialized: Promise<void>;
   private pending = new Map<string, { resolve: (result: IExecuteResult) => void; reject: (error: Error) => void }>();
   private messageId = 0;
@@ -42,6 +45,10 @@ export class SandboxRuntime implements IRuntime {
     this.sandboxOrigin = new URL(sandboxUrl).origin;
     this.vfs = vfs;
     this.options = options;
+    this.networkController = getDefaultNetworkController();
+    if (options.network) {
+      void this.networkController.configure(options.network);
+    }
 
     // Create hidden iframe
     // NOTE: Security comes from the DIFFERENT ORIGIN (e.g., localhost:3002 vs localhost:5173)
@@ -126,6 +133,7 @@ export class SandboxRuntime implements IRuntime {
       options: {
         cwd: this.options.cwd,
         env: this.options.env,
+        network: this.options.network,
         // Note: onConsole callback can't be sent cross-origin,
         // sandbox will send console messages back via postMessage
       },
@@ -219,6 +227,10 @@ export class SandboxRuntime implements IRuntime {
    */
   getVFS(): VirtualFS {
     return this.vfs;
+  }
+
+  getNetwork(): NetworkController {
+    return this.networkController;
   }
 
   /**

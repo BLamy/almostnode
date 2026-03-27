@@ -2251,6 +2251,12 @@ export interface KeychainSlotStatus {
   active: boolean;
   /** Whether this slot supports login/logout buttons in the sidebar */
   canAuth?: boolean;
+  authAction?: string;
+  authDisabled?: boolean;
+  statusText?: string;
+  selectActionPrefix?: string;
+  selectOptions?: Array<{ label: string; value: string }>;
+  selectValue?: string;
 }
 
 // ── SVG icons for services ──────────────────────────────────────────────────
@@ -2380,25 +2386,69 @@ export class KeychainSidebarSurface {
 
       const statusText = document.createElement("div");
       statusText.style.cssText = `font-size: 11px; color: ${slot.active ? "var(--almostnode-success)" : "var(--almostnode-quiet)"}; line-height: 1.3;`;
-      statusText.textContent = slot.active ? "Connected" : "Not connected";
+      statusText.textContent =
+        slot.statusText ?? (slot.active ? "Connected" : "Not connected");
 
       info.append(label, statusText);
+
+      if (slot.selectOptions?.length && slot.selectActionPrefix) {
+        const selectWrap = document.createElement("div");
+        selectWrap.style.cssText =
+          "display:flex;align-items:center;gap:6px;margin-top:6px;";
+
+        const selectLabel = document.createElement("span");
+        selectLabel.style.cssText =
+          "font-size:10px;color:var(--almostnode-quiet);text-transform:uppercase;letter-spacing:0.4px;";
+        selectLabel.textContent = "Exit Node";
+
+        const select = document.createElement("select");
+        select.style.cssText = `
+          min-width: 0;
+          max-width: 160px;
+          background: var(--almostnode-button-bg);
+          color: var(--text);
+          border: 1px solid var(--almostnode-border-subtle);
+          border-radius: 4px;
+          padding: 3px 6px;
+          font-size: 11px;
+        `.replace(/\n\s*/g, "");
+        for (const option of slot.selectOptions) {
+          const optionEl = document.createElement("option");
+          optionEl.value = option.value;
+          optionEl.textContent = option.label;
+          optionEl.selected = option.value === slot.selectValue;
+          select.appendChild(optionEl);
+        }
+        select.value = slot.selectValue ?? slot.selectOptions[0]!.value;
+        select.addEventListener("change", (event) => {
+          event.stopPropagation();
+          this.onAction?.(`${slot.selectActionPrefix}:${select.value}`);
+        });
+
+        selectWrap.append(selectLabel, select);
+        info.appendChild(selectWrap);
+      }
 
       card.append(iconWrap, info);
 
       // Add login/logout button for services that support direct auth actions.
       if (slot.canAuth) {
+        const action = slot.authAction
+          ?? (slot.active ? `logout:${slot.name}` : `login:${slot.name}`);
+        const isLogout = action.startsWith("logout:");
         const authBtn = document.createElement("button");
-        authBtn.textContent = slot.active ? "Logout" : "Login";
-        const isLogout = slot.active;
+        authBtn.textContent = isLogout ? "Logout" : "Login";
+        const isDisabled = Boolean(slot.authDisabled);
         authBtn.style.cssText = `
-          background: ${isLogout ? "var(--almostnode-button-bg)" : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)"};
-          color: ${isLogout ? "var(--muted)" : "var(--almostnode-success)"};
-          border: 1px solid ${isLogout ? "var(--almostnode-border-subtle)" : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)"};
-          padding: 3px 10px; border-radius: 4px; cursor: pointer;
+          background: ${isDisabled ? "var(--almostnode-button-bg)" : isLogout ? "var(--almostnode-button-bg)" : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)"};
+          color: ${isDisabled ? "var(--almostnode-quiet)" : isLogout ? "var(--muted)" : "var(--almostnode-success)"};
+          border: 1px solid ${isDisabled ? "var(--almostnode-border-subtle)" : isLogout ? "var(--almostnode-border-subtle)" : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)"};
+          padding: 3px 10px; border-radius: 4px; cursor: ${isDisabled ? "not-allowed" : "pointer"};
           font-size: 11px; font-weight: 500; flex-shrink: 0;
           transition: all 0.15s;
+          opacity: ${isDisabled ? "0.7" : "1"};
         `.replace(/\n\s*/g, "");
+        authBtn.disabled = isDisabled;
         const hoverBg = isLogout
           ? "color-mix(in srgb, var(--almostnode-danger) 16%, transparent)"
           : "color-mix(in srgb, var(--almostnode-success) 25%, transparent)";
@@ -2408,29 +2458,28 @@ export class KeychainSidebarSurface {
         const hoverBorder = isLogout
           ? "color-mix(in srgb, var(--almostnode-danger) 35%, transparent)"
           : "color-mix(in srgb, var(--almostnode-success) 40%, transparent)";
-        authBtn.addEventListener("mouseenter", () => {
-          authBtn.style.background = hoverBg;
-          authBtn.style.color = hoverColor;
-          authBtn.style.borderColor = hoverBorder;
-        });
-        authBtn.addEventListener("mouseleave", () => {
-          authBtn.style.background = isLogout
-            ? "var(--almostnode-button-bg)"
-            : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)";
-          authBtn.style.color = isLogout
-            ? "var(--muted)"
-            : "var(--almostnode-success)";
-          authBtn.style.borderColor = isLogout
-            ? "var(--almostnode-border-subtle)"
-            : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)";
-        });
-        const action = slot.active
-          ? `logout:${slot.name}`
-          : `login:${slot.name}`;
-        authBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          this.onAction?.(action);
-        });
+        if (!isDisabled) {
+          authBtn.addEventListener("mouseenter", () => {
+            authBtn.style.background = hoverBg;
+            authBtn.style.color = hoverColor;
+            authBtn.style.borderColor = hoverBorder;
+          });
+          authBtn.addEventListener("mouseleave", () => {
+            authBtn.style.background = isLogout
+              ? "var(--almostnode-button-bg)"
+              : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)";
+            authBtn.style.color = isLogout
+              ? "var(--muted)"
+              : "var(--almostnode-success)";
+            authBtn.style.borderColor = isLogout
+              ? "var(--almostnode-border-subtle)"
+              : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)";
+          });
+          authBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.onAction?.(action);
+          });
+        }
         card.appendChild(authBtn);
       }
 

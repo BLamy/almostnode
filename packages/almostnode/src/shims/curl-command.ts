@@ -1,4 +1,5 @@
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
+import { getDefaultNetworkController, networkFetch } from '../network';
 import type { VirtualFS } from '../virtual-fs';
 
 function ok(stdout: string): JustBashExecResult {
@@ -15,6 +16,7 @@ interface CurlArgs {
   headers: [string, string][];
   body: string | null;
   bodyFile: string | null;
+  maxTimeSeconds: number | null;
   silent: boolean;
   includeHeaders: boolean;
   outputFile: string | null;
@@ -33,6 +35,7 @@ function parseArgs(args: string[]): CurlArgs {
     headers: [],
     body: null,
     bodyFile: null,
+    maxTimeSeconds: null,
     silent: false,
     includeHeaders: false,
     outputFile: null,
@@ -69,6 +72,9 @@ function parseArgs(args: string[]): CurlArgs {
           break;
         case '--output':
           result.outputFile = val;
+          break;
+        case '--max-time':
+          result.maxTimeSeconds = parseMaxTimeSeconds(val);
           break;
         case '--write-out':
           result.writeOut = val;
@@ -117,6 +123,9 @@ function parseArgs(args: string[]): CurlArgs {
         case '--output':
           result.outputFile = args[++i] || null;
           break;
+        case '--max-time':
+          result.maxTimeSeconds = parseMaxTimeSeconds(args[++i]);
+          break;
         case '--write-out':
           result.writeOut = args[++i] || null;
           break;
@@ -144,6 +153,9 @@ function parseArgs(args: string[]): CurlArgs {
             continue;
           case '-o':
             result.outputFile = args[++i] || null;
+            continue;
+          case '-m':
+            result.maxTimeSeconds = parseMaxTimeSeconds(args[++i]);
             continue;
           case '-w':
             result.writeOut = args[++i] || null;
@@ -192,6 +204,10 @@ function parseArgs(args: string[]): CurlArgs {
             result.outputFile = args[++i] || null;
             consumed = true;
             break;
+          case 'm':
+            result.maxTimeSeconds = parseMaxTimeSeconds(args[++i]);
+            consumed = true;
+            break;
           case 'w':
             result.writeOut = args[++i] || null;
             consumed = true;
@@ -216,6 +232,19 @@ function parseArgs(args: string[]): CurlArgs {
   }
 
   return result;
+}
+
+function parseMaxTimeSeconds(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
 }
 
 function addHeader(result: CurlArgs, headerStr: string): void {
@@ -247,6 +276,40 @@ function formatResponseHeaders(statusCode: number, statusMessage: string, header
   }
   lines.push('');
   return lines.join('\r\n');
+}
+
+class CurlTimeoutError extends Error {
+  readonly exitCode = 28;
+
+  constructor(readonly timeoutMs: number) {
+    super(`Operation timed out after ${timeoutMs} milliseconds with 0 bytes received`);
+  }
+}
+
+async function withCurlTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number | null,
+): Promise<T> {
+  if (timeoutMs === null) {
+    return operation;
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new CurlTimeoutError(timeoutMs));
+    }, timeoutMs);
+
+    operation.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
 }
 
 export async function runCurlCommand(
@@ -309,6 +372,18 @@ export async function runCurlCommand(
     let responseBody: string;
     let redirectCount = 0;
     const maxRedirects = 10;
+    const timeoutMs = parsed.maxTimeSeconds === null
+      ? null
+      : Math.max(0, Math.floor(parsed.maxTimeSeconds * 1000));
+    const deadline = timeoutMs === null ? null : Date.now() + timeoutMs;
+
+    const getRemainingTimeoutMs = (): number | null => {
+      if (deadline === null || timeoutMs === null) {
+        return null;
+      }
+
+      return Math.max(0, deadline - Date.now());
+    };
 
     // Request loop (for redirect following)
     while (true) {
@@ -319,7 +394,10 @@ export async function runCurlCommand(
         const { getServerBridge } = await import('../server-bridge');
         const bridge = getServerBridge();
         const bodyBuffer = body ? new TextEncoder().encode(body).buffer : undefined;
-        const response = await bridge.handleRequest(port, parsed.method, path, headers, bodyBuffer);
+        const response = await withCurlTimeout(
+          bridge.handleRequest(port, parsed.method, path, headers, bodyBuffer),
+          getRemainingTimeoutMs(),
+        );
 
         statusCode = response.statusCode;
         statusMessage = response.statusMessage || '';
@@ -342,7 +420,14 @@ export async function runCurlCommand(
             fetchOpts.body = body;
           }
 
-          const resp = await fetch(url.toString(), fetchOpts);
+          const resp = await withCurlTimeout(
+            networkFetch(
+              url.toString(),
+              fetchOpts,
+              getDefaultNetworkController(),
+            ),
+            getRemainingTimeoutMs(),
+          );
           statusCode = resp.status;
           statusMessage = resp.statusText || '';
           responseHeaders = {};
@@ -351,6 +436,9 @@ export async function runCurlCommand(
           });
           responseBody = await resp.text();
         } catch (fetchErr: any) {
+          if (fetchErr instanceof CurlTimeoutError) {
+            throw fetchErr;
+          }
           return err(`curl: (7) Failed to connect to ${url.hostname}: ${fetchErr.message || fetchErr}\n`);
         }
       }
@@ -421,6 +509,9 @@ export async function runCurlCommand(
 
     return { stdout, stderr, exitCode: 0 };
   } catch (error: any) {
+    if (error instanceof CurlTimeoutError) {
+      return err(`curl: (28) ${error.message}\n`, error.exitCode);
+    }
     return err(`curl: ${error.message || String(error)}\n`);
   }
 }
@@ -430,6 +521,7 @@ Options:
  -X, --request <method>   HTTP method (GET, POST, PUT, DELETE, etc.)
  -H, --header <header>    Pass custom header(s) to the server
  -d, --data <data>         HTTP POST data (use @filename to read from file)
+ -m, --max-time <seconds>  Maximum time allowed for the transfer
  -o, --output <file>       Write to file instead of stdout
  -s, --silent              Silent mode
  -i, --include             Include response headers in output

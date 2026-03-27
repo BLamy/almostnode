@@ -43,3 +43,61 @@ interface Window {
   __esbuild?: typeof import('esbuild-wasm');
   __esbuildInitPromise?: Promise<void>;
 }
+
+declare module '*.wasm?url' {
+  const url: string;
+  export default url;
+}
+
+declare module '@tailscale/connect' {
+  export interface TailscaleConnectFetchRequest {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    bodyBase64?: string;
+    redirect?: 'follow' | 'manual' | 'error';
+  }
+
+  export interface TailscaleConnectResponse {
+    url: string;
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    bodyBase64: string;
+    text(): Promise<string>;
+  }
+
+  export interface TailscaleConnectIPN {
+    run(callbacks: {
+      notifyState: (state: string) => void;
+      notifyNetMap: (netMapStr: string) => void;
+      notifyBrowseToURL: (url: string) => void;
+      notifyPanicRecover: (err: string) => void;
+    }): void;
+    configure(config: {
+      useExitNode?: boolean;
+      exitNodeId?: string | null;
+    }): Promise<void>;
+    login(): void;
+    logout(): void;
+    fetch(
+      urlOrRequest: string | TailscaleConnectFetchRequest,
+    ): Promise<TailscaleConnectResponse>;
+  }
+
+  export interface TailscaleConnectStateStorage {
+    setState(id: string, value: string): void;
+    getState(id: string): string;
+  }
+
+  export function createIPN(config: {
+    authKey: string;
+    hostname?: string;
+    controlURL?: string;
+    stateStorage?: TailscaleConnectStateStorage;
+    useExitNode?: boolean;
+    exitNodeId?: string | null;
+    wasmURL?: string;
+    panicHandler: (err: string) => void;
+  }): Promise<TailscaleConnectIPN>;
+}

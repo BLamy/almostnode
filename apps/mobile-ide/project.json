@@ -1,0 +1,48 @@
+{
+  "name": "mobile-ide",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/mobile-ide",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["opencode-mobile-runtime:build"],
+      "options": {
+        "command": "expo start --tunnel",
+        "cwd": "apps/mobile-ide"
+      }
+    },
+    "ios": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["opencode-mobile-runtime:build"],
+      "options": {
+        "command": "expo start --ios --tunnel",
+        "cwd": "apps/mobile-ide"
+      }
+    },
+    "android": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["opencode-mobile-runtime:build"],
+      "options": {
+        "command": "expo start --android --tunnel",
+        "cwd": "apps/mobile-ide"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["opencode-mobile-runtime:build"],
+      "options": {
+        "command": "expo export --platform all",
+        "cwd": "apps/mobile-ide"
+      }
+    },
+    "type-check": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["opencode-mobile-runtime:build"],
+      "options": {
+        "command": "tsc --project tsconfig.json --noEmit",
+        "cwd": "apps/mobile-ide"
+      }
+    }
+  }
+}

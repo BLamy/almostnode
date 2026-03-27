@@ -1,0 +1,37 @@
+{
+  "name": "mobile-ide",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "dev": "expo start --tunnel",
+    "android": "expo start --android --tunnel",
+    "ios": "expo start --ios --tunnel",
+    "web": "expo start --web",
+    "build": "expo export --platform all",
+    "type-check": "tsc --project tsconfig.json --noEmit",
+    "generate:templates": "node ../../scripts/generate-mobile-template-registry.mjs"
+  },
+  "dependencies": {
+    "@react-navigation/native": "^7.1.33",
+    "expo": "~55.0.8",
+    "expo-clipboard": "~55.0.9",
+    "expo-file-system": "~55.0.11",
+    "expo-linking": "~55.0.8",
+    "expo-router": "~55.0.7",
+    "expo-secure-store": "~55.0.9",
+    "expo-status-bar": "~55.0.4",
+    "opencode-mobile-runtime": "workspace:*",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-native": "0.83.2",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-screens": "~4.23.0",
+    "react-native-web": "~0.21.0",
+    "react-native-webview": "13.16.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "typescript": "^5.9.3"
+  }
+}

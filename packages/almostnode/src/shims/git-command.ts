@@ -23,6 +23,15 @@ function createProxiedHttp(corsProxy: string) {
   };
 }
 
+function toEnvRecord(
+  env: Map<string, string> | Record<string, string> | undefined,
+): Record<string, string> {
+  if (!env) {
+    return {};
+  }
+  return env instanceof Map ? Object.fromEntries(env) : env;
+}
+
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
 interface GitEnv {
@@ -526,7 +535,7 @@ export async function runGitCommand(
         'Usage: git <command> [options]',
         '',
         'Supported commands:',
-        '  init, clone, status, add, commit, log, branch, checkout',
+        '  init, clone, status, add, commit, log, branch, checkout, remote',
         '  diff, rebase, fetch, pull, push',
         '',
       ].join('\n'),
@@ -553,6 +562,8 @@ export async function runGitCommand(
         return handleBranch(args.slice(1), ctx, vfs);
       case 'checkout':
         return handleCheckout(args.slice(1), ctx, vfs);
+      case 'remote':
+        return handleRemote(args.slice(1), ctx, vfs);
       case 'diff':
         return handleDiff(args.slice(1), ctx, vfs);
       case 'rebase':
@@ -994,6 +1005,68 @@ function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): Ju
   return success(`Switched to '${ref}'\n`);
 }
 
+async function handleRemote(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const gitFs = createGitFs(vfs);
+  let verbose = false;
+  const positionals: string[] = [];
+
+  for (const arg of args) {
+    if (arg === '-v' || arg === '--verbose') {
+      verbose = true;
+      continue;
+    }
+    positionals.push(arg);
+  }
+
+  if (positionals.length === 0) {
+    return listRemotes(dir, gitFs, verbose);
+  }
+
+  const action = positionals[0];
+
+  switch (action) {
+    case 'add': {
+      if (verbose) {
+        return failure('git remote add: unsupported option \'-v\'', 2);
+      }
+      if (positionals.length !== 3) {
+        return failure('usage: git remote add <name> <url>', 2);
+      }
+
+      const remote = positionals[1];
+      const url = positionals[2];
+      const remotes = await git.listRemotes({ fs: gitFs, dir });
+      if (remotes.some((entry) => entry.remote === remote)) {
+        return failure(`error: remote ${remote} already exists.`, 3);
+      }
+
+      await git.addRemote({ fs: gitFs, dir, remote, url });
+      return success('');
+    }
+    case 'remove':
+    case 'rm': {
+      if (verbose) {
+        return failure(`git remote ${action}: unsupported option '-v'`, 2);
+      }
+      if (positionals.length !== 2) {
+        return failure(`usage: git remote ${action} <name>`, 2);
+      }
+
+      const remote = positionals[1];
+      const remotes = await git.listRemotes({ fs: gitFs, dir });
+      if (!remotes.some((entry) => entry.remote === remote)) {
+        return failure(`error: No such remote: '${remote}'`, 2);
+      }
+
+      await git.deleteRemote({ fs: gitFs, dir, remote });
+      return success('');
+    }
+    default:
+      return failure(`git remote: unsupported subcommand '${action}'`, 2);
+  }
+}
+
 function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
   let staged = false;
   let nameOnly = false;
@@ -1404,6 +1477,7 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
     http: proxiedHttp,
     dir,
     url,
+    corsProxy: gitEnv.corsProxy,
     depth,
     singleBranch,
     ref,
@@ -1456,6 +1530,7 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
     fs: gitFs,
     http: proxiedHttp,
     dir,
+    corsProxy: gitEnv.corsProxy,
     remote: remoteLooksLikeUrl ? undefined : remote,
     url: remoteLooksLikeUrl ? remote : undefined,
     ref,
@@ -1499,6 +1574,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
     fs: gitFs,
     http: proxiedHttp,
     dir,
+    corsProxy: gitEnv.corsProxy,
     remote,
     ref: localRef,
     remoteRef,
@@ -1550,6 +1626,7 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
     fs: gitFs,
     http: proxiedHttp,
     dir,
+    corsProxy: gitEnv.corsProxy,
     remote,
     ref,
     remoteRef: ref,
@@ -1562,8 +1639,12 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
 
 // ── Utilities ───────────────────────────────────────────────────────────────
 
-function resolveGitEnv(env: Record<string, string>, vfs?: VirtualFS): GitEnv {
-  let token = env.GIT_TOKEN || env.GITHUB_TOKEN || undefined;
+function resolveGitEnv(
+  env: Map<string, string> | Record<string, string> | undefined,
+  vfs?: VirtualFS,
+): GitEnv {
+  const envRecord = toEnvRecord(env);
+  let token = envRecord.GIT_TOKEN || envRecord.GITHUB_TOKEN || undefined;
 
   // Fall back to stored gh auth token
   if (!token && vfs) {
@@ -1572,16 +1653,16 @@ function resolveGitEnv(env: Record<string, string>, vfs?: VirtualFS): GitEnv {
       token = ghConfig.oauth_token;
     }
   }
-  const username = env.GIT_USERNAME || undefined;
-  const password = env.GIT_PASSWORD || undefined;
+  const username = envRecord.GIT_USERNAME || undefined;
+  const password = envRecord.GIT_PASSWORD || undefined;
 
   return {
     token,
     username,
     password,
-    corsProxy: env.GIT_CORS_PROXY || DEFAULT_CORS_PROXY,
-    authorName: env.GIT_AUTHOR_NAME || env.GIT_COMMITTER_NAME || 'almostnode',
-    authorEmail: env.GIT_AUTHOR_EMAIL || env.GIT_COMMITTER_EMAIL || 'almostnode@example.com',
+    corsProxy: envRecord.GIT_CORS_PROXY || DEFAULT_CORS_PROXY,
+    authorName: envRecord.GIT_AUTHOR_NAME || envRecord.GIT_COMMITTER_NAME || 'almostnode',
+    authorEmail: envRecord.GIT_AUTHOR_EMAIL || envRecord.GIT_COMMITTER_EMAIL || 'almostnode@example.com',
   };
 }
 
@@ -1670,6 +1751,29 @@ function inferCloneTarget(url: string): string {
 
 function isUrlLike(value: string): boolean {
   return /^https?:\/\//i.test(value);
+}
+
+async function listRemotes(
+  dir: string,
+  gitFs: ReturnType<typeof createGitFs>,
+  verbose: boolean,
+): Promise<JustBashExecResult> {
+  const remotes = (await git.listRemotes({ fs: gitFs, dir }))
+    .sort((left, right) => left.remote.localeCompare(right.remote));
+
+  if (remotes.length === 0) {
+    return success('');
+  }
+
+  if (!verbose) {
+    return success(`${remotes.map((entry) => entry.remote).join('\n')}\n`);
+  }
+
+  const lines = remotes.flatMap((entry) => [
+    `${entry.remote}\t${entry.url} (fetch)`,
+    `${entry.remote}\t${entry.url} (push)`,
+  ]);
+  return success(`${lines.join('\n')}\n`);
 }
 
 function mapGitError(error: unknown): JustBashExecResult {

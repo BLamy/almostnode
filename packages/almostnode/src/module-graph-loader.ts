@@ -44,6 +44,11 @@ interface InteropRegistry {
   processes: Map<string, Record<string, unknown>>;
 }
 
+const dynamicImport = new Function(
+  'specifier',
+  'return import(specifier)',
+) as (specifier: string) => Promise<Record<string, unknown>>;
+
 export class ModuleGraphLoader {
   private vfs: VirtualFS;
   private runtimeId: string;
@@ -144,10 +149,7 @@ export class ModuleGraphLoader {
     this.installGlobals();
 
     const url = await this.getModuleUrl(descriptor);
-    const namespace = await import(
-      /* @vite-ignore */
-      url
-    ) as Record<string, unknown>;
+    const namespace = await dynamicImport(url);
 
     return {
       format: descriptor.format,

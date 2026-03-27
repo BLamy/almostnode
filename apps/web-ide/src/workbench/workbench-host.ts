@@ -1,5 +1,6 @@
 import {
   createContainer,
+  type NetworkStatus,
   type RunResult,
   type WorkspaceSearchProvider,
 } from "almostnode";
@@ -58,8 +59,14 @@ import {
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
   OPENCODE_MCP_AUTH_PATH,
+  TAILSCALE_SESSION_KEYCHAIN_PATH,
   type KeychainState,
 } from "../features/keychain";
+import {
+  clearStoredWorkbenchNetworkConfig,
+  readStoredWorkbenchNetworkConfig,
+  writeStoredWorkbenchNetworkConfig,
+} from "../features/network-session";
 import {
   mountOpenCodeBrowserSession,
   type OpenCodeBrowserSessionHandle,
@@ -380,9 +387,22 @@ const LAYOUT_OVERRIDES = `
 .part.sidebar .pane-body > .monaco-scrollable-element,
 .part.sidebar .almostnode-opencode-panel-host,
 .part.sidebar .almostnode-files-tree-host {
+  width: 100% !important;
   height: 100% !important;
+  min-width: 0 !important;
   min-height: 0 !important;
 }
+.part.sidebar .pane-body > .monaco-scrollable-element,
+.part.sidebar .almostnode-opencode-panel-host,
+.part.sidebar .almostnode-files-tree-host {
+  overflow: hidden !important;
+}
+
+[id="almostnode.sidebar.opencode"] .pane-body.wide > .monaco-scrollable-element > div {
+  min-height: 100% !important;
+  max-width: calc(100% + 16px) !important;
+}
+
 .part.sidebar .almostnode-opencode-panel-host,
 .part.sidebar .almostnode-files-tree-host {
   display: flex !important;
@@ -689,6 +709,9 @@ export class WebIDEHost {
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
+  private tailscaleStatus: NetworkStatus | null = null;
+  private hadTailscaleKeychainData = false;
+  private pendingTailscaleKeychainActivation = false;
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
   private readonly templateId: TemplateId;
   private readonly initialProjectFiles: SerializedFile[] | null;
@@ -718,6 +741,7 @@ export class WebIDEHost {
   private removeCursorOverlay: (() => void) | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
+    const initialNetwork = readStoredWorkbenchNetworkConfig();
     this.container = createContainer({
       baseUrl: options.baseUrl,
       basePath: import.meta.env.BASE_URL?.replace(/\/$/, "") || "",
@@ -725,6 +749,7 @@ export class WebIDEHost {
       env: WebIDEHost.defaultCorsProxyUrl
         ? { CORS_PROXY_URL: WebIDEHost.defaultCorsProxyUrl }
         : undefined,
+      network: initialNetwork ?? undefined,
     });
     this.templateId = options.template || "vite";
     this.initialProjectFiles = options.initialProjectFiles ?? null;
@@ -810,6 +835,13 @@ export class WebIDEHost {
       },
     });
     this.keychainSurface.setActionHandler((action) => {
+      if (action.startsWith("select-exit-node:tailscale:")) {
+        void this.selectTailscaleExitNode(
+          action.slice("select-exit-node:tailscale:".length),
+        );
+        return;
+      }
+
       switch (action) {
         case "unlock":
           void this.unlockKeychain();
@@ -832,8 +864,15 @@ export class WebIDEHost {
         case "logout:replay":
           void this.keychainAuthAction("replayio logout");
           break;
+        case "login:tailscale":
+          void this.tailscaleAuthAction("login");
+          break;
+        case "logout:tailscale":
+          void this.tailscaleAuthAction("logout");
+          break;
       }
     });
+    this.keychain.registerSlot("tailscale", [TAILSCALE_SESSION_KEYCHAIN_PATH]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
     this.keychain.registerSlot("opencode", [
       OPENCODE_AUTH_PATH,
@@ -843,6 +882,17 @@ export class WebIDEHost {
       OPENCODE_LEGACY_CONFIG_PATH,
     ]);
     this.keychain.registerSlot("replay", ["/home/user/.replay/auth.json"]);
+    this.hadTailscaleKeychainData = this.keychain.hasSlotData("tailscale");
+    void this.container.network.getStatus().then((status) => {
+      this.tailscaleStatus = status;
+      this.handleTailscaleKeychainTransition();
+      this.updateKeychainSurface();
+    });
+    this.container.network.subscribe((status) => {
+      this.tailscaleStatus = status;
+      this.handleTailscaleKeychainTransition();
+      this.updateKeychainSurface();
+    });
   }
 
   static async bootstrap(options: WebIDEHostOptions): Promise<WebIDEHost> {
@@ -1549,8 +1599,31 @@ export class WebIDEHost {
   }
 
   private updateKeychainSurface(state = this.keychain.getState()): void {
+    const tailscaleStatus = this.tailscaleStatus;
+    const tailscaleStatusText = this.formatTailscaleStatus(tailscaleStatus);
+    const tailscaleAuthAction = this.getTailscaleSidebarAuthAction(
+      tailscaleStatus,
+    );
+    const exitNodeOptions = tailscaleStatus?.exitNodes.map((exitNode) => ({
+      value: exitNode.id,
+      label: exitNode.online ? exitNode.name : `${exitNode.name} (offline)`,
+    }));
     this.keychainSurface.update(
       [
+        {
+          name: "tailscale",
+          label: "Tailscale",
+          active: tailscaleStatus?.state === "running",
+          canAuth: true,
+          authAction: tailscaleAuthAction,
+          statusText: tailscaleStatusText,
+          selectActionPrefix:
+            exitNodeOptions && exitNodeOptions.length > 0
+              ? "select-exit-node:tailscale"
+              : undefined,
+          selectOptions: exitNodeOptions,
+          selectValue: tailscaleStatus?.selectedExitNodeId ?? undefined,
+        },
         {
           name: "github",
           label: "GitHub",
@@ -1573,10 +1646,163 @@ export class WebIDEHost {
     );
   }
 
+  private getTailscaleSidebarAuthAction(
+    status: NetworkStatus | null,
+  ): "login:tailscale" | "logout:tailscale" {
+    return status?.provider === "tailscale" && status.state !== "browser"
+      ? "logout:tailscale"
+      : "login:tailscale";
+  }
+
+  private handleTailscaleKeychainTransition(): void {
+    const hasTailscaleKeychainData = this.keychain.hasSlotData("tailscale");
+    if (!hasTailscaleKeychainData) {
+      const hadData = this.hadTailscaleKeychainData;
+      this.hadTailscaleKeychainData = false;
+      this.pendingTailscaleKeychainActivation = false;
+      if (hadData) {
+        this.keychain.notifyExternalStateChanged();
+      }
+      return;
+    }
+
+    if (!this.hadTailscaleKeychainData) {
+      this.pendingTailscaleKeychainActivation = true;
+    }
+    this.hadTailscaleKeychainData = true;
+
+    if (
+      this.pendingTailscaleKeychainActivation
+      && this.isTailscaleSessionReadyForKeychain(this.tailscaleStatus)
+    ) {
+      this.pendingTailscaleKeychainActivation = false;
+      void this.keychain.handleExternalCredentialActivation();
+    }
+  }
+
+  private isTailscaleSessionReadyForKeychain(
+    status: NetworkStatus | null,
+  ): boolean {
+    return status?.provider === "tailscale" && status.state === "running";
+  }
+
+  private formatTailscaleStatus(status: NetworkStatus | null): string {
+    if (!status) {
+      return "Loading status";
+    }
+
+    const selectedExitNodeName =
+      status.selectedExitNodeId
+        ? status.exitNodes.find((exitNode) => exitNode.id === status.selectedExitNodeId)?.name
+        : null;
+
+    switch (status.state) {
+      case "browser":
+        return "Not connected";
+      case "starting":
+        return status.detail || "Starting";
+      case "running":
+        return selectedExitNodeName
+          ? `Running via ${selectedExitNodeName}`
+          : status.exitNodes.length > 0
+            ? "Running, choose an exit node"
+            : "Running, no exit nodes available";
+      case "needs-login":
+        return "NeedsLogin";
+      case "needs-machine-auth":
+        return "NeedsMachineAuth";
+      case "locked":
+        return "Locked";
+      case "unavailable":
+        return status.detail || "Unavailable";
+      case "error":
+        return status.detail || "Error";
+      case "stopped":
+      default:
+        return "Stopped";
+    }
+  }
+
   private async keychainAuthAction(command: string): Promise<void> {
     await this.revealTerminalPanel(true);
     const tab = this.createUserTerminalTab(true);
     await this.runCommand(tab, command, { echoCommand: true });
+  }
+
+  private async tailscaleAuthAction(
+    action: "login" | "logout",
+  ): Promise<void> {
+    try {
+      if (action === "login") {
+        await this.container.network.configure({
+          provider: "tailscale",
+          useExitNode: true,
+        });
+        this.syncStoredNetworkConfig();
+        this.tailscaleStatus = await this.container.network.login();
+      } else {
+        this.tailscaleStatus = await this.container.network.logout();
+        clearStoredWorkbenchNetworkConfig();
+      }
+    } catch (error) {
+      if (action === "logout") {
+        clearStoredWorkbenchNetworkConfig();
+      }
+      this.tailscaleStatus = {
+        provider: "tailscale",
+        state: "error",
+        active: false,
+        canLogin: true,
+        canLogout: false,
+        adapterAvailable: false,
+        exitNodes: [],
+        selectedExitNodeId: null,
+        detail: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    this.updateKeychainSurface();
+  }
+
+  private async selectTailscaleExitNode(exitNodeId: string): Promise<void> {
+    try {
+      this.tailscaleStatus = await this.container.network.configure({
+        provider: "tailscale",
+        useExitNode: true,
+        exitNodeId: exitNodeId || null,
+      });
+      this.syncStoredNetworkConfig();
+    } catch (error) {
+      this.tailscaleStatus = {
+        provider: "tailscale",
+        state: "error",
+        active: false,
+        canLogin: true,
+        canLogout: false,
+        adapterAvailable: false,
+        exitNodes: [],
+        selectedExitNodeId: null,
+        detail: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    this.updateKeychainSurface();
+  }
+
+  private syncStoredNetworkConfig(): void {
+    const config = this.container.network.getConfig();
+    if (config.provider !== "tailscale") {
+      clearStoredWorkbenchNetworkConfig();
+      return;
+    }
+
+    writeStoredWorkbenchNetworkConfig({
+      provider: "tailscale",
+      useExitNode: config.useExitNode,
+      exitNodeId: config.exitNodeId,
+    });
   }
 
   async revealClaudePanel(focus: boolean): Promise<void> {

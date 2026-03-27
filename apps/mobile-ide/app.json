@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Expo OpenCode Mobile IDE",
+    "slug": "mobile-ide",
+    "version": "1.0.0",
+    "scheme": "mobileide",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

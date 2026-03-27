@@ -624,9 +624,6 @@ declare global {
 }
 
 class BufferPolyfill extends Uint8Array {
-  // BYTES_PER_ELEMENT for TypedArray compatibility
-  static readonly BYTES_PER_ELEMENT = 1;
-
   // Overloads for Buffer.from compatibility
   static from(arrayLike: ArrayLike<number>): BufferPolyfill;
   static from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: unknown): BufferPolyfill;

@@ -59,6 +59,12 @@ import { resolve as resolveExports, imports as resolveImports } from 'resolve.ex
 import { transformEsmToCjsSimple } from './frameworks/code-transforms';
 import * as acorn from 'acorn';
 import { almostnodeDebugError, almostnodeDebugLog } from './utils/debug';
+import {
+  getDefaultNetworkController,
+  networkFetch,
+  setDefaultNetworkController,
+} from './network';
+import type { NetworkController, NetworkOptions } from './network/types';
 
 const CJS_REQUIRE_HELPER = '__almostnodeRequire';
 
@@ -364,6 +370,8 @@ export interface RuntimeOptions {
   onStderr?: (data: string) => void;
   childProcessController?: childProcessShim.ChildProcessController;
   builtinModules?: Record<string, unknown>;
+  network?: NetworkOptions;
+  networkController?: NetworkController;
 }
 
 export interface RequireFunction {
@@ -1477,6 +1485,7 @@ export class Runtime {
   private formatDetector: ModuleResolver;
   private moduleLoader: ModuleGraphLoader;
   private options: RuntimeOptions;
+  private networkController: NetworkController;
   /** Cache for pre-processed code (after ESM transform) before eval */
   private processedCodeCache: Map<string, string> = new Map();
   /** Shared resolver caches to avoid per-module duplication and exception churn */
@@ -1489,6 +1498,11 @@ export class Runtime {
     this.vfs = vfs;
     this.runtimeId = createRuntimeId();
     const childProcessController = options.childProcessController ?? initChildProcess(vfs);
+    this.networkController = options.networkController ?? getDefaultNetworkController();
+    setDefaultNetworkController(this.networkController);
+    if (options.network) {
+      void this.networkController.configure(options.network);
+    }
     // Create process first so we can get cwd for fs shim
     this.process = createProcess({
       cwd: options.cwd || '/',
@@ -1547,93 +1561,13 @@ export class Runtime {
     // In the browser, cross-origin requests will fail without CORS headers.
     if (!(globalThis.fetch as any).__almostnode) {
       const origFetch = globalThis.fetch.bind(globalThis);
-      const MAX_REDIRECTS = 10;
-      (globalThis as any).fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        // Only proxy absolute cross-origin HTTP(S) URLs
-        if (shouldProxyBrowserUrl(url)) {
-          // When input is a Request object, extract its properties so they aren't lost.
-          // init values take precedence over Request properties.
-          let effectiveInit: RequestInit = { ...init };
-          if (input instanceof Request) {
-            const req = input;
-            if (!effectiveInit.method && req.method !== 'GET') effectiveInit.method = req.method;
-            if (!effectiveInit.headers) {
-              effectiveInit.headers = new Headers(req.headers);
-            }
-            if (!effectiveInit.body && req.body && req.method !== 'GET' && req.method !== 'HEAD') {
-              effectiveInit.body = req.body;
-            }
-            if (!effectiveInit.signal && req.signal) effectiveInit.signal = req.signal;
-            if (effectiveInit.redirect === undefined && req.redirect) effectiveInit.redirect = req.redirect;
-            if (effectiveInit.credentials === undefined && req.credentials) effectiveInit.credentials = req.credentials;
-          }
-
-          // Strip browser-specific headers so proxied requests look like native Node.js requests
-          const headers = new Headers(effectiveInit.headers);
-          headers.delete('accept-encoding');
-          headers.delete('host');
-          // Remove browser fingerprint headers that reveal the request originates from a browser
-          for (const key of [...headers.keys()]) {
-            if (key.startsWith('sec-fetch-') || key.startsWith('sec-ch-ua')) {
-              headers.delete(key);
-            }
-          }
-          // Set a Node.js-like User-Agent instead of the browser's
-          if (!headers.has('user-agent') && !headers.has('User-Agent')) {
-            headers.set('User-Agent', 'node');
-          }
-          effectiveInit.headers = headers;
-
-          // Follow redirects through the CORS proxy instead of letting the browser follow them
-          // (browser would follow to the final URL directly, bypassing the proxy → opaque/empty response)
-          let currentUrl = url;
-          let currentMethod = effectiveInit.method || 'GET';
-          let currentBody = effectiveInit.body;
-          for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-            const proxiedUrl = getProxiedBrowserUrl(currentUrl);
-            almostnodeDebugLog('fetch', `[almostnode DEBUG] fetch proxy: ${currentUrl} -> ${proxiedUrl.slice(0, 120)}...`);
-            const resp = await origFetch(proxiedUrl, {
-              ...effectiveInit,
-              method: currentMethod,
-              body: currentBody,
-              redirect: 'manual',
-            });
-            almostnodeDebugLog(
-              'fetch',
-              `[almostnode DEBUG] fetch response: status=${resp.status}, content-type=${resp.headers.get('content-type')}, content-length=${resp.headers.get('content-length')}`,
-            );
-
-            // Handle redirects: 301, 302, 303, 307, 308
-            if (resp.status >= 300 && resp.status < 400) {
-              const location = resp.headers.get('location');
-              if (location) {
-                // Resolve relative redirect URLs against the current URL
-                currentUrl = new URL(location, currentUrl).href;
-                // 303: change method to GET and drop body
-                if (resp.status === 303) {
-                  currentMethod = 'GET';
-                  currentBody = undefined;
-                }
-                // 301, 302: change method to GET for non-GET/HEAD (per browser behavior)
-                if ((resp.status === 301 || resp.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
-                  currentMethod = 'GET';
-                  currentBody = undefined;
-                }
-                // 307, 308: preserve method and body
-                if (redirectCount === MAX_REDIRECTS) {
-                  throw new TypeError('Failed to fetch: too many redirects');
-                }
-                continue;
-              }
-            }
-            return resp;
-          }
-          // Should not reach here, but just in case
-          throw new TypeError('Failed to fetch: too many redirects');
-        }
-        return origFetch(input, init);
-      }, { __almostnode: true });
+      (globalThis as any).__almostnodeNativeFetch = origFetch;
+      (globalThis as any).fetch = Object.assign(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          return networkFetch(input, init, getDefaultNetworkController());
+        },
+        { __almostnode: true },
+      );
     }
 
     // Patch XMLHttpRequest to use the same CORS proxy path as fetch().
@@ -2243,6 +2177,10 @@ export class Runtime {
    */
   getProcess(): Process {
     return this.process;
+  }
+
+  getNetwork(): NetworkController {
+    return this.networkController;
   }
 
   /**

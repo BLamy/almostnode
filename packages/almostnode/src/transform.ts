@@ -9,6 +9,11 @@ import { VirtualFS } from './virtual-fs';
 import { ESBUILD_WASM_ESM_CDN, ESBUILD_WASM_BINARY_CDN } from './config/cdn';
 import * as acorn from 'acorn';
 
+const dynamicImport = new Function(
+  'specifier',
+  'return import(specifier)',
+) as (specifier: string) => Promise<Record<string, unknown>>;
+
 const CJS_REQUIRE_HELPER = '__almostnodeRequire';
 
 // Check if we're in a real browser environment (not Node.js or jsdom tests)
@@ -164,10 +169,7 @@ export async function initTransformer(): Promise<void> {
       console.log('[transform] Loading esbuild-wasm...');
 
       // Load esbuild-wasm from CDN
-      const mod = await import(
-        /* @vite-ignore */
-        ESBUILD_WASM_ESM_CDN
-      );
+      const mod = await dynamicImport(ESBUILD_WASM_ESM_CDN);
 
       // esm.sh wraps the module - get the actual esbuild object
       const esbuildMod = mod.default || mod;

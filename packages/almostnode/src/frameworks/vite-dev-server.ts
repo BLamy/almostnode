@@ -21,6 +21,11 @@ import { loadTailwindConfig } from './tailwind-config-loader';
 import { generateAndWriteRouteTree } from './tanstack-route-tree';
 import { almostnodeDebugLog, almostnodeDebugWarn, almostnodeDebugError } from '../utils/debug';
 
+const dynamicImport = new Function(
+  'specifier',
+  'return import(specifier)',
+) as (specifier: string) => Promise<Record<string, unknown>>;
+
 // Check if we're in a real browser environment (not jsdom or Node.js)
 // jsdom has window but doesn't have ServiceWorker or SharedArrayBuffer
 const isBrowser = typeof window !== 'undefined' &&
@@ -53,10 +58,7 @@ async function initEsbuild(): Promise<void> {
 
   window.__esbuildInitPromise = (async () => {
     try {
-      const mod = await import(
-        /* @vite-ignore */
-        ESBUILD_WASM_ESM_CDN
-      );
+      const mod = await dynamicImport(ESBUILD_WASM_ESM_CDN);
 
       const esbuildMod = mod.default || mod;
 

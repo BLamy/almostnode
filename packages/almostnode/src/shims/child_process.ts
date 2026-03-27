@@ -1944,6 +1944,11 @@ module.exports = (async () => {
     return runCurlCommand(args, ctx, controller.vfs);
   });
 
+  const tailscaleCommand = defineCommand('tailscale', async (args, ctx) => {
+    const { runTailscaleCommand } = await import('./tailscale-command');
+    return runTailscaleCommand(args, ctx);
+  });
+
   const drizzleKitCommand = defineCommand('drizzle-kit', async (args, ctx) => {
     const { runDrizzleKitCommand } = await import('./drizzle-kit-command');
     return runDrizzleKitCommand(args, ctx, controller.vfs);
@@ -2146,6 +2151,7 @@ module.exports = (async () => {
     createRegisteredShellCommand(pgliteCommand.name, pgliteCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(pgCommand.name, pgCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(curlCommand.name, curlCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(tailscaleCommand.name, tailscaleCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(drizzleKitCommand.name, drizzleKitCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(tscCommand.name, tscCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(ghCommand.name, ghCommand, { interceptShellParsing: true }),

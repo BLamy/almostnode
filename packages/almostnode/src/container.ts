@@ -3,6 +3,7 @@ import { Runtime, type RuntimeOptions } from "./runtime";
 import { PackageManager } from "./npm";
 import { almostnodeDebugLog } from "./utils/debug";
 import type { InstallMode, PackageManagerMutationSummary } from "./npm";
+import { createNetworkController, setDefaultNetworkController } from "./network";
 import { ServerBridge, getServerBridge } from "./server-bridge";
 import {
   initChildProcess,
@@ -11,6 +12,7 @@ import {
 import type { ShellCommandDefinition } from "./shell-commands";
 import type { IExecuteResult } from "./runtime-interface";
 import type { WorkspaceSearchProvider } from "./shims/child_process";
+import type { NetworkController, NetworkOptions } from "./network/types";
 
 export type {
   WorkspaceSearchProvider,
@@ -90,11 +92,13 @@ export interface ContainerOptions extends RuntimeOptions {
   git?: GitAuthOptions;
   installMode?: InstallMode;
   shellCommands?: ShellCommandDefinition[];
+  network?: NetworkOptions;
 }
 
 export interface ContainerInstance {
   vfs: VirtualFS;
   runtime: Runtime;
+  network: NetworkController;
   npm: PackageManager;
   serverBridge: ServerBridge;
   execute: (code: string, filename?: string) => Promise<IExecuteResult>;
@@ -153,6 +157,8 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
   let gitAuth = sanitizeGitAuth(options?.git);
   const vfs = new VirtualFS();
+  const networkController = createNetworkController(options?.network);
+  setDefaultNetworkController(networkController);
   const childProcessController = initChildProcess(vfs, {
     installMode: options?.installMode,
     onInstallMutation: async (summary: PackageManagerMutationSummary) => {
@@ -187,6 +193,7 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     ...options,
     env: resolveCommandEnv(),
     childProcessController,
+    networkController,
   };
   const runtime = new Runtime(vfs, runtimeOptions);
   const npmManager = new PackageManager(vfs, {
@@ -413,6 +420,7 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
   return {
     vfs,
     runtime,
+    network: networkController,
     npm: npmManager,
     serverBridge,
     execute: (code: string, filename?: string) =>

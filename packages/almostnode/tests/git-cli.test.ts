@@ -384,6 +384,48 @@ describe('git CLI command', () => {
     expect(result.stdout).toContain('A  file.txt');
   });
 
+  it('supports git remote add/remove/list and -v output', async () => {
+    const container = createContainer();
+    const repo = '/repo-remote';
+
+    container.vfs.mkdirSync(repo, { recursive: true });
+
+    let result = await container.run('git init', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git remote', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+
+    result = await container.run('git remote add origin https://example.com/repo.git', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+
+    result = await container.run('git remote', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('origin\n');
+
+    result = await container.run('git remote -v', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('origin\thttps://example.com/repo.git (fetch)');
+    expect(result.stdout).toContain('origin\thttps://example.com/repo.git (push)');
+
+    result = await container.run('git remote add origin https://example.com/repo.git', { cwd: repo });
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain('error: remote origin already exists.');
+
+    result = await container.run('git remote remove origin', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git remote', { cwd: repo });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+
+    result = await container.run('git remote remove origin', { cwd: repo });
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("error: No such remote: 'origin'");
+  });
+
   it('wires fetch/pull/push auth + cors and supports runtime auth updates', async () => {
     const container = createContainer({
       git: {

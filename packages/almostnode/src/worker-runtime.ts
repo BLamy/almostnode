@@ -6,6 +6,8 @@
  */
 
 import { wrap, proxy, Remote } from 'comlink';
+import { getDefaultNetworkController } from './network';
+import type { NetworkController } from './network/types';
 import type { VirtualFS } from './virtual-fs';
 import type { IRuntime, IExecuteResult, IRuntimeOptions, VFSSnapshot } from './runtime-interface';
 
@@ -30,6 +32,7 @@ export class WorkerRuntime implements IRuntime {
   private workerApi: Remote<WorkerApi>;
   private vfs: VirtualFS;
   private options: IRuntimeOptions;
+  private networkController: NetworkController;
   private initialized: Promise<void>;
   private changeListener: ((path: string, content: string) => void) | null = null;
   private deleteListener: ((path: string) => void) | null = null;
@@ -37,6 +40,10 @@ export class WorkerRuntime implements IRuntime {
   constructor(vfs: VirtualFS, options: IRuntimeOptions = {}) {
     this.vfs = vfs;
     this.options = options;
+    this.networkController = getDefaultNetworkController();
+    if (options.network) {
+      void this.networkController.configure(options.network);
+    }
 
     // Create the worker
     // Using Vite's worker import syntax
@@ -65,6 +72,7 @@ export class WorkerRuntime implements IRuntime {
     const workerOptions: IRuntimeOptions = {
       cwd: this.options.cwd,
       env: this.options.env,
+      network: this.options.network,
     };
 
     await this.workerApi.init(snapshot, workerOptions);
@@ -124,6 +132,10 @@ export class WorkerRuntime implements IRuntime {
    */
   getVFS(): VirtualFS {
     return this.vfs;
+  }
+
+  getNetwork(): NetworkController {
+    return this.networkController;
   }
 
   /**

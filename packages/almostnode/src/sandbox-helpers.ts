@@ -124,6 +124,7 @@ ${serviceWorkerScript}
           runtime = new Runtime(vfs, {
             cwd: options?.cwd,
             env: options?.env,
+            network: options?.network,
             onConsole: (method, args) => {
               // Forward console to parent
               parent.postMessage({

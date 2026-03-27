@@ -23,6 +23,24 @@ export type {
   IRuntimeOptions,
   VFSSnapshot,
 } from "./runtime-interface";
+export * as network from "./network";
+export type {
+  NetworkController,
+  NetworkExitNode,
+  NetworkFetchRequest,
+  NetworkFetchResponse,
+  NetworkLookupAddress,
+  NetworkLookupOptions,
+  NetworkLookupResult,
+  NetworkOptions,
+  NetworkProvider,
+  NetworkRoute,
+  NetworkState,
+  NetworkStatus,
+  TailscaleAdapter,
+  TailscaleAdapterFactory,
+  TailscaleAdapterStatus,
+} from "./network";
 export {
   generateSandboxFiles,
   getSandboxHtml,

@@ -43,6 +43,11 @@ import {
   resolveFileWithExtension,
   needsTransform,
 } from './next-route-resolver';
+
+const dynamicImport = new Function(
+  'specifier',
+  'return import(specifier)',
+) as (specifier: string) => Promise<Record<string, unknown>>;
 import {
   createMockRequest,
   createMockResponse,
@@ -82,10 +87,7 @@ async function initEsbuild(): Promise<void> {
 
   window.__esbuildInitPromise = (async () => {
     try {
-      const mod = await import(
-        /* @vite-ignore */
-        ESBUILD_WASM_ESM_CDN
-      );
+      const mod = await dynamicImport(ESBUILD_WASM_ESM_CDN);
 
       const esbuildMod = mod.default || mod;
 

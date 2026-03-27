@@ -3,6 +3,8 @@
  * Fetches package metadata from npm registry
  */
 
+import { getDefaultNetworkController, networkFetch } from '../network';
+
 export interface PackageVersion {
   name: string;
   version: string;
@@ -59,11 +61,15 @@ export class Registry {
 
     const url = `${this.registryUrl}/${encodePackageName(packageName)}`;
 
-    const response = await fetch(url, {
-      headers: {
-        Accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8',
+    const response = await networkFetch(
+      url,
+      {
+        headers: {
+          Accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8',
+        },
       },
-    });
+      getDefaultNetworkController(),
+    );
 
     if (!response.ok) {
       if (response.status === 404) {
@@ -122,7 +128,11 @@ export class Registry {
    * Download tarball as ArrayBuffer
    */
   async downloadTarball(tarballUrl: string): Promise<ArrayBuffer> {
-    const response = await fetch(tarballUrl);
+    const response = await networkFetch(
+      tarballUrl,
+      undefined,
+      getDefaultNetworkController(),
+    );
 
     if (!response.ok) {
       throw new Error(`Failed to download tarball: ${response.status}`);

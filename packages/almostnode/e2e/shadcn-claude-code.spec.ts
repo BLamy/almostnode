@@ -120,6 +120,8 @@ test.describe('claude-code on shadcn page', () => {
     expect(output).not.toContain(`npx: command "claude-code" exited with code`);
     expect(output).not.toContain(`Unexpected identifier 'node'`);
     expect(output).not.toContain('SyntaxError: Unexpected identifier');
+    expect(output).not.toContain('globalThis.Bun.which is not a function');
+    expect(output).not.toContain('TypeError: globalThis.Bun.which is not a function');
     expect(output).not.toContain('exit code: 1');
   });
 
@@ -148,13 +150,17 @@ test.describe('claude-code on shadcn page', () => {
     expect(interactiveOutput).toContain('[npx @anthropic-ai/claude-code]');
     expect(interactiveOutput).toContain('Installed 1 packages');
     expect(interactiveOutput).not.toContain('Unhandled rejection');
+    expect(interactiveOutput).not.toContain('globalThis.Bun.which is not a function');
+    expect(interactiveOutput).not.toContain('TypeError: globalThis.Bun.which is not a function');
     expect(interactiveOutput).not.toContain('console.Console is not a constructor');
     expect(interactiveOutput).not.toContain('TypeError: console.Console is not a constructor');
     expect(interactiveOutput).not.toContain('exited with code 129');
     expect(interactiveOutput).not.toContain('exit code: 129');
     expect(consoleMessages.join('\n')).not.toContain('Refused to set unsafe header "User-Agent"');
+    expect(consoleMessages.join('\n')).not.toContain('globalThis.Bun.which is not a function');
     expect(consoleMessages.join('\n')).not.toContain('blocked by CORS policy');
     expect(consoleMessages.join('\n')).not.toContain('net::ERR_FAILED');
+    expect(pageErrors.join('\n')).not.toContain('globalThis.Bun.which is not a function');
     expect(pageErrors.join('\n')).not.toContain('unreachable');
   });
 

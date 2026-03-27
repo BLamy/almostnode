@@ -1,0 +1,30 @@
+{
+  "name": "web-ide-video",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/web-ide-video/src",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "pnpm run dev",
+        "cwd": "apps/web-ide-video"
+      }
+    },
+    "render": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/web-ide-video"],
+      "options": {
+        "command": "pnpm run render",
+        "cwd": "apps/web-ide-video"
+      }
+    },
+    "type-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "pnpm run type-check",
+        "cwd": "apps/web-ide-video"
+      }
+    }
+  }
+}

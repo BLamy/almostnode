@@ -1,0 +1,10 @@
+{
+  "author": "Tailscale Inc.",
+  "description": "Tailscale Connect SDK",
+  "license": "BSD-3-Clause",
+  "main": "./pkg.js",
+  "name": "@tailscale/connect",
+  "type": "module",
+  "types": "./pkg.d.ts",
+  "version": "1.39.98-t02582083d"
+}

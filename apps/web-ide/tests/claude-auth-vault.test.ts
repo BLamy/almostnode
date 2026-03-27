@@ -27,9 +27,16 @@ import {
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
   OPENCODE_MCP_AUTH_PATH,
+  TAILSCALE_SESSION_KEYCHAIN_PATH,
   deriveVaultKeyFromPrf,
   parseStoredKeychain,
 } from '../src/features/keychain';
+import {
+  clearStoredTailscaleSessionSnapshot,
+  readStoredTailscaleSessionSnapshot,
+  writeStoredTailscaleSessionSnapshot,
+  type TailscaleSessionSnapshot,
+} from '../src/features/network-session';
 
 const CLAUDE_SLOT_PATHS = [
   CLAUDE_AUTH_CREDENTIALS_PATH,
@@ -165,6 +172,7 @@ function createKeychain(vfs = new VirtualFS()): Keychain {
     vfs,
     overlayRoot: document.getElementById('overlay'),
   });
+  kc.registerSlot('tailscale', [TAILSCALE_SESSION_KEYCHAIN_PATH]);
   kc.registerSlot('claude', CLAUDE_SLOT_PATHS);
   kc.registerSlot('github', [GH_HOSTS_PATH]);
   kc.registerSlot('opencode', OPENCODE_SLOT_PATHS);
@@ -237,6 +245,15 @@ function writeOpenCodeConfig(vfs: VirtualFS): { json: string; jsonc: string } {
   return { json, jsonc };
 }
 
+function writeTailscaleSession(snapshot: TailscaleSessionSnapshot): TailscaleSessionSnapshot {
+  writeStoredTailscaleSessionSnapshot(snapshot);
+  return snapshot;
+}
+
+function clearTailscaleSession(): void {
+  clearStoredTailscaleSessionSnapshot();
+}
+
 async function unlockStoredKeychainKey(stored: { credentialId: string; prfSalt: string }): Promise<CryptoKey> {
   const assertion = await navigator.credentials.get({
     publicKey: {
@@ -283,6 +300,7 @@ describe('ClaudeAuthVault', () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     localStorage.clear();
+    sessionStorage.clear();
     document.body.innerHTML = '<div id="overlay"></div>';
     Object.defineProperty(window, 'crypto', {
       configurable: true,
@@ -303,6 +321,7 @@ describe('ClaudeAuthVault', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
     document.body.innerHTML = '';
   });
 
@@ -520,6 +539,7 @@ describe('Keychain', () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     localStorage.clear();
+    sessionStorage.clear();
     document.body.innerHTML = '<div id="overlay"></div>';
     Object.defineProperty(window, 'crypto', {
       configurable: true,
@@ -540,6 +560,7 @@ describe('Keychain', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
     document.body.innerHTML = '';
   });
 
@@ -626,8 +647,12 @@ describe('Keychain', () => {
     const vfs = new VirtualFS();
     const kc = createKeychain(vfs);
 
+    expect(kc.hasSlotData('tailscale')).toBe(false);
     expect(kc.hasSlotData('claude')).toBe(false);
     expect(kc.hasSlotData('github')).toBe(false);
+
+    writeTailscaleSession({ control: 'tailscale' });
+    expect(kc.hasSlotData('tailscale')).toBe(true);
 
     writeClaudeAuth(vfs, 'test');
     expect(kc.hasSlotData('claude')).toBe(true);
@@ -721,6 +746,77 @@ describe('Keychain', () => {
 
     expect(freshVfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, 'utf8')).toContain('multi-alpha');
     expect(freshVfs.readFileSync(GH_HOSTS_PATH, 'utf8')).toBe(ghContent);
+  });
+
+  it('stores and restores Tailscale auth without file credentials', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const snapshot = writeTailscaleSession({
+      control: 'tailscale-control',
+      profile: 'node-auth',
+    });
+
+    const kc = createKeychain(new VirtualFS());
+    await kc.init();
+
+    expect(kc.getState().hasLiveCredentials).toBe(true);
+
+    await kc.handleExternalCredentialActivation();
+
+    const stored = parseStoredKeychain(localStorage.getItem(KEYCHAIN_STORAGE_KEY));
+    expect(stored?.slots).toEqual([
+      {
+        name: 'tailscale',
+        paths: [TAILSCALE_SESSION_KEYCHAIN_PATH],
+      },
+    ]);
+
+    clearTailscaleSession();
+
+    const freshKc = createKeychain(new VirtualFS());
+    await freshKc.init();
+    expect(freshKc.getState().bannerMode).toBe('unlock');
+
+    await freshKc.handlePrimaryAction();
+
+    expect(readStoredTailscaleSessionSnapshot()).toEqual(snapshot);
+  });
+
+  it('updates the saved vault when new Tailscale auth appears while locked', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    writeTailscaleSession({
+      control: 'tailscale-initial',
+      profile: 'initial-auth',
+    });
+
+    const setupKc = createKeychain(new VirtualFS());
+    await setupKc.init();
+    await setupKc.handleExternalCredentialActivation();
+
+    clearTailscaleSession();
+
+    const lockedKc = createKeychain(new VirtualFS());
+    await lockedKc.init();
+    expect(lockedKc.getState().bannerMode).toBe('unlock');
+
+    const updatedSnapshot = writeTailscaleSession({
+      control: 'tailscale-updated',
+      profile: 'updated-auth',
+      node: 'node-nyc',
+    });
+
+    await lockedKc.handleExternalCredentialActivation();
+
+    clearTailscaleSession();
+
+    const restoredKc = createKeychain(new VirtualFS());
+    await restoredKc.init();
+    await restoredKc.handlePrimaryAction();
+
+    expect(readStoredTailscaleSessionSnapshot()).toEqual(updatedSnapshot);
   });
 
   it('stores and restores OpenCode auth/config without requiring Claude files', async () => {

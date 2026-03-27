@@ -2,12 +2,14 @@
  * Runtime Interface - Common interface for main-thread and worker runtimes
  */
 
+import type { NetworkController, NetworkOptions } from './network/types';
 import type { VirtualFS } from './virtual-fs';
 
 export interface IRuntimeOptions {
   cwd?: string;
   env?: Record<string, string>;
   onConsole?: (method: string, args: unknown[]) => void;
+  network?: NetworkOptions;
 }
 
 export interface IModule {
@@ -57,6 +59,11 @@ export interface IRuntime {
    * Terminate the runtime (only applicable to worker runtime)
    */
   terminate?(): void;
+
+  /**
+   * Get the shared network controller for this runtime.
+   */
+  getNetwork?(): NetworkController;
 }
 
 /**

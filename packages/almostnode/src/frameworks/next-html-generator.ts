@@ -129,6 +129,7 @@ export async function generateAppRouterHtml(
     const loadingModulePath = '${loadingModulePath}';
     const errorModulePath = '${errorModulePath}';
     const notFoundModulePath = '${notFoundModulePath}';
+    const dynamicImport = (specifier) => Function('value', 'return import(value)')(specifier);
 
     // Route info cache: pathname -> Promise<{ found, params, page, layouts }>
     // Uses promise-based caching to deduplicate concurrent requests
@@ -171,7 +172,7 @@ export async function generateAppRouterHtml(
       const modulePath = virtualBase + '/_next/app' + info.page;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const module = await import(/* @vite-ignore */ modulePath + (attempt > 0 ? '?retry=' + attempt : ''));
+          const module = await dynamicImport(modulePath + (attempt > 0 ? '?retry=' + attempt : ''));
           return module.default;
         } catch (e) {
           console.warn('[Navigation] Load attempt ' + (attempt + 1) + ' failed:', modulePath, e.message);
@@ -193,7 +194,7 @@ export async function generateAppRouterHtml(
           layouts.push(layoutCache.get(path));
         } else {
           try {
-            const module = await import(/* @vite-ignore */ path);
+            const module = await dynamicImport(path);
             layoutCache.set(path, module.default);
             layouts.push(module.default);
           } catch (e) {
@@ -212,19 +213,19 @@ export async function generateAppRouterHtml(
     async function loadConventionComponents() {
       if (loadingModulePath) {
         try {
-          const mod = await import(/* @vite-ignore */ loadingModulePath);
+          const mod = await dynamicImport(loadingModulePath);
           LoadingComponent = mod.default;
         } catch (e) { /* loading.tsx not available */ }
       }
       if (errorModulePath) {
         try {
-          const mod = await import(/* @vite-ignore */ errorModulePath);
+          const mod = await dynamicImport(errorModulePath);
           ErrorComponent = mod.default;
         } catch (e) { /* error.tsx not available */ }
       }
       if (notFoundModulePath) {
         try {
-          const mod = await import(/* @vite-ignore */ notFoundModulePath);
+          const mod = await dynamicImport(notFoundModulePath);
           NotFoundComponent = mod.default;
         } catch (e) { /* not-found.tsx not available */ }
       }
@@ -496,6 +497,7 @@ export async function generatePageHtml(
     import ReactDOM from 'react-dom/client';
 
     const virtualBase = '${virtualPrefix}';
+    const dynamicImport = (specifier) => Function('value', 'return import(value)')(specifier);
 
     // Convert URL path to page module path
     function getPageModulePath(pathname) {
@@ -512,7 +514,7 @@ export async function generatePageHtml(
     async function loadPage(pathname) {
       const modulePath = getPageModulePath(pathname);
       try {
-        const module = await import(/* @vite-ignore */ modulePath);
+        const module = await dynamicImport(modulePath);
         return module.default;
       } catch (e) {
         console.error('[Navigation] Failed to load:', modulePath, e);

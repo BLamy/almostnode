@@ -1,0 +1,23 @@
+{
+  "name": "opencode-mobile-runtime",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/opencode-mobile-runtime/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": [],
+      "options": {
+        "command": "node --max-old-space-size=8192 ./node_modules/vite/bin/vite.js build",
+        "cwd": "packages/opencode-mobile-runtime"
+      }
+    },
+    "type-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --project tsconfig.json --noEmit",
+        "cwd": "packages/opencode-mobile-runtime"
+      }
+    }
+  }
+}

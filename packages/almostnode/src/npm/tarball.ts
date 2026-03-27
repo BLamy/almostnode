@@ -4,6 +4,7 @@
  */
 
 import pako from 'pako';
+import { getDefaultNetworkController, networkFetch } from '../network';
 import { VirtualFS } from '../virtual-fs';
 import * as path from '../shims/path';
 
@@ -201,7 +202,11 @@ export async function downloadAndExtract(
 
   onProgress?.(`Downloading ${url}...`);
 
-  const response = await fetch(url);
+  const response = await networkFetch(
+    url,
+    undefined,
+    getDefaultNetworkController(),
+  );
   if (!response.ok) {
     throw new Error(`Failed to download tarball: ${response.status}`);
   }

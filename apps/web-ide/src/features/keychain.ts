@@ -1,7 +1,14 @@
 import type { VirtualFS, FSWatcher } from 'almostnode';
+import {
+  parseStoredTailscaleSessionSnapshot,
+  readStoredTailscaleSessionSnapshot,
+  serializeTailscaleSessionSnapshot,
+  writeStoredTailscaleSessionSnapshot,
+} from './network-session';
 export const CLAUDE_AUTH_CREDENTIALS_PATH = '/home/user/.claude/.credentials.json';
 export const CLAUDE_AUTH_CONFIG_PATH = '/home/user/.claude/.config.json';
 export const CLAUDE_LEGACY_CONFIG_PATH = '/home/user/.claude.json';
+export const TAILSCALE_SESSION_KEYCHAIN_PATH = '/__almostnode/keychain/tailscale-session.json';
 const OPENCODE_DATA_ROOT = '/opencode/data/opencode';
 const OPENCODE_CONFIG_ROOT = '/opencode/config/opencode';
 const LEGACY_OPENCODE_AUTH_PATH = '/opencode/data/auth.json';
@@ -36,6 +43,7 @@ const KEYCHAIN_PRF_INFO = 'almostnode claude auth vault';
 const INVALID_STORED_PAYLOAD_MESSAGE = 'The saved credentials payload is invalid.';
 
 type BannerMode = 'save' | 'unlock' | null;
+type UnlockIntent = 'restore' | 'persist';
 type SupportState = 'unknown' | 'supported' | 'unsupported';
 
 type AuthFileInspection =
@@ -415,6 +423,17 @@ function readManagedSnapshotState(vfs: VirtualFS, managedPaths: string[]): Manag
   let hasInvalidClaudeCredentials = false;
 
   for (const path of managedPaths) {
+    if (path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+      const snapshot = readStoredTailscaleSessionSnapshot();
+      if (snapshot) {
+        files.push({
+          path,
+          rawText: serializeTailscaleSessionSnapshot(snapshot),
+        });
+      }
+      continue;
+    }
+
     if (!vfs.existsSync(path)) {
       continue;
     }
@@ -593,6 +612,8 @@ export class Keychain {
   private busy = false;
   private ignoredWrite = false;
   private dismissedSaveDigest: string | null = null;
+  private syncedSnapshotDigest: string | null = null;
+  private unlockIntent: UnlockIntent = 'restore';
   private supportState: SupportState = 'unknown';
   private slots: Map<string, string[]> = new Map();
 
@@ -609,13 +630,7 @@ export class Keychain {
   hasSlotData(name: string): boolean {
     const paths = this.slots.get(name);
     if (!paths) return false;
-    return paths.some((p) => {
-      try {
-        return this.vfs.existsSync(p) && this.vfs.statSync(p).isFile();
-      } catch {
-        return false;
-      }
-    });
+    return paths.some((path) => this.hasManagedPathData(path));
   }
 
   private get managedPaths(): string[] {
@@ -632,6 +647,10 @@ export class Keychain {
     return this.managedPaths.includes(path);
   }
 
+  private isSyntheticManagedPath(path: string): boolean {
+    return path === TAILSCALE_SESSION_KEYCHAIN_PATH;
+  }
+
   private normalizeManagedPath(path: string): string | null {
     if (this.isManagedPath(path)) {
       return path;
@@ -645,6 +664,28 @@ export class Keychain {
     return null;
   }
 
+  private hasManagedPathData(path: string): boolean {
+    if (path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+      return readStoredTailscaleSessionSnapshot() !== null;
+    }
+
+    if (path === CLAUDE_AUTH_CREDENTIALS_PATH) {
+      return inspectCredentialsFile(this.vfs).kind === 'valid';
+    }
+
+    try {
+      return this.vfs.existsSync(path) && this.vfs.statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  private getPrimaryManagedPath(): string {
+    return this.managedPaths.find((path) => !this.isSyntheticManagedPath(path))
+      ?? this.managedPaths[0]
+      ?? CLAUDE_AUTH_CREDENTIALS_PATH;
+  }
+
   async init(): Promise<void> {
     ensureBannerStyles();
     this.ensureBannerElement();
@@ -653,6 +694,9 @@ export class Keychain {
     // Watch parent dirs for all managed paths
     const watchedDirs = new Set<string>();
     for (const p of this.managedPaths) {
+      if (this.isSyntheticManagedPath(p)) {
+        continue;
+      }
       const parentDir = p.slice(0, p.lastIndexOf('/')) || '/';
       if (watchedDirs.has(parentDir)) continue;
       watchedDirs.add(parentDir);
@@ -676,6 +720,9 @@ export class Keychain {
 
     // Also watch individual managed files that are directly in root or top-level
     for (const p of this.managedPaths) {
+      if (this.isSyntheticManagedPath(p)) {
+        continue;
+      }
       const parentDir = p.slice(0, p.lastIndexOf('/')) || '/';
       if (!watchedDirs.has(parentDir) || parentDir === '/') continue;
       // The directory watcher above covers this
@@ -691,13 +738,13 @@ export class Keychain {
     }
 
     const normalized = command.trim().toLowerCase();
-    const shouldAutoRestore = /\b(opencode(?:-ai)?|gh|replayio)\b/.test(normalized);
+    const shouldAutoRestore = /\b(opencode(?:-ai)?|gh|replayio|tailscale)\b/.test(normalized);
     if (!shouldAutoRestore) {
       return true;
     }
 
     if (!await this.detectSupport()) {
-      this.showUnlockBanner('Unlock the saved keychain before running this command.');
+      this.showUnlockBanner('Unlock the saved keychain before running this command.', 'restore');
       return false;
     }
 
@@ -714,7 +761,7 @@ export class Keychain {
       }
 
       restored = false;
-      this.showUnlockBanner(this.toUserFacingError(error));
+      this.showUnlockBanner(this.toUserFacingError(error), 'restore');
     });
 
     if (discardedInvalidVault) {
@@ -733,11 +780,58 @@ export class Keychain {
     return readManagedSnapshotState(this.vfs, this.managedPaths);
   }
 
+  notifyExternalStateChanged(): void {
+    this.scheduleCredentialsInspection();
+  }
+
+  async handleExternalCredentialActivation(): Promise<void> {
+    const snapshot = this.getManagedSnapshotState().files;
+    if (snapshot.length === 0) {
+      return;
+    }
+
+    const stored = this.getStoredVault();
+    const rawSnapshot = serializeSnapshot(snapshot);
+    if (rawSnapshot === this.syncedSnapshotDigest) {
+      this.hideBanner();
+      return;
+    }
+
+    if (!await this.detectSupport()) {
+      const message = 'This browser does not support the WebAuthn PRF extension.';
+      if (stored) {
+        this.showUnlockBanner(message, 'persist');
+      } else {
+        this.showSaveBanner(message);
+      }
+      return;
+    }
+
+    await this.runBusyAction(async () => {
+      await this.saveCurrentCredentials();
+      this.hideBanner();
+    }, (error) => {
+      if (this.isInvalidStoredPayloadError(error)) {
+        this.discardInvalidStoredVault();
+        return;
+      }
+
+      if (stored) {
+        this.showUnlockBanner(this.toUserFacingError(error), 'persist');
+      } else {
+        this.showSaveBanner(this.toUserFacingError(error));
+      }
+    });
+  }
+
   async handlePrimaryAction(): Promise<void> {
     if (!await this.detectSupport()) {
       const message = 'This browser does not support the WebAuthn PRF extension.';
       if (this.getStoredVault()) {
-        this.showUnlockBanner(message);
+        this.showUnlockBanner(
+          message,
+          this.bannerMode === 'save' ? 'persist' : this.unlockIntent,
+        );
       } else {
         this.showSaveBanner(message);
       }
@@ -745,8 +839,15 @@ export class Keychain {
     }
 
     if (this.getStoredVault()) {
+      const intent = this.bannerMode === 'save' || this.unlockIntent === 'persist'
+        ? 'persist'
+        : 'restore';
       await this.runBusyAction(async () => {
-        await this.restoreSavedCredentials();
+        if (intent === 'persist') {
+          await this.saveCurrentCredentials();
+        } else {
+          await this.restoreSavedCredentials();
+        }
         this.hideBanner();
       }, (error) => {
         if (this.isInvalidStoredPayloadError(error)) {
@@ -754,7 +855,7 @@ export class Keychain {
           return;
         }
 
-        this.showUnlockBanner(this.toUserFacingError(error));
+        this.showUnlockBanner(this.toUserFacingError(error), intent);
       });
       return;
     }
@@ -788,7 +889,7 @@ export class Keychain {
       bannerMode: this.bannerMode,
       bannerMessage: this.bannerMessage,
       busy: this.busy,
-      path: this.managedPaths[0] ?? CLAUDE_AUTH_CREDENTIALS_PATH,
+      path: this.getPrimaryManagedPath(),
     };
   }
 
@@ -851,6 +952,14 @@ export class Keychain {
       return;
     }
 
+    if (this.getStoredVault()) {
+      this.showUnlockBanner(
+        'Unlock the saved keychain to update it with the latest credentials.',
+        'persist',
+      );
+      return;
+    }
+
     if (this.dismissedSaveDigest === rawSnapshot) {
       return;
     }
@@ -882,6 +991,7 @@ export class Keychain {
           updatedAt: new Date().toISOString(),
         });
         this.unlockedKey = registration.key;
+        this.syncedSnapshotDigest = rawSnapshot;
         this.dismissedSaveDigest = null;
         this.emitState();
         return;
@@ -912,6 +1022,7 @@ export class Keychain {
       ciphertext: encrypted.ciphertext,
       updatedAt: new Date().toISOString(),
     });
+    this.syncedSnapshotDigest = rawText;
     this.emitState();
   }
 
@@ -931,6 +1042,15 @@ export class Keychain {
     this.ignoredWrite = true;
     try {
       for (const entry of snapshot) {
+        if (entry.path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+          const tailscaleSnapshot = parseStoredTailscaleSessionSnapshot(entry.rawText);
+          if (!tailscaleSnapshot) {
+            throw new WebAuthnError(INVALID_STORED_PAYLOAD_MESSAGE);
+          }
+          writeStoredTailscaleSessionSnapshot(tailscaleSnapshot);
+          continue;
+        }
+
         const parentPath = entry.path.slice(0, entry.path.lastIndexOf('/')) || '/';
         if (parentPath !== '/') {
           this.vfs.mkdirSync(parentPath, { recursive: true });
@@ -944,6 +1064,7 @@ export class Keychain {
     }
 
     this.unlockedKey = key;
+    this.syncedSnapshotDigest = decrypted;
     this.emitState();
   }
 
@@ -969,14 +1090,13 @@ export class Keychain {
     }
 
     return paths.every((path) => {
+      if (path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+        return readStoredTailscaleSessionSnapshot() !== null;
+      }
       if (path === CLAUDE_AUTH_CREDENTIALS_PATH) {
         return inspectCredentialsFile(this.vfs).kind === 'valid';
       }
-      try {
-        return this.vfs.existsSync(path) && this.vfs.statSync(path).isFile();
-      } catch {
-        return false;
-      }
+      return this.hasManagedPathData(path);
     });
   }
 
@@ -1022,8 +1142,9 @@ export class Keychain {
     this.emitState();
   }
 
-  private showUnlockBanner(message?: string): void {
+  private showUnlockBanner(message?: string, intent: UnlockIntent = 'restore'): void {
     this.bannerMode = 'unlock';
+    this.unlockIntent = intent;
     this.bannerMessage = message || 'Saved credentials are available for this browser.';
     this.renderBanner();
     this.emitState();
@@ -1031,6 +1152,7 @@ export class Keychain {
 
   private hideBanner(): void {
     this.bannerMode = null;
+    this.unlockIntent = 'restore';
     this.bannerMessage = null;
     this.renderBanner();
     this.emitState();
@@ -1074,7 +1196,7 @@ export class Keychain {
 
     const stored = this.getStoredVault();
     if (stored && !this.hasRestoredState(stored)) {
-      this.showUnlockBanner();
+      this.showUnlockBanner(undefined, 'restore');
       return;
     }
     this.hideBanner();
@@ -1087,6 +1209,11 @@ export class Keychain {
   private clearStoredVault(): void {
     localStorage.removeItem(KEYCHAIN_STORAGE_KEY);
     this.unlockedKey = null;
+    this.syncedSnapshotDigest = null;
+    this.bannerMode = null;
+    this.bannerMessage = null;
+    this.unlockIntent = 'restore';
+    this.renderBanner();
     this.emitState();
   }
 

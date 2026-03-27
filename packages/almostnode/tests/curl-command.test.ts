@@ -214,6 +214,22 @@ describe('curl command', () => {
     );
   });
 
+  it('parses --max-time without treating its value as the URL', async () => {
+    mockHandleRequest.mockResolvedValue(makeResponse('ok'));
+
+    const result = await runCurlCommand(['--max-time', '15', 'http://localhost:3000/'], ctx, vfs);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('ok');
+    expect(mockHandleRequest).toHaveBeenCalledWith(
+      3000,
+      'GET',
+      '/',
+      {},
+      undefined,
+    );
+  });
+
   it('-v verbose output on stderr', async () => {
     mockHandleRequest.mockResolvedValue(makeResponse('body', 200, { 'x-foo': 'bar' }));
 

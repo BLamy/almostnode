@@ -8,6 +8,7 @@ import { Readable, Writable, Buffer } from './stream';
 import { Socket, Server as NetServer, AddressInfo } from './net';
 import { createHash } from './crypto';
 import { almostnodeDebugLog } from '../utils/debug';
+import { getDefaultNetworkController, networkFetch } from '../network';
 
 // Save the browser's native WebSocket at module load time, BEFORE any CLI bundle
 // can overwrite it (e.g. Convex CLI does `globalThis.WebSocket = bundledWs`).
@@ -648,24 +649,8 @@ export class ClientRequest extends Writable {
         return;
       }
 
-      // Use CORS proxy if configured
-      const corsProxy = getCorsProxy();
-      const fetchUrl = corsProxy
-        ? corsProxy + encodeURIComponent(url)
-        : url;
-
       // Build fetch options — clone headers to avoid mutating the original
       const fetchHeaders = { ...this.headers };
-      // When going through a CORS proxy, strip accept-encoding so the target
-      // server returns uncompressed data. The browser handles its own
-      // compression on the proxy-to-browser leg. Passing accept-encoding: br
-      // through the proxy causes the proxy to return compressed bytes that the
-      // browser can't properly decompress (it doesn't see the content-encoding).
-      if (corsProxy) {
-        delete fetchHeaders['accept-encoding'];
-        // Also strip host header — it would reference the original host, not the proxy
-        delete fetchHeaders['host'];
-      }
       const fetchOptions: RequestInit = {
         method: this.method,
         headers: fetchHeaders,
@@ -687,52 +672,15 @@ export class ClientRequest extends Writable {
         }, this._timeout);
       }
 
-      // Make the request — follow redirects through the CORS proxy so the
-      // browser doesn't follow them directly (which would bypass the proxy
-      // and produce opaque/empty responses).
-      const MAX_REDIRECTS = 10;
-      let currentUrl = fetchUrl;
-      let currentMethod = fetchOptions.method || 'GET';
-      let currentBody = fetchOptions.body;
-      let response: Response;
-
-      for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-        // When going through a CORS proxy, use redirect: 'manual' so we can
-        // re-proxy redirect targets instead of letting the browser follow them.
-        response = await fetch(currentUrl, {
+      const response = await networkFetch(
+        url,
+        {
           ...fetchOptions,
-          method: currentMethod,
-          body: currentBody,
-          redirect: corsProxy ? 'manual' : (fetchOptions.redirect || 'follow'),
-        });
-        almostnodeDebugLog('http', `[almostnode DEBUG] http fetch status: ${response.status} ${response.url.slice(0, 120)}`);
-
-        // Handle redirects when proxied
-        if (corsProxy && response.status >= 300 && response.status < 400) {
-          const redirectLocation = response.headers.get('location');
-          if (redirectLocation) {
-            // Resolve relative URLs against the original (non-proxied) URL
-            const resolvedUrl = new URL(redirectLocation, url).href;
-            currentUrl = corsProxy + encodeURIComponent(resolvedUrl);
-            // 303: change method to GET and drop body
-            if (response.status === 303) {
-              currentMethod = 'GET';
-              currentBody = undefined;
-            }
-            // 301, 302: change method to GET for non-GET/HEAD (per browser behavior)
-            if ((response.status === 301 || response.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
-              currentMethod = 'GET';
-              currentBody = undefined;
-            }
-            // 307, 308: preserve method and body
-            if (redirectCount === MAX_REDIRECTS) {
-              throw new Error('Too many redirects');
-            }
-            continue;
-          }
-        }
-        break;
-      }
+          redirect: fetchOptions.redirect || 'follow',
+        },
+        getDefaultNetworkController(),
+      );
+      almostnodeDebugLog('http', `[almostnode DEBUG] http fetch status: ${response.status} ${String(response.url || url).slice(0, 120)}`);
 
       // Clear timeout
       if (this._timeoutId) {
@@ -743,7 +691,7 @@ export class ClientRequest extends Writable {
       if (this._aborted) return;
 
       // Convert response to IncomingMessage
-      const incomingMessage = await this._responseToIncomingMessage(response!);
+      const incomingMessage = await this._responseToIncomingMessage(response);
 
       // Emit response event
       this.emit('response', incomingMessage);
