@@ -33,6 +33,7 @@ class FakeTailscaleAdapter implements TailscaleAdapter {
   async login(): Promise<TailscaleAdapterStatus> {
     this.status = {
       state: 'running',
+      selectedExitNodeId: 'node-sfo',
       selfName: 'almostnode-test',
       tailnetName: 'example.ts.net',
     };
@@ -169,6 +170,34 @@ describe('network controller', () => {
     );
     expect(curlResult.exitCode).toBe(0);
     expect(curlResult.stdout).toBe('tailnet-response');
+  });
+
+  it('routes public fetches through tailscale once login reports a selected exit node', async () => {
+    const createdAdapters: FakeTailscaleAdapter[] = [];
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const adapter = new FakeTailscaleAdapter(onStatus);
+      createdAdapters.push(adapter);
+      return adapter;
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await controller.login();
+
+    const response = await controller.fetch({
+      url: 'https://registry.npmjs.org/react',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(createdAdapters[0]?.fetches).toHaveLength(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(controller.getConfig().exitNodeId).toBe('node-sfo');
   });
 
   it('boots the tailscale adapter on getStatus when tailscale is already selected', async () => {

@@ -99,7 +99,7 @@ export class DefaultNetworkController implements NetworkController {
   }
 
   getConfig(): Required<NetworkOptions> {
-    return { ...this.options };
+    return this.getResolvedOptions();
   }
 
   subscribe(listener: (status: NetworkStatus) => void): () => void {
@@ -187,12 +187,13 @@ export class DefaultNetworkController implements NetworkController {
   }
 
   async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
-    const route = selectNetworkRouteForUrl(request.url, this.options);
+    const options = this.getResolvedOptions();
+    const route = selectNetworkRouteForUrl(request.url, options);
     if (route === 'tailscale') {
       const adapter = await this.ensureAdapter();
       return adapter.fetch(request);
     }
-    return browserFetch(request, this.options);
+    return browserFetch(request, options);
   }
 
   async lookup(
@@ -206,7 +207,7 @@ export class DefaultNetworkController implements NetworkController {
       };
     }
 
-    const route = selectNetworkRouteForHost(hostname, this.options);
+    const route = selectNetworkRouteForHost(hostname, this.getResolvedOptions());
     if (route === 'tailscale') {
       const adapter = await this.ensureAdapter();
       return adapter.lookup(hostname, options);
@@ -249,6 +250,22 @@ export class DefaultNetworkController implements NetworkController {
     }
 
     return this.adapterPromise;
+  }
+
+  private getResolvedOptions(): Required<NetworkOptions> {
+    if (
+      this.options.provider !== 'tailscale' ||
+      !this.options.useExitNode ||
+      this.options.exitNodeId
+    ) {
+      return { ...this.options };
+    }
+
+    const selectedExitNodeId = this.adapterStatus?.selectedExitNodeId?.trim() || null;
+    return {
+      ...this.options,
+      exitNodeId: selectedExitNodeId,
+    };
   }
 
   private emit(status = mergeStatus(this.options, this.adapterStatus)): void {
