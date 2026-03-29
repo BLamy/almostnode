@@ -1,0 +1,236 @@
+/* Scoped Tailwind for the project sidebar — same pattern as rendered-editors.css */
+@import "tailwindcss" layer(sidebar-tw);
+
+@layer sidebar-tw {
+  @scope (.almostnode-project-sidebar) {
+    @import "tailwindcss/utilities";
+  }
+}
+
+/* Sidebar container */
+.almostnode-project-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  min-width: 0;
+  height: 100%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
+    var(--panel-alt, #111b27);
+  border-right: 1px solid var(--panel-border);
+  color: var(--text);
+  font-family: "Instrument Sans", system-ui, sans-serif;
+  overflow: hidden;
+  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease;
+}
+
+.almostnode-project-sidebar.is-collapsed {
+  width: 0;
+  min-width: 0;
+  border-right: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Sidebar header */
+.almostnode-sidebar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+
+.almostnode-sidebar__title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.almostnode-sidebar__toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 0.3rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.almostnode-sidebar__toggle:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Project list item */
+.almostnode-project-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.75rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.1s;
+}
+
+.almostnode-project-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.almostnode-project-item.is-active {
+  background: rgba(255, 122, 89, 0.12);
+}
+
+.almostnode-project-item__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.almostnode-project-item__badge {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  background: rgba(255, 122, 89, 0.1);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  flex: none;
+}
+
+.almostnode-project-item__menu-trigger {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.15rem;
+  border-radius: 0.25rem;
+  opacity: 0;
+  transition: opacity 0.1s;
+  display: flex;
+  align-items: center;
+}
+
+.almostnode-project-item:hover .almostnode-project-item__menu-trigger,
+.almostnode-project-item__menu-trigger[data-state="open"] {
+  opacity: 1;
+}
+
+.almostnode-project-item__menu-trigger:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Chat thread item */
+.almostnode-chat-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.35rem 0.75rem 0.35rem 1.5rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.almostnode-chat-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.almostnode-chat-item.is-active {
+  color: var(--text);
+  background: rgba(255, 122, 89, 0.08);
+}
+
+.almostnode-chat-item__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.almostnode-chat-item__time {
+  flex: none;
+  font-size: 0.66rem;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* Section label */
+.almostnode-sidebar__section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.75rem 0.25rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* Switching overlay */
+.almostnode-sidebar__switching-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7, 16, 24, 0.7);
+  backdrop-filter: blur(4px);
+}
+
+.almostnode-sidebar__switching-spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 2px solid rgba(255, 122, 89, 0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sidebar-spin 0.6s linear infinite;
+}
+
+@keyframes sidebar-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Inline rename input */
+.almostnode-project-item__rename-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--accent);
+  border-radius: 0.25rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.08rem 0.35rem;
+  outline: none;
+}

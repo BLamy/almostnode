@@ -13,6 +13,17 @@ export interface SerializedFile {
   contentBase64: string;
 }
 
+function serializedFilesToMap(files: Iterable<SerializedFile>): Map<string, string> {
+  const snapshot = new Map<string, string>();
+  for (const file of files) {
+    if (!shouldPersistProjectPath(file.path)) {
+      continue;
+    }
+    snapshot.set(normalizeProjectPath(file.path), file.contentBase64);
+  }
+  return snapshot;
+}
+
 function normalizeProjectPath(vfsPath: string): string {
   const normalized = vfsPath.replace(/\\/g, '/');
   if (
@@ -151,6 +162,44 @@ export function loadProjectFilesIntoVfs(
 
     const content = Buffer.from(file.contentBase64, 'base64');
     vfs.writeFileSync(normalizedPath, content);
+  }
+}
+
+export function replaceProjectFilesInVfs(
+  vfs: {
+    existsSync: (path: string) => boolean;
+    readdirSync: (path: string) => unknown;
+    statSync: (path: string) => { isDirectory: () => boolean };
+    readFileSync: (path: string) => unknown;
+    mkdirSync: (path: string, options?: { recursive?: boolean }) => void;
+    writeFileSync: (path: string, content: Buffer | Uint8Array | string) => void;
+    unlinkSync: (path: string) => void;
+    rmdirSync: (path: string) => void;
+  },
+  files: SerializedFile[],
+): void {
+  vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
+
+  const previousMap = serializedFilesToMap(collectProjectFilesBase64(vfs));
+  const nextMap = serializedFilesToMap(files);
+
+  for (const [path, contentBase64] of nextMap.entries()) {
+    if (previousMap.get(path) === contentBase64) {
+      previousMap.delete(path);
+      continue;
+    }
+
+    const separatorIndex = path.lastIndexOf('/');
+    if (separatorIndex > 0) {
+      ensureVfsDirectoryExists(vfs, path.slice(0, separatorIndex));
+    }
+
+    vfs.writeFileSync(path, Buffer.from(contentBase64, 'base64'));
+    previousMap.delete(path);
+  }
+
+  for (const path of previousMap.keys()) {
+    removeVfsEntryRecursive(vfs, path);
   }
 }
 

@@ -2945,8 +2945,6 @@ export function registerWorkbenchSurfaces(options: {
     }
   }
 
-  const previewInput = new PreviewEditorInput();
-  const databaseInput = new DatabaseEditorInput();
   const disposables = new DisposableStore();
 
   disposables.add(
@@ -3020,8 +3018,12 @@ export function registerWorkbenchSurfaces(options: {
     }),
   );
   return {
-    previewInput,
-    databaseInput,
+    get previewInput() {
+      return new PreviewEditorInput();
+    },
+    get databaseInput() {
+      return new DatabaseEditorInput();
+    },
     renderedEditors: rendered.factories,
     filesViewId: FILES_VIEW_ID,
     openCodeViewId: OPEN_CODE_VIEW_ID,

@@ -1,12 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import type { TemplateId } from '../features/workspace-seed';
 import { WebIDEHost } from '../workbench/workbench-host';
+import { ProjectManager } from '../features/project-manager';
+import { ProjectSidebar } from '../sidebar/project-sidebar';
 import type { DesktopBridge } from './bridge';
 import type { SerializedFile } from './project-snapshot';
 
 const DEBUG_STORAGE_KEY = '__almostnodeDebug';
 const CORS_PROXY_STORAGE_KEY = '__corsProxyUrl';
 const INTERNAL_CORS_PROXY_PATH = '/__api/cors-proxy?url=';
+const SIDEBAR_COLLAPSED_KEY = 'almostnode-sidebar-collapsed';
+const PROJECT_QUERY_PARAM = 'project';
 
 function normalizeDebugSections(raw: string | null): string[] {
   if (!raw) return [];
@@ -72,6 +76,30 @@ function syncCorsProxyState(raw: string | undefined): void {
   }
 }
 
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function hasProjectQueryParam(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).has(PROJECT_QUERY_PARAM);
+  } catch {
+    return false;
+  }
+}
+
 export interface WorkbenchScreenProps {
   template: TemplateId;
   debug?: string;
@@ -101,6 +129,41 @@ export function WorkbenchScreen({
 }: WorkbenchScreenProps) {
   const workbenchRef = useRef<HTMLDivElement | null>(null);
   const bootstrappedRef = useRef(false);
+  const managerRef = useRef<ProjectManager | null>(null);
+  const [hostReady, setHostReady] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+
+  // Lazily create the project manager singleton
+  if (!managerRef.current) {
+    managerRef.current = new ProjectManager();
+  }
+  const manager = managerRef.current;
+
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      writeSidebarCollapsed(next);
+      // Trigger Monaco layout reflow after sidebar animation
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+      return next;
+    });
+  }, []);
+
+  // Cmd+B / Ctrl+B keyboard shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'b' && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        handleToggleSidebar();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleToggleSidebar]);
+
+  const shouldRestoreProjectFromUrl = !initialProjectFiles && hasProjectQueryParam();
 
   useEffect(() => {
     if (bootstrappedRef.current) return;
@@ -120,12 +183,23 @@ export function WorkbenchScreen({
       marketplaceMode,
       template,
       initialProjectFiles,
-      skipWorkspaceSeed,
-      deferPreviewStart,
+      skipWorkspaceSeed: skipWorkspaceSeed || shouldRestoreProjectFromUrl,
+      deferPreviewStart: deferPreviewStart || shouldRestoreProjectFromUrl,
       desktopBridge: desktopBridge ?? null,
       hostProjectDirectory: hostProjectDirectory ?? null,
       agentLaunchCommand: agentLaunchCommand ?? null,
     }).then((host) => {
+      // Wire project manager to host
+      manager.setHost({
+        getVfs: () => host.getVfs(),
+        getTemplateId: () => host.getTemplateId(),
+        attachProjectContext: (tid, dbPrefix) =>
+          host.attachProjectContext(tid, dbPrefix),
+        switchProjectWorkspace: (tid, files, dbPrefix) =>
+          host.switchProjectWorkspace(tid, files, dbPrefix),
+      });
+      void manager.init();
+      setHostReady(true);
       onHostReady?.(host);
     });
   }, [
@@ -137,15 +211,24 @@ export function WorkbenchScreen({
     initialProjectFiles,
     skipWorkspaceSeed,
     deferPreviewStart,
+    shouldRestoreProjectFromUrl,
     marketplace,
     onHostReady,
     template,
+    manager,
   ]);
 
   return (
     <div className="webide-shell">
       <header className="webide-header" />
       <main className="webide-body">
+        {hostReady && (
+          <ProjectSidebar
+            manager={manager}
+            isCollapsed={sidebarCollapsed}
+            onToggle={handleToggleSidebar}
+          />
+        )}
         <div id="webideWorkbench" ref={workbenchRef} />
       </main>
     </div>

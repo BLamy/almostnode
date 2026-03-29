@@ -107,14 +107,17 @@ html[data-almostnode-theme="light"] body {
 }
 
 .webide-body {
+  display: flex;
   min-height: 0;
   padding: 0;
 }
 
 #webideWorkbench {
-  width: 100%;
+  flex: 1 1 0;
+  width: 0;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   border: 1px solid var(--panel-border);
   border-radius: 1rem;
   overflow: hidden;

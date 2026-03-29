@@ -47,3 +47,4 @@ packages/almostnode/e2e/deploy-debug.spec.ts
 packages/almostnode/examples/macaly-demo.html
 
 /.playwright-cli
+.collaborator

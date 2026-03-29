@@ -30,6 +30,7 @@ import type { DesktopBridge } from "../desktop/bridge";
 import { HostTerminalSession } from "../desktop/host-terminal-session";
 import {
   loadProjectFilesIntoVfs,
+  replaceProjectFilesInVfs,
   type SerializedFile,
 } from "../desktop/project-snapshot";
 import {
@@ -103,7 +104,6 @@ import {
 import { EnablementState } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { QueryType } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
-import { SIDE_GROUP } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService";
 import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
 import getKeybindingsServiceOverride from "@codingame/monaco-vscode-keybindings-service-override";
 import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-service-override";
@@ -719,6 +719,7 @@ export class WebIDEHost {
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
+  private previewStartRetryTimeoutId = 0;
   private readonly consolePanel = new ConsolePanelElement();
   private readonly consoleTabId = "console-panel";
   private consoleMessageCount = 0;
@@ -729,7 +730,9 @@ export class WebIDEHost {
   private hadTailscaleKeychainData = false;
   private pendingTailscaleKeychainActivation = false;
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
-  private readonly templateId: TemplateId;
+  private workspaceDependencyInstallKey: string | null = null;
+  private workspaceDependencyInstallRequestKey: string | null = null;
+  private templateId: TemplateId;
   private readonly initialProjectFiles: SerializedFile[] | null;
   private readonly skipWorkspaceSeed: boolean;
   private readonly deferPreviewStart: boolean;
@@ -743,6 +746,8 @@ export class WebIDEHost {
   private pgliteMiddleware:
     | import("almostnode/internal").RequestMiddleware
     | null = null;
+  private databaseSidebarRegistered = false;
+  private currentProjectDatabaseNamespace = "global";
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
   private testRecorder:
@@ -979,6 +984,279 @@ export class WebIDEHost {
     return getTemplateDefaults(this.templateId);
   }
 
+  getVfs() {
+    return this.container.vfs;
+  }
+
+  getTemplateId(): TemplateId {
+    return this.templateId;
+  }
+
+  private normalizeProjectDatabaseNamespace(dbPrefix?: string): string {
+    const trimmed = dbPrefix?.trim();
+    return trimmed ? trimmed : "global";
+  }
+
+  private abortRunningTerminalCommands(): void {
+    for (const tab of this.terminalTabs.values()) {
+      tab.runningAbortController?.abort();
+    }
+    for (const tab of this.openCodeSidebarTerminalTabs.values()) {
+      tab.runningAbortController?.abort();
+    }
+  }
+
+  private resetPreviewTerminalTab(): void {
+    const previewTabId = this.previewTerminalTabId;
+    if (!previewTabId) {
+      return;
+    }
+
+    const wasActive = this.activeTerminalTabId === previewTabId;
+    if (wasActive) {
+      this.activeTerminalTabId = null;
+    }
+
+    this.previewTerminalTabId = null;
+    this.disposeShellTerminalTab(previewTabId);
+
+    if (wasActive) {
+      this.activateFallbackTerminalTab(false);
+    }
+  }
+
+  private async waitForPreviewServerShutdown(port: number | null): Promise<void> {
+    if (typeof port !== "number") {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timeoutId = 0;
+      const handleServerUnregistered = (stoppedPort: unknown) => {
+        if (stoppedPort !== port) {
+          return;
+        }
+        if (timeoutId) {
+          window.clearTimeout(timeoutId);
+        }
+        this.container.serverBridge.off(
+          "server-unregistered",
+          handleServerUnregistered,
+        );
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+
+      this.container.serverBridge.on(
+        "server-unregistered",
+        handleServerUnregistered,
+      );
+
+      timeoutId = window.setTimeout(() => {
+        this.container.serverBridge.off(
+          "server-unregistered",
+          handleServerUnregistered,
+        );
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      }, 1500);
+    });
+  }
+
+  private async closeCurrentProjectDatabase(): Promise<void> {
+    try {
+      const { getActiveDatabase, setDatabaseNamespace } =
+        await import("../../../../packages/almostnode/src/pglite/db-manager");
+      const { closePGliteInstance } =
+        await import("../../../../packages/almostnode/src/pglite/pglite-database");
+      setDatabaseNamespace(this.currentProjectDatabaseNamespace);
+      const active = getActiveDatabase(this.currentProjectDatabaseNamespace);
+      if (active) {
+        await closePGliteInstance(active);
+      }
+    } catch {
+      // PGlite may not have been initialized.
+    }
+  }
+
+  async attachProjectContext(
+    templateId: TemplateId,
+    dbPrefix?: string,
+  ): Promise<void> {
+    const nextNamespace = this.normalizeProjectDatabaseNamespace(dbPrefix);
+    if (this.currentProjectDatabaseNamespace !== nextNamespace) {
+      await this.closeCurrentProjectDatabase();
+    }
+    this.templateId = templateId;
+    this.currentProjectDatabaseNamespace = nextNamespace;
+    void this.initPGliteIfNeeded();
+  }
+
+  async switchProjectWorkspace(
+    newTemplateId: TemplateId,
+    files: SerializedFile[],
+    dbPrefix?: string,
+  ): Promise<void> {
+    const previousPreviewPort = this.previewPort;
+    this.abortRunningTerminalCommands();
+    this.clearScheduledPreviewStartRetry();
+    this.resetPreviewTerminalTab();
+    await this.waitForPreviewServerShutdown(previousPreviewPort);
+    await this.closeCurrentProjectDatabase();
+
+    this.previewPort = null;
+    this.previewUrl = null;
+    this.previewStartRequested = false;
+    this.previewSurface.setActiveDb(null);
+    this.previewSurface.clear("Switching projects…");
+    this.databaseSurface.update([], null);
+
+    this.templateId = newTemplateId;
+    replaceProjectFilesInVfs(this.container.vfs, files);
+
+    const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
+    if (!this.container.vfs.existsSync(packageJsonPath)) {
+      seedWorkspace(this.container, this.templateId);
+    }
+
+    this.currentProjectDatabaseNamespace =
+      this.normalizeProjectDatabaseNamespace(dbPrefix);
+
+    await this.ensureGitInitialized();
+
+    if (this.terminalTabs.size === 0) {
+      const initialTab = this.createUserTerminalTab(false);
+      this.updateTerminalStatus(initialTab, "Idle");
+    }
+
+    await this.revealPreviewEditor();
+    this.updatePreviewStatus("Waiting for a preview server");
+    this.ensurePreviewServerRunning();
+    this.schedulePreviewStartRetry();
+    void this.initPGliteIfNeeded();
+
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  /**
+   * Tear down the active project: abort all terminal sessions, clear preview,
+   * unregister PGlite middleware, and close all editor tabs.
+   */
+  async teardownActiveProject(): Promise<void> {
+    // 1. Abort + dispose all terminal tabs
+    for (const [id, tab] of this.terminalTabs) {
+      tab.runningAbortController?.abort();
+      tab.terminal.dispose();
+      tab.session.dispose();
+      this.terminalSurface.removeTab(id);
+    }
+    this.terminalTabs.clear();
+    this.activeTerminalTabId = null;
+    this.previewTerminalTabId = null;
+    this.terminalCounter = 0;
+
+    // 2. Abort + dispose all OpenCode sidebar terminal tabs
+    for (const [id, tab] of this.openCodeSidebarTerminalTabs) {
+      tab.runningAbortController?.abort();
+      tab.terminal.dispose();
+      tab.session.dispose();
+      this.openCodeSurface.removeTab(id);
+    }
+    this.openCodeSidebarTerminalTabs.clear();
+
+    // 3. Close OpenCode panel tabs
+    for (const [id, tab] of this.openCodeTabs) {
+      tab.session.dispose();
+      this.terminalSurface.removeTab(id);
+    }
+    this.openCodeTabs.clear();
+
+    // 4. Close OpenCode sidebar tabs
+    for (const [id, tab] of this.openCodeSidebarTabs) {
+      tab.session?.dispose();
+      this.openCodeSurface.removeTab(id);
+    }
+    this.openCodeSidebarTabs.clear();
+    this.activeOpenCodeSidebarTabId = null;
+
+    // 5. Clear preview state
+    this.previewPort = null;
+    this.previewUrl = null;
+    this.previewStartRequested = false;
+    this.previewSurface.setActiveDb(null);
+    this.previewSurface.clear("Switching projects\u2026");
+
+    // 6. Unregister PGlite middleware & close instances
+    if (this.pgliteMiddleware) {
+      this.container.serverBridge.unregisterMiddleware(this.pgliteMiddleware);
+      this.pgliteMiddleware = null;
+    }
+    await this.closeCurrentProjectDatabase();
+    this.databaseSurface.update([], null);
+
+    // 7. Close all open editor tabs
+    try {
+      const commandService = await getService(ICommandService);
+      await commandService.executeCommand("workbench.action.closeAllEditors");
+    } catch {
+      // May fail if no editors are open
+    }
+
+    // 8. Reset workspace dependency install promise
+    this.workspaceDependencyInstallPromise = null;
+    this.workspaceDependencyInstallKey = null;
+    this.workspaceDependencyInstallRequestKey = null;
+
+    // 9. Clear console
+    this.consolePanel.clear();
+    this.consoleMessageCount = 0;
+  }
+
+  /**
+   * Reload the workbench for a new project: create terminal, install deps,
+   * start dev server, init PGlite.
+   */
+  async reloadWorkbenchForNewProject(
+    newTemplateId: TemplateId,
+    dbPrefix?: string,
+  ): Promise<void> {
+    this.templateId = newTemplateId;
+    this.currentProjectDatabaseNamespace =
+      this.normalizeProjectDatabaseNamespace(dbPrefix);
+
+    // 1. Seed workspace if VFS is empty (new project with no saved files)
+    const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
+    if (!this.container.vfs.existsSync(packageJsonPath)) {
+      seedWorkspace(this.container, this.templateId);
+    }
+
+    // 2. Ensure git is initialized
+    await this.ensureGitInitialized();
+
+    // 3. Create initial terminal tab
+    const initialTab = this.createUserTerminalTab(false);
+    this.updateTerminalStatus(initialTab, "Idle");
+
+    // 4. Restore preview as the default editor for the switched project.
+    await this.revealPreviewEditor();
+    this.updatePreviewStatus("Waiting for a preview server");
+
+    // 5. Start preview server (which does npm install first)
+    this.ensurePreviewServerRunning();
+    this.schedulePreviewStartRetry();
+
+    // 6. Init PGlite if needed
+    void this.initPGliteIfNeeded();
+
+    // 7. Trigger Monaco layout refresh
+    window.dispatchEvent(new Event("resize"));
+  }
+
   get terminal(): Terminal {
     return this.requireActiveTerminalTab().terminal;
   }
@@ -1129,6 +1407,23 @@ export class WebIDEHost {
 
   private updatePreviewStatus(text: string): void {
     this.previewSurface.setStatus(text);
+  }
+
+  private clearScheduledPreviewStartRetry(): void {
+    if (this.previewStartRetryTimeoutId) {
+      window.clearTimeout(this.previewStartRetryTimeoutId);
+      this.previewStartRetryTimeoutId = 0;
+    }
+  }
+
+  private schedulePreviewStartRetry(delayMs = 3000): void {
+    this.clearScheduledPreviewStartRetry();
+    this.previewStartRetryTimeoutId = window.setTimeout(() => {
+      this.previewStartRetryTimeoutId = 0;
+      if (!this.previewUrl && !this.previewStartRequested) {
+        this.ensurePreviewServerRunning();
+      }
+    }, delayMs);
   }
 
   private ensurePreviewServerRunning(): void {
@@ -2206,44 +2501,56 @@ export class WebIDEHost {
 
   private async revealPreviewEditor(): Promise<void> {
     const editorService = await getService(IEditorService);
-    const existing = this.workbenchSurfaces.previewInput.resource
+    const previewInput = this.workbenchSurfaces.previewInput;
+    const existing = previewInput.resource
       ? editorService
-          .findEditors(this.workbenchSurfaces.previewInput.resource)
+          .findEditors(previewInput.resource)
           .find((identifier) => {
-            return identifier.editor.matches(
-              this.workbenchSurfaces.previewInput,
-            );
+            return identifier.editor.typeId === previewInput.typeId;
           })
       : undefined;
 
-    await editorService.openEditor(
-      this.workbenchSurfaces.previewInput,
-      {
-        pinned: true,
-      },
-      existing?.groupId ?? SIDE_GROUP,
-    );
+    if (existing?.groupId !== undefined) {
+      await editorService.openEditor(
+        previewInput,
+        {
+          pinned: true,
+        },
+        existing.groupId,
+      );
+      return;
+    }
+
+    await editorService.openEditor(previewInput, {
+      pinned: true,
+    });
   }
 
   private async revealDatabaseEditor(): Promise<void> {
     const editorService = await getService(IEditorService);
-    const existing = this.workbenchSurfaces.databaseInput.resource
+    const databaseInput = this.workbenchSurfaces.databaseInput;
+    const existing = databaseInput.resource
       ? editorService
-          .findEditors(this.workbenchSurfaces.databaseInput.resource)
+          .findEditors(databaseInput.resource)
           .find((identifier) => {
-            return identifier.editor.matches(
-              this.workbenchSurfaces.databaseInput,
-            );
+            return identifier.editor.typeId === databaseInput.typeId;
           })
       : undefined;
 
-    await editorService.openEditor(
-      this.workbenchSurfaces.databaseInput,
-      {
-        pinned: true,
-      },
-      existing?.groupId,
-    );
+    if (existing?.groupId !== undefined) {
+      await editorService.openEditor(
+        databaseInput,
+        {
+          pinned: true,
+        },
+        existing.groupId,
+      );
+      return;
+    }
+
+    await editorService.openEditor(databaseInput, {
+      pinned: true,
+    });
   }
 
   private async revealTerminalPanel(focus: boolean): Promise<void> {
@@ -3189,34 +3496,39 @@ export class WebIDEHost {
       getIdbPath,
       getActiveDatabase,
       setActiveDatabase,
+      setDatabaseNamespace,
       createDatabase,
       deleteDatabase,
     } = await import("../../../../packages/almostnode/src/pglite/db-manager");
-    const hasExistingDbs = listDatabases().length > 0;
+    const namespace = setDatabaseNamespace(this.currentProjectDatabaseNamespace);
+    const hasExistingDbs = listDatabases(namespace).length > 0;
 
     if (!hasSchema && !hasDrizzleDir && !hasExistingDbs) {
-      // No database needed
+      this.previewSurface.setActiveDb(null);
+      this.databaseSurface.update([], null);
       return;
     }
 
     try {
-      // Register database sidebar view (workbench is already initialized at this point)
-      const { registerCustomView } =
-        await import("@codingame/monaco-vscode-workbench-service-override");
-      registerCustomView({
-        id: "almostnode.sidebar.database",
-        name: "Database",
-        location: ViewContainerLocation.Sidebar,
-        order: 1,
-        icon:
-          "data:image/svg+xml," +
-          encodeURIComponent(
-            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>',
-          ),
-        renderBody: (container) => this.databaseSurface.attach(container),
-      });
+      if (!this.databaseSidebarRegistered) {
+        const { registerCustomView } =
+          await import("@codingame/monaco-vscode-workbench-service-override");
+        registerCustomView({
+          id: "almostnode.sidebar.database",
+          name: "Database",
+          location: ViewContainerLocation.Sidebar,
+          order: 1,
+          icon:
+            "data:image/svg+xml," +
+            encodeURIComponent(
+              '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>',
+            ),
+          renderBody: (container) => this.databaseSurface.attach(container),
+        });
+        this.databaseSidebarRegistered = true;
+      }
 
-      const activeName = ensureDefaultDatabase();
+      const activeName = ensureDefaultDatabase(namespace);
 
       // Load PGlite and init instance (with migration support)
       const { initAndMigrate } =
@@ -3224,21 +3536,23 @@ export class WebIDEHost {
       await initAndMigrate(
         activeName,
         this.container.vfs,
-        getIdbPath(activeName),
+        getIdbPath(activeName, namespace),
       );
       console.log(`[pglite] Database "${activeName}" ready`);
 
       // Register middleware
-      const { createPGliteMiddleware } =
-        await import("../../../../packages/almostnode/src/pglite/bridge-middleware");
-      this.pgliteMiddleware = createPGliteMiddleware();
-      this.container.serverBridge.registerMiddleware(this.pgliteMiddleware);
+      if (!this.pgliteMiddleware) {
+        const { createPGliteMiddleware } =
+          await import("../../../../packages/almostnode/src/pglite/bridge-middleware");
+        this.pgliteMiddleware = createPGliteMiddleware();
+        this.container.serverBridge.registerMiddleware(this.pgliteMiddleware);
+      }
 
       // Set active DB on preview surface
       this.previewSurface.setActiveDb(activeName);
 
       // Update database panel
-      this.databaseSurface.update(listDatabases(), activeName);
+      this.databaseSurface.update(listDatabases(namespace), activeName);
 
       // Set up database browser query handler
       this.databaseBrowserSurface.setQueryHandler(
@@ -3248,21 +3562,29 @@ export class WebIDEHost {
           return handleDatabaseRequest(operation, body, dbName);
         },
       );
+      this.databaseBrowserSurface.setDatabase(activeName);
 
       // Wire database panel callbacks
       this.databaseSurface.setCallbacks({
         onOpen: async (name: string) => {
           try {
+            const callbackNamespace = setDatabaseNamespace(
+              this.currentProjectDatabaseNamespace,
+            );
             // Switch active database if different
-            const currentActive = getActiveDatabase();
+            const currentActive = getActiveDatabase(callbackNamespace);
             if (currentActive !== name) {
               const { closePGliteInstance, initAndMigrate: initMigrate } =
                 await import("../../../../packages/almostnode/src/pglite/pglite-database");
               if (currentActive) await closePGliteInstance(currentActive);
-              setActiveDatabase(name);
-              await initMigrate(name, this.container.vfs, getIdbPath(name));
+              setActiveDatabase(name, callbackNamespace);
+              await initMigrate(
+                name,
+                this.container.vfs,
+                getIdbPath(name, callbackNamespace),
+              );
               this.previewSurface.setActiveDb(name);
-              this.databaseSurface.update(listDatabases(), name);
+              this.databaseSurface.update(listDatabases(callbackNamespace), name);
             }
             // Update browser surface and open tab
             this.databaseBrowserSurface.setDatabase(name);
@@ -3273,14 +3595,22 @@ export class WebIDEHost {
         },
         onSwitch: async (name: string) => {
           try {
+            const callbackNamespace = setDatabaseNamespace(
+              this.currentProjectDatabaseNamespace,
+            );
             const { closePGliteInstance, initAndMigrate: initMigrate } =
               await import("../../../../packages/almostnode/src/pglite/pglite-database");
-            const oldActive = getActiveDatabase();
+            const oldActive = getActiveDatabase(callbackNamespace);
             if (oldActive) await closePGliteInstance(oldActive);
-            setActiveDatabase(name);
-            await initMigrate(name, this.container.vfs, getIdbPath(name));
+            setActiveDatabase(name, callbackNamespace);
+            await initMigrate(
+              name,
+              this.container.vfs,
+              getIdbPath(name, callbackNamespace),
+            );
             this.previewSurface.setActiveDb(name);
-            this.databaseSurface.update(listDatabases(), name);
+            this.databaseSurface.update(listDatabases(callbackNamespace), name);
+            this.databaseBrowserSurface.setDatabase(name);
             console.log(`[pglite] Switched to database "${name}"`);
           } catch (err) {
             console.error("[pglite] Switch failed:", err);
@@ -3288,11 +3618,21 @@ export class WebIDEHost {
         },
         onCreate: async (name: string) => {
           try {
-            createDatabase(name);
+            const callbackNamespace = setDatabaseNamespace(
+              this.currentProjectDatabaseNamespace,
+            );
+            createDatabase(name, callbackNamespace);
             const { initAndMigrate: initMigrate } =
               await import("../../../../packages/almostnode/src/pglite/pglite-database");
-            await initMigrate(name, this.container.vfs, getIdbPath(name));
-            this.databaseSurface.update(listDatabases(), getActiveDatabase());
+            await initMigrate(
+              name,
+              this.container.vfs,
+              getIdbPath(name, callbackNamespace),
+            );
+            this.databaseSurface.update(
+              listDatabases(callbackNamespace),
+              getActiveDatabase(callbackNamespace),
+            );
             console.log(`[pglite] Created database "${name}"`);
           } catch (err) {
             console.error("[pglite] Create failed:", err);
@@ -3300,23 +3640,28 @@ export class WebIDEHost {
         },
         onDelete: async (name: string) => {
           try {
+            const callbackNamespace = setDatabaseNamespace(
+              this.currentProjectDatabaseNamespace,
+            );
             const { closePGliteInstance: closeInst } =
               await import("../../../../packages/almostnode/src/pglite/pglite-database");
             await closeInst(name);
-            deleteDatabase(name);
-            const active = getActiveDatabase();
-            if (!active || active === name) {
-              const newActive = ensureDefaultDatabase();
+            deleteDatabase(name, callbackNamespace);
+            let active = getActiveDatabase(callbackNamespace);
+            if (!active) {
+              const newActive = ensureDefaultDatabase(callbackNamespace);
               const { initAndMigrate: initMigrate } =
                 await import("../../../../packages/almostnode/src/pglite/pglite-database");
               await initMigrate(
                 newActive,
                 this.container.vfs,
-                getIdbPath(newActive),
+                getIdbPath(newActive, callbackNamespace),
               );
               this.previewSurface.setActiveDb(newActive);
+              this.databaseBrowserSurface.setDatabase(newActive);
+              active = newActive;
             }
-            this.databaseSurface.update(listDatabases(), getActiveDatabase());
+            this.databaseSurface.update(listDatabases(callbackNamespace), active);
             console.log(`[pglite] Deleted database "${name}"`);
           } catch (err) {
             console.error("[pglite] Delete failed:", err);
@@ -3469,6 +3814,7 @@ export class WebIDEHost {
       this.previewPort = _port;
       this.previewUrl = `${url}/`;
       this.previewStartRequested = false;
+      this.clearScheduledPreviewStartRetry();
       this.previewSurface.setUrl(this.previewUrl);
 
       const iframe = this.previewSurface.getIframe();
@@ -3503,6 +3849,7 @@ export class WebIDEHost {
       this.previewPort = null;
       this.previewUrl = null;
       this.previewStartRequested = false;
+      this.clearScheduledPreviewStartRetry();
       this.previewSurface.clear(
         "Preview server stopped. Run the workspace to start it again.",
       );
@@ -3549,6 +3896,53 @@ export class WebIDEHost {
     }
   }
 
+  private readWorkspaceFileText(path: string): string | null {
+    if (!this.container.vfs.existsSync(path)) {
+      return null;
+    }
+
+    try {
+      const raw: unknown = this.container.vfs.readFileSync(path);
+      if (typeof raw === "string") {
+        return raw;
+      }
+      if (raw instanceof Uint8Array) {
+        return new TextDecoder().decode(raw);
+      }
+      if (raw && typeof raw === "object" && ArrayBuffer.isView(raw)) {
+        const view = raw as ArrayBufferView;
+        return new TextDecoder().decode(
+          new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+        );
+      }
+      if (raw instanceof ArrayBuffer) {
+        return new TextDecoder().decode(new Uint8Array(raw));
+      }
+      return String(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  private getWorkspaceDependencyInstallKey(): string | null {
+    const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
+    const packageJson = this.readWorkspaceFileText(packageJsonPath);
+    if (!packageJson) {
+      return null;
+    }
+
+    const parts = [`package.json:${packageJson}`];
+    for (const lockFile of ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+      const lockPath = `${WORKSPACE_ROOT}/${lockFile}`;
+      const lockContents = this.readWorkspaceFileText(lockPath);
+      if (lockContents !== null) {
+        parts.push(`${lockFile}:${lockContents}`);
+      }
+    }
+
+    return parts.join("\n\n");
+  }
+
   private async ensureWorkspaceDependenciesInstalled(): Promise<void> {
     const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
     const nodeModulesPath = `${WORKSPACE_ROOT}/node_modules`;
@@ -3556,28 +3950,55 @@ export class WebIDEHost {
     if (!this.container.vfs.existsSync(packageJsonPath)) {
       return;
     }
-    if (this.container.vfs.existsSync(nodeModulesPath)) {
+    const installKey = this.getWorkspaceDependencyInstallKey();
+    if (!installKey) {
       return;
     }
 
-    if (!this.workspaceDependencyInstallPromise) {
-      this.workspaceDependencyInstallPromise = this.container.npm
-        .installFromPackageJson({
-          onProgress: (message) => {
-            const previewTab = this.previewTerminalTabId
-              ? this.terminalTabs.get(this.previewTerminalTabId)
-              : null;
-            if (previewTab) {
-              this.updateTerminalStatus(previewTab, message);
-            }
-          },
-        })
-        .then(() => undefined)
-        .catch((error) => {
-          this.workspaceDependencyInstallPromise = null;
-          throw error;
-        });
+    if (
+      this.container.vfs.existsSync(nodeModulesPath) &&
+      this.workspaceDependencyInstallKey === installKey
+    ) {
+      return;
     }
+
+    if (this.workspaceDependencyInstallPromise) {
+      if (this.workspaceDependencyInstallRequestKey === installKey) {
+        await this.workspaceDependencyInstallPromise;
+        return;
+      }
+
+      await this.workspaceDependencyInstallPromise.catch(() => undefined);
+    }
+
+    if (
+      this.container.vfs.existsSync(nodeModulesPath) &&
+      this.workspaceDependencyInstallKey === installKey
+    ) {
+      return;
+    }
+
+    this.workspaceDependencyInstallRequestKey = installKey;
+    this.workspaceDependencyInstallPromise = this.container.npm
+      .installFromPackageJson({
+        onProgress: (message) => {
+          const previewTab = this.previewTerminalTabId
+            ? this.terminalTabs.get(this.previewTerminalTabId)
+            : null;
+          if (previewTab) {
+            this.updateTerminalStatus(previewTab, message);
+          }
+        },
+      })
+      .then(() => {
+        this.workspaceDependencyInstallKey = installKey;
+      })
+      .finally(() => {
+        if (this.workspaceDependencyInstallRequestKey === installKey) {
+          this.workspaceDependencyInstallPromise = null;
+          this.workspaceDependencyInstallRequestKey = null;
+        }
+      });
 
     await this.workspaceDependencyInstallPromise;
   }

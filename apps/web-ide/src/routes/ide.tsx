@@ -5,6 +5,7 @@ import type { TemplateId } from '../features/workspace-seed';
 const VALID_TEMPLATES: TemplateId[] = ['vite', 'nextjs', 'tanstack'];
 type IDESearch = {
   template?: string;
+  project?: string;
   debug?: string;
   marketplace?: string;
   corsProxy?: string;
@@ -13,6 +14,7 @@ type IDESearch = {
 export const Route = createFileRoute('/ide')({
   validateSearch: (search: Record<string, unknown>): IDESearch => ({
     template: typeof search.template === 'string' ? search.template : undefined,
+    project: typeof search.project === 'string' ? search.project : undefined,
     debug: typeof search.debug === 'string' ? search.debug : undefined,
     marketplace: typeof search.marketplace === 'string' ? search.marketplace : undefined,
     corsProxy: typeof search.corsProxy === 'string' ? search.corsProxy : undefined,
@@ -21,9 +23,17 @@ export const Route = createFileRoute('/ide')({
 });
 
 function IDEWorkspace() {
-  const { template, debug, marketplace, corsProxy } = Route.useSearch();
+  const {
+    template,
+    project,
+    debug,
+    marketplace,
+    corsProxy,
+  } = Route.useSearch();
   const templateId = (
-    template && VALID_TEMPLATES.includes(template as TemplateId)
+    !project
+    && template
+    && VALID_TEMPLATES.includes(template as TemplateId)
       ? template
       : 'vite'
   ) as TemplateId;

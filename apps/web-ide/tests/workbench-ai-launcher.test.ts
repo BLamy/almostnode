@@ -1,5 +1,9 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { JSDOM } from "jsdom";
+
+const getServiceMock = vi.fn();
+const loadProjectFilesIntoVfsMock = vi.fn();
+const replaceProjectFilesInVfsMock = vi.fn();
 
 vi.mock("almostnode", () => ({
   createContainer: vi.fn(),
@@ -34,7 +38,8 @@ vi.mock("../src/desktop/host-terminal-session", () => ({
   HostTerminalSession: class {},
 }));
 vi.mock("../src/desktop/project-snapshot", () => ({
-  loadProjectFilesIntoVfs: vi.fn(),
+  loadProjectFilesIntoVfs: loadProjectFilesIntoVfsMock,
+  replaceProjectFilesInVfs: replaceProjectFilesInVfsMock,
 }));
 vi.mock("../src/extensions/extension-services", () => ({
   createExtensionServiceOverrides: vi.fn(() => ({})),
@@ -76,12 +81,13 @@ vi.mock("../src/features/opencode-browser-session", () => ({
 }));
 vi.mock("@codingame/monaco-vscode-api", () => ({
   initialize: vi.fn(),
-  getService: vi.fn(),
+  getService: getServiceMock,
   ICommandService: class {},
   Menu: {},
   ConfigurationTarget: {},
 }));
 vi.mock("@codingame/monaco-vscode-api/services", () => ({
+  getService: getServiceMock,
   IEditorService: class {},
   IPaneCompositePartService: class {},
   IStatusbarService: class {},
@@ -228,6 +234,7 @@ beforeAll(async () => {
     HTMLElement: dom.window.HTMLElement,
     HTMLDivElement: dom.window.HTMLDivElement,
     Node: dom.window.Node,
+    Event: dom.window.Event,
     AbortController: dom.window.AbortController,
     Worker: class {},
   });
@@ -239,7 +246,232 @@ beforeAll(async () => {
   ({ WebIDEHost } = await import("../src/workbench/workbench-host"));
 });
 
+beforeEach(() => {
+  getServiceMock?.mockReset();
+  loadProjectFilesIntoVfsMock.mockReset();
+  replaceProjectFilesInVfsMock.mockReset();
+});
+
 describe("WebIDEHost AI launcher behavior", () => {
+  it("reopens preview in the active group instead of forcing a side group", async () => {
+    const openEditor = vi.fn().mockResolvedValue(undefined);
+    const findEditors = vi.fn(() => []);
+    getServiceMock.mockResolvedValue({
+      findEditors,
+      openEditor,
+    });
+
+    await (WebIDEHost.prototype as unknown as {
+      revealPreviewEditor: (this: unknown) => Promise<void>;
+    }).revealPreviewEditor.call({
+      workbenchSurfaces: {
+        previewInput: {
+          resource: { toString: () => "almostnode-preview:/workspace" },
+        },
+      },
+    });
+
+    expect(findEditors).toHaveBeenCalled();
+    expect(openEditor).toHaveBeenCalledTimes(1);
+    expect(openEditor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resource: expect.anything(),
+      }),
+      { pinned: true },
+    );
+    expect(openEditor.mock.calls[0]).toHaveLength(2);
+  });
+
+  it("reuses the existing preview editor group when one is already open", async () => {
+    const openEditor = vi.fn().mockResolvedValue(undefined);
+    const previewInput = {
+      resource: { toString: () => "almostnode-preview:/workspace" },
+    };
+    getServiceMock.mockResolvedValue({
+      findEditors: vi.fn(() => [
+        {
+          groupId: 7,
+          editor: {
+            matches: (candidate: unknown) => candidate === previewInput,
+          },
+        },
+      ]),
+      openEditor,
+    });
+
+    await (WebIDEHost.prototype as unknown as {
+      revealPreviewEditor: (this: unknown) => Promise<void>;
+    }).revealPreviewEditor.call({
+      workbenchSurfaces: {
+        previewInput,
+      },
+    });
+
+    expect(openEditor).toHaveBeenCalledWith(previewInput, { pinned: true }, 7);
+  });
+
+  it("reopens preview as the default editor when switching projects", async () => {
+    const order: string[] = [];
+    const initialTab = { id: "terminal-1" };
+    const openWorkspaceFile = vi.fn();
+
+    await (WebIDEHost.prototype as unknown as {
+      reloadWorkbenchForNewProject: (
+        this: unknown,
+        newTemplateId: "vite" | "nextjs" | "tanstack",
+        dbPrefix?: string,
+      ) => Promise<void>;
+    }).reloadWorkbenchForNewProject.call(
+      {
+        templateId: "vite",
+        normalizeProjectDatabaseNamespace: vi.fn(
+          (dbPrefix?: string) => dbPrefix ?? "global",
+        ),
+        container: {
+          vfs: {
+            existsSync: vi.fn(() => true),
+          },
+        },
+        ensureGitInitialized: vi.fn(async () => {
+          order.push("git");
+        }),
+        createUserTerminalTab: vi.fn((focus: boolean) => {
+          order.push(`terminal:${String(focus)}`);
+          return initialTab;
+        }),
+        updateTerminalStatus: vi.fn((tab: unknown, text: string) => {
+          if (tab === initialTab) {
+            order.push(`status:${text}`);
+          }
+        }),
+        revealPreviewEditor: vi.fn(async () => {
+          order.push("preview");
+        }),
+        updatePreviewStatus: vi.fn((text: string) => {
+          order.push(`preview-status:${text}`);
+        }),
+        ensurePreviewServerRunning: vi.fn(() => {
+          order.push("preview-start");
+        }),
+        schedulePreviewStartRetry: vi.fn(() => {
+          order.push("preview-retry");
+        }),
+        initPGliteIfNeeded: vi.fn(() => {
+          order.push("pglite");
+          return Promise.resolve();
+        }),
+        openWorkspaceFile,
+      },
+      "nextjs",
+    );
+
+    expect(order).toEqual([
+      "git",
+      "terminal:false",
+      "status:Idle",
+      "preview",
+      "preview-status:Waiting for a preview server",
+      "preview-start",
+      "preview-retry",
+      "pglite",
+    ]);
+    expect(openWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it("switches projects by replacing persisted files in place instead of remounting the workbench", async () => {
+    const order: string[] = [];
+    const vfs = {
+      existsSync: vi.fn(() => true),
+    };
+    const host = Object.create(WebIDEHost.prototype) as Record<string, unknown>;
+    host.templateId = "vite";
+    host.currentProjectDatabaseNamespace = "project-a";
+    host.previewPort = 3000;
+    host.container = {
+      vfs,
+    };
+    host.previewSurface = {
+      setActiveDb: vi.fn(),
+      clear: vi.fn(),
+    };
+    host.databaseSurface = {
+      update: vi.fn(),
+    };
+    host.terminalTabs = new Map([["terminal-1", {}]]);
+    host.abortRunningTerminalCommands = vi.fn(() => {
+      order.push("abort");
+    });
+    host.clearScheduledPreviewStartRetry = vi.fn(() => {
+      order.push("clear-preview-retry");
+    });
+    host.resetPreviewTerminalTab = vi.fn(() => {
+      order.push("reset-preview-terminal");
+    });
+    host.waitForPreviewServerShutdown = vi.fn(async (port: number | null) => {
+      order.push(`wait-preview-stop:${String(port)}`);
+    });
+    host.closeCurrentProjectDatabase = vi.fn(async () => {
+      order.push("close-db");
+    });
+    host.ensureGitInitialized = vi.fn(async () => {
+      order.push("git");
+    });
+    host.createUserTerminalTab = vi.fn(() => {
+      order.push("create-terminal");
+      return { id: "terminal-2" };
+    });
+    host.updateTerminalStatus = vi.fn();
+    host.revealPreviewEditor = vi.fn(async () => {
+      order.push("preview");
+    });
+    host.updatePreviewStatus = vi.fn((text: string) => {
+      order.push(`preview-status:${text}`);
+    });
+    host.ensurePreviewServerRunning = vi.fn(() => {
+      order.push("preview-start");
+    });
+    host.schedulePreviewStartRetry = vi.fn(() => {
+      order.push("preview-retry");
+    });
+    host.initPGliteIfNeeded = vi.fn(() => {
+      order.push("pglite");
+      return Promise.resolve();
+    });
+
+    const files = [
+      {
+        path: "/project/src/main.ts",
+        contentBase64: "Y29uc29sZS5sb2coJ3N3aXRjaGVkJyk7Cg==",
+      },
+    ];
+
+    await (host as unknown as {
+      switchProjectWorkspace: (
+        templateId: "vite" | "nextjs" | "tanstack",
+        files: Array<{ path: string; contentBase64: string }>,
+        dbPrefix?: string,
+      ) => Promise<void>;
+    }).switchProjectWorkspace("nextjs", files, "project-b");
+
+    expect(replaceProjectFilesInVfsMock).toHaveBeenCalledWith(vfs, files);
+    expect(order).toEqual([
+      "abort",
+      "clear-preview-retry",
+      "reset-preview-terminal",
+      "wait-preview-stop:3000",
+      "close-db",
+      "git",
+      "preview",
+      "preview-status:Waiting for a preview server",
+      "preview-start",
+      "preview-retry",
+      "pglite",
+    ]);
+    expect(host.templateId).toBe("nextjs");
+    expect(host.currentProjectDatabaseNamespace).toBe("project-b");
+    expect(host.createUserTerminalTab).not.toHaveBeenCalled();
+  });
+
   it("reveals the browser AI panel and auto-starts sidebar OpenCode when no AI tab exists", async () => {
     const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
     const createOpenCodeSidebarTab = vi.fn();

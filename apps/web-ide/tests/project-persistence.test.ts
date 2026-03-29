@@ -6,6 +6,7 @@ import {
   PROJECT_ROOT,
   collectProjectFilesBase64,
   loadProjectFilesIntoVfs,
+  replaceProjectFilesInVfs,
   shouldPersistProjectPath,
   type SerializedFile,
 } from '../src/desktop/project-snapshot';
@@ -58,6 +59,30 @@ describe('desktop project persistence helpers', () => {
     expect(Buffer.from(container.vfs.readFileSync(`${PROJECT_ROOT}/public/logo.bin`) as Uint8Array)).toEqual(
       Buffer.from([1, 2, 3, 4]),
     );
+  });
+
+  it('replaces persisted project files in place while preserving host-managed directories', () => {
+    const container = createContainer();
+    container.vfs.mkdirSync(`${PROJECT_ROOT}/src`, { recursive: true });
+    container.vfs.mkdirSync(`${PROJECT_ROOT}/node_modules/pkg`, { recursive: true });
+    container.vfs.mkdirSync(`${PROJECT_ROOT}/.git`, { recursive: true });
+    container.vfs.writeFileSync(`${PROJECT_ROOT}/src/old.ts`, 'old\n');
+    container.vfs.writeFileSync(`${PROJECT_ROOT}/node_modules/pkg/index.js`, 'keep me\n');
+    container.vfs.writeFileSync(`${PROJECT_ROOT}/.git/config`, 'keep me too\n');
+
+    const files: SerializedFile[] = [
+      {
+        path: `${PROJECT_ROOT}/src/new.ts`,
+        contentBase64: Buffer.from('new\n', 'utf8').toString('base64'),
+      },
+    ];
+
+    replaceProjectFilesInVfs(container.vfs, files);
+
+    expect(container.vfs.existsSync(`${PROJECT_ROOT}/src/old.ts`)).toBe(false);
+    expect(container.vfs.readFileSync(`${PROJECT_ROOT}/src/new.ts`, 'utf8')).toBe('new\n');
+    expect(container.vfs.readFileSync(`${PROJECT_ROOT}/node_modules/pkg/index.js`, 'utf8')).toBe('keep me\n');
+    expect(container.vfs.readFileSync(`${PROJECT_ROOT}/.git/config`, 'utf8')).toBe('keep me too\n');
   });
 
   it('diffs persisted snapshots as writes and deletes while ignoring skipped paths', () => {
