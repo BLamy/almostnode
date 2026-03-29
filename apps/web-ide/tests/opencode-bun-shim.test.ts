@@ -36,6 +36,17 @@ describe("OpenCode browser Bun shim", () => {
     }
   });
 
+  it("exposes Bun as a global identifier for vendor modules that use free Bun references", async () => {
+    const { restore } = await loadBunShim();
+
+    try {
+      expect(new Function("return Bun.which('bash')")()).toBe("/bin/sh");
+      expect(new Function("return typeof Bun.$")()).toBe("function");
+    } finally {
+      restore();
+    }
+  });
+
   it("returns null for unsupported commands from Bun.which", async () => {
     const { mod, restore } = await loadBunShim();
 

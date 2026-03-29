@@ -31,8 +31,19 @@ import { HostTerminalSession } from "../desktop/host-terminal-session";
 import {
   loadProjectFilesIntoVfs,
   replaceProjectFilesInVfs,
+  collectScopedFilesBase64,
+  replaceScopedFilesInVfs,
   type SerializedFile,
 } from "../desktop/project-snapshot";
+import type {
+  ProjectAgentStateSnapshot,
+  ResumableThreadRecord,
+} from "../features/project-db";
+import {
+  CLAUDE_PROJECTS_ROOT,
+  discoverClaudeThreads,
+  toOpenCodeThreads,
+} from "../features/resumable-threads";
 import {
   createExtensionServiceOverrides,
   type ExtensionServiceOverrideBundle,
@@ -77,9 +88,12 @@ import {
   writeStoredTailscaleSessionSnapshot,
 } from "../features/network-session";
 import {
+  collectOpenCodeBrowserSnapshot,
+  listOpenCodeBrowserSessions,
   mountOpenCodeBrowserSession,
   type OpenCodeBrowserSessionHandle,
   type OpenCodeBrowserShellState,
+  restoreOpenCodeBrowserSnapshot,
 } from "../features/opencode-browser-session";
 import {
   initialize,
@@ -189,6 +203,7 @@ const WORKBENCH_WORKERS = {
 const LEGACY_TESTS_ROOT = "/tests";
 const LEGACY_TEST_E2E_ROOT = `${LEGACY_TESTS_ROOT}/e2e`;
 const LEGACY_TEST_METADATA_PATH = `${LEGACY_TESTS_ROOT}/.almostnode-tests.json`;
+const AI_SIDEBAR_TAB_CLOSED_EVENT = "almostnode:ai-sidebar-tab-closed";
 
 export interface WebIDEHostElements {
   workbench: HTMLElement;
@@ -992,6 +1007,81 @@ export class WebIDEHost {
     return this.templateId;
   }
 
+  async collectAgentStateSnapshot(): Promise<ProjectAgentStateSnapshot> {
+    return {
+      claudeFiles: collectScopedFilesBase64(this.container.vfs, [
+        CLAUDE_PROJECTS_ROOT,
+      ]),
+      openCodeDb:
+        this.agentMode === "browser"
+          ? await collectOpenCodeBrowserSnapshot()
+          : null,
+    };
+  }
+
+  async restoreAgentStateSnapshot(
+    snapshot: ProjectAgentStateSnapshot | null | undefined,
+  ): Promise<void> {
+    replaceScopedFilesInVfs(
+      this.container.vfs,
+      [CLAUDE_PROJECTS_ROOT],
+      snapshot?.claudeFiles ?? [],
+    );
+
+    if (this.agentMode === "browser") {
+      await restoreOpenCodeBrowserSnapshot(snapshot?.openCodeDb ?? null);
+    }
+  }
+
+  async discoverActiveProjectThreads(
+    projectId: string,
+  ): Promise<{
+    claude: ResumableThreadRecord[];
+    opencode: ResumableThreadRecord[];
+  }> {
+    const claudeFiles = collectScopedFilesBase64(this.container.vfs, [
+      CLAUDE_PROJECTS_ROOT,
+    ]);
+    const claude = discoverClaudeThreads(projectId, claudeFiles);
+
+    if (this.agentMode !== "browser") {
+      return { claude, opencode: [] };
+    }
+
+    try {
+      const sessions = await listOpenCodeBrowserSessions({
+        container: this.container,
+        cwd: WORKSPACE_ROOT,
+        env: {},
+      });
+      return {
+        claude,
+        opencode: toOpenCodeThreads(projectId, sessions),
+      };
+    } catch {
+      return { claude, opencode: [] };
+    }
+  }
+
+  async resumeResumableThread(thread: ResumableThreadRecord): Promise<void> {
+    await this.revealOpenCodeSidebarView(true);
+
+    const title = thread.title.trim() || (
+      thread.harness === "claude"
+        ? `Claude Code ${++this.claudeSidebarCounter}`
+        : `OpenCode ${++this.openCodeSidebarTerminalCounter}`
+    );
+    const tab = this.createAiSidebarTerminalTab(true, { title });
+    const command =
+      thread.harness === "claude"
+        ? `npx @anthropic-ai/claude-code --resume ${thread.resumeToken}`
+        : `npx opencode-ai --continue --session ${thread.resumeToken}`;
+    await this.runCommand(tab, command, {
+      echoCommand: true,
+      interceptAgentLaunch: false,
+    });
+  }
+
   private normalizeProjectDatabaseNamespace(dbPrefix?: string): string {
     const trimmed = dbPrefix?.trim();
     return trimmed ? trimmed : "global";
@@ -1691,6 +1781,7 @@ export class WebIDEHost {
       this.openCodeSidebarTabs.delete(id);
       this.openCodeSurface.removeTab(id);
       openCodeTab.session?.dispose();
+      window.dispatchEvent(new CustomEvent(AI_SIDEBAR_TAB_CLOSED_EVENT));
       if (wasActive) {
         this.activeOpenCodeSidebarTabId = null;
         const nextTabId = this.getFirstAiSidebarTabId();
@@ -1712,6 +1803,7 @@ export class WebIDEHost {
     this.openCodeSurface.removeTab(id);
     terminalTab.terminal.dispose();
     terminalTab.session.dispose();
+    window.dispatchEvent(new CustomEvent(AI_SIDEBAR_TAB_CLOSED_EVENT));
 
     if (wasActive) {
       this.activeOpenCodeSidebarTabId = null;
@@ -2340,7 +2432,10 @@ export class WebIDEHost {
   private async runCommand(
     tab: TerminalTabState,
     command: string,
-    options?: { echoCommand?: boolean },
+    options?: {
+      echoCommand?: boolean;
+      interceptAgentLaunch?: boolean;
+    },
   ): Promise<void> {
     const trimmed = command.trim();
     if (!trimmed) {
@@ -2356,6 +2451,8 @@ export class WebIDEHost {
     if (
       this.agentMode === "browser"
       && tab.kind === "user"
+      && tab.surface !== "sidebar"
+      && options?.interceptAgentLaunch !== false
       && matchesOpenCodeLaunchCommand(trimmed)
     ) {
       await this.launchAiSession("opencode");

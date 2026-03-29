@@ -5,8 +5,10 @@ import { diffSerializedFiles } from '../src/desktop/project-mirror';
 import {
   PROJECT_ROOT,
   collectProjectFilesBase64,
+  collectScopedFilesBase64,
   loadProjectFilesIntoVfs,
   replaceProjectFilesInVfs,
+  replaceScopedFilesInVfs,
   shouldPersistProjectPath,
   type SerializedFile,
 } from '../src/desktop/project-snapshot';
@@ -120,5 +122,31 @@ describe('desktop project persistence helpers', () => {
         path: `${PROJECT_ROOT}/src/old-name.ts`,
       },
     ]);
+  });
+
+  it('collects and restores scoped Claude project state without unrelated config files', () => {
+    const container = createContainer();
+    const claudeProjectsRoot = '/home/user/.claude/projects';
+    const transcriptPath = `${claudeProjectsRoot}/demo/session.jsonl`;
+    const configPath = '/home/user/.claude/.config.json';
+
+    container.vfs.mkdirSync(`${claudeProjectsRoot}/demo`, { recursive: true });
+    container.vfs.mkdirSync('/home/user/.claude', { recursive: true });
+    container.vfs.writeFileSync(transcriptPath, '{"sessionId":"abc"}\n');
+    container.vfs.writeFileSync(configPath, '{"token":"secret"}\n');
+
+    const files = collectScopedFilesBase64(container.vfs, [claudeProjectsRoot]);
+    expect(files).toEqual([
+      {
+        path: transcriptPath,
+        contentBase64: Buffer.from('{"sessionId":"abc"}\n', 'utf8').toString('base64'),
+      },
+    ]);
+
+    const restored = createContainer();
+    replaceScopedFilesInVfs(restored.vfs, [claudeProjectsRoot], files);
+
+    expect(restored.vfs.readFileSync(transcriptPath, 'utf8')).toBe('{"sessionId":"abc"}\n');
+    expect(restored.vfs.existsSync(configPath)).toBe(false);
   });
 });

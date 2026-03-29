@@ -2,7 +2,7 @@
  * IndexedDB wrapper for multi-project persistence.
  *
  * DB: "almostnode-webide"
- * Stores: projects, project-files, chat-threads, chat-messages
+ * Stores: projects, project-files, project-agent-state, resumable-threads
  */
 
 import type { SerializedFile } from '../desktop/project-snapshot';
@@ -25,31 +25,37 @@ export interface ProjectFilesRecord {
   savedAt: number;
 }
 
-export interface ChatThread {
-  id: string;
-  projectId: string;
-  title: string;
-  createdAt: number;
-  lastMessageAt: number;
+export type AgentHarness = 'claude' | 'opencode';
+
+export interface ProjectAgentStateSnapshot {
+  claudeFiles: SerializedFile[];
+  openCodeDb: Uint8Array | null;
 }
 
-export interface ChatMessage {
+export interface ProjectAgentStateRecord extends ProjectAgentStateSnapshot {
+  projectId: string;
+  savedAt: number;
+}
+
+export interface ResumableThreadRecord {
   id: string;
-  threadId: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+  projectId: string;
+  harness: AgentHarness;
+  title: string;
+  resumeToken: string;
   createdAt: number;
+  updatedAt: number;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DB_NAME = 'almostnode-webide';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_PROJECTS = 'projects';
 const STORE_PROJECT_FILES = 'project-files';
-const STORE_CHAT_THREADS = 'chat-threads';
-const STORE_CHAT_MESSAGES = 'chat-messages';
+const STORE_PROJECT_AGENT_STATE = 'project-agent-state';
+const STORE_RESUMABLE_THREADS = 'resumable-threads';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -68,14 +74,13 @@ function openDB(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_PROJECT_FILES, { keyPath: 'projectId' });
       }
 
-      if (!db.objectStoreNames.contains(STORE_CHAT_THREADS)) {
-        const threads = db.createObjectStore(STORE_CHAT_THREADS, { keyPath: 'id' });
-        threads.createIndex('projectId', 'projectId', { unique: false });
+      if (!db.objectStoreNames.contains(STORE_PROJECT_AGENT_STATE)) {
+        db.createObjectStore(STORE_PROJECT_AGENT_STATE, { keyPath: 'projectId' });
       }
 
-      if (!db.objectStoreNames.contains(STORE_CHAT_MESSAGES)) {
-        const messages = db.createObjectStore(STORE_CHAT_MESSAGES, { keyPath: 'id' });
-        messages.createIndex('threadId', 'threadId', { unique: false });
+      if (!db.objectStoreNames.contains(STORE_RESUMABLE_THREADS)) {
+        const threads = db.createObjectStore(STORE_RESUMABLE_THREADS, { keyPath: 'id' });
+        threads.createIndex('projectId', 'projectId', { unique: false });
       }
     };
 
@@ -193,12 +198,8 @@ export class ProjectDB {
     const db = await this.getDb();
     await txDelete(db, STORE_PROJECTS, id);
     await txDelete(db, STORE_PROJECT_FILES, id);
-    await txDeleteByIndex(db, STORE_CHAT_THREADS, 'projectId', id);
-    // Delete messages for all threads belonging to this project
-    const threads = await txGetAllByIndex<ChatThread>(db, STORE_CHAT_THREADS, 'projectId', id);
-    for (const thread of threads) {
-      await txDeleteByIndex(db, STORE_CHAT_MESSAGES, 'threadId', thread.id);
-    }
+    await txDelete(db, STORE_PROJECT_AGENT_STATE, id);
+    await txDeleteByIndex(db, STORE_RESUMABLE_THREADS, 'projectId', id);
   }
 
   // ── Project Files ──
@@ -219,45 +220,55 @@ export class ProjectDB {
     await txPut(db, STORE_PROJECT_FILES, record);
   }
 
-  // ── Chat Threads ──
+  // ── Agent State ──
 
-  async listChatThreads(projectId: string): Promise<ChatThread[]> {
+  async getProjectAgentState(projectId: string): Promise<ProjectAgentStateRecord | undefined> {
     const db = await this.getDb();
-    const threads = await txGetAllByIndex<ChatThread>(db, STORE_CHAT_THREADS, 'projectId', projectId);
-    return threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+    return txGet<ProjectAgentStateRecord>(db, STORE_PROJECT_AGENT_STATE, projectId);
   }
 
-  async getChatThread(id: string): Promise<ChatThread | undefined> {
+  async putProjectAgentState(state: ProjectAgentStateRecord): Promise<void> {
     const db = await this.getDb();
-    return txGet<ChatThread>(db, STORE_CHAT_THREADS, id);
+    await txPut(db, STORE_PROJECT_AGENT_STATE, state);
   }
 
-  async putChatThread(thread: ChatThread): Promise<void> {
+  // ── Resumable Threads ──
+
+  async listResumableThreads(projectId: string): Promise<ResumableThreadRecord[]> {
     const db = await this.getDb();
-    await txPut(db, STORE_CHAT_THREADS, thread);
+    const threads = await txGetAllByIndex<ResumableThreadRecord>(
+      db,
+      STORE_RESUMABLE_THREADS,
+      'projectId',
+      projectId,
+    );
+    return threads.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  async deleteChatThread(id: string): Promise<void> {
+  async listAllResumableThreads(): Promise<ResumableThreadRecord[]> {
     const db = await this.getDb();
-    await txDeleteByIndex(db, STORE_CHAT_MESSAGES, 'threadId', id);
-    await txDelete(db, STORE_CHAT_THREADS, id);
+    const threads = await txGetAll<ResumableThreadRecord>(db, STORE_RESUMABLE_THREADS);
+    return threads.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  // ── Chat Messages ──
-
-  async listChatMessages(threadId: string): Promise<ChatMessage[]> {
+  async getResumableThread(id: string): Promise<ResumableThreadRecord | undefined> {
     const db = await this.getDb();
-    const messages = await txGetAllByIndex<ChatMessage>(db, STORE_CHAT_MESSAGES, 'threadId', threadId);
-    return messages.sort((a, b) => a.createdAt - b.createdAt);
+    return txGet<ResumableThreadRecord>(db, STORE_RESUMABLE_THREADS, id);
   }
 
-  async putChatMessage(message: ChatMessage): Promise<void> {
+  async replaceProjectResumableThreads(
+    projectId: string,
+    threads: ResumableThreadRecord[],
+  ): Promise<void> {
     const db = await this.getDb();
-    await txPut(db, STORE_CHAT_MESSAGES, message);
+    await txDeleteByIndex(db, STORE_RESUMABLE_THREADS, 'projectId', projectId);
+    for (const thread of threads) {
+      await txPut(db, STORE_RESUMABLE_THREADS, thread);
+    }
   }
 
-  async deleteChatMessage(id: string): Promise<void> {
+  async putResumableThread(thread: ResumableThreadRecord): Promise<void> {
     const db = await this.getDb();
-    await txDelete(db, STORE_CHAT_MESSAGES, id);
+    await txPut(db, STORE_RESUMABLE_THREADS, thread);
   }
 }

@@ -1,12 +1,19 @@
+import { Buffer } from "node:buffer";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { JSDOM } from "jsdom";
 
 const getServiceMock = vi.fn();
 const loadProjectFilesIntoVfsMock = vi.fn();
 const replaceProjectFilesInVfsMock = vi.fn();
+const collectScopedFilesBase64Mock = vi.fn();
+const replaceScopedFilesInVfsMock = vi.fn();
+const collectOpenCodeBrowserSnapshotMock = vi.fn();
+const listOpenCodeBrowserSessionsMock = vi.fn();
+const restoreOpenCodeBrowserSnapshotMock = vi.fn();
 
 vi.mock("almostnode", () => ({
   createContainer: vi.fn(),
+  stream: { Buffer },
 }));
 vi.mock("../src/features/workspace-seed", () => ({
   DEFAULT_FILE: "/project/src/main.ts",
@@ -40,6 +47,8 @@ vi.mock("../src/desktop/host-terminal-session", () => ({
 vi.mock("../src/desktop/project-snapshot", () => ({
   loadProjectFilesIntoVfs: loadProjectFilesIntoVfsMock,
   replaceProjectFilesInVfs: replaceProjectFilesInVfsMock,
+  collectScopedFilesBase64: collectScopedFilesBase64Mock,
+  replaceScopedFilesInVfs: replaceScopedFilesInVfsMock,
 }));
 vi.mock("../src/extensions/extension-services", () => ({
   createExtensionServiceOverrides: vi.fn(() => ({})),
@@ -78,6 +87,9 @@ vi.mock("../src/features/network-session", () => ({
 }));
 vi.mock("../src/features/opencode-browser-session", () => ({
   mountOpenCodeBrowserSession: vi.fn(),
+  collectOpenCodeBrowserSnapshot: collectOpenCodeBrowserSnapshotMock,
+  listOpenCodeBrowserSessions: listOpenCodeBrowserSessionsMock,
+  restoreOpenCodeBrowserSnapshot: restoreOpenCodeBrowserSnapshotMock,
 }));
 vi.mock("@codingame/monaco-vscode-api", () => ({
   initialize: vi.fn(),
@@ -250,6 +262,11 @@ beforeEach(() => {
   getServiceMock?.mockReset();
   loadProjectFilesIntoVfsMock.mockReset();
   replaceProjectFilesInVfsMock.mockReset();
+  collectScopedFilesBase64Mock.mockReset();
+  replaceScopedFilesInVfsMock.mockReset();
+  collectOpenCodeBrowserSnapshotMock.mockReset();
+  listOpenCodeBrowserSessionsMock.mockReset();
+  restoreOpenCodeBrowserSnapshotMock.mockReset();
 });
 
 describe("WebIDEHost AI launcher behavior", () => {
@@ -587,6 +604,57 @@ describe("WebIDEHost AI launcher behavior", () => {
       "OpenCode moved to AI panel",
     );
     expect(printPrompt).toHaveBeenCalled();
+  });
+
+  it("opens a fresh AI sidebar tab and runs the literal Claude resume command", async () => {
+    const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
+    const createAiSidebarTerminalTab = vi.fn(() => ({ id: "ai-sidebar-1" }));
+    const runCommand = vi.fn().mockResolvedValue(undefined);
+
+    await (WebIDEHost.prototype as unknown as {
+      resumeResumableThread: (
+        this: unknown,
+        thread: {
+          id: string;
+          projectId: string;
+          harness: "claude" | "opencode";
+          title: string;
+          resumeToken: string;
+          createdAt: number;
+          updatedAt: number;
+        },
+      ) => Promise<void>;
+    }).resumeResumableThread.call(
+      {
+        revealOpenCodeSidebarView,
+        createAiSidebarTerminalTab,
+        runCommand,
+        claudeSidebarCounter: 0,
+        openCodeSidebarTerminalCounter: 0,
+      },
+      {
+        id: "claude:project-1:session-1",
+        projectId: "project-1",
+        harness: "claude",
+        title: "Fix Claude restore",
+        resumeToken: "session-1",
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    );
+
+    expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(true);
+    expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(true, {
+      title: "Fix Claude restore",
+    });
+    expect(runCommand).toHaveBeenCalledWith(
+      { id: "ai-sidebar-1" },
+      "npx @anthropic-ai/claude-code --resume session-1",
+      {
+        echoCommand: true,
+        interceptAgentLaunch: false,
+      },
+    );
   });
 
   it("treats needs-login tailscale sessions as a login action and running sessions as logout", () => {

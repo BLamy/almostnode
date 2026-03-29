@@ -24,6 +24,24 @@ function serializedFilesToMap(files: Iterable<SerializedFile>): Map<string, stri
   return snapshot;
 }
 
+function normalizeScopedPath(vfsPath: string, roots: readonly string[]): string {
+  const normalized = vfsPath.replace(/\\/g, '/').replace(/\/+$/g, '');
+  const matchesRoot = roots.some((root) => (
+    normalized === root || normalized.startsWith(`${root}/`)
+  ));
+  if (!matchesRoot) {
+    throw new Error(`Serialized file path must be under one of: ${roots.join(', ')} (${vfsPath})`);
+  }
+  return normalized;
+}
+
+function shouldPersistScopedPath(vfsPath: string, roots: readonly string[]): boolean {
+  const normalized = vfsPath.replace(/\\/g, '/').replace(/\/+$/g, '');
+  return roots.some((root) => (
+    normalized === root || normalized.startsWith(`${root}/`)
+  ));
+}
+
 function normalizeProjectPath(vfsPath: string): string {
   const normalized = vfsPath.replace(/\\/g, '/');
   if (
@@ -110,6 +128,51 @@ function collectProjectFiles(
   }
 }
 
+function collectScopedFiles(
+  vfs: {
+    existsSync: (path: string) => boolean;
+    readdirSync: (path: string) => unknown;
+    statSync: (path: string) => { isDirectory: () => boolean };
+    readFileSync: (path: string) => unknown;
+  },
+  directoryPath: string,
+  roots: readonly string[],
+  out: SerializedFile[],
+): void {
+  if (!shouldPersistScopedPath(directoryPath, roots)) {
+    return;
+  }
+
+  let entries: string[] = [];
+  try {
+    entries = vfs.readdirSync(directoryPath) as string[];
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = `${directoryPath}/${entry}`;
+    try {
+      const stat = vfs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        collectScopedFiles(vfs, fullPath, roots, out);
+        continue;
+      }
+      if (!shouldPersistScopedPath(fullPath, roots)) {
+        continue;
+      }
+
+      const content = vfs.readFileSync(fullPath);
+      out.push({
+        path: normalizeScopedPath(fullPath, roots),
+        contentBase64: toBase64(content),
+      });
+    } catch {
+      // Ignore unreadable files while collecting snapshots.
+    }
+  }
+}
+
 export function collectProjectFilesBase64(
   vfs: {
     existsSync: (path: string) => boolean;
@@ -124,6 +187,28 @@ export function collectProjectFilesBase64(
 
   const files: SerializedFile[] = [];
   collectProjectFiles(vfs, PROJECT_ROOT, files);
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return files;
+}
+
+export function collectScopedFilesBase64(
+  vfs: {
+    existsSync: (path: string) => boolean;
+    readdirSync: (path: string) => unknown;
+    statSync: (path: string) => { isDirectory: () => boolean };
+    readFileSync: (path: string) => unknown;
+  },
+  roots: readonly string[],
+): SerializedFile[] {
+  const files: SerializedFile[] = [];
+
+  for (const root of roots) {
+    if (!vfs.existsSync(root)) {
+      continue;
+    }
+    collectScopedFiles(vfs, root, roots, files);
+  }
+
   files.sort((left, right) => left.path.localeCompare(right.path));
   return files;
 }
@@ -182,6 +267,55 @@ export function replaceProjectFilesInVfs(
 
   const previousMap = serializedFilesToMap(collectProjectFilesBase64(vfs));
   const nextMap = serializedFilesToMap(files);
+
+  for (const [path, contentBase64] of nextMap.entries()) {
+    if (previousMap.get(path) === contentBase64) {
+      previousMap.delete(path);
+      continue;
+    }
+
+    const separatorIndex = path.lastIndexOf('/');
+    if (separatorIndex > 0) {
+      ensureVfsDirectoryExists(vfs, path.slice(0, separatorIndex));
+    }
+
+    vfs.writeFileSync(path, Buffer.from(contentBase64, 'base64'));
+    previousMap.delete(path);
+  }
+
+  for (const path of previousMap.keys()) {
+    removeVfsEntryRecursive(vfs, path);
+  }
+}
+
+export function replaceScopedFilesInVfs(
+  vfs: {
+    existsSync: (path: string) => boolean;
+    readdirSync: (path: string) => unknown;
+    statSync: (path: string) => { isDirectory: () => boolean };
+    readFileSync: (path: string) => unknown;
+    mkdirSync: (path: string, options?: { recursive?: boolean }) => void;
+    writeFileSync: (path: string, content: Buffer | Uint8Array | string) => void;
+    unlinkSync: (path: string) => void;
+    rmdirSync: (path: string) => void;
+  },
+  roots: readonly string[],
+  files: SerializedFile[],
+): void {
+  for (const root of roots) {
+    ensureVfsDirectoryExists(vfs, root);
+  }
+
+  const previousMap = new Map<string, string>();
+  for (const file of collectScopedFilesBase64(vfs, roots)) {
+    previousMap.set(file.path, file.contentBase64);
+  }
+
+  const nextMap = new Map<string, string>();
+  for (const file of files) {
+    const normalizedPath = normalizeScopedPath(file.path, roots);
+    nextMap.set(normalizedPath, file.contentBase64);
+  }
 
   for (const [path, contentBase64] of nextMap.entries()) {
     if (previousMap.get(path) === contentBase64) {

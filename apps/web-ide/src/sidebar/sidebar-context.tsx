@@ -1,36 +1,48 @@
-import { createContext, useContext, useReducer, useCallback, type ReactNode, type Dispatch } from 'react';
-import type { ProjectRecord, ChatThread } from '../features/project-db';
-
-// ── State ─────────────────────────────────────────────────────────────────────
+import { createContext, useContext, useReducer, type Dispatch, type ReactNode } from 'react';
+import type { ProjectRecord, ResumableThreadRecord } from '../features/project-db';
 
 export interface SidebarState {
   projects: ProjectRecord[];
+  projectThreads: Record<string, ResumableThreadRecord[]>;
   activeProjectId: string | null;
-  chatThreads: ChatThread[];
-  activeChatThreadId: string | null;
+  activeThreadId: string | null;
+  expandedProjectIds: string[];
   isCollapsed: boolean;
   isSwitching: boolean;
 }
 
 const initialState: SidebarState = {
   projects: [],
+  projectThreads: {},
   activeProjectId: null,
-  chatThreads: [],
-  activeChatThreadId: null,
+  activeThreadId: null,
+  expandedProjectIds: [],
   isCollapsed: false,
   isSwitching: false,
 };
 
-// ── Actions ───────────────────────────────────────────────────────────────────
-
 export type SidebarAction =
   | { type: 'SET_PROJECTS'; projects: ProjectRecord[] }
   | { type: 'SET_ACTIVE_PROJECT'; projectId: string | null }
-  | { type: 'SET_CHAT_THREADS'; threads: ChatThread[] }
-  | { type: 'SET_ACTIVE_CHAT_THREAD'; threadId: string | null }
-  | { type: 'TOGGLE_COLLAPSED' }
+  | { type: 'SET_RESUMABLE_THREADS'; threads: ResumableThreadRecord[] }
+  | { type: 'SET_ACTIVE_THREAD'; threadId: string | null }
+  | { type: 'TOGGLE_PROJECT_EXPANDED'; projectId: string }
+  | { type: 'SET_EXPANDED_PROJECTS'; projectIds: string[] }
   | { type: 'SET_COLLAPSED'; collapsed: boolean }
   | { type: 'SET_SWITCHING'; isSwitching: boolean };
+
+function groupThreadsByProject(
+  threads: ResumableThreadRecord[],
+): Record<string, ResumableThreadRecord[]> {
+  const grouped: Record<string, ResumableThreadRecord[]> = {};
+  for (const thread of threads) {
+    if (!grouped[thread.projectId]) {
+      grouped[thread.projectId] = [];
+    }
+    grouped[thread.projectId]!.push(thread);
+  }
+  return grouped;
+}
 
 function sidebarReducer(state: SidebarState, action: SidebarAction): SidebarState {
   switch (action.type) {
@@ -38,12 +50,22 @@ function sidebarReducer(state: SidebarState, action: SidebarAction): SidebarStat
       return { ...state, projects: action.projects };
     case 'SET_ACTIVE_PROJECT':
       return { ...state, activeProjectId: action.projectId };
-    case 'SET_CHAT_THREADS':
-      return { ...state, chatThreads: action.threads };
-    case 'SET_ACTIVE_CHAT_THREAD':
-      return { ...state, activeChatThreadId: action.threadId };
-    case 'TOGGLE_COLLAPSED':
-      return { ...state, isCollapsed: !state.isCollapsed };
+    case 'SET_RESUMABLE_THREADS':
+      return {
+        ...state,
+        projectThreads: groupThreadsByProject(action.threads),
+      };
+    case 'SET_ACTIVE_THREAD':
+      return { ...state, activeThreadId: action.threadId };
+    case 'TOGGLE_PROJECT_EXPANDED':
+      return {
+        ...state,
+        expandedProjectIds: state.expandedProjectIds.includes(action.projectId)
+          ? state.expandedProjectIds.filter((projectId) => projectId !== action.projectId)
+          : [...state.expandedProjectIds, action.projectId],
+      };
+    case 'SET_EXPANDED_PROJECTS':
+      return { ...state, expandedProjectIds: action.projectIds };
     case 'SET_COLLAPSED':
       return { ...state, isCollapsed: action.collapsed };
     case 'SET_SWITCHING':
@@ -52,8 +74,6 @@ function sidebarReducer(state: SidebarState, action: SidebarAction): SidebarStat
       return state;
   }
 }
-
-// ── Context ───────────────────────────────────────────────────────────────────
 
 interface SidebarContextValue {
   state: SidebarState;

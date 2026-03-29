@@ -197,6 +197,12 @@ export function WorkbenchScreen({
           host.attachProjectContext(tid, dbPrefix),
         switchProjectWorkspace: (tid, files, dbPrefix) =>
           host.switchProjectWorkspace(tid, files, dbPrefix),
+        collectAgentStateSnapshot: () => host.collectAgentStateSnapshot(),
+        restoreAgentStateSnapshot: (snapshot) =>
+          host.restoreAgentStateSnapshot(snapshot),
+        discoverActiveProjectThreads: (projectId) =>
+          host.discoverActiveProjectThreads(projectId),
+        resumeResumableThread: (thread) => host.resumeResumableThread(thread),
       });
       void manager.init();
       setHostReady(true);

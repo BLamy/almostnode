@@ -1,6 +1,22 @@
 import { createProcess, type TerminalSession } from "almostnode";
 import { WORKSPACE_ROOT } from "./workspace-seed";
 import type { ReturnTypeOfCreateContainer } from "../workbench/workbench-host";
+import "../../../../vendor/opencode/packages/browser/src/shims/bun.browser";
+import { createOpencodeClient } from "../../../../vendor/opencode/packages/browser/src/shims/opencode-sdk.browser";
+import {
+  attachProcessBridge,
+  detachProcessBridge,
+} from "../../../../vendor/opencode/packages/browser/src/shims/child-process.browser";
+import {
+  initBrowserDB,
+  exportBrowserDBSnapshot,
+  importBrowserDBSnapshot,
+} from "../../../../vendor/opencode/packages/browser/src/shims/db.browser";
+import {
+  attachWorkspaceBridge,
+  detachWorkspaceBridge,
+} from "../../../../vendor/opencode/packages/browser/src/shims/fs.browser";
+import { Server } from "../../../../vendor/opencode/packages/opencode/src/server/server";
 
 declare const __OPENTUI_WASM_URL__: string;
 
@@ -27,6 +43,16 @@ export interface OpenCodeBrowserSessionHandle {
   dispose(): void;
   getShellState(): OpenCodeBrowserShellState;
   setThemeMode(themeMode: OpenCodeThemeMode): void;
+}
+
+export interface OpenCodeBrowserSessionSummary {
+  id: string;
+  title: string;
+  parentID?: string;
+  time?: {
+    created: number;
+    updated: number;
+  };
 }
 
 function ensureBrowserProcess(cwd: string, env: Record<string, string>): void {
@@ -270,6 +296,62 @@ function createProcessBridge(session: TerminalSession) {
       return resultPromise;
     },
   };
+}
+
+function createInternalFetch(): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    return Server.Default().fetch(request);
+  }) as typeof fetch;
+}
+
+async function withOpenCodeBrowserRuntime<T>(
+  options: Pick<OpenCodeBrowserSessionOptions, "container" | "cwd" | "env">,
+  callback: (client: ReturnType<typeof createOpencodeClient>) => Promise<T>,
+): Promise<T> {
+  const bridgeSession = options.container.createTerminalSession({
+    cwd: options.cwd,
+    env: options.env,
+  });
+
+  ensureBrowserProcess(options.cwd, options.env);
+  attachWorkspaceBridge(createWorkspaceBridge(options.container));
+  attachProcessBridge(createProcessBridge(bridgeSession));
+
+  try {
+    await initBrowserDB();
+    const client = createOpencodeClient({
+      baseUrl: "http://opencode.internal",
+      directory: toOpenCodePath(options.cwd),
+      fetch: createInternalFetch(),
+    });
+    return await callback(client);
+  } finally {
+    detachWorkspaceBridge();
+    detachProcessBridge();
+    bridgeSession.dispose();
+  }
+}
+
+export async function listOpenCodeBrowserSessions(
+  options: Pick<OpenCodeBrowserSessionOptions, "container" | "cwd" | "env">,
+): Promise<OpenCodeBrowserSessionSummary[]> {
+  return withOpenCodeBrowserRuntime(options, async (client) => {
+    const sessions = await client.session.list();
+    return Array.isArray(sessions)
+      ? sessions as OpenCodeBrowserSessionSummary[]
+      : [];
+  });
+}
+
+export async function collectOpenCodeBrowserSnapshot(): Promise<Uint8Array | null> {
+  return exportBrowserDBSnapshot();
+}
+
+export async function restoreOpenCodeBrowserSnapshot(
+  snapshot: Uint8Array | null,
+): Promise<void> {
+  await importBrowserDBSnapshot(snapshot);
 }
 
 export async function mountOpenCodeBrowserSession(

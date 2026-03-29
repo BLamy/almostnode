@@ -1,24 +1,25 @@
 /**
  * Project lifecycle manager — coordinates ProjectDB with WebIDEHost.
  *
- * Handles CRUD, project switching, auto-save, and first-run bootstrapping.
+ * Handles CRUD, project switching, auto-save, resumable thread persistence,
+ * and first-run bootstrapping.
  */
 
 import {
   ProjectDB,
+  type ProjectAgentStateSnapshot,
   type ProjectRecord,
-  type ChatThread,
+  type ResumableThreadRecord,
 } from './project-db';
 import {
   collectProjectFilesBase64,
   type SerializedFile,
 } from '../desktop/project-snapshot';
+import { mergeDiscoveredThreads } from './resumable-threads';
 import type { TemplateId } from './workspace-seed';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface ProjectManagerHost {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getVfs(): any;
   getTemplateId(): TemplateId;
   attachProjectContext(templateId: TemplateId, dbPrefix?: string): Promise<void>;
@@ -27,23 +28,29 @@ export interface ProjectManagerHost {
     files: Awaited<ReturnType<ProjectDB['getProjectFiles']>>,
     dbPrefix?: string,
   ): Promise<void>;
+  collectAgentStateSnapshot(): Promise<ProjectAgentStateSnapshot>;
+  restoreAgentStateSnapshot(
+    snapshot: ProjectAgentStateSnapshot | null | undefined,
+  ): Promise<void>;
+  discoverActiveProjectThreads(projectId: string): Promise<{
+    claude: ResumableThreadRecord[];
+    opencode: ResumableThreadRecord[];
+  }>;
+  resumeResumableThread(thread: ResumableThreadRecord): Promise<void>;
 }
 
 export interface ProjectManagerCallbacks {
   onProjectsChanged: (projects: ProjectRecord[]) => void;
   onActiveProjectChanged: (projectId: string | null) => void;
-  onChatThreadsChanged: (threads: ChatThread[]) => void;
+  onResumableThreadsChanged: (threads: ResumableThreadRecord[]) => void;
   onSwitchingStateChanged: (isSwitching: boolean) => void;
 }
-
-// ── Constants ─────────────────────────────────────────────────────────────────
 
 const ACTIVE_PROJECT_KEY = 'almostnode-active-project-id';
 const URL_PROJECT_PARAM = 'project';
 const URL_TEMPLATE_PARAM = 'template';
 const AUTO_SAVE_DEBOUNCE_MS = 3000;
-
-// ── ProjectManager ────────────────────────────────────────────────────────────
+const AI_SIDEBAR_TAB_CLOSED_EVENT = 'almostnode:ai-sidebar-tab-closed';
 
 export class ProjectManager {
   readonly db = new ProjectDB();
@@ -51,8 +58,10 @@ export class ProjectManager {
   private callbacks: ProjectManagerCallbacks | null = null;
   private activeProjectId: string | null = null;
   private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  private vfsChangeHandler: ((...args: unknown[]) => void) | null = null;
   private initialized = false;
+  private readonly handleAiSidebarTabClosed = () => {
+    void this.syncActiveProjectThreads();
+  };
 
   setHost(host: ProjectManagerHost): void {
     this.host = host;
@@ -60,18 +69,16 @@ export class ProjectManager {
 
   setCallbacks(callbacks: ProjectManagerCallbacks): void {
     this.callbacks = callbacks;
+
+    if (this.initialized) {
+      void this.emitCurrentStateToCallbacks();
+    }
   }
 
   getActiveProjectId(): string | null {
     return this.activeProjectId;
   }
 
-  /**
-   * Initialize the project manager. Call once after the host is bootstrapped.
-   *
-   * If no projects exist, creates "My Project" from the current template
-   * and saves the current VFS files into it.
-   */
   async init(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
@@ -83,20 +90,24 @@ export class ProjectManager {
       const project = createProjectRecord('My Project', templateId);
       await this.db.putProject(project);
 
-      // Save current VFS into this project
       if (this.host) {
         const files = collectProjectFilesBase64(this.host.getVfs());
         await this.db.saveProjectFiles(project.id, files);
+        const agentState = await this.host.collectAgentStateSnapshot();
+        await this.db.putProjectAgentState({
+          projectId: project.id,
+          ...agentState,
+          savedAt: Date.now(),
+        });
       }
 
       projects = [project];
     }
 
-    // Restore active project: URL param > localStorage > first project
     const urlProjectId = readUrlProjectId();
     const storedActiveId = urlProjectId ?? readActiveProjectId();
     const matchingProject = storedActiveId
-      ? projects.find((p) => p.id === storedActiveId)
+      ? projects.find((project) => project.id === storedActiveId)
       : null;
 
     this.activeProjectId = matchingProject?.id ?? projects[0]!.id;
@@ -128,21 +139,22 @@ export class ProjectManager {
           activeProject.dbPrefix,
         );
       }
+
+      const agentState = await this.db.getProjectAgentState(activeProject.id);
+      await this.host.restoreAgentStateSnapshot(agentState ?? null);
     }
 
-    // Load chat threads for active project
-    await this.refreshChatThreads();
-
-    // Start auto-save
+    await this.syncActiveProjectThreads();
     this.startAutoSave();
+    window.addEventListener(
+      AI_SIDEBAR_TAB_CLOSED_EVENT,
+      this.handleAiSidebarTabClosed,
+    );
 
-    // Listen for beforeunload to save on exit
     window.addEventListener('beforeunload', () => {
       void this.saveCurrentProject();
     });
   }
-
-  // ── Project CRUD ──
 
   async createProject(name: string, templateId: TemplateId): Promise<ProjectRecord> {
     const project = createProjectRecord(name, templateId);
@@ -162,55 +174,51 @@ export class ProjectManager {
 
   async deleteProject(id: string): Promise<void> {
     if (id === this.activeProjectId) {
-      // Switch to another project first
       const projects = await this.db.listProjects();
-      const other = projects.find((p) => p.id !== id);
-      if (other) {
-        await this.switchProject(other.id);
-      } else {
-        // Last project — can't delete
+      const otherProject = projects.find((project) => project.id !== id);
+      if (!otherProject) {
         return;
       }
+      await this.switchProject(otherProject.id);
     }
+
     await this.db.deleteProject(id);
     await this.notifyProjectsChanged();
+    await this.refreshResumableThreads();
   }
 
-  // ── Project Switching ──
-
   async switchProject(targetId: string): Promise<void> {
-    if (targetId === this.activeProjectId) return;
-    if (!this.host) return;
+    if (targetId === this.activeProjectId || !this.host) {
+      return;
+    }
 
     const targetProject = await this.db.getProject(targetId);
-    if (!targetProject) return;
+    if (!targetProject) {
+      return;
+    }
 
     this.callbacks?.onSwitchingStateChanged(true);
 
     try {
-      // 1. Save current project files
       await this.saveCurrentProject();
 
-      // 2. Load target project files from IndexedDB
       const files = await this.db.getProjectFiles(targetId);
+      const agentState = await this.db.getProjectAgentState(targetId);
 
-      // 3. Swap the mounted workspace in place and switch the project DB namespace.
       await this.host.switchProjectWorkspace(
         targetProject.templateId,
         files,
         targetProject.dbPrefix,
       );
+      await this.host.restoreAgentStateSnapshot(agentState ?? null);
 
-      // 4. Update active project
       this.activeProjectId = targetId;
       writeActiveProjectId(targetId);
       writeUrlProjectId(targetId);
 
-      // 5. Update UI
       this.callbacks?.onActiveProjectChanged(targetId);
-      await this.refreshChatThreads();
+      await this.syncActiveProjectThreads();
 
-      // Touch lastModified
       targetProject.lastModified = Date.now();
       await this.db.putProject(targetProject);
       await this.notifyProjectsChanged();
@@ -219,15 +227,23 @@ export class ProjectManager {
     }
   }
 
-  // ── Save ──
-
   async saveCurrentProject(): Promise<void> {
-    if (!this.activeProjectId || !this.host) return;
+    if (!this.activeProjectId || !this.host) {
+      return;
+    }
 
     const files = collectProjectFilesBase64(this.host.getVfs());
     await this.db.saveProjectFiles(this.activeProjectId, files);
 
-    // Update lastModified
+    const agentState = await this.host.collectAgentStateSnapshot();
+    await this.db.putProjectAgentState({
+      projectId: this.activeProjectId,
+      ...agentState,
+      savedAt: Date.now(),
+    });
+
+    await this.syncActiveProjectThreads();
+
     const project = await this.db.getProject(this.activeProjectId);
     if (project) {
       project.lastModified = Date.now();
@@ -235,53 +251,44 @@ export class ProjectManager {
     }
   }
 
-  // ── Chat Thread CRUD ──
-
-  async createChatThread(title: string): Promise<ChatThread> {
-    if (!this.activeProjectId) throw new Error('No active project');
-
-    const thread: ChatThread = {
-      id: crypto.randomUUID(),
-      projectId: this.activeProjectId,
-      title,
-      createdAt: Date.now(),
-      lastMessageAt: Date.now(),
-    };
-    await this.db.putChatThread(thread);
-    await this.refreshChatThreads();
-    return thread;
-  }
-
-  async renameChatThread(id: string, title: string): Promise<void> {
-    const thread = await this.db.getChatThread(id);
-    if (!thread) return;
-    thread.title = title;
-    await this.db.putChatThread(thread);
-    await this.refreshChatThreads();
-  }
-
-  async deleteChatThread(id: string): Promise<void> {
-    await this.db.deleteChatThread(id);
-    await this.refreshChatThreads();
-  }
-
-  // ── Auto-save ──
-
-  private startAutoSave(): void {
-    // Watch VFS changes via polling debounce (VFS doesn't expose events we can reliably use externally)
-    // Instead, we schedule saves based on activity
-    this.scheduleAutoSave();
-  }
-
-  private scheduleAutoSave(): void {
-    if (this.autoSaveTimer) {
-      clearTimeout(this.autoSaveTimer);
+  async resumeThread(threadId: string): Promise<void> {
+    if (!this.host) {
+      return;
     }
-    this.autoSaveTimer = setTimeout(() => {
-      void this.saveCurrentProject().finally(() => {
-        this.scheduleAutoSave();
-      });
-    }, AUTO_SAVE_DEBOUNCE_MS);
+
+    const thread = await this.db.getResumableThread(threadId);
+    if (!thread) {
+      return;
+    }
+
+    if (thread.projectId !== this.activeProjectId) {
+      await this.switchProject(thread.projectId);
+    }
+
+    await this.host.resumeResumableThread(thread);
+    await this.syncActiveProjectThreads();
+  }
+
+  async syncActiveProjectThreads(): Promise<ResumableThreadRecord[]> {
+    if (!this.activeProjectId) {
+      this.callbacks?.onResumableThreadsChanged([]);
+      return [];
+    }
+
+    if (!this.host) {
+      const threads = await this.db.listResumableThreads(this.activeProjectId);
+      await this.notifyResumableThreadsChanged();
+      return threads;
+    }
+
+    const existing = await this.db.listResumableThreads(this.activeProjectId);
+    const discovered = await this.host.discoverActiveProjectThreads(
+      this.activeProjectId,
+    );
+    const threads = mergeDiscoveredThreads(existing, discovered);
+    await this.db.replaceProjectResumableThreads(this.activeProjectId, threads);
+    await this.notifyResumableThreadsChanged();
+    return threads;
   }
 
   dispose(): void {
@@ -289,23 +296,54 @@ export class ProjectManager {
       clearTimeout(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
+
+    window.removeEventListener(
+      AI_SIDEBAR_TAB_CLOSED_EVENT,
+      this.handleAiSidebarTabClosed,
+    );
   }
 
-  // ── Private helpers ──
+  private startAutoSave(): void {
+    this.scheduleAutoSave();
+  }
+
+  private scheduleAutoSave(): void {
+    if (this.autoSaveTimer) {
+      clearTimeout(this.autoSaveTimer);
+    }
+
+    this.autoSaveTimer = setTimeout(() => {
+      void this.saveCurrentProject().finally(() => {
+        this.scheduleAutoSave();
+      });
+    }, AUTO_SAVE_DEBOUNCE_MS);
+  }
 
   private async notifyProjectsChanged(): Promise<void> {
     const projects = await this.db.listProjects();
     this.callbacks?.onProjectsChanged(projects);
   }
 
-  private async refreshChatThreads(): Promise<void> {
-    if (!this.activeProjectId) return;
-    const threads = await this.db.listChatThreads(this.activeProjectId);
-    this.callbacks?.onChatThreadsChanged(threads);
+  private async emitCurrentStateToCallbacks(): Promise<void> {
+    if (!this.callbacks) {
+      return;
+    }
+
+    await this.notifyProjectsChanged();
+    this.callbacks.onActiveProjectChanged(this.activeProjectId);
+    await this.notifyResumableThreadsChanged();
+    this.callbacks.onSwitchingStateChanged(false);
+  }
+
+  private async refreshResumableThreads(): Promise<void> {
+    await this.notifyResumableThreadsChanged();
+  }
+
+  private async notifyResumableThreadsChanged(): Promise<void> {
+    const threads = await this.db.listAllResumableThreads();
+    this.callbacks?.onResumableThreadsChanged(threads);
   }
 }
-
-// ── Utility functions ─────────────────────────────────────────────────────────
 
 function createProjectRecord(name: string, templateId: TemplateId): ProjectRecord {
   const id = crypto.randomUUID();
