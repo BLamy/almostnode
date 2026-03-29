@@ -4,22 +4,45 @@ import type {
   NetworkLookupOptions,
   NetworkLookupResult,
   NetworkOptions,
+  PersistedNetworkSession,
   TailscaleAdapter,
   TailscaleAdapterFactory,
   TailscaleAdapterStatus,
 } from './types';
 import type {
+  TailscaleWorkerErrorDebug,
+  TailscaleWorkerErrorPayload,
   TailscaleWorkerEvent,
   TailscaleWorkerRequest,
 } from './tailscale-worker-types';
 import {
   createTailscaleSessionPersistence,
   type StorageLike,
+  type TailscaleStateSnapshot,
 } from './tailscale-session-storage';
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+}
+
+class TailscaleAdapterError extends Error {
+  readonly code?: string;
+  readonly debug?: TailscaleWorkerErrorDebug;
+
+  constructor(error: TailscaleWorkerErrorPayload | string) {
+    const message = typeof error === 'string' ? error : error.message;
+    super(message);
+    this.name = 'TailscaleAdapterError';
+    this.code = typeof error === 'string' ? undefined : error.code;
+    this.debug = typeof error === 'string' ? undefined : error.debug;
+  }
+}
+
+interface TailscaleConnectAdapterHooks {
+  initialSnapshot?: TailscaleStateSnapshot | null;
+  onAuthUrl?: (url: string | null) => void;
+  onPersistedSessionChange?: (session: PersistedNetworkSession | null) => void;
 }
 
 class TailscaleConnectAdapter implements TailscaleAdapter {
@@ -30,12 +53,16 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   private workerHydrated = false;
   private workerHydrationPromise: Promise<void> | null = null;
   private status: TailscaleAdapterStatus = { state: 'needs-login' };
-  private shouldOpenNextLoginUrl = false;
+  private lastAuthUrl: string | null = null;
+  private sessionSnapshot: TailscaleStateSnapshot | null;
 
   constructor(
     private options: Required<NetworkOptions>,
     private readonly onStatus: (status: TailscaleAdapterStatus) => void,
-  ) {}
+    private readonly hooks: TailscaleConnectAdapterHooks = {},
+  ) {
+    this.sessionSnapshot = hooks.initialSnapshot ?? null;
+  }
 
   async configure(options: Required<NetworkOptions>): Promise<void> {
     this.options = options;
@@ -50,7 +77,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       this.status = await this.sendRequest<TailscaleAdapterStatus>({
         type: 'getStatus',
       });
-      this.maybeOpenLoginUrl();
+      this.handleAuthUrl(this.status.loginUrl ?? null);
       this.onStatus(this.status);
     } catch (error) {
       this.status = {
@@ -64,24 +91,10 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   }
 
   async login(): Promise<TailscaleAdapterStatus> {
-    this.shouldOpenNextLoginUrl = true;
-
-    // Tailscale rejects reauthorization when a stale nodekey is still present.
-    // Start each fresh login attempt from an explicit logout/reset.
-    if (this.status.state !== 'running') {
-      try {
-        await this.sendRequest<TailscaleAdapterStatus>({
-          type: 'logout',
-        });
-      } catch {
-        // A best-effort reset is enough here; proceed with login either way.
-      }
-    }
-
     this.status = await this.sendRequest<TailscaleAdapterStatus>({
       type: 'login',
     });
-    this.maybeOpenLoginUrl();
+    this.handleAuthUrl(this.status.loginUrl ?? null);
     this.onStatus(this.status);
     return this.status;
   }
@@ -90,6 +103,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     this.status = await this.sendRequest<TailscaleAdapterStatus>({
       type: 'logout',
     });
+    this.handleAuthUrl(this.status.loginUrl ?? null);
     this.onStatus(this.status);
     return this.status;
   }
@@ -112,6 +126,10 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     });
   }
 
+  getSessionSnapshot(): TailscaleStateSnapshot | null {
+    return this.sessionSnapshot;
+  }
+
   dispose(): void {
     for (const pending of this.pendingRequests.values()) {
       pending.reject(new Error('Tailscale adapter disposed.'));
@@ -122,19 +140,6 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     this.workerHydrationPromise = null;
     this.worker?.terminate();
     this.worker = null;
-  }
-
-  private maybeOpenLoginUrl(): void {
-    if (!this.shouldOpenNextLoginUrl || !this.status.loginUrl) {
-      return;
-    }
-
-    this.shouldOpenNextLoginUrl = false;
-    try {
-      globalThis.open?.(this.status.loginUrl, '_blank', 'noopener,noreferrer');
-    } catch {
-      // Ignore popup failures; the UI/status still exposes the URL.
-    }
   }
 
   private async ensureWorker(): Promise<Worker> {
@@ -153,18 +158,20 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     worker.addEventListener('message', (event: MessageEvent<TailscaleWorkerEvent>) => {
       const message = event.data;
       if (message.type === 'storageUpdate') {
+        this.sessionSnapshot = message.snapshot;
+        this.hooks.onPersistedSessionChange?.(this.buildPersistedSession());
         if (message.snapshot) {
-          this.persistence.save(message.snapshot);
-        } else {
-          this.persistence.clear();
+          this.onStatus(this.status);
+          return;
         }
+
         this.onStatus(this.status);
         return;
       }
 
       if (message.type === 'status') {
         this.status = message.status;
-        this.maybeOpenLoginUrl();
+        this.handleAuthUrl(message.status.loginUrl ?? null);
         this.onStatus(this.status);
         return;
       }
@@ -178,7 +185,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       if (message.ok) {
         pending.resolve(message.value);
       } else {
-        pending.reject(new Error(message.error));
+        pending.reject(new TailscaleAdapterError(message.error));
       }
     });
 
@@ -189,7 +196,10 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       this.workerHydrated = false;
       this.workerHydrationPromise = null;
       for (const pending of this.pendingRequests.values()) {
-        pending.reject(new Error(detail));
+        pending.reject(new TailscaleAdapterError({
+          code: 'runtime_unavailable',
+          message: detail,
+        }));
       }
       this.pendingRequests.clear();
       this.worker?.terminate();
@@ -208,31 +218,15 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     return worker;
   }
 
-  private getBrowserSessionStorage(): StorageLike | null {
-    try {
-      if (typeof sessionStorage === 'undefined') {
-        return null;
-      }
-      return sessionStorage;
-    } catch {
-      return null;
-    }
-  }
-
-  private readonly persistence = createTailscaleSessionPersistence(
-    this.getBrowserSessionStorage(),
-  );
-
   private async ensureWorkerHydrated(): Promise<void> {
     if (this.workerHydrated) {
       return;
     }
 
     if (!this.workerHydrationPromise) {
-      const snapshot = this.persistence.load();
       this.workerHydrationPromise = this.postRequest<null>({
         type: 'hydrateStorage',
-        snapshot,
+        snapshot: this.sessionSnapshot,
       }).then(() => {
         this.workerHydrated = true;
       }).finally(() => {
@@ -274,10 +268,72 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     }
     return value;
   }
+
+  private handleAuthUrl(url: string | null): void {
+    if (url === this.lastAuthUrl) {
+      return;
+    }
+    this.lastAuthUrl = url;
+    this.hooks.onAuthUrl?.(url);
+  }
+
+  private buildPersistedSession(): PersistedNetworkSession | null {
+    if (this.options.provider !== 'tailscale') {
+      return null;
+    }
+
+    return {
+      provider: 'tailscale',
+      useExitNode: this.options.useExitNode,
+      exitNodeId: this.options.exitNodeId,
+      acceptDns: this.options.acceptDns,
+      stateSnapshot: this.sessionSnapshot,
+    };
+  }
 }
 
 export function createTailscaleConnectAdapterFactory(): TailscaleAdapterFactory {
   return async (options, onStatus) => {
-    return new TailscaleConnectAdapter(options, onStatus);
+    const storage = getBrowserSessionStorage();
+    const persistence = createTailscaleSessionPersistence(storage);
+    return new TailscaleConnectAdapter(options, onStatus, {
+      initialSnapshot: persistence.load(),
+      onAuthUrl: (url) => {
+        if (!url) {
+          return;
+        }
+        try {
+          globalThis.open?.(url, '_blank', 'noopener,noreferrer');
+        } catch {
+          // Ignore popup failures; the UI/status still exposes the URL.
+        }
+      },
+      onPersistedSessionChange: (session) => {
+        if (!session?.stateSnapshot) {
+          persistence.clear();
+          return;
+        }
+        persistence.save(session.stateSnapshot);
+      },
+    });
   };
+}
+
+export function createNativeTailscaleConnectAdapter(
+  options: Required<NetworkOptions>,
+  onStatus: (status: TailscaleAdapterStatus) => void,
+  hooks: TailscaleConnectAdapterHooks = {},
+): TailscaleAdapter {
+  return new TailscaleConnectAdapter(options, onStatus, hooks);
+}
+
+function getBrowserSessionStorage(): StorageLike | null {
+  try {
+    if (typeof sessionStorage === 'undefined') {
+      return null;
+    }
+    return sessionStorage;
+  } catch {
+    return null;
+  }
 }

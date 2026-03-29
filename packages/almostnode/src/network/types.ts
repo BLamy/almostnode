@@ -7,7 +7,9 @@ export interface NetworkOptions {
   authMode?: NetworkAuthMode;
   useExitNode?: boolean;
   exitNodeId?: string | null;
+  acceptDns?: boolean;
   corsProxy?: string | null;
+  tailscaleConnected?: boolean;
 }
 
 export interface NetworkExitNode {
@@ -35,6 +37,9 @@ export interface NetworkStatus {
   canLogin: boolean;
   canLogout: boolean;
   adapterAvailable: boolean;
+  dnsEnabled: boolean;
+  dnsHealthy: boolean | null;
+  dnsDetail?: string;
   exitNodes: NetworkExitNode[];
   selectedExitNodeId: string | null;
   detail?: string;
@@ -94,12 +99,34 @@ export interface NetworkController {
 
 export interface TailscaleAdapterStatus {
   state?: Exclude<NetworkState, 'browser'>;
+  dnsEnabled?: boolean;
+  dnsHealthy?: boolean | null;
+  dnsDetail?: string;
   exitNodes?: NetworkExitNode[];
   selectedExitNodeId?: string | null;
   detail?: string;
   loginUrl?: string | null;
   selfName?: string | null;
   tailnetName?: string | null;
+}
+
+export interface PersistedNetworkSession {
+  provider: 'tailscale';
+  useExitNode: boolean;
+  exitNodeId: string | null;
+  acceptDns: boolean;
+  stateSnapshot: Record<string, string> | null;
+}
+
+export interface NetworkIntegration {
+  loadSession?: () =>
+    | PersistedNetworkSession
+    | null
+    | Promise<PersistedNetworkSession | null>;
+  saveSession?: (
+    session: PersistedNetworkSession | null,
+  ) => void | Promise<void>;
+  onAuthUrl?: (url: string | null) => void;
 }
 
 export interface TailscaleAdapter {
@@ -112,6 +139,7 @@ export interface TailscaleAdapter {
     hostname: string,
     options?: NetworkLookupOptions,
   ): Promise<NetworkLookupResult>;
+  getSessionSnapshot?(): Record<string, string> | null;
   dispose?(): Promise<void> | void;
 }
 

@@ -62,6 +62,7 @@ import { almostnodeDebugError, almostnodeDebugLog } from './utils/debug';
 import {
   getDefaultNetworkController,
   networkFetch,
+  selectNetworkRouteForUrl,
   setDefaultNetworkController,
 } from './network';
 import type { NetworkController, NetworkOptions } from './network/types';
@@ -597,6 +598,126 @@ function shouldProxyBrowserUrl(rawUrl: string): boolean {
 
 function getProxiedBrowserUrl(rawUrl: string): string {
   return getRuntimeCorsProxy() + encodeURIComponent(rawUrl);
+}
+
+type AlmostnodePatchedXMLHttpRequest = XMLHttpRequest & {
+  __almostnodeOriginalUrl?: string;
+  __almostnodeRequestMethod?: string;
+  __almostnodeRoute?: 'browser' | 'tailscale';
+  __almostnodeProxied?: boolean;
+  __almostnodeRequestHeaders?: Headers;
+  __almostnodeResponseHeaders?: Headers;
+  __almostnodeAborted?: boolean;
+};
+
+function createXhrEvent(type: string): Event {
+  if (typeof Event === 'function') {
+    return new Event(type);
+  }
+  return { type } as Event;
+}
+
+function setXhrInstanceValue(
+  xhr: AlmostnodePatchedXMLHttpRequest,
+  key: string,
+  value: unknown,
+): void {
+  try {
+    Object.defineProperty(xhr, key, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+  } catch {
+    try {
+      (xhr as unknown as Record<string, unknown>)[key] = value;
+    } catch {
+      // Ignore read-only XHR properties that cannot be shadowed.
+    }
+  }
+}
+
+function emitXhrEvent(
+  xhr: AlmostnodePatchedXMLHttpRequest,
+  type: string,
+): void {
+  const event = createXhrEvent(type);
+  const handler = (xhr as unknown as Record<string, unknown>)[`on${type}`];
+  if (typeof handler === 'function') {
+    try {
+      (handler as (event: Event) => void).call(xhr, event);
+    } catch {
+      // Keep browser listeners flowing even if a property handler throws.
+    }
+  }
+
+  if (typeof xhr.dispatchEvent === 'function') {
+    try {
+      xhr.dispatchEvent(event);
+    } catch {
+      // Ignore dispatch failures on mocked XHR implementations.
+    }
+  }
+}
+
+function setXhrReadyState(
+  xhr: AlmostnodePatchedXMLHttpRequest,
+  readyState: number,
+): void {
+  setXhrInstanceValue(xhr, 'readyState', readyState);
+  emitXhrEvent(xhr, 'readystatechange');
+}
+
+function getXhrRoute(
+  rawUrl: string,
+): 'browser' | 'tailscale' {
+  const controller = getDefaultNetworkController();
+  return selectNetworkRouteForUrl(
+    rawUrl,
+    controller.getConfig(),
+    typeof location !== 'undefined' ? location : null,
+  );
+}
+
+function formatXhrResponseHeaders(headers: Headers): string {
+  const lines: string[] = [];
+  headers.forEach((value, key) => {
+    lines.push(`${key}: ${value}`);
+  });
+  return lines.join('\r\n');
+}
+
+async function readXhrResponseBody(
+  response: Response,
+  responseType: XMLHttpRequestResponseType,
+): Promise<{ responseValue: unknown; responseText?: string }> {
+  switch (responseType) {
+    case 'arraybuffer':
+      return { responseValue: await response.arrayBuffer() };
+    case 'blob':
+      return { responseValue: await response.blob() };
+    case 'json': {
+      const text = await response.text();
+      if (!text) {
+        return { responseValue: null, responseText: text };
+      }
+      try {
+        return { responseValue: JSON.parse(text), responseText: text };
+      } catch {
+        return { responseValue: null, responseText: text };
+      }
+    }
+    case 'document': {
+      const text = await response.text();
+      return { responseValue: text, responseText: text };
+    }
+    case 'text':
+    case '':
+    default: {
+      const text = await response.text();
+      return { responseValue: text, responseText: text };
+    }
+  }
 }
 
 /**
@@ -1577,9 +1698,17 @@ export class Runtime {
         prototype: XMLHttpRequest;
       }).prototype as XMLHttpRequest & {
         __almostnodeOriginalOpen?: XMLHttpRequest['open'];
+        __almostnodeOriginalAbort?: XMLHttpRequest['abort'];
+        __almostnodeOriginalGetAllResponseHeaders?: XMLHttpRequest['getAllResponseHeaders'];
+        __almostnodeOriginalGetResponseHeader?: XMLHttpRequest['getResponseHeader'];
+        __almostnodeOriginalSend?: XMLHttpRequest['send'];
         __almostnodeOriginalSetRequestHeader?: XMLHttpRequest['setRequestHeader'];
       };
       const origOpen = xhrProto.open;
+      const origSend = xhrProto.send;
+      const origAbort = xhrProto.abort;
+      const origGetResponseHeader = xhrProto.getResponseHeader;
+      const origGetAllResponseHeaders = xhrProto.getAllResponseHeaders;
       const origSetRequestHeader = xhrProto.setRequestHeader;
 
       xhrProto.open = function (
@@ -1590,20 +1719,35 @@ export class Runtime {
         password?: string | null
       ) {
         const requestedUrl = typeof url === 'string' ? url : String(url);
-        const proxied = shouldProxyBrowserUrl(requestedUrl);
+        const route = getXhrRoute(requestedUrl);
+        const proxied = route === 'browser' && shouldProxyBrowserUrl(requestedUrl);
         const effectiveUrl = proxied ? getProxiedBrowserUrl(requestedUrl) : requestedUrl;
-        (this as any).__almostnodeOriginalUrl = requestedUrl;
-        (this as any).__almostnodeProxied = proxied;
+        const xhr = this as AlmostnodePatchedXMLHttpRequest;
+        xhr.__almostnodeOriginalUrl = requestedUrl;
+        xhr.__almostnodeRequestMethod = method;
+        xhr.__almostnodeRoute = route;
+        xhr.__almostnodeProxied = proxied;
+        xhr.__almostnodeRequestHeaders = new Headers();
+        xhr.__almostnodeResponseHeaders = new Headers();
+        xhr.__almostnodeAborted = false;
         return origOpen.call(this, method, effectiveUrl, async ?? true, username ?? null, password ?? null);
       };
 
       xhrProto.setRequestHeader = function (name: string, value: string) {
+        const xhr = this as AlmostnodePatchedXMLHttpRequest;
         const lowerName = String(name || '').toLowerCase();
         if (FORBIDDEN_XHR_HEADERS.has(lowerName)) {
           return;
         }
 
-        if ((this as any).__almostnodeProxied && (lowerName === 'host' || lowerName === 'accept-encoding')) {
+        if (xhr.__almostnodeProxied && (lowerName === 'host' || lowerName === 'accept-encoding')) {
+          return;
+        }
+
+        xhr.__almostnodeRequestHeaders ??= new Headers();
+        xhr.__almostnodeRequestHeaders.append(name, value);
+
+        if (xhr.__almostnodeRoute === 'tailscale') {
           return;
         }
 
@@ -1616,6 +1760,103 @@ export class Runtime {
           }
           throw error;
         }
+      };
+
+      xhrProto.getResponseHeader = function (name: string) {
+        const xhr = this as AlmostnodePatchedXMLHttpRequest;
+        if (xhr.__almostnodeRoute === 'tailscale') {
+          return xhr.__almostnodeResponseHeaders?.get(name) ?? null;
+        }
+        return origGetResponseHeader.call(this, name);
+      };
+
+      xhrProto.getAllResponseHeaders = function () {
+        const xhr = this as AlmostnodePatchedXMLHttpRequest;
+        if (xhr.__almostnodeRoute === 'tailscale') {
+          return formatXhrResponseHeaders(xhr.__almostnodeResponseHeaders ?? new Headers());
+        }
+        return origGetAllResponseHeaders.call(this);
+      };
+
+      xhrProto.abort = function () {
+        const xhr = this as AlmostnodePatchedXMLHttpRequest;
+        if (xhr.__almostnodeRoute !== 'tailscale') {
+          return origAbort.call(this);
+        }
+
+        xhr.__almostnodeAborted = true;
+        setXhrInstanceValue(xhr, 'status', 0);
+        setXhrInstanceValue(xhr, 'statusText', '');
+        setXhrReadyState(xhr, 0);
+        emitXhrEvent(xhr, 'abort');
+        emitXhrEvent(xhr, 'loadend');
+      };
+
+      xhrProto.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
+        const xhr = this as AlmostnodePatchedXMLHttpRequest;
+        if (xhr.__almostnodeRoute !== 'tailscale') {
+          return origSend.call(this, body as Document | XMLHttpRequestBodyInit | null | undefined);
+        }
+
+        const requestedUrl = xhr.__almostnodeOriginalUrl;
+        if (!requestedUrl) {
+          throw new Error('XMLHttpRequest.send() called before open().');
+        }
+
+        xhr.__almostnodeAborted = false;
+
+        void (async () => {
+          try {
+            const requestHeaders = new Headers(xhr.__almostnodeRequestHeaders);
+            const method = (xhr.__almostnodeRequestMethod || 'GET').toUpperCase();
+            const request = new Request(requestedUrl, {
+              method,
+              headers: requestHeaders,
+              body: method === 'GET' || method === 'HEAD'
+                ? undefined
+                : (body as BodyInit | null | undefined),
+              credentials: xhr.withCredentials ? 'include' : 'same-origin',
+              redirect: 'follow',
+            });
+            const response = await networkFetch(request, undefined, getDefaultNetworkController());
+            if (xhr.__almostnodeAborted) {
+              return;
+            }
+
+            const responseHeaders = new Headers(response.headers);
+            const { responseValue, responseText } = await readXhrResponseBody(
+              response,
+              xhr.responseType || '',
+            );
+            if (xhr.__almostnodeAborted) {
+              return;
+            }
+
+            xhr.__almostnodeResponseHeaders = responseHeaders;
+            setXhrInstanceValue(xhr, 'status', response.status);
+            setXhrInstanceValue(xhr, 'statusText', response.statusText);
+            setXhrInstanceValue(xhr, 'responseURL', response.url || requestedUrl);
+            setXhrReadyState(xhr, 2);
+            setXhrReadyState(xhr, 3);
+            setXhrInstanceValue(xhr, 'response', responseValue);
+            if (responseText !== undefined) {
+              setXhrInstanceValue(xhr, 'responseText', responseText);
+            }
+            setXhrReadyState(xhr, 4);
+            emitXhrEvent(xhr, 'load');
+            emitXhrEvent(xhr, 'loadend');
+          } catch (error) {
+            if (xhr.__almostnodeAborted) {
+              return;
+            }
+
+            setXhrInstanceValue(xhr, 'status', 0);
+            setXhrInstanceValue(xhr, 'statusText', '');
+            setXhrReadyState(xhr, 4);
+            emitXhrEvent(xhr, 'error');
+            emitXhrEvent(xhr, 'loadend');
+          }
+        })();
       };
 
       Object.defineProperty(globalThis.XMLHttpRequest, '__almostnode', {

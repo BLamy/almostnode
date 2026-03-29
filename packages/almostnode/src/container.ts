@@ -12,7 +12,11 @@ import {
 import type { ShellCommandDefinition } from "./shell-commands";
 import type { IExecuteResult } from "./runtime-interface";
 import type { WorkspaceSearchProvider } from "./shims/child_process";
-import type { NetworkController, NetworkOptions } from "./network/types";
+import type {
+  NetworkController,
+  NetworkIntegration,
+  NetworkOptions,
+} from "./network/types";
 
 export type {
   WorkspaceSearchProvider,
@@ -93,6 +97,7 @@ export interface ContainerOptions extends RuntimeOptions {
   installMode?: InstallMode;
   shellCommands?: ShellCommandDefinition[];
   network?: NetworkOptions;
+  networkIntegration?: NetworkIntegration;
 }
 
 export interface ContainerInstance {
@@ -157,7 +162,10 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
   let gitAuth = sanitizeGitAuth(options?.git);
   const vfs = new VirtualFS();
-  const networkController = createNetworkController(options?.network);
+  const networkController = createNetworkController(
+    options?.network,
+    options?.networkIntegration ?? null,
+  );
   setDefaultNetworkController(networkController);
   const childProcessController = initChildProcess(vfs, {
     installMode: options?.installMode,

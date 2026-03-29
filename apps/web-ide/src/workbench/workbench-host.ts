@@ -1,5 +1,6 @@
 import {
   createContainer,
+  type PersistedNetworkSession,
   type NetworkStatus,
   type RunResult,
   type WorkspaceSearchProvider,
@@ -40,6 +41,7 @@ import {
   PreviewSurface,
   TerminalPanelSurface,
   OpenCodeTerminalSurface,
+  type AgentLaunchKind,
   ConsolePanelElement,
   DatabaseSidebarSurface,
   DatabaseBrowserSurface,
@@ -53,6 +55,9 @@ import {
   JsonEditorInput,
 } from "../features/rendered-editors";
 import {
+  CLAUDE_AUTH_CONFIG_PATH,
+  CLAUDE_AUTH_CREDENTIALS_PATH,
+  CLAUDE_LEGACY_CONFIG_PATH,
   Keychain,
   OPENCODE_AUTH_PATH,
   OPENCODE_CONFIG_JSONC_PATH,
@@ -64,8 +69,11 @@ import {
 } from "../features/keychain";
 import {
   clearStoredWorkbenchNetworkConfig,
+  clearStoredTailscaleSessionSnapshot,
   readStoredWorkbenchNetworkConfig,
+  readStoredTailscaleSessionSnapshot,
   writeStoredWorkbenchNetworkConfig,
+  writeStoredTailscaleSessionSnapshot,
 } from "../features/network-session";
 import {
   mountOpenCodeBrowserSession,
@@ -626,6 +634,7 @@ interface TerminalTabState {
   closable: boolean;
   kind: "user" | "preview" | "agent";
   inputMode: "managed" | "passthrough";
+  surface: "panel" | "sidebar";
 }
 
 interface OpenCodeTabState {
@@ -641,7 +650,7 @@ interface OpenCodeSidebarTabState {
   id: string;
   title: string;
   host: HTMLElement;
-  session: OpenCodeBrowserSessionHandle;
+  session: OpenCodeBrowserSessionHandle | null;
 }
 
 type WorkbenchThemeKind = "light" | "dark";
@@ -695,11 +704,18 @@ export class WebIDEHost {
     string,
     OpenCodeSidebarTabState
   >();
+  private readonly openCodeSidebarTerminalTabs = new Map<
+    string,
+    TerminalTabState
+  >();
   private activeTerminalTabId: string | null = null;
+  private activeOpenCodeSidebarTabId: string | null = null;
   private previewTerminalTabId: string | null = null;
   private terminalCounter = 0;
   private openCodeTerminalCounter = 0;
   private openCodeSidebarCounter = 0;
+  private openCodeSidebarTerminalCounter = 0;
+  private claudeSidebarCounter = 0;
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
@@ -741,7 +757,6 @@ export class WebIDEHost {
   private removeCursorOverlay: (() => void) | null = null;
 
   constructor(private readonly options: WebIDEHostOptions) {
-    const initialNetwork = readStoredWorkbenchNetworkConfig();
     this.container = createContainer({
       baseUrl: options.baseUrl,
       basePath: import.meta.env.BASE_URL?.replace(/\/$/, "") || "",
@@ -749,7 +764,45 @@ export class WebIDEHost {
       env: WebIDEHost.defaultCorsProxyUrl
         ? { CORS_PROXY_URL: WebIDEHost.defaultCorsProxyUrl }
         : undefined,
-      network: initialNetwork ?? undefined,
+      networkIntegration: {
+        loadSession: (): PersistedNetworkSession | null => {
+          const stored = readStoredWorkbenchNetworkConfig();
+          if (!stored) {
+            return null;
+          }
+
+          return {
+            ...stored,
+            stateSnapshot: readStoredTailscaleSessionSnapshot(),
+          };
+        },
+        saveSession: (session) => {
+          if (!session) {
+            clearStoredWorkbenchNetworkConfig();
+            clearStoredTailscaleSessionSnapshot();
+            return;
+          }
+
+          writeStoredWorkbenchNetworkConfig({
+            provider: session.provider,
+            useExitNode: session.useExitNode,
+            exitNodeId: session.exitNodeId,
+            acceptDns: session.acceptDns,
+          });
+
+          if (session.stateSnapshot) {
+            writeStoredTailscaleSessionSnapshot(session.stateSnapshot);
+          } else {
+            clearStoredTailscaleSessionSnapshot();
+          }
+        },
+        onAuthUrl: (url) => {
+          if (!url) {
+            return;
+          }
+          globalThis.open?.(url, "_blank", "noopener,noreferrer");
+        },
+      },
     });
     this.templateId = options.template || "vite";
     this.initialProjectFiles = options.initialProjectFiles ?? null;
@@ -801,15 +854,17 @@ export class WebIDEHost {
       },
     });
     this.openCodeSurface = new OpenCodeTerminalSurface({
-      onCreateTab: () => {
-        void this.createOpenCodeSidebarTab(true);
+      onLaunch: (kind) => {
+        void this.launchAiSession(kind);
       },
       onCloseTab: (id) => {
-        this.closeOpenCodeSidebarTab(id);
+        this.closeAiSidebarTab(id);
       },
       onSelectTab: (id) => {
-        this.openCodeSurface.setActiveTab(id);
-        this.openCodeSidebarTabs.get(id)?.host.focus();
+        this.setActiveAiSidebarTab(id);
+      },
+      onResize: (id, cols, rows) => {
+        this.openCodeSidebarTerminalTabs.get(id)?.session.resize(cols, rows);
       },
     });
     this.databaseSurface = new DatabaseSidebarSurface();
@@ -832,6 +887,7 @@ export class WebIDEHost {
       onStateChange: (state) => {
         this.updateKeychainStatusEntry(state);
         this.updateKeychainSurface(state);
+        this.updateAiLauncherSurface();
       },
     });
     this.keychainSurface.setActionHandler((action) => {
@@ -873,6 +929,11 @@ export class WebIDEHost {
       }
     });
     this.keychain.registerSlot("tailscale", [TAILSCALE_SESSION_KEYCHAIN_PATH]);
+    this.keychain.registerSlot("claude", [
+      CLAUDE_AUTH_CREDENTIALS_PATH,
+      CLAUDE_AUTH_CONFIG_PATH,
+      CLAUDE_LEGACY_CONFIG_PATH,
+    ]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
     this.keychain.registerSlot("opencode", [
       OPENCODE_AUTH_PATH,
@@ -887,11 +948,13 @@ export class WebIDEHost {
       this.tailscaleStatus = status;
       this.handleTailscaleKeychainTransition();
       this.updateKeychainSurface();
+      this.updateAiLauncherSurface();
     });
     this.container.network.subscribe((status) => {
       this.tailscaleStatus = status;
       this.handleTailscaleKeychainTransition();
       this.updateKeychainSurface();
+      this.updateAiLauncherSurface();
     });
   }
 
@@ -1056,6 +1119,11 @@ export class WebIDEHost {
   }
 
   private updateTerminalStatus(tab: TerminalTabState, text: string): void {
+    if (tab.surface === "sidebar") {
+      this.openCodeSurface.updateTabStatus(tab.id, text);
+      return;
+    }
+
     this.terminalSurface.updateTabStatus(tab.id, text);
   }
 
@@ -1096,10 +1164,12 @@ export class WebIDEHost {
       env?: Record<string, string>;
       session?: WorkbenchTerminalSession;
       inputMode?: "managed" | "passthrough";
+      surface?: "panel" | "sidebar";
     },
   ): TerminalTabState {
     const id = options?.id ?? `${kind}-${crypto.randomUUID()}`;
     const { terminal, fitAddon } = this.createTerminalInstance();
+    const surface = options?.surface ?? "panel";
     const tab: TerminalTabState = {
       id,
       title,
@@ -1118,27 +1188,45 @@ export class WebIDEHost {
       closable,
       kind,
       inputMode: options?.inputMode ?? "managed",
+      surface,
     };
-    this.terminalTabs.set(id, tab);
-    this.terminalSurface.addTab({
-      id,
-      title,
-      terminal,
-      fitAddon,
-      closable,
-    });
+    if (surface === "sidebar") {
+      this.openCodeSidebarTerminalTabs.set(id, tab);
+      this.openCodeSurface.addTab({
+        id,
+        title,
+        terminal,
+        fitAddon,
+        closable,
+      });
+    } else {
+      this.terminalTabs.set(id, tab);
+      this.terminalSurface.addTab({
+        id,
+        title,
+        terminal,
+        fitAddon,
+        closable,
+      });
+    }
     this.bindTerminal(tab);
     if (kind === "preview") {
       this.previewTerminalTabId = id;
     }
-    if (focus || !this.activeTerminalTabId) {
+    if (surface === "sidebar") {
+      if (focus || !this.activeOpenCodeSidebarTabId) {
+        this.setActiveAiSidebarTab(id);
+      }
+    } else if (focus || !this.activeTerminalTabId) {
       this.setActiveTerminalTab(id);
     }
-    terminal.write(
-      kind === "preview"
-        ? "almostnode preview terminal"
-        : "almostnode webide terminal",
-    );
+    if (kind === "preview") {
+      terminal.write("almostnode preview terminal");
+    } else if (surface === "sidebar") {
+      terminal.write("almostnode ai panel terminal");
+    } else {
+      terminal.write("almostnode webide terminal");
+    }
     if (
       kind === "user" &&
       this.terminalCounter === 1 &&
@@ -1171,6 +1259,22 @@ export class WebIDEHost {
       id: options?.id,
       cwd: options?.cwd,
       env: options?.env,
+    });
+  }
+
+  private createAiSidebarTerminalTab(
+    focus: boolean,
+    options?: {
+      title?: string;
+    },
+  ): TerminalTabState {
+    const id = `ai-sidebar-${crypto.randomUUID()}`;
+    const title =
+      options?.title ?? `Terminal ${++this.openCodeSidebarTerminalCounter}`;
+    return this.createTerminalTab("user", title, focus, true, {
+      id,
+      cwd: WORKSPACE_ROOT,
+      surface: "sidebar",
     });
   }
 
@@ -1244,6 +1348,97 @@ export class WebIDEHost {
     }
   }
 
+  private getClaudeLauncherAvailable(): boolean {
+    return (
+      this.tailscaleStatus?.state === "running"
+      && this.keychain.hasSlotData("claude")
+    );
+  }
+
+  private hasAiSidebarTab(id: string | null | undefined): boolean {
+    return Boolean(
+      id
+      && (
+        this.openCodeSidebarTabs.has(id)
+        || this.openCodeSidebarTerminalTabs.has(id)
+      ),
+    );
+  }
+
+  private getFirstAiSidebarTabId(): string | null {
+    return (
+      this.openCodeSidebarTabs.keys().next().value
+      ?? this.openCodeSidebarTerminalTabs.keys().next().value
+      ?? null
+    );
+  }
+
+  private setActiveAiSidebarTab(id: string): void {
+    if (!this.hasAiSidebarTab(id)) {
+      return;
+    }
+
+    this.activeOpenCodeSidebarTabId = id;
+    this.openCodeSurface.setActiveTab(id);
+    const sidebarTerminalTab = this.openCodeSidebarTerminalTabs.get(id);
+    if (sidebarTerminalTab) {
+      sidebarTerminalTab.terminal.focus();
+      return;
+    }
+
+    this.openCodeSidebarTabs.get(id)?.host.focus();
+  }
+
+  private closeAiSidebarTab(id: string): void {
+    const openCodeTab = this.openCodeSidebarTabs.get(id);
+    if (openCodeTab) {
+      const wasActive = this.activeOpenCodeSidebarTabId === id;
+      this.openCodeSidebarTabs.delete(id);
+      this.openCodeSurface.removeTab(id);
+      openCodeTab.session?.dispose();
+      if (wasActive) {
+        this.activeOpenCodeSidebarTabId = null;
+        const nextTabId = this.getFirstAiSidebarTabId();
+        if (nextTabId) {
+          this.setActiveAiSidebarTab(nextTabId);
+        }
+      }
+      return;
+    }
+
+    const terminalTab = this.openCodeSidebarTerminalTabs.get(id);
+    if (!terminalTab) {
+      return;
+    }
+
+    const wasActive = this.activeOpenCodeSidebarTabId === id;
+    terminalTab.runningAbortController?.abort();
+    this.openCodeSidebarTerminalTabs.delete(id);
+    this.openCodeSurface.removeTab(id);
+    terminalTab.terminal.dispose();
+    terminalTab.session.dispose();
+
+    if (wasActive) {
+      this.activeOpenCodeSidebarTabId = null;
+      const nextTabId = this.getFirstAiSidebarTabId();
+      if (nextTabId) {
+        this.setActiveAiSidebarTab(nextTabId);
+      }
+    }
+  }
+
+  private updateAiLauncherSurface(): void {
+    this.openCodeSurface.setClaudeAvailable(this.getClaudeLauncherAvailable());
+  }
+
+  private getAiLaunchCommand(
+    kind: Exclude<AgentLaunchKind, "terminal">,
+  ): string {
+    return kind === "claude"
+      ? "npx @anthropic-ai/claude-code"
+      : "npx opencode-ai";
+  }
+
   private async createOpenCodeSidebarTab(focus: boolean): Promise<void> {
     if (this.agentMode === "host") {
       await this.revealTerminalPanel(focus);
@@ -1267,8 +1462,14 @@ export class WebIDEHost {
       element: host,
       closable: true,
     });
+    this.openCodeSidebarTabs.set(id, {
+      id,
+      title,
+      host,
+      session: null,
+    });
     this.openCodeSurface.updateTabStatus(id, "Starting OpenCode...");
-    this.openCodeSurface.setActiveTab(id);
+    this.setActiveAiSidebarTab(id);
 
     try {
       const session = await mountOpenCodeBrowserSession({
@@ -1283,12 +1484,7 @@ export class WebIDEHost {
         },
       });
 
-      this.openCodeSidebarTabs.set(id, {
-        id,
-        title,
-        host,
-        session,
-      });
+      this.openCodeSidebarTabs.set(id, { id, title, host, session });
       this.openCodeSurface.updateTabStatus(id, "OpenCode ready");
 
       void session.exited.finally(() => {
@@ -1296,35 +1492,65 @@ export class WebIDEHost {
           return;
         }
 
-        this.closeOpenCodeSidebarTab(id);
+        this.closeAiSidebarTab(id);
       });
     } catch (error) {
       console.error("[opencode] failed to start sidebar session", error);
+      this.openCodeSidebarTabs.delete(id);
       this.openCodeSurface.removeTab(id);
+      if (this.activeOpenCodeSidebarTabId === id) {
+        this.activeOpenCodeSidebarTabId = null;
+      }
       const message = error instanceof Error ? error.message : String(error);
-      await this.revealTerminalPanel(focus);
-      const tab = this.createUserTerminalTab(focus);
-      tab.terminal.write(`\r\nOpenCode failed to start: ${message}`);
-      this.printPrompt(tab);
+      const fallbackTab = this.createAiSidebarTerminalTab(focus, {
+        title: `Terminal ${++this.openCodeSidebarTerminalCounter}`,
+      });
+      fallbackTab.terminal.write(`\r\nOpenCode failed to start: ${message}`);
+      this.printPrompt(fallbackTab);
     }
   }
 
-  private closeOpenCodeSidebarTab(id: string): void {
-    const tab = this.openCodeSidebarTabs.get(id);
-    if (!tab) {
+  private async launchAiSession(kind: AgentLaunchKind): Promise<void> {
+    if (this.agentMode === "host") {
+      await this.revealTerminalPanel(true);
+      void this.createHostAgentTerminalTab(true);
       return;
     }
 
-    this.openCodeSidebarTabs.delete(id);
-    this.openCodeSurface.removeTab(id);
-    tab.session.dispose();
+    await this.revealOpenCodeSidebarView(true);
 
-    const nextTab = this.openCodeSidebarTabs.values().next().value as
-      | OpenCodeSidebarTabState
-      | undefined;
-    if (nextTab) {
-      this.openCodeSurface.setActiveTab(nextTab.id);
+    if (kind === "opencode") {
+      await this.createOpenCodeSidebarTab(true);
+      return;
     }
+
+    if (kind === "terminal") {
+      this.createAiSidebarTerminalTab(true);
+      return;
+    }
+
+    if (!this.getClaudeLauncherAvailable()) {
+      return;
+    }
+
+    const command = this.getAiLaunchCommand(kind);
+    if (!(await this.keychain.prepareForCommand(command))) {
+      await this.revealKeychainPanel();
+      return;
+    }
+
+    const tab = this.createTerminalTab(
+      "user",
+      `Claude Code ${++this.claudeSidebarCounter}`,
+      true,
+      true,
+      {
+        id: `claude-sidebar-${crypto.randomUUID()}`,
+        cwd: WORKSPACE_ROOT,
+        surface: "sidebar",
+      },
+    );
+    await this.runCommand(tab, command, { echoCommand: true });
   }
 
   private async createOpenCodeTerminalTab(
@@ -1575,12 +1801,11 @@ export class WebIDEHost {
     }
 
     await this.revealOpenCodeSidebarView(focus);
-    const existing = this.openCodeSidebarTabs.values().next().value as
-      | OpenCodeSidebarTabState
-      | undefined;
-    if (existing) {
-      this.openCodeSurface.setActiveTab(existing.id);
-      existing.host.focus();
+    const existingTabId = this.hasAiSidebarTab(this.activeOpenCodeSidebarTabId)
+      ? this.activeOpenCodeSidebarTabId
+      : this.getFirstAiSidebarTabId();
+    if (existingTabId) {
+      this.setActiveAiSidebarTab(existingTabId);
       return;
     }
 
@@ -1608,48 +1833,59 @@ export class WebIDEHost {
       value: exitNode.id,
       label: exitNode.online ? exitNode.name : `${exitNode.name} (offline)`,
     }));
-    this.keychainSurface.update(
-      [
-        {
-          name: "tailscale",
-          label: "Tailscale",
-          active: tailscaleStatus?.state === "running",
-          canAuth: true,
-          authAction: tailscaleAuthAction,
-          statusText: tailscaleStatusText,
-          selectActionPrefix:
-            exitNodeOptions && exitNodeOptions.length > 0
-              ? "select-exit-node:tailscale"
-              : undefined,
-          selectOptions: exitNodeOptions,
-          selectValue: tailscaleStatus?.selectedExitNodeId ?? undefined,
-        },
-        {
-          name: "github",
-          label: "GitHub",
-          active: this.keychain.hasSlotData("github"),
-          canAuth: true,
-        },
-        {
-          name: "opencode",
-          label: "OpenCode",
-          active: this.keychain.hasSlotData("opencode"),
-        },
-        {
-          name: "replay",
-          label: "Replay.io",
-          active: this.keychain.hasSlotData("replay"),
-          canAuth: true,
-        },
-      ],
-      { hasStoredVault: state.hasStoredVault, supported: state.supported },
-    );
+    const slots = [
+      {
+        name: "tailscale",
+        label: "Tailscale",
+        active: tailscaleStatus?.state === "running",
+        canAuth: true,
+        authAction: tailscaleAuthAction,
+        statusText: tailscaleStatusText,
+        selectActionPrefix:
+          exitNodeOptions && exitNodeOptions.length > 0
+            ? "select-exit-node:tailscale"
+            : undefined,
+        selectOptions: exitNodeOptions,
+        selectValue: tailscaleStatus?.selectedExitNodeId ?? undefined,
+      },
+      {
+        name: "github",
+        label: "GitHub",
+        active: this.keychain.hasSlotData("github"),
+        canAuth: true,
+      },
+      ...(this.keychain.hasSlotData("claude")
+        ? [
+            {
+              name: "claude",
+              label: "Claude Code",
+              active: true,
+            },
+          ]
+        : []),
+      {
+        name: "opencode",
+        label: "OpenCode",
+        active: this.keychain.hasSlotData("opencode"),
+      },
+      {
+        name: "replay",
+        label: "Replay.io",
+        active: this.keychain.hasSlotData("replay"),
+        canAuth: true,
+      },
+    ];
+    this.keychainSurface.update(slots, {
+      hasStoredVault: state.hasStoredVault,
+      supported: state.supported,
+    });
   }
 
   private getTailscaleSidebarAuthAction(
     status: NetworkStatus | null,
   ): "login:tailscale" | "logout:tailscale" {
-    return status?.provider === "tailscale" && status.state !== "browser"
+    return status?.provider === "tailscale"
+      && (status.canLogout || status.state === "running" || status.state === "starting")
       ? "logout:tailscale"
       : "login:tailscale";
   }
@@ -1702,15 +1938,20 @@ export class WebIDEHost {
       case "starting":
         return status.detail || "Starting";
       case "running":
+        if (status.dnsEnabled && status.dnsHealthy === false) {
+          return status.dnsDetail
+            ? `Running, DNS issue: ${status.dnsDetail}`
+            : "Running, DNS issue";
+        }
         return selectedExitNodeName
           ? `Running via ${selectedExitNodeName}`
           : status.exitNodes.length > 0
             ? "Running, choose an exit node"
             : "Running, no exit nodes available";
       case "needs-login":
-        return "NeedsLogin";
+        return "Needs login";
       case "needs-machine-auth":
-        return "NeedsMachineAuth";
+        return "Needs machine auth";
       case "locked":
         return "Locked";
       case "unavailable":
@@ -1738,15 +1979,14 @@ export class WebIDEHost {
           provider: "tailscale",
           useExitNode: true,
         });
-        this.syncStoredNetworkConfig();
         this.tailscaleStatus = await this.container.network.login();
       } else {
         this.tailscaleStatus = await this.container.network.logout();
-        clearStoredWorkbenchNetworkConfig();
       }
     } catch (error) {
       if (action === "logout") {
         clearStoredWorkbenchNetworkConfig();
+        clearStoredTailscaleSessionSnapshot();
       }
       this.tailscaleStatus = {
         provider: "tailscale",
@@ -1755,6 +1995,8 @@ export class WebIDEHost {
         canLogin: true,
         canLogout: false,
         adapterAvailable: false,
+        dnsEnabled: true,
+        dnsHealthy: null,
         exitNodes: [],
         selectedExitNodeId: null,
         detail: error instanceof Error ? error.message : String(error),
@@ -1772,7 +2014,6 @@ export class WebIDEHost {
         useExitNode: true,
         exitNodeId: exitNodeId || null,
       });
-      this.syncStoredNetworkConfig();
     } catch (error) {
       this.tailscaleStatus = {
         provider: "tailscale",
@@ -1781,6 +2022,8 @@ export class WebIDEHost {
         canLogin: true,
         canLogout: false,
         adapterAvailable: false,
+        dnsEnabled: true,
+        dnsHealthy: null,
         exitNodes: [],
         selectedExitNodeId: null,
         detail: error instanceof Error ? error.message : String(error),
@@ -1790,22 +2033,12 @@ export class WebIDEHost {
 
     this.updateKeychainSurface();
   }
-
-  private syncStoredNetworkConfig(): void {
-    const config = this.container.network.getConfig();
-    if (config.provider !== "tailscale") {
-      clearStoredWorkbenchNetworkConfig();
+  async revealClaudePanel(focus: boolean): Promise<void> {
+    if (this.agentMode === "browser" && this.getClaudeLauncherAvailable()) {
+      await this.launchAiSession("claude");
       return;
     }
 
-    writeStoredWorkbenchNetworkConfig({
-      provider: "tailscale",
-      useExitNode: config.useExitNode,
-      exitNodeId: config.exitNodeId,
-    });
-  }
-
-  async revealClaudePanel(focus: boolean): Promise<void> {
     await this.revealOpenCodePanel(focus);
   }
 
@@ -1825,10 +2058,15 @@ export class WebIDEHost {
       tab.terminal.write("\r\n");
     }
 
-    if (tab.kind === "user" && matchesOpenCodeLaunchCommand(trimmed)) {
-      await this.createOpenCodeTerminalTab(true, {
-        replaceTab: tab,
-      });
+    if (
+      this.agentMode === "browser"
+      && tab.kind === "user"
+      && matchesOpenCodeLaunchCommand(trimmed)
+    ) {
+      await this.launchAiSession("opencode");
+      this.writeTerminal(tab, "Launching OpenCode in the AI panel.\n");
+      this.updateTerminalStatus(tab, "OpenCode moved to AI panel");
+      this.printPrompt(tab);
       return;
     }
 
@@ -2709,9 +2947,9 @@ export class WebIDEHost {
           },
           {
             id: "almostnode.claude.open",
-            label: "Almostnode: Open OpenCode",
+            label: "Almostnode: Open Claude Code",
             menu: Menu.CommandPalette,
-            handler: () => this.revealOpenCodePanel(true),
+            handler: () => this.revealClaudePanel(true),
           },
           {
             id: "almostnode.keychain.primary",
@@ -2825,12 +3063,16 @@ export class WebIDEHost {
       tab.terminal.options.theme = terminalTheme;
     }
 
+    for (const tab of this.openCodeSidebarTerminalTabs.values()) {
+      tab.terminal.options.theme = terminalTheme;
+    }
+
     for (const tab of this.openCodeTabs.values()) {
       tab.session.setThemeMode(themeKind);
     }
 
     for (const tab of this.openCodeSidebarTabs.values()) {
-      tab.session.setThemeMode(themeKind);
+      tab.session?.setThemeMode(themeKind);
     }
   }
 
@@ -3193,6 +3435,7 @@ export class WebIDEHost {
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
     await this.keychain.init();
+    this.updateAiLauncherSurface();
     this.container.setKeychain(this.keychain);
     this.container.setSearchProvider(this.createSearchProvider());
     this.updatePreviewStatus("Waiting for a preview server");

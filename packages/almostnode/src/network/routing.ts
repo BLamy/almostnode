@@ -4,6 +4,27 @@ const TAILSCALE_IPV4_CIDR_PREFIX = 10;
 const TAILSCALE_IPV4_BASE = ipv4ToInt('100.64.0.0');
 const TAILSCALE_IPV4_MASK = 0xffffffff << (32 - TAILSCALE_IPV4_CIDR_PREFIX);
 const TAILSCALE_IPV6_PREFIX = 'fd7a:115c:a1e0:';
+const EXIT_NODE_PUBLIC_HOST_SUFFIXES = [
+  'anthropic.com',
+  'claude.ai',
+  'claude.com',
+];
+
+/**
+ * Hostnames used for npm/npx package **downloading and module resolution**.
+ * These stay on the browser transport even when Tailscale exit-node routing is
+ * active, because they are infrastructure traffic, not application traffic.
+ * Once a downloaded module is executing, any fetch it performs will go through
+ * Tailscale as normal.
+ */
+const MODULE_RESOLUTION_HOST_SUFFIXES = [
+  'npmjs.org',
+  'npmjs.com',
+  'esm.sh',
+  'unpkg.com',
+  'jsdelivr.net',
+  'skypack.dev',
+];
 
 function ipv4ToInt(input: string): number {
   return input
@@ -69,6 +90,20 @@ export function isLocalBrowserTarget(url: URL): boolean {
   );
 }
 
+function isExitNodePublicHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return EXIT_NODE_PUBLIC_HOST_SUFFIXES.some((suffix) => (
+    normalized === suffix || normalized.endsWith(`.${suffix}`)
+  ));
+}
+
+export function isModuleResolutionHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return MODULE_RESOLUTION_HOST_SUFFIXES.some((suffix) => (
+    normalized === suffix || normalized.endsWith(`.${suffix}`)
+  ));
+}
+
 function isSameOrigin(url: URL, locationLike?: Pick<Location, 'origin'> | null): boolean {
   if (!locationLike?.origin) {
     return false;
@@ -106,7 +141,17 @@ export function selectNetworkRouteForUrl(
     return 'tailscale';
   }
 
-  return options.useExitNode && Boolean(options.exitNodeId) ? 'tailscale' : 'browser';
+  if (isModuleResolutionHostname(url.hostname)) {
+    return 'browser';
+  }
+
+  if (options.useExitNode && options.tailscaleConnected) {
+    return 'tailscale';
+  }
+
+  return options.useExitNode && Boolean(options.exitNodeId) && isExitNodePublicHostname(url.hostname)
+    ? 'tailscale'
+    : 'browser';
 }
 
 export function selectNetworkRouteForHost(
@@ -125,5 +170,15 @@ export function selectNetworkRouteForHost(
     return 'tailscale';
   }
 
-  return options.useExitNode && Boolean(options.exitNodeId) ? 'tailscale' : 'browser';
+  if (isModuleResolutionHostname(hostname)) {
+    return 'browser';
+  }
+
+  if (options.useExitNode && options.tailscaleConnected) {
+    return 'tailscale';
+  }
+
+  return options.useExitNode && Boolean(options.exitNodeId) && isExitNodePublicHostname(hostname)
+    ? 'tailscale'
+    : 'browser';
 }

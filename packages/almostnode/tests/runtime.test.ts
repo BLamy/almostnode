@@ -110,6 +110,133 @@ describe('Runtime', () => {
         vi.unstubAllGlobals();
       }
     });
+
+    it('should route Claude XMLHttpRequest traffic through the shared network controller when tailscale is selected', async () => {
+      class MockXHR {
+        openArgs: unknown[] | null = null;
+        headers: Array<[string, string]> = [];
+        readyState = 0;
+        responseType: XMLHttpRequestResponseType = '';
+        response: unknown = null;
+        responseText = '';
+        responseURL = '';
+        status = 0;
+        statusText = '';
+        withCredentials = false;
+        onreadystatechange: ((event: Event) => void) | null = null;
+        private listeners = new Map<string, Array<(event: Event) => void>>();
+
+        open(...args: unknown[]) {
+          this.openArgs = args;
+          this.readyState = 1;
+        }
+
+        setRequestHeader(name: string, value: string) {
+          this.headers.push([name, value]);
+        }
+
+        send(_body?: unknown) {}
+
+        abort() {}
+
+        getResponseHeader(_name: string): string | null {
+          return null;
+        }
+
+        getAllResponseHeaders(): string {
+          return '';
+        }
+
+        addEventListener(type: string, listener: (event: Event) => void) {
+          const listeners = this.listeners.get(type) || [];
+          listeners.push(listener);
+          this.listeners.set(type, listeners);
+        }
+
+        dispatchEvent(event: Event): boolean {
+          const listeners = this.listeners.get(event.type) || [];
+          for (const listener of listeners) {
+            listener(event);
+          }
+          return true;
+        }
+      }
+
+      vi.stubGlobal('location', { origin: 'https://blamy.github.io' } as any);
+      vi.stubGlobal('localStorage', {
+        getItem: () => null,
+      } as any);
+      vi.stubGlobal('XMLHttpRequest', MockXHR as any);
+
+      const controller = {
+        getConfig: () => ({
+          provider: 'tailscale' as const,
+          authMode: 'interactive' as const,
+          useExitNode: true,
+          exitNodeId: 'node-sfo',
+          corsProxy: null,
+          tailscaleConnected: true,
+        }),
+        fetch: vi.fn(async (request: { url: string; method?: string; headers?: Record<string, string> }) => ({
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: {
+            'content-type': 'application/json',
+            'x-runtime-route': 'tailscale',
+          },
+          bodyBase64: Buffer.from(JSON.stringify({ ok: true })).toString('base64'),
+        })),
+        configure: vi.fn(),
+        getStatus: vi.fn(),
+        login: vi.fn(),
+        logout: vi.fn(),
+        lookup: vi.fn(),
+        subscribe: vi.fn(() => () => {}),
+      };
+
+      try {
+        new Runtime(vfs, { networkController: controller as any });
+
+        const xhr = new (globalThis as any).XMLHttpRequest() as MockXHR;
+        const loadend = vi.fn();
+        xhr.addEventListener('loadend', loadend);
+        xhr.responseType = 'json';
+        xhr.open('POST', 'https://platform.claude.com/oauth/token');
+        xhr.setRequestHeader('content-type', 'application/json');
+        xhr.send(JSON.stringify({ code: 'abc123' }));
+
+        await vi.waitFor(() => {
+          expect(loadend).toHaveBeenCalledTimes(1);
+        });
+
+        expect(controller.fetch).toHaveBeenCalledTimes(1);
+        expect(controller.fetch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            url: 'https://platform.claude.com/oauth/token',
+            method: 'POST',
+            headers: expect.objectContaining({
+              'content-type': 'application/json',
+            }),
+          }),
+        );
+        expect(xhr.openArgs).toEqual([
+          'POST',
+          'https://platform.claude.com/oauth/token',
+          true,
+          null,
+          null,
+        ]);
+        expect(xhr.status).toBe(200);
+        expect(xhr.statusText).toBe('OK');
+        expect(xhr.responseURL).toBe('https://platform.claude.com/oauth/token');
+        expect(xhr.response).toEqual({ ok: true });
+        expect(xhr.getResponseHeader('content-type')).toBe('application/json');
+        expect(xhr.getResponseHeader('x-runtime-route')).toBe('tailscale');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   describe('fs shim', () => {

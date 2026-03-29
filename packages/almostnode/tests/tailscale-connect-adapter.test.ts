@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTailscaleConnectAdapterFactory } from '../src/network/tailscale-connect-adapter';
 import {
   parseTailscaleStateSnapshot,
@@ -81,6 +81,10 @@ class FakeWorker {
         break;
       case 'logout':
         this.emitMessage({
+          type: 'storageUpdate',
+          snapshot: null,
+        });
+        this.emitMessage({
           type: 'response',
           id: message.id,
           ok: true,
@@ -119,7 +123,7 @@ describe('tailscale connect adapter', () => {
     if (originalSessionStorage) {
       Object.defineProperty(globalThis, 'sessionStorage', originalSessionStorage);
     } else {
-      delete (globalThis as { sessionStorage?: MemorySessionStorage }).sessionStorage;
+      delete (globalThis as unknown as { sessionStorage?: MemorySessionStorage }).sessionStorage;
     }
   });
 
@@ -141,7 +145,9 @@ describe('tailscale connect adapter', () => {
         authMode: 'interactive',
         useExitNode: true,
         exitNodeId: 'node-sfo',
+        acceptDns: true,
         corsProxy: null,
+        tailscaleConnected: false,
       },
       () => {},
     );
@@ -178,9 +184,14 @@ describe('tailscale connect adapter', () => {
     expect(storage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).toBeNull();
   });
 
-  it('explicitly logs out before a fresh login attempt', async () => {
+  it('logs in directly from a hydrated session without a synthetic logout', async () => {
+    const storage = new MemorySessionStorage();
+    storage.setItem(
+      TAILSCALE_SESSION_STORAGE_KEY,
+      JSON.stringify({ profile: 'alpha' }),
+    );
     Object.defineProperty(globalThis, 'sessionStorage', {
-      value: new MemorySessionStorage(),
+      value: storage,
       configurable: true,
     });
 
@@ -191,7 +202,9 @@ describe('tailscale connect adapter', () => {
         authMode: 'interactive',
         useExitNode: true,
         exitNodeId: null,
+        acceptDns: true,
         corsProxy: null,
+        tailscaleConnected: false,
       },
       () => {},
     );
@@ -199,17 +212,108 @@ describe('tailscale connect adapter', () => {
     await adapter.login();
     const worker = FakeWorker.lastInstance;
 
+    expect(worker?.messages).toHaveLength(3);
     expect(worker?.messages[0]).toMatchObject({
       type: 'hydrateStorage',
+      snapshot: { profile: 'alpha' },
     });
     expect(worker?.messages[1]).toMatchObject({
       type: 'configure',
     });
     expect(worker?.messages[2]).toMatchObject({
+      type: 'login',
+    });
+  });
+
+  it('clears persisted state on explicit logout', async () => {
+    const storage = new MemorySessionStorage();
+    storage.setItem(
+      TAILSCALE_SESSION_STORAGE_KEY,
+      JSON.stringify({ profile: 'alpha' }),
+    );
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: storage,
+      configurable: true,
+    });
+
+    const adapterFactory = createTailscaleConnectAdapterFactory();
+    const adapter = await adapterFactory(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+    );
+
+    await adapter.logout();
+    const worker = FakeWorker.lastInstance;
+
+    expect(worker?.messages[2]).toMatchObject({
       type: 'logout',
     });
-    expect(worker?.messages[3]).toMatchObject({
-      type: 'login',
+    expect(storage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).toBeNull();
+  });
+
+  it('preserves worker error codes when requests fail', async () => {
+    const adapterFactory = createTailscaleConnectAdapterFactory();
+    const adapter = await adapterFactory(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+    );
+
+    const fetchPromise = adapter.fetch({
+      url: 'https://api.anthropic.com/v1/messages',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      bodyBase64: Buffer.from('{}').toString('base64'),
+    });
+
+    await vi.waitFor(() => {
+      expect(FakeWorker.lastInstance?.messages.at(-1)).toMatchObject({ type: 'fetch' });
+    });
+    const worker = FakeWorker.lastInstance;
+    const fetchMessage = worker?.messages.at(-1);
+
+    worker?.emitMessage({
+      type: 'response',
+      id: fetchMessage?.id,
+      ok: false,
+      error: {
+        code: 'fetch_timeout',
+        message: 'Tailscale fetch timed out after 15000ms: POST https://api.anthropic.com/v1/messages',
+        debug: {
+          phase: 'fallback_fetch',
+          hostname: 'api.anthropic.com',
+          ipAddress: '104.18.33.45',
+          fallbackAttempted: true,
+          fallbackStrategy: 'rewrite_to_resolved_ip',
+        },
+      },
+    });
+
+    await expect(fetchPromise).rejects.toMatchObject({
+      code: 'fetch_timeout',
+      message: 'Tailscale fetch timed out after 15000ms: POST https://api.anthropic.com/v1/messages',
+      debug: {
+        phase: 'fallback_fetch',
+        hostname: 'api.anthropic.com',
+        ipAddress: '104.18.33.45',
+        fallbackAttempted: true,
+        fallbackStrategy: 'rewrite_to_resolved_ip',
+      },
     });
   });
 });

@@ -8,6 +8,8 @@ declare global {
 		headers?: Record<string, string>;
 		bodyBase64?: string;
 		redirect?: "follow" | "manual" | "error";
+		/** Original hostname for TLS SNI when URL is rewritten to an IP address. */
+		tlsServerName?: string;
 	};
 	type IPNFetchResponse = {
 		url: string;
@@ -17,14 +19,23 @@ declare global {
 		bodyBase64: string;
 		text: () => Promise<string>;
 	};
-	interface IPN {
-		run(callbacks: IPNCallbacks): void;
-		configure(config: {
-			useExitNode?: boolean;
-			exitNodeId?: string | null;
-		}): Promise<void>;
-		login(): void;
-		logout(): void;
+		interface IPN {
+			run(callbacks: IPNCallbacks): void;
+			configure(config: {
+				useExitNode?: boolean;
+				routeAll?: boolean;
+				exitNodeId?: string | null;
+				acceptDns?: boolean;
+				corpDns?: boolean;
+				corpDNS?: boolean;
+				dns?: boolean;
+				dnsIP?: string | null;
+				dnsIp?: string | null;
+				bootstrapDns?: string[];
+				ipMap?: Record<string, string>;
+			}): Promise<void>;
+			login(): void;
+			logout(): void;
 		ssh(host: string, username: string, termConfig: {
 			writeFn: (data: string) => void;
 			writeErrorFn: (err: string) => void;
@@ -36,9 +47,11 @@ declare global {
 			onConnectionProgress: (message: string) => void;
 			onConnected: () => void;
 			onDone: () => void;
-		}): IPNSSHSession;
-		fetch(url: string | IPNFetchRequest): Promise<IPNFetchResponse>;
-	}
+			}): IPNSSHSession;
+			fetch(url: string | IPNFetchRequest): Promise<IPNFetchResponse>;
+			lookup?(hostname: string): Promise<unknown>;
+			resolve?(hostname: string): Promise<unknown>;
+		}
 	interface IPNSSHSession {
 		resize(rows: number, cols: number): boolean;
 		close(): boolean;
@@ -50,11 +63,20 @@ declare global {
 	type IPNConfig = {
 		stateStorage?: IPNStateStorage;
 		authKey?: string;
-		controlURL?: string;
-		hostname?: string;
-		useExitNode?: boolean;
-		exitNodeId?: string | null;
-	};
+			controlURL?: string;
+			hostname?: string;
+			useExitNode?: boolean;
+			routeAll?: boolean;
+			exitNodeId?: string | null;
+			acceptDns?: boolean;
+			corpDns?: boolean;
+			corpDNS?: boolean;
+			dns?: boolean;
+			dnsIP?: string | null;
+			dnsIp?: string | null;
+			bootstrapDns?: string[];
+			ipMap?: Record<string, string>;
+		};
 	type IPNCallbacks = {
 		notifyState: (state: IPNState) => void;
 		notifyNetMap: (netMapStr: string) => void;

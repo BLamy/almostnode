@@ -9,6 +9,19 @@ import { getDefaultNetworkController } from '../network';
 type LookupCallback = (err: Error | null, address?: string, family?: number) => void;
 type LookupAllCallback = (err: Error | null, addresses?: Array<{ address: string; family: number }>) => void;
 
+function createLookupError(hostname: string, cause?: unknown): Error {
+  const detail = cause instanceof Error ? cause.message : cause ? String(cause) : 'Name resolution failed';
+  const error = new Error(`getaddrinfo ENOTFOUND ${hostname}: ${detail}`) as Error & {
+    code?: string;
+    hostname?: string;
+    syscall?: string;
+  };
+  error.code = 'ENOTFOUND';
+  error.hostname = hostname;
+  error.syscall = 'getaddrinfo';
+  return error;
+}
+
 /**
  * Lookup a hostname - returns localhost in browser
  */
@@ -49,7 +62,7 @@ export function lookup(
           (cb as LookupCallback)(null, first.address, first.family);
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (hostname === 'localhost' || hostname === '127.0.0.1') {
           if (options.all) {
             (cb as LookupAllCallback)(null, [{ address: '127.0.0.1', family: 4 }]);
@@ -58,12 +71,12 @@ export function lookup(
           }
           return;
         }
-
+        const lookupError = createLookupError(hostname, error);
         if (options.all) {
-          (cb as LookupAllCallback)(null, [{ address: '0.0.0.0', family: 4 }]);
-        } else {
-          (cb as LookupCallback)(null, '0.0.0.0', 4);
+          (cb as LookupAllCallback)(lookupError);
+          return;
         }
+        (cb as LookupCallback)(lookupError);
       });
   });
 }
@@ -79,7 +92,7 @@ export function resolve(
     void getDefaultNetworkController()
       .lookup(hostname)
       .then((result) => callback(null, result.addresses.map((entry) => entry.address)))
-      .catch(() => callback(null, ['0.0.0.0']));
+      .catch((error) => callback(createLookupError(hostname, error)));
   });
 }
 
@@ -98,7 +111,7 @@ export function resolve6(
     void getDefaultNetworkController()
       .lookup(hostname, { family: 6, all: true })
       .then((result) => callback(null, result.addresses.map((entry) => entry.address)))
-      .catch(() => callback(null, ['::1']));
+      .catch((error) => callback(createLookupError(hostname, error)));
   });
 }
 
@@ -171,8 +184,11 @@ export const promises = {
   },
   resolve4: (hostname: string) => promises.resolve(hostname),
   resolve6: (hostname: string) => {
-    return new Promise<string[]>((resolve) => {
-      resolve(['::1']);
+    return new Promise<string[]>((promiseResolve, promiseReject) => {
+      resolve6(hostname, (err, addresses) => {
+        if (err) promiseReject(err);
+        else promiseResolve(addresses || []);
+      });
     });
   },
   reverse: (ip: string) => {

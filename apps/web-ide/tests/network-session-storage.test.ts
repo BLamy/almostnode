@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   clearStoredTailscaleSessionSnapshot,
   clearStoredWorkbenchNetworkConfig,
@@ -28,6 +28,29 @@ class MemorySessionStorage {
   }
 }
 
+const originalLocalStorage = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "localStorage",
+);
+const originalSessionStorage = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "sessionStorage",
+);
+
+afterEach(() => {
+  if (originalLocalStorage) {
+    Object.defineProperty(globalThis, "localStorage", originalLocalStorage);
+  } else {
+    delete (globalThis as typeof globalThis & { localStorage?: MemorySessionStorage }).localStorage;
+  }
+
+  if (originalSessionStorage) {
+    Object.defineProperty(globalThis, "sessionStorage", originalSessionStorage);
+  } else {
+    delete (globalThis as typeof globalThis & { sessionStorage?: MemorySessionStorage }).sessionStorage;
+  }
+});
+
 describe("workbench network session storage", () => {
   it("restores persisted tailscale provider and exit-node selection", () => {
     const storage = new MemorySessionStorage();
@@ -45,6 +68,7 @@ describe("workbench network session storage", () => {
       provider: "tailscale",
       useExitNode: true,
       exitNodeId: "node-sfo",
+      acceptDns: true,
     });
   });
 
@@ -56,6 +80,8 @@ describe("workbench network session storage", () => {
         provider: "tailscale",
         useExitNode: true,
         exitNodeId: "node-nyc",
+        acceptDns: true,
+        stateSnapshot: null,
       }),
     );
 
@@ -115,5 +141,79 @@ describe("workbench network session storage", () => {
     writeStoredTailscaleSessionSnapshot({ control: "alpha" }, storage);
     clearStoredTailscaleSessionSnapshot(storage);
     expect(storage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).toBeNull();
+  });
+
+  it("prefers localStorage so sessions survive browser restarts", () => {
+    const localStorage = new MemorySessionStorage();
+    const sessionStorage = new MemorySessionStorage();
+    Object.defineProperty(globalThis, "localStorage", {
+      value: localStorage,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis, "sessionStorage", {
+      value: sessionStorage,
+      configurable: true,
+    });
+
+    writeStoredWorkbenchNetworkConfig({
+      provider: "tailscale",
+      useExitNode: true,
+      exitNodeId: "node-sfo",
+    });
+    writeStoredTailscaleSessionSnapshot({
+      control: "node-auth",
+      profile: "user-profile",
+    });
+
+    expect(localStorage.getItem(WORKBENCH_NETWORK_SESSION_STORAGE_KEY)).not.toBeNull();
+    expect(localStorage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).not.toBeNull();
+    expect(sessionStorage.getItem(WORKBENCH_NETWORK_SESSION_STORAGE_KEY)).toBeNull();
+    expect(sessionStorage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).toBeNull();
+    expect(readStoredWorkbenchNetworkConfig()).toEqual({
+      provider: "tailscale",
+      useExitNode: true,
+      exitNodeId: "node-sfo",
+      acceptDns: true,
+    });
+    expect(readStoredTailscaleSessionSnapshot()).toEqual({
+      control: "node-auth",
+      profile: "user-profile",
+    });
+  });
+
+  it("falls back to sessionStorage when localStorage is unavailable", () => {
+    const sessionStorage = new MemorySessionStorage();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("localStorage unavailable");
+      },
+    });
+    Object.defineProperty(globalThis, "sessionStorage", {
+      value: sessionStorage,
+      configurable: true,
+    });
+
+    writeStoredWorkbenchNetworkConfig({
+      provider: "tailscale",
+      useExitNode: false,
+      exitNodeId: null,
+      acceptDns: false,
+    });
+    writeStoredTailscaleSessionSnapshot({
+      control: "fallback-node",
+    });
+
+    expect(readStoredWorkbenchNetworkConfig()).toEqual({
+      provider: "tailscale",
+      useExitNode: false,
+      exitNodeId: null,
+      acceptDns: false,
+    });
+    expect(readStoredTailscaleSessionSnapshot()).toEqual({
+      control: "fallback-node",
+    });
+    expect(sessionStorage.getItem(WORKBENCH_NETWORK_SESSION_STORAGE_KEY)).not.toBeNull();
+    expect(sessionStorage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).not.toBeNull();
   });
 });

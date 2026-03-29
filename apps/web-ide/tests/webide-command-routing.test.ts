@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  matchesClaudeLaunchCommand,
   matchesOpenCodeLaunchCommand,
   matchesShadcnLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
@@ -10,6 +11,12 @@ describe('webide terminal command routing', () => {
     expect(matchesOpenCodeLaunchCommand('npx opencode-ai')).toBe(true);
     expect(matchesOpenCodeLaunchCommand('env FOO=bar npm exec -- opencode')).toBe(true);
     expect(matchesOpenCodeLaunchCommand('time ./node_modules/.bin/opencode-ai help')).toBe(true);
+  });
+
+  it('matches Claude launch commands across wrappers', () => {
+    expect(matchesClaudeLaunchCommand('npx @anthropic-ai/claude-code')).toBe(true);
+    expect(matchesClaudeLaunchCommand('env FOO=bar npm exec -- claude')).toBe(true);
+    expect(matchesClaudeLaunchCommand('time ./node_modules/.bin/claude --help')).toBe(true);
   });
 
   it('matches shadcn launch commands across wrappers', () => {

@@ -15,6 +15,8 @@ function renderStatus(status: NetworkStatus): string {
     `provider: ${status.provider}`,
     `state: ${status.state}`,
     `active: ${status.active ? 'yes' : 'no'}`,
+    `dnsEnabled: ${status.dnsEnabled ? 'yes' : 'no'}`,
+    `dnsHealthy: ${status.dnsHealthy === null ? 'unknown' : status.dnsHealthy ? 'yes' : 'no'}`,
   ];
 
   if (status.selfName) {
@@ -25,6 +27,9 @@ function renderStatus(status: NetworkStatus): string {
   }
   if (status.detail) {
     lines.push(`detail: ${status.detail}`);
+  }
+  if (status.dnsDetail) {
+    lines.push(`dnsDetail: ${status.dnsDetail}`);
   }
   if (status.loginUrl) {
     lines.push(`loginUrl: ${status.loginUrl}`);
@@ -55,13 +60,57 @@ export async function runTailscaleCommand(
 
   try {
     switch (command) {
+      case 'up':
       case 'login': {
-        await controller.configure({ provider: 'tailscale', useExitNode: true });
+        await controller.configure({
+          provider: 'tailscale',
+          useExitNode: true,
+          acceptDns: true,
+        });
         const status = await controller.login();
         return ok(renderStatus(status));
       }
+      case 'down':
       case 'logout': {
         const status = await controller.logout();
+        return ok(renderStatus(status));
+      }
+      case 'set': {
+        let exitNodeId: string | null | undefined;
+        let acceptDns: boolean | undefined;
+
+        for (let index = 1; index < args.length; index += 1) {
+          const arg = args[index];
+          if (arg === '--exit-node') {
+            exitNodeId = args[index + 1]?.trim() || null;
+            index += 1;
+            continue;
+          }
+          if (arg.startsWith('--exit-node=')) {
+            exitNodeId = arg.slice('--exit-node='.length).trim() || null;
+            continue;
+          }
+          if (arg === '--accept-dns') {
+            const value = args[index + 1];
+            acceptDns = value ? value !== 'false' : true;
+            if (value) {
+              index += 1;
+            }
+            continue;
+          }
+          if (arg.startsWith('--accept-dns=')) {
+            acceptDns = arg.slice('--accept-dns='.length) !== 'false';
+            continue;
+          }
+          return err(`tailscale set: unknown flag '${arg}'\n`);
+        }
+
+        const status = await controller.configure({
+          provider: 'tailscale',
+          useExitNode: true,
+          exitNodeId,
+          acceptDns,
+        });
         return ok(renderStatus(status));
       }
       case 'status': {
@@ -70,11 +119,14 @@ export async function runTailscaleCommand(
       }
       case '--help':
       case 'help':
-        return ok(`Usage: tailscale <status|login|logout>
+        return ok(`Usage: tailscale <status|up|down|set|login|logout>
 Commands:
   status   Show the current almostnode Tailscale session status
-  login    Start an interactive Tailscale login for almostnode networking
-  logout   Disconnect the current almostnode Tailscale session
+  up       Start an interactive Tailscale login for almostnode networking
+  down     Disconnect the current almostnode Tailscale session
+  set      Update exit-node and DNS preferences
+  login    Alias for 'up'
+  logout   Alias for 'down'
 `);
       default:
         return err(`tailscale: unknown subcommand '${command}'\n`);

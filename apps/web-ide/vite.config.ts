@@ -824,7 +824,7 @@ export default defineConfig(async ({ mode }) => {
     },
     resolve: {
       dedupe: ["react", "react-dom", "solid-js"],
-      alias: isTest ? [] : [
+      alias: [
         {
           find: /^almostnode\/internal$/,
           replacement: resolve(__dirname, "../../packages/almostnode/src/internal.ts"),
@@ -833,6 +833,7 @@ export default defineConfig(async ({ mode }) => {
           find: /^almostnode$/,
           replacement: resolve(__dirname, "../../packages/almostnode/src/browser.ts"),
         },
+        ...(isTest ? [] : [
         {
           find: /^@codingame\/monaco-vscode-api\/vscode\/src\/(.*)$/,
           replacement: resolve(__dirname, "node_modules/@codingame/monaco-vscode-api/vscode/src/$1"),
@@ -1281,6 +1282,7 @@ export default defineConfig(async ({ mode }) => {
           find: "dns",
           replacement: resolve(__dirname, "../../packages/almostnode/src/shims/dns.ts"),
         },
+        ]),
       ],
     },
     optimizeDeps: {

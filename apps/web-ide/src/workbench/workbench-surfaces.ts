@@ -1532,12 +1532,16 @@ export class TerminalPanelSurface {
   }
 }
 
+export type AgentLaunchKind = "opencode" | "terminal" | "claude";
+
 export class OpenCodeTerminalSurface {
   private readonly root = document.createElement("div");
   private readonly statusRow = document.createElement("div");
   private readonly tabs = document.createElement("div");
-  private readonly actions = document.createElement("div");
-  private readonly newTabButton = document.createElement("button");
+  private readonly launcher = document.createElement("div");
+  private readonly splitButton = document.createElement("div");
+  private readonly primaryLaunchButton = document.createElement("button");
+  private readonly dropdownLaunchButton = document.createElement("button");
   private readonly body = document.createElement("div");
   private readonly loading = document.createElement("div");
   private readonly resizeObserver: ResizeObserver;
@@ -1552,30 +1556,61 @@ export class OpenCodeTerminalSurface {
   >();
   private readonly customTabs = new Set<string>();
   private readonly customHosts = new Map<string, HTMLElement>();
+  private menu: HTMLDivElement | null = null;
+  private claudeAvailable = false;
 
   constructor(
     private readonly callbacks: {
-      onCreateTab: () => void;
-      onCloseTab: (id: string) => void;
-      onSelectTab: (id: string) => void;
+      onLaunch: (kind: AgentLaunchKind) => void;
+      onCloseTab?: (id: string) => void;
+      onSelectTab?: (id: string) => void;
       onResize?: (id: string, cols: number, rows: number) => void;
     },
   ) {
     this.root.className = "almostnode-opencode-surface";
     this.statusRow.className = "almostnode-opencode-surface__status-row";
     this.tabs.className = "almostnode-opencode-surface__tabs";
-    this.actions.className = "almostnode-opencode-surface__actions";
+    this.launcher.className = "almostnode-opencode-surface__launcher";
+    this.splitButton.className = "almostnode-opencode-surface__split-button";
 
-    this.newTabButton.type = "button";
-    this.newTabButton.className = "almostnode-opencode-surface__new-tab";
-    this.newTabButton.textContent = "+";
-    this.newTabButton.setAttribute("aria-label", "New OpenCode session");
-    this.newTabButton.addEventListener("click", () => {
-      this.callbacks.onCreateTab();
+    this.primaryLaunchButton.type = "button";
+    this.primaryLaunchButton.className =
+      "almostnode-opencode-surface__launcher-primary";
+    this.primaryLaunchButton.innerHTML =
+      '<span class="almostnode-opencode-surface__launcher-plus" aria-hidden="true">+</span>' +
+      '<span class="almostnode-opencode-surface__launcher-label">New Chat</span>';
+    this.primaryLaunchButton.setAttribute(
+      "aria-label",
+      "Start a new OpenCode session",
+    );
+    this.primaryLaunchButton.addEventListener("click", () => {
+      this.callbacks.onLaunch("opencode");
     });
 
-    this.body.className = "almostnode-opencode-surface__body";
+    this.dropdownLaunchButton.type = "button";
+    this.dropdownLaunchButton.className =
+      "almostnode-opencode-surface__launcher-toggle";
+    this.dropdownLaunchButton.setAttribute("aria-label", "Choose chat type");
+    this.dropdownLaunchButton.setAttribute("aria-haspopup", "menu");
+    this.dropdownLaunchButton.setAttribute("aria-expanded", "false");
+    this.dropdownLaunchButton.innerHTML =
+      '<span aria-hidden="true">▾</span>';
+    this.dropdownLaunchButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (this.menu) {
+        this.dismissMenu();
+        return;
+      }
+      this.showMenu();
+    });
 
+    this.splitButton.append(
+      this.primaryLaunchButton,
+      this.dropdownLaunchButton,
+    );
+    this.launcher.append(this.splitButton);
+
+    this.body.className = "almostnode-opencode-surface__body";
     this.loading.className = "almostnode-opencode-surface__loading";
     this.loading.innerHTML =
       '<div class="almostnode-opencode-surface__loading-content">' +
@@ -1585,8 +1620,7 @@ export class OpenCodeTerminalSurface {
     this.loading.hidden = true;
     this.loading.style.display = "none";
 
-    this.actions.append(this.newTabButton);
-    this.statusRow.append(this.tabs, this.actions);
+    this.statusRow.append(this.launcher, this.tabs);
     this.root.append(this.statusRow, this.body, this.loading);
 
     this.resizeObserver = new ResizeObserver(() => {
@@ -1594,6 +1628,9 @@ export class OpenCodeTerminalSurface {
     });
     this.resizeObserver.observe(this.root);
     this.resizeObserver.observe(this.body);
+
+    document.addEventListener("click", this.handleDocumentClick);
+    document.addEventListener("keydown", this.handleDocumentKeydown);
   }
 
   attach(container: HTMLElement): IDisposable {
@@ -1615,11 +1652,34 @@ export class OpenCodeTerminalSurface {
 
     return {
       dispose: () => {
+        this.dismissMenu();
         if (this.root.parentElement === container) {
           container.removeChild(this.root);
         }
       },
     };
+  }
+
+  focus(): void {
+    const active = this.activeTabId
+      ? this.terminals.get(this.activeTabId)
+      : null;
+    if (active) {
+      active.terminal.focus();
+      return;
+    }
+
+    this.activeTabId && this.customHosts.get(this.activeTabId)?.focus();
+    if (!this.activeTabId) {
+      this.primaryLaunchButton.focus();
+    }
+  }
+
+  setClaudeAvailable(available: boolean): void {
+    this.claudeAvailable = available;
+    if (this.menu) {
+      this.showMenu();
+    }
   }
 
   showLoading(): void {
@@ -1636,7 +1696,6 @@ export class OpenCodeTerminalSurface {
       this.loading.classList.remove("is-hiding");
     };
     this.loading.addEventListener("transitionend", onEnd);
-    // Fallback if transition doesn't fire
     window.setTimeout(onEnd, 500);
   }
 
@@ -1647,16 +1706,87 @@ export class OpenCodeTerminalSurface {
     this.updateTabStatus(this.activeTabId, text);
   }
 
-  focus(): void {
-    const active = this.activeTabId
-      ? this.terminals.get(this.activeTabId)
-      : null;
-    if (active) {
-      active.terminal.focus();
-      return;
+  private readonly handleDocumentClick = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!(target instanceof Node) || !this.root.contains(target)) {
+      this.dismissMenu();
+    }
+  };
+
+  private readonly handleDocumentKeydown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      this.dismissMenu();
+    }
+  };
+
+  private getMenuItems(): Array<{
+    kind: AgentLaunchKind;
+    label: string;
+    detail: string;
+  }> {
+    const items: Array<{
+      kind: AgentLaunchKind;
+      label: string;
+      detail: string;
+    }> = [
+      {
+        kind: "opencode",
+        label: "OpenCode",
+        detail: "Start OpenCode in this panel",
+      },
+      {
+        kind: "terminal",
+        label: "Empty Terminal",
+        detail: "Open a terminal in this panel",
+      },
+    ];
+
+    if (this.claudeAvailable) {
+      items.push({
+        kind: "claude",
+        label: "Claude Code",
+        detail: "Run npx @anthropic-ai/claude-code in this panel",
+      });
     }
 
-    this.activeTabId && this.customHosts.get(this.activeTabId)?.focus();
+    return items;
+  }
+
+  private showMenu(): void {
+    this.dismissMenu();
+
+    const menu = document.createElement("div");
+    menu.className = "almostnode-opencode-surface__menu";
+    menu.setAttribute("role", "menu");
+
+    for (const item of this.getMenuItems()) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "almostnode-opencode-surface__menu-item";
+      button.setAttribute("role", "menuitem");
+      button.innerHTML =
+        `<span class="almostnode-opencode-surface__menu-label">${item.label}</span>` +
+        `<span class="almostnode-opencode-surface__menu-detail">${item.detail}</span>`;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.dismissMenu();
+        this.callbacks.onLaunch(item.kind);
+      });
+      menu.appendChild(button);
+    }
+
+    this.menu = menu;
+    this.dropdownLaunchButton.setAttribute("aria-expanded", "true");
+    this.launcher.appendChild(menu);
+  }
+
+  private dismissMenu(): void {
+    if (!this.menu) {
+      return;
+    }
+    this.menu.remove();
+    this.menu = null;
+    this.dropdownLaunchButton.setAttribute("aria-expanded", "false");
   }
 
   addTab(tab: {
@@ -1682,7 +1812,7 @@ export class OpenCodeTerminalSurface {
     button.className = "almostnode-opencode-surface__tab";
     button.dataset.terminalId = tab.id;
     button.addEventListener("click", () => {
-      this.callbacks.onSelectTab(tab.id);
+      this.callbacks.onSelectTab?.(tab.id);
     });
 
     const label = document.createElement("span");
@@ -1698,7 +1828,7 @@ export class OpenCodeTerminalSurface {
       closeButton.setAttribute("aria-label", `Close ${tab.title}`);
       closeButton.addEventListener("click", (event) => {
         event.stopPropagation();
-        this.callbacks.onCloseTab(tab.id);
+        this.callbacks.onCloseTab?.(tab.id);
       });
       button.appendChild(closeButton);
     }
@@ -1741,7 +1871,7 @@ export class OpenCodeTerminalSurface {
     button.className = "almostnode-opencode-surface__tab";
     button.dataset.terminalId = tab.id;
     button.addEventListener("click", () => {
-      this.callbacks.onSelectTab(tab.id);
+      this.callbacks.onSelectTab?.(tab.id);
     });
 
     const label = document.createElement("span");
@@ -1757,7 +1887,7 @@ export class OpenCodeTerminalSurface {
       closeButton.setAttribute("aria-label", `Close ${tab.title}`);
       closeButton.addEventListener("click", (event) => {
         event.stopPropagation();
-        this.callbacks.onCloseTab(tab.id);
+        this.callbacks.onCloseTab?.(tab.id);
       });
       button.appendChild(closeButton);
     }
@@ -2412,6 +2542,14 @@ export class KeychainSidebarSurface {
           padding: 3px 6px;
           font-size: 11px;
         `.replace(/\n\s*/g, "");
+        if (!slot.selectValue) {
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "Choose…";
+          placeholder.disabled = true;
+          placeholder.selected = true;
+          select.appendChild(placeholder);
+        }
         for (const option of slot.selectOptions) {
           const optionEl = document.createElement("option");
           optionEl.value = option.value;
@@ -2419,9 +2557,12 @@ export class KeychainSidebarSurface {
           optionEl.selected = option.value === slot.selectValue;
           select.appendChild(optionEl);
         }
-        select.value = slot.selectValue ?? slot.selectOptions[0]!.value;
+        select.value = slot.selectValue ?? "";
         select.addEventListener("change", (event) => {
           event.stopPropagation();
+          if (!select.value) {
+            return;
+          }
           this.onAction?.(`${slot.selectActionPrefix}:${select.value}`);
         });
 

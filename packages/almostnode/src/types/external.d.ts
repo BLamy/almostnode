@@ -49,6 +49,11 @@ declare module '*.wasm?url' {
   export default url;
 }
 
+declare module '*.pem?raw' {
+  const content: string;
+  export default content;
+}
+
 declare module '@tailscale/connect' {
   export interface TailscaleConnectFetchRequest {
     url: string;
@@ -56,6 +61,7 @@ declare module '@tailscale/connect' {
     headers?: Record<string, string>;
     bodyBase64?: string;
     redirect?: 'follow' | 'manual' | 'error';
+    tlsServerName?: string;
   }
 
   export interface TailscaleConnectResponse {
@@ -76,13 +82,24 @@ declare module '@tailscale/connect' {
     }): void;
     configure(config: {
       useExitNode?: boolean;
+      routeAll?: boolean;
       exitNodeId?: string | null;
+      acceptDns?: boolean;
+      corpDns?: boolean;
+      corpDNS?: boolean;
+      dns?: boolean;
+      dnsIP?: string | null;
+      dnsIp?: string | null;
+      bootstrapDns?: string[];
+      ipMap?: Record<string, string>;
     }): Promise<void>;
     login(): void;
     logout(): void;
     fetch(
       urlOrRequest: string | TailscaleConnectFetchRequest,
     ): Promise<TailscaleConnectResponse>;
+    lookup?(hostname: string): Promise<unknown>;
+    resolve?(hostname: string): Promise<unknown>;
   }
 
   export interface TailscaleConnectStateStorage {
@@ -96,7 +113,16 @@ declare module '@tailscale/connect' {
     controlURL?: string;
     stateStorage?: TailscaleConnectStateStorage;
     useExitNode?: boolean;
+    routeAll?: boolean;
     exitNodeId?: string | null;
+    acceptDns?: boolean;
+    corpDns?: boolean;
+    corpDNS?: boolean;
+    dns?: boolean;
+    dnsIP?: string | null;
+    dnsIp?: string | null;
+    bootstrapDns?: string[];
+    ipMap?: Record<string, string>;
     wasmURL?: string;
     panicHandler: (err: string) => void;
   }): Promise<TailscaleConnectIPN>;

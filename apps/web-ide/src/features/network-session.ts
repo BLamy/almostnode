@@ -1,6 +1,17 @@
+import {
+  createNetworkSessionPersistence,
+} from "../../../../packages/almostnode/src/network/session";
+import {
+  createTailscaleSessionPersistence,
+  parseTailscaleStateSnapshot,
+  serializeTailscaleStateSnapshot,
+  TAILSCALE_SESSION_STORAGE_KEY,
+} from "../../../../packages/almostnode/src/network/tailscale-session-storage";
+import type { PersistedNetworkSession } from "../../../../packages/almostnode/src/network/types";
+
 export const WORKBENCH_NETWORK_SESSION_STORAGE_KEY =
   "__almostnodeWorkbenchNetwork";
-export const TAILSCALE_SESSION_STORAGE_KEY = "__almostnodeTailscaleState";
+export { TAILSCALE_SESSION_STORAGE_KEY };
 
 export interface SessionStorageLike {
   getItem(key: string): string | null;
@@ -10,190 +21,121 @@ export interface SessionStorageLike {
 
 export type TailscaleSessionSnapshot = Record<string, string>;
 
-export interface StoredWorkbenchNetworkConfig {
-  provider: "tailscale";
-  useExitNode: boolean;
-  exitNodeId: string | null;
-}
-
-function getBrowserSessionStorage(): SessionStorageLike | null {
-  try {
-    if (typeof sessionStorage === "undefined") {
-      return null;
-    }
-    return sessionStorage;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeTailscaleSessionSnapshot(
-  value: unknown,
-): TailscaleSessionSnapshot | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-
-  const snapshot: TailscaleSessionSnapshot = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry !== "string") {
-      return null;
-    }
-    snapshot[key] = entry;
-  }
-
-  return snapshot;
-}
+export type StoredWorkbenchNetworkConfig = Omit<
+  PersistedNetworkSession,
+  "acceptDns" | "stateSnapshot"
+> & {
+  acceptDns?: boolean;
+};
 
 export function parseStoredWorkbenchNetworkConfig(
   raw: string | null | undefined,
 ): StoredWorkbenchNetworkConfig | null {
-  if (!raw) {
+  const persistence = createNetworkSessionPersistence({
+    getItem: () => raw ?? null,
+    setItem: () => {},
+    removeItem: () => {},
+  });
+  const session = persistence.load();
+  if (!session) {
     return null;
   }
 
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (
-      !parsed
-      || typeof parsed !== "object"
-      || parsed.provider !== "tailscale"
-      || typeof parsed.useExitNode !== "boolean"
-    ) {
-      return null;
-    }
-
-    return {
-      provider: "tailscale",
-      useExitNode: parsed.useExitNode,
-      exitNodeId:
-        typeof parsed.exitNodeId === "string" && parsed.exitNodeId.trim()
-          ? parsed.exitNodeId.trim()
-          : null,
-    };
-  } catch {
-    return null;
-  }
+  return {
+    provider: session.provider,
+    useExitNode: session.useExitNode,
+    exitNodeId: session.exitNodeId,
+    acceptDns: session.acceptDns,
+  };
 }
 
 export function readStoredWorkbenchNetworkConfig(
-  storage: SessionStorageLike | null | undefined = getBrowserSessionStorage(),
+  storage: SessionStorageLike | null | undefined = getBrowserDurableStorage(),
 ): StoredWorkbenchNetworkConfig | null {
-  if (!storage) {
+  const session = createNetworkSessionPersistence(
+    storage,
+    WORKBENCH_NETWORK_SESSION_STORAGE_KEY,
+  ).load();
+  if (!session) {
     return null;
   }
 
-  try {
-    const raw = storage.getItem(WORKBENCH_NETWORK_SESSION_STORAGE_KEY);
-    const parsed = parseStoredWorkbenchNetworkConfig(raw);
-    if (raw && !parsed) {
-      storage.removeItem(WORKBENCH_NETWORK_SESSION_STORAGE_KEY);
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
+  return {
+    provider: session.provider,
+    useExitNode: session.useExitNode,
+    exitNodeId: session.exitNodeId,
+    acceptDns: session.acceptDns,
+  };
 }
 
 export function writeStoredWorkbenchNetworkConfig(
   config: StoredWorkbenchNetworkConfig,
-  storage: SessionStorageLike | null | undefined = getBrowserSessionStorage(),
+  storage: SessionStorageLike | null | undefined = getBrowserDurableStorage(),
 ): void {
-  if (!storage) {
-    return;
-  }
-
-  try {
-    storage.setItem(
-      WORKBENCH_NETWORK_SESSION_STORAGE_KEY,
-      JSON.stringify(config),
-    );
-  } catch {
-    // Ignore sessionStorage failures.
-  }
+  createNetworkSessionPersistence(
+    storage,
+    WORKBENCH_NETWORK_SESSION_STORAGE_KEY,
+  ).save({
+    ...config,
+    acceptDns: config.acceptDns !== false,
+    stateSnapshot: readStoredTailscaleSessionSnapshot(storage),
+  });
 }
 
 export function clearStoredWorkbenchNetworkConfig(
-  storage: SessionStorageLike | null | undefined = getBrowserSessionStorage(),
+  storage: SessionStorageLike | null | undefined = getBrowserDurableStorage(),
 ): void {
-  if (!storage) {
-    return;
-  }
-
-  try {
-    storage.removeItem(WORKBENCH_NETWORK_SESSION_STORAGE_KEY);
-  } catch {
-    // Ignore sessionStorage failures.
-  }
+  createNetworkSessionPersistence(
+    storage,
+    WORKBENCH_NETWORK_SESSION_STORAGE_KEY,
+  ).clear();
 }
 
 export function parseStoredTailscaleSessionSnapshot(
   raw: string | null | undefined,
 ): TailscaleSessionSnapshot | null {
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    return normalizeTailscaleSessionSnapshot(JSON.parse(raw));
-  } catch {
-    return null;
-  }
+  return parseTailscaleStateSnapshot(raw);
 }
 
 export function serializeTailscaleSessionSnapshot(
   snapshot: TailscaleSessionSnapshot,
 ): string {
-  return JSON.stringify(snapshot);
+  return serializeTailscaleStateSnapshot(snapshot);
 }
 
 export function readStoredTailscaleSessionSnapshot(
-  storage: SessionStorageLike | null | undefined = getBrowserSessionStorage(),
+  storage: SessionStorageLike | null | undefined = getBrowserDurableStorage(),
 ): TailscaleSessionSnapshot | null {
-  if (!storage) {
-    return null;
-  }
-
-  try {
-    const raw = storage.getItem(TAILSCALE_SESSION_STORAGE_KEY);
-    const parsed = parseStoredTailscaleSessionSnapshot(raw);
-    if (raw && !parsed) {
-      storage.removeItem(TAILSCALE_SESSION_STORAGE_KEY);
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
+  return createTailscaleSessionPersistence(storage).load();
 }
 
 export function writeStoredTailscaleSessionSnapshot(
   snapshot: TailscaleSessionSnapshot,
-  storage: SessionStorageLike | null | undefined = getBrowserSessionStorage(),
+  storage: SessionStorageLike | null | undefined = getBrowserDurableStorage(),
 ): void {
-  if (!storage) {
-    return;
-  }
-
-  try {
-    storage.setItem(
-      TAILSCALE_SESSION_STORAGE_KEY,
-      serializeTailscaleSessionSnapshot(snapshot),
-    );
-  } catch {
-    // Ignore sessionStorage failures.
-  }
+  createTailscaleSessionPersistence(storage).save(snapshot);
 }
 
 export function clearStoredTailscaleSessionSnapshot(
-  storage: SessionStorageLike | null | undefined = getBrowserSessionStorage(),
+  storage: SessionStorageLike | null | undefined = getBrowserDurableStorage(),
 ): void {
-  if (!storage) {
-    return;
-  }
+  createTailscaleSessionPersistence(storage).clear();
+}
 
+function getBrowserStorage(
+  storageKey: "localStorage" | "sessionStorage",
+): SessionStorageLike | null {
   try {
-    storage.removeItem(TAILSCALE_SESSION_STORAGE_KEY);
+    const storage = globalThis[storageKey];
+    if (typeof storage === "undefined") {
+      return null;
+    }
+    return storage;
   } catch {
-    // Ignore sessionStorage failures.
+    return null;
   }
+}
+
+function getBrowserDurableStorage(): SessionStorageLike | null {
+  return getBrowserStorage("localStorage") ?? getBrowserStorage("sessionStorage");
 }

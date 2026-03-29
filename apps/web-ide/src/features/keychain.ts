@@ -1,5 +1,9 @@
 import type { VirtualFS, FSWatcher } from 'almostnode';
 import {
+  matchesClaudeLaunchCommand,
+  matchesOpenCodeLaunchCommand,
+} from './terminal-command-routing';
+import {
   parseStoredTailscaleSessionSnapshot,
   readStoredTailscaleSessionSnapshot,
   serializeTailscaleSessionSnapshot,
@@ -738,7 +742,9 @@ export class Keychain {
     }
 
     const normalized = command.trim().toLowerCase();
-    const shouldAutoRestore = /\b(opencode(?:-ai)?|gh|replayio|tailscale)\b/.test(normalized);
+    const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
+      || matchesClaudeLaunchCommand(command)
+      || /\b(gh|replayio|tailscale)\b/.test(normalized);
     if (!shouldAutoRestore) {
       return true;
     }

@@ -16,6 +16,9 @@ import { createFsShim, type Stats } from '../shims/fs';
 import pathShim from '../shims/path';
 import { VirtualFS } from '../virtual-fs';
 import type {
+  TailscaleWorkerErrorCode,
+  TailscaleWorkerErrorDebug,
+  TailscaleWorkerErrorPayload,
   TailscaleWorkerEvent,
   TailscaleWorkerRequestWithId,
 } from './tailscale-worker-types';
@@ -23,6 +26,10 @@ import {
   createTailscaleSessionStateStore,
   type TailscaleStateSnapshot,
 } from './tailscale-session-storage';
+import {
+  installTailscaleRuntimeCertificates,
+  withTailscaleCertificateEnv,
+} from './tailscale-runtime-certificates';
 
 type TailscaleConnectState =
   | 'NoState'
@@ -51,13 +58,40 @@ interface TailscaleConnectNetMap {
   selectedExitNodeId?: string | null;
 }
 
+interface TailscaleBridgeCapabilities {
+  canLookup: boolean;
+  canReconfigure: boolean;
+  canStructuredFetch: boolean;
+}
+
+class ClassifiedTailscaleWorkerError extends Error {
+  readonly code: TailscaleWorkerErrorCode;
+  readonly debug?: TailscaleWorkerErrorDebug;
+
+  constructor(
+    code: TailscaleWorkerErrorCode,
+    message: string,
+    debug?: TailscaleWorkerErrorDebug,
+  ) {
+    super(message);
+    this.name = 'ClassifiedTailscaleWorkerError';
+    this.code = code;
+    this.debug = debug;
+  }
+}
+
 const defaultOptions: Required<NetworkOptions> = {
   provider: 'tailscale',
   authMode: 'interactive',
   useExitNode: false,
   exitNodeId: null,
+  acceptDns: true,
   corsProxy: null,
+  tailscaleConnected: false,
 };
+const TAILSCALE_DEFAULT_DNS_IP = '100.100.100.100';
+const TAILSCALE_DEFAULT_DNS_IPV6 = 'fd7a:115c:a1e0::53';
+const PUBLIC_DNS_JSON_ENDPOINT = 'https://cloudflare-dns.com/dns-query';
 const TAILSCALE_RUNTIME_ROOT = '/tailscale';
 const TAILSCALE_RUNTIME_LOGS_DIR = `${TAILSCALE_RUNTIME_ROOT}/logs`;
 const TAILSCALE_RUNTIME_CACHE_DIR = `${TAILSCALE_RUNTIME_ROOT}/cache`;
@@ -70,15 +104,27 @@ let options = defaultOptions;
 let ipnPromise: Promise<TailscaleConnectIPN> | null = null;
 let ipnStartScheduled = false;
 let ipnStarted = false;
+let ipnStartPromise: Promise<void> | null = null;
 let tailscaleConnectModulePromise: Promise<typeof import('@tailscale/connect')> | null = null;
 let state: TailscaleConnectState = 'NoState';
 let netMap: TailscaleConnectNetMap | null = null;
 let loginUrl: string | null = null;
 let panicError: string | null = null;
+let dnsHealthy: boolean | null = null;
+let dnsDetail: string | null = null;
 let tailscaleRuntimeCwd = TAILSCALE_RUNTIME_ROOT;
-const tailscaleStateStorage = createTailscaleSessionStateStore(
+let allowSnapshotClear = false;
+const fetchIpMap = new Map<string, string>();
+const tailscaleStateStorageInner = createTailscaleSessionStateStore(
   null,
   (snapshot) => {
+    if (snapshot === null) {
+      if (!allowSnapshotClear) {
+        return;
+      }
+      allowSnapshotClear = false;
+    }
+
     const event: TailscaleWorkerEvent = {
       type: 'storageUpdate',
       snapshot,
@@ -86,6 +132,64 @@ const tailscaleStateStorage = createTailscaleSessionStateStore(
     self.postMessage(event);
   },
 );
+
+/**
+ * Wrapper around the state store that intercepts Go's setState writes for
+ * profile keys.  When Go writes profile prefs (e.g. after a control-server
+ * login handshake), it may reset CorpDNS to false.  We force it back to
+ * true so the Go DNS resolver has upstream resolvers configured — without
+ * this, hostname-based fetch through the Tailscale WASM panics with
+ * `ValueOf: invalid value` because Go's DNS fails and creates an
+ * un-serializable error.
+ */
+const tailscaleStateStorage = {
+  getState(id: string): string {
+    return tailscaleStateStorageInner.getState(id);
+  },
+  setState(id: string, value: string): void {
+    if (id.startsWith('profile-') && value && getEffectiveAcceptDns(options)) {
+      try {
+        const decoded = hexToString(value);
+        const prefs = JSON.parse(decoded);
+        if (typeof prefs === 'object' && prefs !== null) {
+          let patched = false;
+          if (prefs.CorpDNS === false) {
+            prefs.CorpDNS = true;
+            patched = true;
+          }
+          if (options.useExitNode && prefs.RouteAll === false) {
+            prefs.RouteAll = true;
+            patched = true;
+          }
+          if (patched) {
+            value = stringToHex(JSON.stringify(prefs, null, '\t'));
+          }
+        }
+      } catch {
+        // Not a JSON profile entry — pass through unchanged.
+      }
+    }
+    tailscaleStateStorageInner.setState(id, value);
+  },
+  clear(): void {
+    tailscaleStateStorageInner.clear();
+  },
+  replace(snapshot: TailscaleStateSnapshot | null): void {
+    tailscaleStateStorageInner.replace(snapshot);
+  },
+  snapshot(): TailscaleStateSnapshot | null {
+    return tailscaleStateStorageInner.snapshot();
+  },
+};
+
+function getEffectiveAcceptDns(
+  nextOptions: Pick<NetworkOptions, 'acceptDns' | 'useExitNode'>,
+): boolean {
+  // In the browser runtime there is no host OS resolver to fall back to when
+  // public traffic is forced through an exit node. Treat exit-node mode as
+  // requiring Tailscale-managed DNS so the engine always has upstreams.
+  return Boolean(nextOptions.acceptDns) || Boolean(nextOptions.useExitNode);
+}
 
 const tailscaleRuntimeVfs = new VirtualFS();
 tailscaleRuntimeVfs.mkdirSync(TAILSCALE_RUNTIME_ROOT, { recursive: true });
@@ -95,6 +199,7 @@ tailscaleRuntimeVfs.mkdirSync(TAILSCALE_RUNTIME_TMP_DIR, { recursive: true });
 tailscaleRuntimeVfs.writeFileSync(TAILSCALE_RUNTIME_STDIN_PATH, new Uint8Array(0));
 tailscaleRuntimeVfs.writeFileSync(TAILSCALE_RUNTIME_STDOUT_PATH, new Uint8Array(0));
 tailscaleRuntimeVfs.writeFileSync(TAILSCALE_RUNTIME_STDERR_PATH, new Uint8Array(0));
+installTailscaleRuntimeCertificates(tailscaleRuntimeVfs);
 
 const tailscaleRuntimeFs = createFsShim(
   tailscaleRuntimeVfs,
@@ -200,6 +305,42 @@ function decodeStdioChunk(
   return new TextDecoder().decode(buffer.slice(start, end));
 }
 
+function updateDnsHealth(healthy: boolean | null, detail?: string | null): void {
+  const nextDetail = detail?.trim() || null;
+  const changed = dnsHealthy !== healthy || dnsDetail !== nextDetail;
+  dnsHealthy = healthy;
+  dnsDetail = nextDetail;
+  if (changed) {
+    emitStatus();
+  }
+}
+
+function processRuntimeLog(text: string): void {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (
+      line.includes('dns: resolver: forward: no upstream resolvers set')
+      || line.includes('lookup ') && line.includes(' via DoH fallback failed:')
+      || line.includes('error resolving ')
+    ) {
+      updateDnsHealth(false, line);
+      continue;
+    }
+
+    if (
+      line.includes('dns_query_fwd_success')
+      || line.includes('dns_resolve_local_ok')
+      || line.includes('resolving ') && line.includes(' using fallback resolver')
+    ) {
+      updateDnsHealth(true, null);
+    }
+  }
+}
+
 const tailscaleRuntimeWriteSync = tailscaleRuntimeFs.writeSync.bind(
   tailscaleRuntimeFs,
 );
@@ -211,6 +352,7 @@ tailscaleRuntimeFs.writeSync = ((fd, buffer, offset, length, position) => {
       length,
     );
     if (text) {
+      processRuntimeLog(text);
       if (fd === 2) {
         console.error(text);
       } else {
@@ -581,6 +723,7 @@ interface TailscaleConnectBootstrapConfig {
   stateStorage: TailscaleConnectStateStorage;
   useExitNode: boolean;
   exitNodeId: string | null;
+  acceptDns: boolean;
   wasmURL?: string;
   panicHandler: (error: string) => void;
 }
@@ -639,12 +782,12 @@ function getTailscaleGoRuntimeConstructor():
 
 function installTailscaleRuntimeGlobals(): void {
   const processValue = {
-    env: {
+    env: withTailscaleCertificateEnv({
       HOME: TAILSCALE_RUNTIME_ROOT,
       TMPDIR: TAILSCALE_RUNTIME_TMP_DIR,
       TS_LOGS_DIR: TAILSCALE_RUNTIME_LOGS_DIR,
       XDG_CACHE_HOME: TAILSCALE_RUNTIME_CACHE_DIR,
-    },
+    }),
     argv: ['tailscale-connect-worker'],
     pid: 1,
     ppid: 0,
@@ -680,27 +823,52 @@ async function createWorkerIpn(
   const AlmostnodeTailscaleGo = class extends GoRuntime {
     constructor() {
       super();
-      this.env = {
+      this.env = withTailscaleCertificateEnv({
         ...(this.env || {}),
         HOME: TAILSCALE_RUNTIME_ROOT,
         TMPDIR: TAILSCALE_RUNTIME_TMP_DIR,
         TS_LOGS_DIR: TAILSCALE_RUNTIME_LOGS_DIR,
         XDG_CACHE_HOME: TAILSCALE_RUNTIME_CACHE_DIR,
-      };
+      });
     }
   };
 
   const restoreGo = overrideGlobalProperty('Go', AlmostnodeTailscaleGo);
   try {
+    const acceptDns = getEffectiveAcceptDns(config);
+    console.log('[tailscale-worker] create IPN:', {
+      exitNodeId: config.exitNodeId,
+      routeAll: config.useExitNode,
+      acceptDns,
+      ipMapEntries: fetchIpMap.size,
+    });
+    // The Go WASM reads PascalCase property names (CorpDNS, RouteAll,
+    // ExitNodeID) while the TypeScript types use camelCase.  Include
+    // both forms so the Go engine actually picks up DNS/routing config.
     const ipn = await tailscaleConnect.createIPN({
       authKey: config.authKey,
       hostname: config.hostname,
       stateStorage: config.stateStorage,
       useExitNode: config.useExitNode,
+      routeAll: config.useExitNode,
+      RouteAll: config.useExitNode,
       exitNodeId: config.exitNodeId,
+      exitNodeID: config.exitNodeId,
+      ExitNodeID: config.exitNodeId,
+      acceptDns,
+      corpDns: acceptDns,
+      corpDNS: acceptDns,
+      CorpDNS: acceptDns,
+      dns: acceptDns,
+      dnsIP: acceptDns ? TAILSCALE_DEFAULT_DNS_IP : null,
+      dnsIp: acceptDns ? TAILSCALE_DEFAULT_DNS_IP : null,
+      bootstrapDns: acceptDns
+        ? [TAILSCALE_DEFAULT_DNS_IP, TAILSCALE_DEFAULT_DNS_IPV6]
+        : [],
+      ipMap: fetchIpMap.size > 0 ? Object.fromEntries(fetchIpMap) : undefined,
       wasmURL: config.wasmURL ?? tailscaleWasmUrl,
       panicHandler: config.panicHandler,
-    });
+    } as Parameters<typeof tailscaleConnect.createIPN>[0]);
     return ipn;
   } finally {
     restoreGo();
@@ -746,10 +914,15 @@ function extractExitNodes(currentNetMap: TailscaleConnectNetMap | null): Network
 function mapState(): TailscaleAdapterStatus {
   const exitNodes = extractExitNodes(netMap);
   const selectedExitNodeId = netMap?.selectedExitNodeId ?? null;
+  const resolvedDnsDetail = dnsDetail ?? undefined;
+  const dnsEnabled = getEffectiveAcceptDns(options);
 
   if (panicError) {
     return {
       state: 'error',
+      dnsEnabled,
+      dnsHealthy,
+      dnsDetail: resolvedDnsDetail ?? panicError,
       exitNodes,
       selectedExitNodeId,
       detail: panicError,
@@ -758,9 +931,12 @@ function mapState(): TailscaleAdapterStatus {
   }
 
   if (netMap?.lockedOut) {
-    return {
-      state: 'locked',
-      exitNodes,
+      return {
+        state: 'locked',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
+        exitNodes,
       selectedExitNodeId,
       detail: 'Tailnet lock approval required for this device.',
       loginUrl,
@@ -773,6 +949,9 @@ function mapState(): TailscaleAdapterStatus {
     case 'NeedsLogin':
       return {
         state: 'needs-login',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         loginUrl,
@@ -782,6 +961,9 @@ function mapState(): TailscaleAdapterStatus {
     case 'NeedsMachineAuth':
       return {
         state: 'needs-machine-auth',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         detail: 'A tailnet administrator must approve this device.',
@@ -792,6 +974,9 @@ function mapState(): TailscaleAdapterStatus {
     case 'Running':
       return {
         state: 'running',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         loginUrl,
@@ -801,6 +986,9 @@ function mapState(): TailscaleAdapterStatus {
     case 'Starting':
       return {
         state: 'starting',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         detail: 'Starting Tailscale session.',
@@ -811,6 +999,9 @@ function mapState(): TailscaleAdapterStatus {
     case 'Stopped':
       return {
         state: 'stopped',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         loginUrl,
@@ -820,6 +1011,9 @@ function mapState(): TailscaleAdapterStatus {
     case 'InUseOtherUser':
       return {
         state: 'error',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         detail: 'The Tailscale session is in use by a different user.',
@@ -829,6 +1023,9 @@ function mapState(): TailscaleAdapterStatus {
     default:
       return {
         state: 'needs-login',
+        dnsEnabled,
+        dnsHealthy,
+        dnsDetail: resolvedDnsDetail,
         exitNodes,
         selectedExitNodeId,
         loginUrl,
@@ -843,6 +1040,24 @@ function handleIpnError(error: unknown): void {
   emitStatus();
 }
 
+async function applyCurrentIpnConfig(ipn: TailscaleConnectIPN): Promise<void> {
+  const configurableIpn = ipn as TailscaleConnectIPN & {
+    configure?: (config: TailscaleConfigureOptions) => Promise<void>;
+  };
+  if (typeof configurableIpn.configure !== 'function') {
+    console.warn('[tailscale-worker] IPN does not support configure()');
+    return;
+  }
+  const config = buildIpnConfig();
+  const configRecord = config as Record<string, unknown>;
+  console.log('[tailscale-worker] configure IPN:', {
+    routeAll: configRecord.RouteAll,
+    exitNodeId: configRecord.ExitNodeID,
+    corpDns: configRecord.CorpDNS,
+  });
+  await configurableIpn.configure(config);
+}
+
 function emitStatus(): void {
   const event: TailscaleWorkerEvent = {
     type: 'status',
@@ -855,6 +1070,9 @@ function createIpnCallbacks(): Parameters<TailscaleConnectIPN['run']>[0] {
   return {
     notifyState: (nextState) => {
       state = nextState as TailscaleConnectState;
+      if (state === 'Running' && getEffectiveAcceptDns(options) && dnsHealthy === null) {
+        updateDnsHealth(null, null);
+      }
       emitStatus();
     },
     notifyNetMap: (netMapStr) => {
@@ -871,35 +1089,113 @@ function createIpnCallbacks(): Parameters<TailscaleConnectIPN['run']>[0] {
     },
     notifyPanicRecover: (error) => {
       panicError = error;
+      updateDnsHealth(false, error);
       emitStatus();
     },
   };
 }
 
-function ensureIpnStarted(ipn: TailscaleConnectIPN): void {
-  if (ipnStarted || ipnStartScheduled) {
-    return;
+function ensureIpnStarted(ipn: TailscaleConnectIPN): Promise<void> {
+  if (ipnStarted) {
+    return Promise.resolve();
+  }
+
+  if (ipnStartPromise) {
+    return ipnStartPromise;
   }
 
   ipnStartScheduled = true;
-  setTimeout(() => {
-    ipnStartScheduled = false;
-    if (ipnStarted) {
-      return;
+  ipnStartPromise = new Promise((resolve, reject) => {
+    setTimeout(() => {
+      ipnStartScheduled = false;
+      if (ipnStarted) {
+        ipnStartPromise = null;
+        resolve();
+        return;
+      }
+
+      ipnStarted = true;
+      try {
+        ipn.run(createIpnCallbacks());
+        resolve();
+      } catch (error) {
+        ipnStarted = false;
+        handleIpnError(error);
+        reject(error);
+      } finally {
+        ipnStartPromise = null;
+      }
+    }, 0);
+  });
+
+  return ipnStartPromise;
+}
+
+function hexToString(hex: string): string {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function stringToHex(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let hex = '';
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+/**
+ * Patches persisted Tailscale profile prefs in the state snapshot so that
+ * DNS-related settings match the current worker options.  The Go IPN engine
+ * loads prefs from state storage and they take precedence over the config
+ * passed to `createIPN`.  If a previous session stored `CorpDNS: false`
+ * the engine will start without upstream resolvers, causing SERVFAIL errors
+ * that can trigger a WASM panic in `makePromise`.
+ */
+function patchSnapshotDnsPrefs(
+  snapshot: TailscaleStateSnapshot | null,
+): TailscaleStateSnapshot | null {
+  if (!snapshot) {
+    return null;
+  }
+
+  const acceptDns = getEffectiveAcceptDns(options);
+  if (!acceptDns) {
+    return snapshot;
+  }
+
+  const patched = { ...snapshot };
+  for (const [key, hexValue] of Object.entries(patched)) {
+    if (!key.startsWith('profile-') || !hexValue) {
+      continue;
     }
 
-    ipnStarted = true;
     try {
-      ipn.run(createIpnCallbacks());
-    } catch (error) {
-      ipnStarted = false;
-      handleIpnError(error);
+      const decoded = hexToString(hexValue);
+      const prefs = JSON.parse(decoded);
+      if (typeof prefs !== 'object' || prefs === null) {
+        continue;
+      }
+      if (prefs.CorpDNS === false || prefs.RouteAll !== options.useExitNode) {
+        prefs.CorpDNS = true;
+        prefs.RouteAll = options.useExitNode;
+        patched[key] = stringToHex(JSON.stringify(prefs, null, '\t'));
+      }
+    } catch {
+      // Not a JSON profile entry – leave as-is.
     }
-  }, 0);
+  }
+
+  return patched;
 }
 
 function hydrateStateStorage(snapshot: TailscaleStateSnapshot | null): void {
-  tailscaleStateStorage.replace(snapshot);
+  allowSnapshotClear = false;
+  tailscaleStateStorage.replace(patchSnapshotDnsPrefs(snapshot));
 }
 
 function isIPv4(address: string): boolean {
@@ -967,17 +1263,312 @@ function encodeTextBody(text: string): string {
   return btoa(unescape(encodeURIComponent(text)));
 }
 
+type TailscaleConfigureOptions = Parameters<TailscaleConnectIPN['configure']>[0];
+
+function buildIpnConfig(
+  overrides: Partial<TailscaleConfigureOptions> = {},
+): TailscaleConfigureOptions {
+  const acceptDns = getEffectiveAcceptDns(options);
+  // The Go WASM reads PascalCase property names (CorpDNS, RouteAll,
+  // ExitNodeID) while the TypeScript types use camelCase.  Include both
+  // forms so the config works regardless of which the runtime reads.
+  const base: Record<string, unknown> = {
+    useExitNode: options.useExitNode,
+    routeAll: options.useExitNode,
+    RouteAll: options.useExitNode,
+    exitNodeId: options.exitNodeId,
+    exitNodeID: options.exitNodeId,
+    ExitNodeID: options.exitNodeId,
+    acceptDns,
+    corpDns: acceptDns,
+    corpDNS: acceptDns,
+    CorpDNS: acceptDns,
+    dns: acceptDns,
+    dnsIP: acceptDns ? TAILSCALE_DEFAULT_DNS_IP : null,
+    dnsIp: acceptDns ? TAILSCALE_DEFAULT_DNS_IP : null,
+    bootstrapDns: acceptDns
+      ? [TAILSCALE_DEFAULT_DNS_IP, TAILSCALE_DEFAULT_DNS_IPV6]
+      : [],
+    ipMap: fetchIpMap.size > 0 ? Object.fromEntries(fetchIpMap) : undefined,
+  };
+  return { ...base, ...overrides } as TailscaleConfigureOptions;
+}
+
+function extractRequestHostname(input: string): string | null {
+  try {
+    const url = new URL(input);
+    return url.hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+function pushResolvedAddress(
+  entries: Array<{ address: string; family: 4 | 6 }>,
+  address: string,
+): void {
+  if (isIPv4(address)) {
+    entries.push({ address, family: 4 });
+    return;
+  }
+  if (isIPv6(address)) {
+    entries.push({ address, family: 6 });
+  }
+}
+
+async function resolveHostnameViaPublicDnsJson(
+  hostname: string,
+  family?: 4 | 6,
+): Promise<Array<{ address: string; family: 4 | 6 }>> {
+  const requestedFamilies = family ? [family] : [4, 6];
+  const addresses: Array<{ address: string; family: 4 | 6 }> = [];
+  let lastError: Error | null = null;
+
+  for (const currentFamily of requestedFamilies) {
+    const endpoint = new URL(PUBLIC_DNS_JSON_ENDPOINT);
+    endpoint.searchParams.set('name', hostname);
+    endpoint.searchParams.set('type', currentFamily === 6 ? 'AAAA' : 'A');
+
+    try {
+      const response = await fetch(endpoint.toString(), {
+        headers: {
+          accept: 'application/dns-json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `Public DNS query failed for '${hostname}': HTTP ${response.status}.`,
+        );
+      }
+
+      const payload = await response.json() as {
+        Status?: number;
+        Answer?: Array<{ type?: number; data?: string }>;
+      };
+
+      const expectedType = currentFamily === 6 ? 28 : 1;
+      const answers = Array.isArray(payload.Answer) ? payload.Answer : [];
+      for (const answer of answers) {
+        if (answer?.type !== expectedType || typeof answer.data !== 'string') {
+          continue;
+        }
+        pushResolvedAddress(addresses, answer.data);
+      }
+
+      if (addresses.length > 0) {
+        return addresses;
+      }
+
+      if (payload.Status && payload.Status !== 0) {
+        lastError = new Error(
+          `Public DNS query failed for '${hostname}': status ${payload.Status}.`,
+        );
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return addresses;
+}
+
+async function resolveHostnameWithoutIpn(
+  hostname: string,
+  lookupOptions?: NetworkLookupOptions,
+): Promise<NetworkLookupResult | null> {
+  const fromNetMap = collectLookupAddresses(hostname, lookupOptions);
+  if (fromNetMap && fromNetMap.addresses.length > 0) {
+    return fromNetMap;
+  }
+
+  const normalizedHost = normalizeName(hostname);
+  const cachedAddress = fetchIpMap.get(normalizedHost);
+  if (cachedAddress) {
+    const family = isIPv6(cachedAddress) ? 6 : 4;
+    const requestedFamily = lookupOptions?.family;
+    if (!requestedFamily || requestedFamily === family) {
+      console.log(
+        `[tailscale-worker] public DNS cache hit: host=${hostname} ip=${cachedAddress}`,
+      );
+      return {
+        hostname,
+        addresses: [{ address: cachedAddress, family }],
+      };
+    }
+  }
+
+  const requestedFamily =
+    lookupOptions?.family === 6 ? 6 : lookupOptions?.family === 4 ? 4 : undefined;
+  console.log(
+    `[tailscale-worker] resolving public hostname via DoH: host=${hostname} family=${requestedFamily ?? 'auto'}`,
+  );
+  const addresses = await resolveHostnameViaPublicDnsJson(hostname, requestedFamily);
+  if (addresses.length === 0) {
+    return null;
+  }
+
+  return {
+    hostname,
+    addresses,
+  };
+}
+
+function isSimpleUrlOnlyFetchRequest(request: NetworkFetchRequest): boolean {
+  const method = (request.method || 'GET').toUpperCase();
+  if (method !== 'GET') {
+    return false;
+  }
+
+  if (request.bodyBase64) {
+    return false;
+  }
+
+  if (request.redirect === 'manual' || request.redirect === 'error') {
+    return false;
+  }
+
+  if (request.credentials && request.credentials !== 'omit' && request.credentials !== 'same-origin') {
+    return false;
+  }
+
+  return !request.headers || Object.keys(request.headers).length === 0;
+}
+
+function getTailscaleBridgeCapabilities(
+  ipn: TailscaleConnectIPN,
+): TailscaleBridgeCapabilities {
+  const ipnRecord = ipn as unknown as Record<string, unknown>;
+  const canReconfigure = typeof ipnRecord.configure === 'function';
+  const canLookup =
+    typeof ipnRecord.lookup === 'function'
+    || typeof ipnRecord.resolve === 'function';
+
+  return {
+    canLookup,
+    canReconfigure,
+    canStructuredFetch: canReconfigure || canLookup,
+  };
+}
+
+function isTlsSniFailure(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('tls')
+    || normalized.includes('x509')
+    || normalized.includes('certificate')
+    || normalized.includes('server name')
+    || normalized.includes('hostname')
+  );
+}
+
+function normalizeWorkerDebug(debug: unknown): TailscaleWorkerErrorDebug | undefined {
+  return debug && typeof debug === 'object'
+    ? debug as TailscaleWorkerErrorDebug
+    : undefined;
+}
+
+function toTailscaleWorkerErrorPayload(
+  error: unknown,
+  fallbackCode: TailscaleWorkerErrorCode,
+  fallbackDebug?: TailscaleWorkerErrorDebug,
+): TailscaleWorkerErrorPayload {
+  if (error instanceof ClassifiedTailscaleWorkerError) {
+    return {
+      code: error.code,
+      message: error.message,
+      debug: error.debug ?? fallbackDebug,
+    };
+  }
+
+  const message = getErrorMessage(error);
+  const errorDebug =
+    error instanceof Error
+      ? normalizeWorkerDebug((error as Error & { debug?: unknown }).debug)
+      : error && typeof error === 'object'
+        ? normalizeWorkerDebug((error as Record<string, unknown>).debug)
+        : undefined;
+  const debug = errorDebug ?? fallbackDebug;
+
+  if (message.includes('only supports simple GET requests')) {
+    return { code: 'unsupported_fetch_shape', message, debug };
+  }
+  if (message.includes('Tailscale fetch timed out after')) {
+    return { code: 'fetch_timeout', message, debug };
+  }
+  if (
+    message.includes('Tailscale DNS could not resolve')
+    || message.includes('Public DNS query failed')
+    || isLoopbackDnsFailure(message, debug?.hostname ?? null)
+  ) {
+    return { code: 'dns_resolution_failed', message, debug };
+  }
+  if (
+    message.includes('ValueOf: invalid value')
+    || (panicError && message.includes(panicError))
+    || /\bpanic\b/i.test(message)
+  ) {
+    return { code: 'runtime_panic', message, debug };
+  }
+  if (isTlsSniFailure(message)) {
+    return { code: 'tls_sni_failed', message, debug };
+  }
+  return { code: fallbackCode, message, debug };
+}
+
+function getMinimalRuntimeFetchError(): string {
+  return (
+    'The bundled @tailscale/connect runtime only supports simple GET requests ' +
+    'without custom headers, bodies, or redirect overrides.'
+  );
+}
+
+/**
+ * Extracts the hostname from the hydrated state storage so that the IPN
+ * can reuse the existing machine identity instead of re-registering under
+ * a new random name (which causes the Go engine to discard persisted prefs
+ * like CorpDNS and recreate the profile from scratch).
+ */
+function extractHostnameFromStateStorage(): string | null {
+  const currentProfileHex = tailscaleStateStorage.getState('_current-profile');
+  if (!currentProfileHex) {
+    return null;
+  }
+
+  try {
+    const profileKey = hexToString(currentProfileHex);
+    const profileHex = tailscaleStateStorage.getState(profileKey);
+    if (!profileHex) {
+      return null;
+    }
+    const prefs = JSON.parse(hexToString(profileHex));
+    if (typeof prefs?.Hostname === 'string' && prefs.Hostname) {
+      return prefs.Hostname;
+    }
+  } catch {
+    // Fall through to random hostname.
+  }
+  return null;
+}
+
 async function ensureIpn(): Promise<TailscaleConnectIPN> {
   if (!ipnPromise) {
+    const storedHostname = extractHostnameFromStateStorage();
     ipnPromise = createWorkerIpn({
       authKey: '',
-      hostname: `almostnode-${Math.random().toString(36).slice(2, 8)}`,
+      hostname: storedHostname || `almostnode-${Math.random().toString(36).slice(2, 8)}`,
       stateStorage: tailscaleStateStorage as TailscaleConnectStateStorage,
       useExitNode: options.useExitNode,
       exitNodeId: options.exitNodeId,
+      acceptDns: options.acceptDns,
       wasmURL: tailscaleWasmUrl,
       panicHandler: (error: string) => {
         panicError = error;
+        updateDnsHealth(false, error);
         emitStatus();
       },
     })
@@ -998,35 +1589,447 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
   return ipnPromise;
 }
 
-async function handleFetch(
+/**
+ * Returns true when the hostname belongs to the Tailscale tailnet (matches a
+ * known node name or ends with `.ts.net`) and can be resolved by Go's internal
+ * DNS without risk of the WASM panic.
+ */
+function isTailscaleInternalHostname(hostname: string): boolean {
+  const normalized = normalizeName(hostname);
+  if (normalized.endsWith('.ts.net')) {
+    return true;
+  }
+  if (netMap) {
+    const candidates = [netMap.self, ...netMap.peers];
+    for (const node of candidates) {
+      const nodeName = normalizeName(node.name);
+      if (nodeName === normalized || nodeName.split('.')[0] === normalized) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function preparePublicHostnameIpMap(url: string): Promise<{
+  hostname: string | null;
+  ipAddress: string | null;
+  mappingChanged: boolean;
+}> {
+  const hostname = extractRequestHostname(url);
+  if (!hostname || isIPv4(hostname) || isIPv6(hostname) || isTailscaleInternalHostname(hostname)) {
+    return {
+      hostname,
+      ipAddress: null,
+      mappingChanged: false,
+    };
+  }
+
+  const resolved = await resolveHostnameWithoutIpn(hostname);
+  const ipAddress =
+    resolved?.addresses.find((address) => address.family === 4)?.address
+    ?? resolved?.addresses[0]?.address
+    ?? null;
+
+  if (!ipAddress) {
+    throw new ClassifiedTailscaleWorkerError(
+      'dns_resolution_failed',
+      `Tailscale DNS could not resolve public hostname '${hostname}'.`,
+    );
+  }
+
+  const normalizedHost = normalizeName(hostname);
+  const previousAddress = fetchIpMap.get(normalizedHost) ?? null;
+  const mappingChanged = previousAddress !== ipAddress;
+  fetchIpMap.set(normalizedHost, ipAddress);
+
+  console.log(
+    `[tailscale-worker] prepared public route: host=${hostname} ip=${ipAddress} changed=${mappingChanged ? 'yes' : 'no'}`,
+  );
+
+  return {
+    hostname,
+    ipAddress,
+    mappingChanged,
+  };
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isLoopbackDnsFailure(message: string, hostname: string | null): boolean {
+  const normalized = message.toLowerCase();
+  if (
+    !normalized.includes(' on [::1]:53')
+    && !normalized.includes(' on 127.0.0.1:53')
+    && !normalized.includes(' on localhost:53')
+  ) {
+    return false;
+  }
+
+  if (!hostname) {
+    return true;
+  }
+
+  return normalized.includes(`lookup ${hostname.toLowerCase()}`);
+}
+
+function buildDirectIpFallbackRequest(
   request: NetworkFetchRequest,
-): Promise<NetworkFetchResponse> {
-  const ipn = await ensureIpn();
-  const response = await ipn.fetch({
-    url: request.url,
+  hostname: string,
+  ipAddress: string,
+): Parameters<TailscaleConnectIPN['fetch']>[0] {
+  const url = new URL(request.url);
+  const originalHostHeader = url.host;
+  url.hostname = ipAddress;
+
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(request.headers || {})) {
+    if (key.toLowerCase() === 'host') {
+      continue;
+    }
+    headers[key] = value;
+  }
+  headers.Host = originalHostHeader;
+
+  const fallbackRequest: Exclude<Parameters<TailscaleConnectIPN['fetch']>[0], string> = {
+    url: url.toString(),
     method: request.method,
-    headers: request.headers,
+    headers,
     bodyBase64: request.bodyBase64,
     redirect: request.redirect === 'manual' || request.redirect === 'error'
       ? request.redirect
       : 'follow',
-  });
-  const bodyBase64 = response.bodyBase64 || encodeTextBody(await response.text());
+  };
+
+  if (url.protocol === 'https:') {
+    fallbackRequest.tlsServerName = hostname;
+  }
+
+  return fallbackRequest;
+}
+
+function shouldRetryWithResolvedIp(
+  error: unknown,
+  request: NetworkFetchRequest,
+  preparedRoute: {
+    hostname: string | null;
+    ipAddress: string | null;
+  },
+  capabilities: TailscaleBridgeCapabilities,
+): preparedRoute is { hostname: string; ipAddress: string } {
+  if (!preparedRoute.hostname || !preparedRoute.ipAddress || !capabilities.canStructuredFetch) {
+    return false;
+  }
+
+  try {
+    const url = new URL(request.url);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return isLoopbackDnsFailure(getErrorMessage(error), preparedRoute.hostname);
+}
+
+const TAILSCALE_FETCH_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(
+        new ClassifiedTailscaleWorkerError(
+          'fetch_timeout',
+          `Tailscale fetch timed out after ${ms}ms: ${label}`,
+        ),
+      ), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function handleFetch(
+  request: NetworkFetchRequest,
+): Promise<NetworkFetchResponse> {
+  const hadLiveIpn = ipnPromise !== null;
+  const fetchLabel = `${request.method || 'GET'} ${request.url}`;
+  console.log(`[tailscale-worker] fetch start: ${fetchLabel}`);
+  const fetchStart = Date.now();
+  let fetchDebug: TailscaleWorkerErrorDebug = {
+    phase: 'prepare_public_dns',
+    url: request.url,
+    useExitNode: options.useExitNode,
+    exitNodeId: options.exitNodeId,
+    hadLiveIpn,
+  };
+
+  try {
+    const preparedRoute = await preparePublicHostnameIpMap(request.url);
+    fetchDebug = {
+      ...fetchDebug,
+      hostname: preparedRoute.hostname,
+      ipAddress: preparedRoute.ipAddress,
+    };
+    fetchDebug = {
+      ...fetchDebug,
+      phase: 'ipn_start',
+    };
+    const ipn = await ensureIpn();
+    await ensureIpnStarted(ipn);
+
+    const capabilities = getTailscaleBridgeCapabilities(ipn);
+    fetchDebug = {
+      ...fetchDebug,
+      phase: 'primary_fetch',
+      capabilities,
+      attemptedIpMapSync: Boolean(preparedRoute.mappingChanged && capabilities.canReconfigure),
+    };
+    console.log(
+      `[tailscale-worker] fetch capabilities: structured=${capabilities.canStructuredFetch ? 'yes' : 'no'} reconfigure=${capabilities.canReconfigure ? 'yes' : 'no'} lookup=${capabilities.canLookup ? 'yes' : 'no'} liveIpn=${hadLiveIpn ? 'yes' : 'no'}`,
+    );
+
+    if (preparedRoute.mappingChanged) {
+      if (!capabilities.canReconfigure) {
+        if (hadLiveIpn) {
+          throw new ClassifiedTailscaleWorkerError(
+            'runtime_unavailable',
+            `Active Tailscale runtime cannot refresh public-host routing for '${preparedRoute.hostname}'.`,
+          );
+        }
+      } else {
+        console.log(
+          `[tailscale-worker] syncing ipMap before fetch: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
+        );
+        await applyCurrentIpnConfig(ipn);
+      }
+    }
+
+    let response: Awaited<ReturnType<TailscaleConnectIPN['fetch']>>;
+    let usedDirectIpFallback = false;
+    if (capabilities.canStructuredFetch) {
+      const fetchReq: Parameters<TailscaleConnectIPN['fetch']>[0] = {
+        url: request.url,
+        method: request.method,
+        headers: request.headers,
+        bodyBase64: request.bodyBase64,
+        redirect: request.redirect === 'manual' || request.redirect === 'error'
+          ? request.redirect
+          : 'follow',
+      };
+      try {
+        response = await withTimeout(ipn.fetch(fetchReq), TAILSCALE_FETCH_TIMEOUT_MS, fetchLabel);
+      } catch (primaryError) {
+        if (!shouldRetryWithResolvedIp(primaryError, request, preparedRoute, capabilities)) {
+          throw primaryError;
+        }
+
+        const primaryErrorMessage = getErrorMessage(primaryError);
+        const fallbackRequest = buildDirectIpFallbackRequest(
+          request,
+          preparedRoute.hostname,
+          preparedRoute.ipAddress,
+        );
+        const fallbackLabel = `${fetchLabel} [direct-ip fallback]`;
+        fetchDebug = {
+          ...fetchDebug,
+          phase: 'fallback_fetch',
+          fallbackAttempted: true,
+          fallbackStrategy: 'rewrite_to_resolved_ip',
+          primaryError: primaryErrorMessage,
+        };
+        console.warn(
+          `[tailscale-worker] primary fetch hit loopback DNS despite ipMap; retrying direct IP: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
+          fetchDebug,
+        );
+
+        try {
+          response = await withTimeout(
+            ipn.fetch(fallbackRequest),
+            TAILSCALE_FETCH_TIMEOUT_MS,
+            fallbackLabel,
+          );
+          usedDirectIpFallback = true;
+        } catch (fallbackError) {
+          const fallbackMessage = getErrorMessage(fallbackError);
+          const fallbackPayload = toTailscaleWorkerErrorPayload(
+            fallbackError,
+            'runtime_unavailable',
+            {
+              ...fetchDebug,
+              fallbackError: fallbackMessage,
+            },
+          );
+          throw new ClassifiedTailscaleWorkerError(
+            fallbackPayload.code,
+            `Tailscale runtime ignored ipMap for '${preparedRoute.hostname}' and direct-IP retry failed. Primary error: ${primaryErrorMessage}. Fallback error: ${fallbackPayload.message}`,
+            fallbackPayload.debug,
+          );
+        }
+      }
+    } else {
+      if (!isSimpleUrlOnlyFetchRequest(request)) {
+        throw new ClassifiedTailscaleWorkerError(
+          'unsupported_fetch_shape',
+          getMinimalRuntimeFetchError(),
+        );
+      }
+      response = await withTimeout(ipn.fetch(request.url), TAILSCALE_FETCH_TIMEOUT_MS, fetchLabel);
+    }
+
+    const elapsed = Date.now() - fetchStart;
+    console.log(
+      `[tailscale-worker] fetch complete: ${response.status} in ${elapsed}ms: ${fetchLabel}${usedDirectIpFallback ? ' (direct-ip fallback)' : ''}`,
+    );
+
+    const bodyBase64 = response.bodyBase64 || encodeTextBody(await response.text());
+
+    if (getEffectiveAcceptDns(options)) {
+      updateDnsHealth(true, null);
+    }
+
+    return {
+      url: usedDirectIpFallback ? request.url : (response.url || request.url),
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers || {},
+      bodyBase64,
+    };
+  } catch (error) {
+    const elapsed = Date.now() - fetchStart;
+    const formatted = toTailscaleWorkerErrorPayload(error, 'runtime_unavailable', fetchDebug);
+    console.warn(
+      `[tailscale-worker] fetch failed after ${elapsed}ms (${formatted.code}): ${fetchLabel}`,
+      formatted.debug
+        ? {
+            message: formatted.message,
+            debug: formatted.debug,
+          }
+        : formatted.message,
+    );
+    throw new ClassifiedTailscaleWorkerError(
+      formatted.code,
+      formatted.message,
+      formatted.debug,
+    );
+  }
+}
+
+function normalizeLookupAddresses(
+  hostname: string,
+  value: unknown,
+  family?: number,
+): NetworkLookupResult | null {
+  const requestedFamily = family === 6 ? 6 : family === 4 ? 4 : null;
+
+  const pushAddress = (
+    entries: Array<{ address: string; family: 4 | 6 }>,
+    address: unknown,
+  ): void => {
+    if (typeof address !== 'string' || !address) {
+      return;
+    }
+
+    const detectedFamily = isIPv6(address) ? 6 : isIPv4(address) ? 4 : null;
+    if (!detectedFamily) {
+      return;
+    }
+    if (requestedFamily && detectedFamily !== requestedFamily) {
+      return;
+    }
+    entries.push({ address, family: detectedFamily });
+  };
+
+  const addresses: Array<{ address: string; family: 4 | 6 }> = [];
+  if (typeof value === 'string') {
+    pushAddress(addresses, value);
+  } else if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'string') {
+        pushAddress(addresses, entry);
+        continue;
+      }
+      if (entry && typeof entry === 'object') {
+        const record = entry as Record<string, unknown>;
+        pushAddress(addresses, record.address ?? record.ip ?? record.value);
+      }
+    }
+  } else if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.addresses)) {
+      for (const entry of record.addresses) {
+        if (entry && typeof entry === 'object') {
+          const addressRecord = entry as Record<string, unknown>;
+          pushAddress(
+            addresses,
+            addressRecord.address ?? addressRecord.ip ?? addressRecord.value,
+          );
+        } else {
+          pushAddress(addresses, entry);
+        }
+      }
+    } else {
+      pushAddress(addresses, record.address ?? record.ip ?? record.value);
+    }
+  }
+
+  if (addresses.length === 0) {
+    return null;
+  }
 
   return {
-    url: response.url || request.url,
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers || {},
-    bodyBase64,
+    hostname,
+    addresses,
   };
+}
+
+async function lookupViaDynamicIpnMethod(
+  ipn: TailscaleConnectIPN,
+  hostname: string,
+  lookupOptions?: NetworkLookupOptions,
+): Promise<NetworkLookupResult | null> {
+  const capabilities = getTailscaleBridgeCapabilities(ipn);
+  if (!capabilities.canLookup) {
+    return null;
+  }
+
+  const ipnRecord = ipn as unknown as Record<string, unknown>;
+  const candidateMethods = ['lookup', 'resolve'];
+
+  for (const methodName of candidateMethods) {
+    const method = ipnRecord[methodName];
+    if (typeof method !== 'function') {
+      continue;
+    }
+
+    try {
+      const value = await (method as (hostname: string) => Promise<unknown>)(hostname);
+      const normalized = normalizeLookupAddresses(
+        hostname,
+        value,
+        lookupOptions?.family,
+      );
+      if (normalized) {
+        return normalized;
+      }
+    } catch (error) {
+      updateDnsHealth(false, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  return null;
 }
 
 async function handleLookup(
   hostname: string,
   lookupOptions?: NetworkLookupOptions,
 ): Promise<NetworkLookupResult> {
-  await ensureIpn();
+  const ipn = await ensureIpn();
+  await ensureIpnStarted(ipn);
 
   if (isIPv4(hostname)) {
     return {
@@ -1044,10 +2047,25 @@ async function handleLookup(
 
   const fromNetMap = collectLookupAddresses(hostname, lookupOptions);
   if (fromNetMap && fromNetMap.addresses.length > 0) {
+    updateDnsHealth(true, null);
     return fromNetMap;
   }
 
-  throw new Error(`Tailscale peer not found for '${hostname}'.`);
+  const fromResolver = await resolveHostnameWithoutIpn(hostname, lookupOptions);
+  if (fromResolver && fromResolver.addresses.length > 0) {
+    updateDnsHealth(true, null);
+    return fromResolver;
+  }
+
+  const fromIpn = await lookupViaDynamicIpnMethod(ipn, hostname, lookupOptions);
+  if (fromIpn && fromIpn.addresses.length > 0) {
+    updateDnsHealth(true, null);
+    return fromIpn;
+  }
+
+  const detail = `Tailscale DNS could not resolve '${hostname}'.`;
+  updateDnsHealth(false, detail);
+  throw new Error(detail);
 }
 
 type TailscaleWorkerResponseValue = Extract<
@@ -1056,7 +2074,7 @@ type TailscaleWorkerResponseValue = Extract<
 >['value'];
 
 function sendResponse(id: number, ok: true, value: TailscaleWorkerResponseValue): void;
-function sendResponse(id: number, ok: false, error: string): void;
+function sendResponse(id: number, ok: false, error: TailscaleWorkerErrorPayload): void;
 function sendResponse(id: number, ok: boolean, valueOrError: unknown): void {
   const message: TailscaleWorkerEvent = ok
     ? {
@@ -1065,11 +2083,11 @@ function sendResponse(id: number, ok: boolean, valueOrError: unknown): void {
         ok: true,
         value: valueOrError as TailscaleWorkerResponseValue,
       }
-    : {
+      : {
         type: 'response',
         id,
         ok: false,
-        error: String(valueOrError),
+        error: valueOrError as TailscaleWorkerErrorPayload,
       };
   self.postMessage(message);
 }
@@ -1085,12 +2103,13 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
         break;
       case 'configure':
         options = request.options;
+        panicError = null;
+        if (!getEffectiveAcceptDns(options)) {
+          updateDnsHealth(null, null);
+        }
         if (ipnPromise) {
           const ipn = await ipnPromise;
-          await ipn.configure({
-            useExitNode: options.useExitNode,
-            exitNodeId: options.exitNodeId,
-          });
+          await applyCurrentIpnConfig(ipn);
           emitStatus();
         }
         sendResponse(request.id, true, null);
@@ -1098,14 +2117,14 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
       case 'getStatus':
         if (options.provider === 'tailscale') {
           const ipn = await ensureIpn();
-          ensureIpnStarted(ipn);
+          void ensureIpnStarted(ipn).catch(handleIpnError);
         }
         sendResponse(request.id, true, mapState());
         break;
       case 'login': {
         const ipn = await ensureIpn();
         sendResponse(request.id, true, mapState());
-        ensureIpnStarted(ipn);
+        void ensureIpnStarted(ipn).catch(handleIpnError);
         setTimeout(() => {
           try {
             ipn.login();
@@ -1116,13 +2135,17 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
         break;
       }
       case 'logout':
+        allowSnapshotClear = true;
         if (ipnPromise) {
           const ipn = await ipnPromise;
           ipn.logout();
         }
+        fetchIpMap.clear();
         state = 'NeedsLogin';
         loginUrl = null;
         tailscaleStateStorage.clear();
+        panicError = null;
+        updateDnsHealth(null, null);
         emitStatus();
         sendResponse(request.id, true, mapState());
         break;
@@ -1141,7 +2164,7 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
     sendResponse(
       request.id,
       false,
-      error instanceof Error ? error.message : String(error),
+      toTailscaleWorkerErrorPayload(error, 'runtime_unavailable'),
     );
   }
 });

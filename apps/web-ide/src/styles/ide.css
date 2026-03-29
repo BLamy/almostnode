@@ -583,45 +583,162 @@ html[data-almostnode-theme="light"] #webideWorkbench {
 .almostnode-opencode-surface__status-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.75rem;
   padding: 0.55rem 0.85rem;
   border-bottom: 1px solid var(--almostnode-toolbar-border, var(--panel-border));
   background: var(--almostnode-toolbar-bg, rgba(255, 255, 255, 0.02));
 }
 
-.almostnode-opencode-surface__status {
-  min-width: 0;
-  font-size: 0.74rem;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: "IBM Plex Mono", monospace;
-}
-
-.almostnode-opencode-surface__tabs,
-.almostnode-opencode-surface__actions {
+.almostnode-opencode-surface__tabs {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-}
-
-.almostnode-opencode-surface__tabs {
   min-width: 0;
   flex: 1 1 auto;
   overflow-x: auto;
   scrollbar-width: thin;
 }
 
+.almostnode-opencode-surface__launcher {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.almostnode-opencode-surface__split-button {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--almostnode-toolbar-border, var(--panel-border));
+  border-radius: 999px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)),
+    var(--almostnode-button-bg, rgba(255, 255, 255, 0.04));
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.16);
+}
+
+.almostnode-opencode-surface__launcher-primary,
+.almostnode-opencode-surface__launcher-toggle,
+.almostnode-opencode-surface__menu-item,
 .almostnode-opencode-surface__tab,
-.almostnode-opencode-surface__new-tab,
 .almostnode-opencode-surface__tab-close {
   appearance: none;
+  font: inherit;
+}
+
+.almostnode-opencode-surface__launcher-primary,
+.almostnode-opencode-surface__launcher-toggle,
+.almostnode-opencode-surface__menu-item {
+  border: 0;
+  background: transparent;
+  color: var(--almostnode-button-fg, var(--text));
+}
+
+.almostnode-opencode-surface__launcher-primary,
+.almostnode-opencode-surface__launcher-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  min-height: 2rem;
+}
+
+.almostnode-opencode-surface__launcher-primary {
+  gap: 0.55rem;
+  padding: 0.32rem 0.9rem 0.32rem 0.75rem;
+  font-weight: 600;
+}
+
+.almostnode-opencode-surface__launcher-plus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.almostnode-opencode-surface__launcher-label {
+  letter-spacing: 0.01em;
+}
+
+.almostnode-opencode-surface__launcher-toggle {
+  width: 2rem;
+  border-left: 1px solid
+    var(--almostnode-toolbar-border, var(--panel-border));
+  color: var(--muted);
+}
+
+.almostnode-opencode-surface__launcher-primary:hover,
+.almostnode-opencode-surface__launcher-toggle:hover {
+  background: var(--almostnode-button-hover-bg, rgba(255, 255, 255, 0.08));
+  color: var(--text);
+}
+
+.almostnode-opencode-surface__hint {
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.almostnode-opencode-surface__menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 12;
+  min-width: 18rem;
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.45rem;
+  border-radius: 1rem;
+  border: 1px solid var(--almostnode-toolbar-border, var(--panel-border));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
+    color-mix(
+      in srgb,
+      var(--almostnode-surface-alt-bg, #111b27) 96%,
+      transparent
+    );
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+}
+
+.almostnode-opencode-surface__menu-item {
+  display: grid;
+  gap: 0.18rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.almostnode-opencode-surface__menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.almostnode-opencode-surface__menu-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.almostnode-opencode-surface__menu-detail {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.almostnode-opencode-surface__tab,
+.almostnode-opencode-surface__tab-close {
   border: 1px solid var(--almostnode-toolbar-border, var(--panel-border));
   background: var(--almostnode-button-bg, rgba(255, 255, 255, 0.04));
   color: var(--almostnode-button-fg, var(--muted));
-  font: inherit;
 }
 
 .almostnode-opencode-surface__tab {
@@ -643,23 +760,18 @@ html[data-almostnode-theme="light"] #webideWorkbench {
   white-space: nowrap;
 }
 
-.almostnode-opencode-surface__tab-close,
-.almostnode-opencode-surface__new-tab {
+.almostnode-opencode-surface__tab-close {
   border-radius: 999px;
   width: 1.6rem;
   height: 1.6rem;
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-}
-
-.almostnode-opencode-surface__tab-close {
-  padding: 0;
   font-size: 0.72rem;
 }
 
-.almostnode-opencode-surface__new-tab:hover,
 .almostnode-opencode-surface__tab:hover,
 .almostnode-opencode-surface__tab-close:hover {
   border-color: var(--accent);
@@ -700,7 +812,6 @@ html[data-almostnode-theme="light"] #webideWorkbench {
   background: transparent !important;
 }
 
-/* Loading overlay */
 .almostnode-opencode-surface__loading {
   position: absolute;
   inset: 0;

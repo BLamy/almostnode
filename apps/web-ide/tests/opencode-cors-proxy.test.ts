@@ -8,6 +8,7 @@ const networkMocks = vi.hoisted(() => {
       useExitNode: true,
       exitNodeId: null,
       corsProxy: null,
+      tailscaleConnected: true,
     })),
   };
 
@@ -128,5 +129,27 @@ describe("OpenCode CORS proxy shim", () => {
     expect((request as Request).headers.has("anthropic-dangerous-direct-browser-access")).toBe(false);
     expect(await (request as Request).text()).toContain("claude-sonnet-4-20250514");
     expect(await response.text()).toBe("tailnet-response");
+  });
+
+  it("does not fall back to the browser proxy when the tailscale fetch fails", async () => {
+    networkMocks.selectNetworkRouteForUrl.mockReturnValue("tailscale");
+    networkMocks.networkFetch.mockRejectedValue(new Error("fetch_timeout"));
+
+    const browserFetch = vi.fn<typeof fetch>();
+    globalThis.fetch = browserFetch;
+
+    const fetchFn = createProxiedFetch("test-key");
+
+    await expect(fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514" }),
+    })).rejects.toThrow("fetch_timeout");
+
+    expect(networkMocks.networkFetch).toHaveBeenCalledTimes(1);
+    expect(browserFetch).not.toHaveBeenCalled();
   });
 });

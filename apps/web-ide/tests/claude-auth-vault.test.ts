@@ -593,6 +593,41 @@ describe('Keychain', () => {
     ]);
   });
 
+  it('stores and restores Claude auth/config in the shared v2 keychain format', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const vfs = new VirtualFS();
+    const kc = createKeychain(vfs);
+
+    await kc.init();
+    const auth = writeClaudeAuth(vfs, 'claude-alpha');
+    const config = writeClaudeConfig(vfs, 'dark');
+    await flushWatcher();
+    await kc.handlePrimaryAction();
+
+    const stored = parseStoredKeychain(localStorage.getItem(KEYCHAIN_STORAGE_KEY));
+    expect(stored?.slots).toEqual([
+      {
+        name: 'claude',
+        paths: [
+          CLAUDE_AUTH_CREDENTIALS_PATH,
+          CLAUDE_AUTH_CONFIG_PATH,
+          CLAUDE_LEGACY_CONFIG_PATH,
+        ],
+      },
+    ]);
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+    await freshKc.handlePrimaryAction();
+
+    expect(freshVfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, 'utf8')).toBe(auth);
+    expect(freshVfs.readFileSync(CLAUDE_AUTH_CONFIG_PATH, 'utf8')).toBe(config.nestedConfig);
+    expect(freshVfs.readFileSync(CLAUDE_LEGACY_CONFIG_PATH, 'utf8')).toBe(config.legacyConfig);
+  });
+
   it('persists GitHub token alongside Claude auth via persistCurrentState', async () => {
     vi.useFakeTimers();
     installWebAuthnMock();
@@ -880,6 +915,33 @@ describe('Keychain', () => {
     await expect(freshKc.prepareForCommand('opencode')).resolves.toBe(true);
 
     expect(freshVfs.readFileSync(OPENCODE_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshKc.getState().hasLiveCredentials).toBe(true);
+  });
+
+  it('auto-restores saved Claude auth before claude-code commands run', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    const auth = writeClaudeAuth(setupVfs, 'claude-prepare');
+    writeClaudeConfig(setupVfs, 'light');
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    expect(freshKc.getState().hasLiveCredentials).toBe(false);
+
+    await expect(
+      freshKc.prepareForCommand('npx @anthropic-ai/claude-code'),
+    ).resolves.toBe(true);
+
+    expect(freshVfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, 'utf8')).toBe(auth);
     expect(freshKc.getState().hasLiveCredentials).toBe(true);
   });
 

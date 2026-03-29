@@ -93,7 +93,7 @@ describe("KeychainSidebarSurface", () => {
     expect(actions).toEqual(["select-exit-node:tailscale:node-sfo"]);
   });
 
-  it("can render a logout action for tailscale even when the slot is not active", () => {
+  it("can render a login action for tailscale when the session needs authentication", () => {
     const surface = new KeychainSidebarSurface();
     const actions: string[] = [];
     surface.setActionHandler((action) => {
@@ -109,20 +109,64 @@ describe("KeychainSidebarSurface", () => {
           label: "Tailscale",
           active: false,
           canAuth: true,
-          authAction: "logout:tailscale",
-          statusText: "NeedsLogin",
+          authAction: "login:tailscale",
+          statusText: "Needs login",
         },
       ],
       { hasStoredVault: false, supported: true },
     );
 
     const button = Array.from(container.querySelectorAll("button")).find(
-      (candidate) => candidate.textContent === "Logout",
+      (candidate) => candidate.textContent === "Login",
     ) as HTMLButtonElement | undefined;
 
     expect(button).toBeTruthy();
     button?.click();
 
-    expect(actions).toEqual(["logout:tailscale"]);
+    expect(actions).toEqual(["login:tailscale"]);
+  });
+
+  it("renders a placeholder when exit nodes exist but none is actually selected", () => {
+    const surface = new KeychainSidebarSurface();
+    const actions: string[] = [];
+    surface.setActionHandler((action) => {
+      actions.push(action);
+    });
+
+    const container = document.createElement("div");
+    surface.attach(container);
+    surface.update(
+      [
+        {
+          name: "tailscale",
+          label: "Tailscale",
+          active: true,
+          canAuth: true,
+          statusText: "Running, choose an exit node",
+          selectActionPrefix: "select-exit-node:tailscale",
+          selectOptions: [{ value: "node-self", label: "bretts-macbook-air" }],
+        },
+      ],
+      { hasStoredVault: false, supported: true },
+    );
+
+    const select = container.querySelector("select") as HTMLSelectElement | null;
+    expect(select).not.toBeNull();
+    expect(select?.value).toBe("");
+    expect(
+      Array.from(select!.options).map((option) => ({
+        value: option.value,
+        text: option.textContent,
+        disabled: option.disabled,
+      })),
+    ).toEqual([
+      { value: "", text: "Choose…", disabled: true },
+      { value: "node-self", text: "bretts-macbook-air", disabled: false },
+    ]);
+
+    select!.value = "node-self";
+    select!.dispatchEvent(new window.Event("change", { bubbles: true }));
+
+    expect(actions).toEqual(["select-exit-node:tailscale:node-self"]);
   });
 });

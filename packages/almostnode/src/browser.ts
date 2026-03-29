@@ -27,3 +27,33 @@ export type {
 export { createProcess } from "./shims/process";
 export type { Process, ProcessEnv } from "./shims/process";
 export * as stream from "./shims/stream";
+export * as network from "./network";
+export type {
+  NetworkController,
+  NetworkExitNode,
+  NetworkFetchRequest,
+  NetworkFetchResponse,
+  NetworkIntegration,
+  NetworkLookupAddress,
+  NetworkLookupOptions,
+  NetworkLookupResult,
+  NetworkOptions,
+  NetworkProvider,
+  PersistedNetworkSession,
+  NetworkRoute,
+  NetworkState,
+  NetworkStatus,
+  TailscaleAdapter,
+  TailscaleAdapterFactory,
+  TailscaleAdapterStatus,
+} from "./network";
+export {
+  createNetworkSessionPersistence,
+  createTailscaleSessionPersistence,
+  parsePersistedNetworkSession,
+  parseTailscaleStateSnapshot,
+  PERSISTED_NETWORK_SESSION_STORAGE_KEY,
+  serializePersistedNetworkSession,
+  serializeTailscaleStateSnapshot,
+  TAILSCALE_SESSION_STORAGE_KEY,
+} from "./network";

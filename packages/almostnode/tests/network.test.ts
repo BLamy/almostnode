@@ -12,6 +12,7 @@ import type {
   NetworkFetchRequest,
   NetworkFetchResponse,
   NetworkLookupResult,
+  NetworkOptions,
   TailscaleAdapter,
   TailscaleAdapterStatus,
 } from '../src/network/types';
@@ -20,6 +21,7 @@ class FakeTailscaleAdapter implements TailscaleAdapter {
   private status: TailscaleAdapterStatus = { state: 'needs-login' };
   public fetches: NetworkFetchRequest[] = [];
   public getStatusCalls = 0;
+  public configuredOptions: Array<Required<NetworkOptions>> = [];
 
   constructor(
     private readonly onStatus: (status: TailscaleAdapterStatus) => void,
@@ -45,6 +47,10 @@ class FakeTailscaleAdapter implements TailscaleAdapter {
     this.status = { state: 'stopped' };
     this.onStatus(this.status);
     return this.status;
+  }
+
+  async configure(options: Required<NetworkOptions>): Promise<void> {
+    this.configuredOptions.push({ ...options });
   }
 
   async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
@@ -90,7 +96,15 @@ describe('network controller', () => {
     expect(
       selectNetworkRouteForUrl(
         'https://app.example.com/api/data',
-        { provider: 'tailscale', authMode: 'interactive', useExitNode: true, exitNodeId: null, corsProxy: null },
+        {
+          provider: 'tailscale',
+          authMode: 'interactive',
+          useExitNode: true,
+          exitNodeId: null,
+          acceptDns: true,
+          corsProxy: null,
+          tailscaleConnected: true,
+        },
         { origin: 'https://app.example.com' },
       ),
     ).toBe('browser');
@@ -100,39 +114,90 @@ describe('network controller', () => {
     expect(
       selectNetworkRouteForUrl(
         'https://db.ts.net/status',
-        { provider: 'tailscale', authMode: 'interactive', useExitNode: false, exitNodeId: null, corsProxy: null },
+        {
+          provider: 'tailscale',
+          authMode: 'interactive',
+          useExitNode: false,
+          exitNodeId: null,
+          acceptDns: true,
+          corsProxy: null,
+          tailscaleConnected: false,
+        },
         { origin: 'https://app.example.com' },
       ),
     ).toBe('tailscale');
   });
 
-  it('routes public URLs through browser unless exit-node mode is enabled', () => {
+  it('routes public URLs through tailscale only after the exit-node session is connected', () => {
     const baseOptions = {
       provider: 'tailscale' as const,
       authMode: 'interactive' as const,
+      acceptDns: true,
       corsProxy: null,
     };
 
     expect(
       selectNetworkRouteForUrl(
         'https://registry.npmjs.org/react',
-        { ...baseOptions, useExitNode: true, exitNodeId: null },
+        {
+          ...baseOptions,
+          useExitNode: true,
+          exitNodeId: null,
+          tailscaleConnected: false,
+        },
         { origin: 'https://app.example.com' },
       ),
     ).toBe('browser');
 
     expect(
       selectNetworkRouteForUrl(
+        'https://platform.claude.com/oauth/token',
+        {
+          ...baseOptions,
+          useExitNode: false,
+          exitNodeId: null,
+          tailscaleConnected: true,
+        },
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('browser');
+
+    // npm module resolution stays on browser even when connected
+    expect(
+      selectNetworkRouteForUrl(
         'https://registry.npmjs.org/react',
-        { ...baseOptions, useExitNode: false, exitNodeId: null },
+        {
+          ...baseOptions,
+          useExitNode: true,
+          exitNodeId: 'node-sfo',
+          tailscaleConnected: true,
+        },
         { origin: 'https://app.example.com' },
       ),
     ).toBe('browser');
 
     expect(
       selectNetworkRouteForUrl(
-        'https://registry.npmjs.org/react',
-        { ...baseOptions, useExitNode: true, exitNodeId: 'node-sfo' },
+        'https://platform.claude.com/oauth/token',
+        {
+          ...baseOptions,
+          useExitNode: true,
+          exitNodeId: 'node-sfo',
+          tailscaleConnected: true,
+        },
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('tailscale');
+
+    expect(
+      selectNetworkRouteForUrl(
+        'https://api.anthropic.com/v1/messages',
+        {
+          ...baseOptions,
+          useExitNode: true,
+          exitNodeId: 'node-sfo',
+          tailscaleConnected: true,
+        },
         { origin: 'https://app.example.com' },
       ),
     ).toBe('tailscale');
@@ -172,7 +237,70 @@ describe('network controller', () => {
     expect(curlResult.stdout).toBe('tailnet-response');
   });
 
-  it('routes public fetches through tailscale once login reports a selected exit node', async () => {
+  it('routes Claude public fetches through tailscale once login reports a selected exit node', async () => {
+    const createdAdapters: FakeTailscaleAdapter[] = [];
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const adapter = new FakeTailscaleAdapter(onStatus);
+      createdAdapters.push(adapter);
+      return adapter;
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await controller.login();
+
+    const response = await controller.fetch({
+      url: 'https://platform.claude.com/oauth/token',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(createdAdapters[0]?.fetches).toHaveLength(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(controller.getConfig().exitNodeId).toBe('node-sfo');
+    expect(createdAdapters[0]?.configuredOptions.at(-1)).toMatchObject({
+      exitNodeId: 'node-sfo',
+      useExitNode: true,
+    });
+  });
+
+  it('routes public POST requests through tailscale when exit-node is connected', async () => {
+    const createdAdapters: FakeTailscaleAdapter[] = [];
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const adapter = new FakeTailscaleAdapter(onStatus);
+      createdAdapters.push(adapter);
+      return adapter;
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await controller.login();
+
+    const response = await controller.fetch({
+      url: 'https://api.anthropic.com/v1/messages',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'test-key',
+      },
+      bodyBase64: Buffer.from('{"model":"claude-sonnet-4-20250514"}').toString('base64'),
+    });
+
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(createdAdapters[0]?.fetches).toHaveLength(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps npm module resolution on browser transport even when tailscale is connected', async () => {
     const createdAdapters: FakeTailscaleAdapter[] = [];
     setTailscaleAdapterFactory(async (_options, onStatus) => {
       const adapter = new FakeTailscaleAdapter(onStatus);
@@ -194,10 +322,178 @@ describe('network controller', () => {
       headers: {},
     });
 
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('browser-response');
+    expect(createdAdapters[0]?.fetches).toHaveLength(0);
+    expect(nativeFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces public tailscale fetch failures without browser fallback', async () => {
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const status = {
+        state: 'running' as const,
+        selectedExitNodeId: 'node-sfo',
+      };
+      onStatus(status);
+      return {
+        async getStatus(): Promise<TailscaleAdapterStatus> {
+          return status;
+        },
+        async login(): Promise<TailscaleAdapterStatus> {
+          return status;
+        },
+        async logout(): Promise<TailscaleAdapterStatus> {
+          return { state: 'stopped' };
+        },
+        async fetch(): Promise<NetworkFetchResponse> {
+          throw new Error('TLS certificate validation failed');
+        },
+        async lookup(): Promise<NetworkLookupResult> {
+          return { hostname: '', addresses: [] };
+        },
+      };
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await expect(controller.fetch({
+      url: 'https://api.anthropic.com/v1/messages',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      bodyBase64: Buffer.from('{}').toString('base64'),
+    })).rejects.toThrow('TLS certificate validation failed');
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it('surfaces tailnet-internal fetch failures without browser fallback', async () => {
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const status = {
+        state: 'running' as const,
+        selectedExitNodeId: 'node-sfo',
+      };
+      onStatus(status);
+      return {
+        async getStatus(): Promise<TailscaleAdapterStatus> {
+          return status;
+        },
+        async login(): Promise<TailscaleAdapterStatus> {
+          return status;
+        },
+        async logout(): Promise<TailscaleAdapterStatus> {
+          return { state: 'stopped' };
+        },
+        async fetch(): Promise<NetworkFetchResponse> {
+          throw new Error('tailnet peer refused connection');
+        },
+        async lookup(): Promise<NetworkLookupResult> {
+          return { hostname: 'db.ts.net', addresses: [] };
+        },
+      };
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await expect(controller.fetch({
+      url: 'https://db.ts.net/status',
+      method: 'GET',
+      headers: {},
+    })).rejects.toThrow('tailnet peer refused connection');
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it('routes generic public fetches through tailscale after tailscale login', async () => {
+    const createdAdapters: FakeTailscaleAdapter[] = [];
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const adapter = new FakeTailscaleAdapter(onStatus);
+      createdAdapters.push(adapter);
+      return adapter;
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await controller.login();
+
+    const response = await controller.fetch({
+      url: 'https://opencode.ai/install',
+      method: 'GET',
+      headers: {},
+    });
+
     expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
     expect(createdAdapters[0]?.fetches).toHaveLength(1);
     expect(nativeFetch).not.toHaveBeenCalled();
-    expect(controller.getConfig().exitNodeId).toBe('node-sfo');
+    expect(controller.getConfig().tailscaleConnected).toBe(true);
+  });
+
+  it('refreshes tailscale status before the first public fetch so persisted sessions bypass the proxy', async () => {
+    const fetches: NetworkFetchRequest[] = [];
+    let getStatusCalls = 0;
+
+    setTailscaleAdapterFactory(async (_options, onStatus) => ({
+      async getStatus(): Promise<TailscaleAdapterStatus> {
+        getStatusCalls += 1;
+        const status = {
+          state: 'running' as const,
+          selectedExitNodeId: 'node-sfo',
+        };
+        onStatus(status);
+        return status;
+      },
+      async login(): Promise<TailscaleAdapterStatus> {
+        return {
+          state: 'running',
+          selectedExitNodeId: 'node-sfo',
+        };
+      },
+      async logout(): Promise<TailscaleAdapterStatus> {
+        return { state: 'stopped' };
+      },
+      async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
+        fetches.push(request);
+        return {
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'text/plain' },
+          bodyBase64: Buffer.from('tailnet-response').toString('base64'),
+        };
+      },
+      async lookup(): Promise<NetworkLookupResult> {
+        return {
+          hostname: 'db.ts.net',
+          addresses: [{ address: '100.100.100.100', family: 4 }],
+        };
+      },
+    }));
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    const response = await controller.fetch({
+      url: 'https://opencode.ai/install',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(fetches).toHaveLength(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(getStatusCalls).toBe(1);
+    expect(controller.getConfig().tailscaleConnected).toBe(true);
   });
 
   it('boots the tailscale adapter on getStatus when tailscale is already selected', async () => {
@@ -215,6 +511,168 @@ describe('network controller', () => {
     expect(createdAdapters[0]?.getStatusCalls).toBe(1);
     expect(status.state).toBe('needs-login');
     expect(status.provider).toBe('tailscale');
+  });
+
+  it('hydrates runtime-owned tailscale sessions and persists updated config', async () => {
+    const adapterOptions: Array<Record<string, unknown>> = [];
+    const loadSession = vi.fn(async () => ({
+      provider: 'tailscale' as const,
+      useExitNode: true,
+      exitNodeId: 'node-ord',
+      acceptDns: false,
+      stateSnapshot: { profile: 'alpha' },
+    }));
+    const saveSession = vi.fn(async () => {});
+
+    setTailscaleAdapterFactory(async (options) => {
+      adapterOptions.push({ ...options });
+      return {
+        async configure(nextOptions): Promise<void> {
+          adapterOptions.push({ ...nextOptions });
+        },
+        async getStatus(): Promise<TailscaleAdapterStatus> {
+          return {
+            state: 'running',
+            selectedExitNodeId: 'node-ord',
+            dnsEnabled: false,
+            dnsHealthy: true,
+          };
+        },
+        async login(): Promise<TailscaleAdapterStatus> {
+          return {
+            state: 'running',
+            selectedExitNodeId: 'node-ord',
+            dnsEnabled: false,
+            dnsHealthy: true,
+          };
+        },
+        async logout(): Promise<TailscaleAdapterStatus> {
+          return { state: 'stopped' };
+        },
+        async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
+          return {
+            url: request.url,
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            bodyBase64: '',
+          };
+        },
+        async lookup(): Promise<NetworkLookupResult> {
+          return {
+            hostname: 'db.ts.net',
+            addresses: [{ address: '100.100.100.100', family: 4 }],
+          };
+        },
+      };
+    });
+
+    const controller = createNetworkController(
+      {},
+      {
+        loadSession,
+        saveSession,
+      },
+    );
+
+    const status = await controller.getStatus();
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    expect(status.provider).toBe('tailscale');
+    expect(status.dnsEnabled).toBe(false);
+    expect(controller.getConfig()).toMatchObject({
+      provider: 'tailscale',
+      useExitNode: true,
+      exitNodeId: 'node-ord',
+      acceptDns: false,
+    });
+    expect(adapterOptions[0]).toMatchObject({
+      provider: 'tailscale',
+      useExitNode: true,
+      exitNodeId: 'node-ord',
+      acceptDns: false,
+    });
+
+    await controller.configure({ exitNodeId: 'node-sfo' });
+
+    expect(saveSession).toHaveBeenLastCalledWith({
+      provider: 'tailscale',
+      useExitNode: true,
+      exitNodeId: 'node-sfo',
+      acceptDns: false,
+      stateSnapshot: { profile: 'alpha' },
+    });
+  });
+
+  it('retains a hydrated tailscale snapshot while status refresh resumes directly to running', async () => {
+    const loadSession = vi.fn(async () => ({
+      provider: 'tailscale' as const,
+      useExitNode: true,
+      exitNodeId: 'node-ord',
+      acceptDns: false,
+      stateSnapshot: { profile: 'alpha' },
+    }));
+    const saveSession = vi.fn(async () => {});
+
+    setTailscaleAdapterFactory(async (_options, onStatus) => ({
+      async getStatus(): Promise<TailscaleAdapterStatus> {
+        const status = {
+          state: 'running' as const,
+          selectedExitNodeId: 'node-ord',
+          dnsEnabled: false,
+          dnsHealthy: true,
+        };
+        onStatus(status);
+        return status;
+      },
+      async login(): Promise<TailscaleAdapterStatus> {
+        return {
+          state: 'running',
+          selectedExitNodeId: 'node-ord',
+          dnsEnabled: false,
+          dnsHealthy: true,
+        };
+      },
+      async logout(): Promise<TailscaleAdapterStatus> {
+        return { state: 'stopped' };
+      },
+      async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
+        return {
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          bodyBase64: '',
+        };
+      },
+      async lookup(): Promise<NetworkLookupResult> {
+        return {
+          hostname: 'db.ts.net',
+          addresses: [{ address: '100.100.100.100', family: 4 }],
+        };
+      },
+    }));
+
+    const controller = createNetworkController(
+      {},
+      {
+        loadSession,
+        saveSession,
+      },
+    );
+
+    const status = await controller.getStatus();
+
+    expect(status.state).toBe('running');
+    expect(status.provider).toBe('tailscale');
+    await vi.waitFor(() => {
+      expect(saveSession).toHaveBeenLastCalledWith({
+        provider: 'tailscale',
+        useExitNode: true,
+        exitNodeId: 'node-ord',
+        acceptDns: false,
+        stateSnapshot: { profile: 'alpha' },
+      });
+    });
   });
 
   it('falls back to browser fetch for public HTTP when tailscale is not selected', async () => {
