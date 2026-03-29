@@ -65,4 +65,78 @@ describe('Claude command environment', () => {
       }
     }
   });
+
+  it('reads Claude history transcripts one JSON line at a time', async () => {
+    const container = createContainer();
+
+    container.vfs.writeFileSync(
+      '/project/history.jsonl',
+      [
+        JSON.stringify({
+          type: 'file-history-snapshot',
+          messageId: 'm1',
+          snapshot: { messageId: 'm1', trackedFileBackups: {}, timestamp: '2026-03-29T18:31:32.024Z' },
+          isSnapshotUpdate: false,
+        }),
+        JSON.stringify({
+          parentUuid: null,
+          isSidechain: false,
+          promptId: 'p1',
+          type: 'user',
+          message: { role: 'user', content: 'hey' },
+          uuid: 'm1',
+          timestamp: '2026-03-29T18:31:32.024Z',
+        }),
+        JSON.stringify({
+          parentUuid: 'm1',
+          isSidechain: false,
+          type: 'assistant',
+          uuid: 'm2',
+          timestamp: '2026-03-29T18:31:37.292Z',
+          message: {
+            model: 'claude-opus-4-6',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Hey! How can I help you today?' }],
+          },
+        }),
+      ].join('\n'),
+    );
+
+    container.vfs.writeFileSync(
+      '/project/read-history.js',
+      [
+        "const fs = require('fs/promises');",
+        '',
+        '(async () => {',
+        "  const transcript = await fs.readFile('/project/history.jsonl');",
+        '  const parsed = [];',
+        '  let offset = 0;',
+        '',
+        '  while (offset < transcript.length) {',
+        '    let newlineIndex = transcript.indexOf(10, offset);',
+        '    if (newlineIndex === -1) newlineIndex = transcript.length;',
+        '',
+        "    const line = transcript.toString('utf8', offset, newlineIndex).trim();",
+        '    offset = newlineIndex + 1;',
+        '',
+        '    if (line) parsed.push(JSON.parse(line));',
+        '  }',
+        '',
+        '  console.log(JSON.stringify(parsed.map(entry => entry.type)));',
+        '})().catch((error) => {',
+        "  console.error(error && error.stack ? error.stack : String(error));",
+        '  process.exit(1);',
+        '});',
+      ].join('\n'),
+    );
+
+    const result = await container.run('node /project/read-history.js');
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual([
+      'file-history-snapshot',
+      'user',
+      'assistant',
+    ]);
+  });
 });

@@ -9,6 +9,19 @@ import { uint8ToBase64, uint8ToHex, uint8ToBinaryString } from '../utils/binary-
 const _encoder = new TextEncoder();
 const _decoder = new TextDecoder('utf-8');
 
+function normalizeBufferBoundary(value: number | undefined, length: number, fallback: number): number {
+  if (value === undefined || Number.isNaN(value)) {
+    return fallback;
+  }
+
+  const normalized = Math.trunc(value);
+  if (normalized < 0) {
+    return Math.max(length + normalized, 0);
+  }
+
+  return Math.min(normalized, length);
+}
+
 // Base Stream class that stream consumers use for instanceof checks.
 export class Stream extends EventEmitter {
   pipe<T extends Writable>(destination: T): T {
@@ -748,27 +761,35 @@ class BufferPolyfill extends Uint8Array {
     return _encoder.encode(string).length;
   }
 
-  toString(encoding: BufferEncoding = 'utf8'): string {
+  toString(encoding: BufferEncoding = 'utf8', start?: number, end?: number): string {
     const enc = (encoding || 'utf8').toLowerCase();
+    const startIndex = normalizeBufferBoundary(start, this.length, 0);
+    const endIndex = normalizeBufferBoundary(end, this.length, this.length);
+
+    if (endIndex <= startIndex) {
+      return '';
+    }
+
+    const slice = Uint8Array.prototype.subarray.call(this, startIndex, endIndex) as Uint8Array;
 
     if (enc === 'base64') {
-      return uint8ToBase64(this);
+      return uint8ToBase64(slice);
     }
 
     if (enc === 'base64url') {
-      return uint8ToBase64(this).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      return uint8ToBase64(slice).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     }
 
     if (enc === 'hex') {
-      return uint8ToHex(this);
+      return uint8ToHex(slice);
     }
 
     if (enc === 'latin1' || enc === 'binary') {
-      return uint8ToBinaryString(this);
+      return uint8ToBinaryString(slice);
     }
 
     // Default: utf8
-    return _decoder.decode(this);
+    return _decoder.decode(slice);
   }
 
   slice(start?: number, end?: number): BufferPolyfill {

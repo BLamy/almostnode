@@ -269,6 +269,12 @@ describe('Buffer module (Node.js compat)', () => {
       assert.strictEqual(buf.toString(), 'hello');
     });
 
+    it('should honor start and end offsets', () => {
+      const buf = Buffer.from('hello world');
+      assert.strictEqual(buf.toString('utf8', 0, 5), 'hello');
+      assert.strictEqual(buf.toString('utf8', 6), 'world');
+    });
+
     it('should convert to hex', () => {
       const buf = Buffer.from('hello');
       assert.strictEqual(buf.toString('hex'), '68656c6c6f');

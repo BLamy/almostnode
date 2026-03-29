@@ -5,12 +5,11 @@
 
 import { VirtualFS, createNodeError } from '../virtual-fs';
 import type { Stats, FSWatcher, WatchListener, WatchEventType } from '../virtual-fs';
-import { uint8ToBase64, uint8ToHex } from '../utils/binary-encoding';
+import { Buffer } from './stream';
 import { almostnodeDebugLog, almostnodeDebugWarn } from '../utils/debug';
 
 export type { Stats, FSWatcher, WatchListener, WatchEventType };
 
-const _decoder = new TextDecoder();
 const _encoder = new TextEncoder();
 const asyncDisposeSymbol = (Symbol as typeof Symbol & { asyncDispose?: symbol }).asyncDispose ?? Symbol.for('Symbol.asyncDispose');
 const disposeSymbol = Symbol.dispose ?? Symbol.for('Symbol.dispose');
@@ -209,32 +208,8 @@ export class Dirent {
   }
 }
 
-/**
- * Create a Buffer-like object from Uint8Array
- * This is a minimal Buffer implementation for browser compatibility
- */
 function createBuffer(data: Uint8Array): Buffer {
-  const buffer = data as Buffer;
-
-  // Add Buffer-specific methods
-  Object.defineProperty(buffer, 'toString', {
-    value: function (encoding?: string) {
-      if (encoding === 'utf8' || encoding === 'utf-8' || !encoding) {
-        return _decoder.decode(this);
-      }
-      if (encoding === 'base64') {
-        return uint8ToBase64(this);
-      }
-      if (encoding === 'hex') {
-        return uint8ToHex(this);
-      }
-      throw new Error(`Unsupported encoding: ${encoding}`);
-    },
-    writable: true,
-    configurable: true,
-  });
-
-  return buffer;
+  return Buffer.from(data);
 }
 
 /**
