@@ -3,7 +3,11 @@ import { Runtime, type RuntimeOptions } from "./runtime";
 import { PackageManager } from "./npm";
 import { almostnodeDebugLog } from "./utils/debug";
 import type { InstallMode, PackageManagerMutationSummary } from "./npm";
-import { createNetworkController, setDefaultNetworkController } from "./network";
+import {
+  createNetworkController,
+  NETWORK_ENV_KEYS,
+  setDefaultNetworkController,
+} from "./network";
 import { ServerBridge, getServerBridge } from "./server-bridge";
 import {
   initChildProcess,
@@ -192,6 +196,7 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
   const resolveCommandEnv = (
     runEnv?: Record<string, string>,
   ): Record<string, string> => ({
+    ...networkController.getResolvedPolicy().env,
     ...baseEnv,
     ...gitAuthToEnv(gitAuth),
     ...(runEnv || {}),
@@ -233,6 +238,9 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
   ): Record<string, string> => {
     const next = stripInternalChildProcessEnv(env);
     for (const key of GIT_ENV_KEYS) {
+      delete next[key];
+    }
+    for (const key of NETWORK_ENV_KEYS) {
       delete next[key];
     }
     return next;

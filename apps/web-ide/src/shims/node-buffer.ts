@@ -150,25 +150,167 @@ class BufferPolyfill extends Uint8Array {
     );
   }
 
-  toString(encoding: BufferEncoding = "utf8"): string {
+  toString(encoding: BufferEncoding = "utf8", start?: number, end?: number): string {
     const normalized = normalizeEncoding(encoding);
+    const startIndex = Math.max(0, Math.trunc(start ?? 0));
+    const endIndex = Math.min(this.length, Math.trunc(end ?? this.length));
+    const slice =
+      endIndex <= startIndex
+        ? new Uint8Array(0)
+        : Uint8Array.prototype.subarray.call(this, startIndex, endIndex);
+
     if (normalized === "base64") {
-      return toBase64(this);
+      return toBase64(slice);
     }
     if (normalized === "base64url") {
-      return toBase64(this).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+      return toBase64(slice).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
     }
     if (normalized === "hex") {
-      return toHex(this);
+      return toHex(slice);
     }
     if (normalized === "latin1" || normalized === "binary") {
-      return toLatin1(this);
+      return toLatin1(slice);
     }
-    return decoder.decode(this);
+    return decoder.decode(slice);
   }
 
   slice(start?: number, end?: number): BufferPolyfill {
     return new BufferPolyfill(super.slice(start, end));
+  }
+
+  subarray(start?: number, end?: number): BufferPolyfill {
+    return new BufferPolyfill(super.subarray(start, end));
+  }
+
+  write(value: string, offset = 0, length?: number, encoding?: BufferEncoding): number {
+    const bytes = BufferPolyfill.from(value, encoding).subarray(
+      0,
+      length === undefined ? undefined : Math.max(0, length),
+    );
+    this.set(bytes, offset);
+    return bytes.length;
+  }
+
+  copy(target: Uint8Array, targetStart = 0, sourceStart = 0, sourceEnd = this.length): number {
+    const source = this.subarray(sourceStart, sourceEnd);
+    target.set(source, targetStart);
+    return source.length;
+  }
+
+  compare(otherBuffer: Uint8Array): number {
+    const length = Math.min(this.length, otherBuffer.length);
+    for (let index = 0; index < length; index += 1) {
+      if (this[index] < otherBuffer[index]) return -1;
+      if (this[index] > otherBuffer[index]) return 1;
+    }
+    if (this.length < otherBuffer.length) return -1;
+    if (this.length > otherBuffer.length) return 1;
+    return 0;
+  }
+
+  equals(otherBuffer: Uint8Array): boolean {
+    return this.compare(otherBuffer) === 0;
+  }
+
+  readUInt8(offset: number): number {
+    return this[offset];
+  }
+
+  readUInt16BE(offset: number): number {
+    return (this[offset] << 8) | this[offset + 1];
+  }
+
+  readUInt16LE(offset: number): number {
+    return this[offset] | (this[offset + 1] << 8);
+  }
+
+  readUInt32BE(offset: number): number {
+    return (
+      (this[offset] * 0x1000000)
+      + ((this[offset + 1] << 16) | (this[offset + 2] << 8) | this[offset + 3])
+    ) >>> 0;
+  }
+
+  readUInt32LE(offset: number): number {
+    return (
+      this[offset]
+      | (this[offset + 1] << 8)
+      | (this[offset + 2] << 16)
+      | (this[offset + 3] * 0x1000000)
+    ) >>> 0;
+  }
+
+  writeUInt8(value: number, offset: number): number {
+    this[offset] = value & 0xff;
+    return offset + 1;
+  }
+
+  writeUInt16BE(value: number, offset: number): number {
+    this[offset] = (value >> 8) & 0xff;
+    this[offset + 1] = value & 0xff;
+    return offset + 2;
+  }
+
+  writeUInt16LE(value: number, offset: number): number {
+    this[offset] = value & 0xff;
+    this[offset + 1] = (value >> 8) & 0xff;
+    return offset + 2;
+  }
+
+  writeUInt32BE(value: number, offset: number): number {
+    this[offset] = (value >>> 24) & 0xff;
+    this[offset + 1] = (value >>> 16) & 0xff;
+    this[offset + 2] = (value >>> 8) & 0xff;
+    this[offset + 3] = value & 0xff;
+    return offset + 4;
+  }
+
+  writeUInt32LE(value: number, offset: number): number {
+    this[offset] = value & 0xff;
+    this[offset + 1] = (value >>> 8) & 0xff;
+    this[offset + 2] = (value >>> 16) & 0xff;
+    this[offset + 3] = (value >>> 24) & 0xff;
+    return offset + 4;
+  }
+
+  readUint8(offset: number): number {
+    return this.readUInt8(offset);
+  }
+
+  readUint16BE(offset: number): number {
+    return this.readUInt16BE(offset);
+  }
+
+  readUint16LE(offset: number): number {
+    return this.readUInt16LE(offset);
+  }
+
+  readUint32BE(offset: number): number {
+    return this.readUInt32BE(offset);
+  }
+
+  readUint32LE(offset: number): number {
+    return this.readUInt32LE(offset);
+  }
+
+  writeUint8(value: number, offset: number): number {
+    return this.writeUInt8(value, offset);
+  }
+
+  writeUint16BE(value: number, offset: number): number {
+    return this.writeUInt16BE(value, offset);
+  }
+
+  writeUint16LE(value: number, offset: number): number {
+    return this.writeUInt16LE(value, offset);
+  }
+
+  writeUint32BE(value: number, offset: number): number {
+    return this.writeUInt32BE(value, offset);
+  }
+
+  writeUint32LE(value: number, offset: number): number {
+    return this.writeUInt32LE(value, offset);
   }
 }
 

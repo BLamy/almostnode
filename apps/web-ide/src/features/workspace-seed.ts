@@ -10,7 +10,13 @@ export const WORKSPACE_TEST_METADATA_PATH = `${WORKSPACE_TESTS_ROOT}/.almostnode
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
-export type TemplateId = "vite" | "nextjs" | "tanstack";
+export const TEMPLATE_IDS = ["vite", "nextjs", "tanstack"] as const;
+
+export type TemplateId = (typeof TEMPLATE_IDS)[number];
+
+export function isTemplateId(value: string): value is TemplateId {
+  return (TEMPLATE_IDS as readonly string[]).includes(value);
+}
 
 export interface TemplateDefinition {
   id: TemplateId;

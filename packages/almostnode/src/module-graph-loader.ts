@@ -28,6 +28,7 @@ export interface ModuleGraphLoaderOptions {
   builtinModules: Record<string, unknown>;
   console: Record<string, unknown>;
   process: Record<string, unknown>;
+  globalObject: Record<string, unknown>;
   requireCjs: (resolvedPath: string) => unknown;
   createRequire: (fromPath: string) => {
     (id: string): unknown;
@@ -41,7 +42,10 @@ interface InteropRegistry {
   cjsRequire: Map<string, (resolvedPath: string) => unknown>;
   requireFactories: Map<string, ModuleGraphLoaderOptions['createRequire']>;
   moduleUrls: Map<string, Map<string, string>>;
+  runtimeGlobals: Map<string, Record<string, unknown>>;
   processes: Map<string, Record<string, unknown>>;
+  getRuntimeGlobal: (runtimeId: string) => Record<string, unknown>;
+  getProcess: (runtimeId: string) => Record<string, unknown> | undefined;
 }
 
 const dynamicImport = new Function(
@@ -53,8 +57,7 @@ export class ModuleGraphLoader {
   private vfs: VirtualFS;
   private runtimeId: string;
   private builtinModules: Record<string, unknown>;
-  private console: Record<string, unknown>;
-  private process: Record<string, unknown>;
+  private globalObject: Record<string, unknown>;
   private requireCjs: (resolvedPath: string) => unknown;
   private createRequire: ModuleGraphLoaderOptions['createRequire'];
   private resolver: ModuleResolver;
@@ -70,8 +73,7 @@ export class ModuleGraphLoader {
     this.vfs = options.vfs;
     this.runtimeId = options.runtimeId;
     this.builtinModules = options.builtinModules;
-    this.console = options.console;
-    this.process = options.process;
+    this.globalObject = options.globalObject;
     this.requireCjs = options.requireCjs;
     this.createRequire = options.createRequire;
     this.resolver = new ModuleResolver(this.vfs, {
@@ -86,7 +88,8 @@ export class ModuleGraphLoader {
     if (!registry.moduleUrls.has(this.runtimeId)) {
       registry.moduleUrls.set(this.runtimeId, new Map());
     }
-    registry.processes.set(this.runtimeId, this.process);
+    registry.runtimeGlobals.set(this.runtimeId, this.globalObject);
+    registry.processes.set(this.runtimeId, options.process);
   }
 
   clearCache(): void {
@@ -146,8 +149,6 @@ export class ModuleGraphLoader {
   }
 
   private async importResolved(descriptor: ResolvedModuleDescriptor): Promise<LoadedModuleRecord> {
-    this.installGlobals();
-
     const url = await this.getModuleUrl(descriptor);
     const namespace = await dynamicImport(url);
 
@@ -245,14 +246,28 @@ export class ModuleGraphLoader {
     }
 
     const rewritten = await this.rewriteEsmSpecifiers(code, descriptor.resolvedPath);
+    const runtimePreamble = this.createRuntimePreamble();
     if (!rewritten.metaNeedsPreamble) {
-      return rewritten.code;
+      return [runtimePreamble, rewritten.code].join('\n');
     }
 
     return [
+      runtimePreamble,
       `const __almostnode_filename = ${JSON.stringify(descriptor.resolvedPath)};`,
       `const __almostnode_dirname = ${JSON.stringify(pathShim.dirname(descriptor.resolvedPath))};`,
       rewritten.code,
+    ].join('\n');
+  }
+
+  private createRuntimePreamble(): string {
+    return [
+      'const __almostnode_hostGlobal = globalThis;',
+      `const __almostnode_global = __almostnode_hostGlobal.__almostnodeModuleInterop.getRuntimeGlobal(${JSON.stringify(this.runtimeId)});`,
+      'const globalThis = __almostnode_global;',
+      'const global = __almostnode_global;',
+      'const console = __almostnode_global.console;',
+      'const process = __almostnode_global.process;',
+      'const Buffer = __almostnode_global.Buffer;',
     ].join('\n');
   }
 
@@ -464,15 +479,6 @@ export class ModuleGraphLoader {
     };
   }
 
-  private installGlobals(): void {
-    (globalThis as any).console = this.console;
-    (globalThis as any).process = this.process;
-    const bufferModule = this.builtinModules.buffer as { Buffer?: unknown } | undefined;
-    if (bufferModule?.Buffer) {
-      (globalThis as any).Buffer = bufferModule.Buffer;
-    }
-  }
-
   private getCacheKey(descriptor: ResolvedModuleDescriptor): string {
     return `${this.runtimeId}|${this.revision}|${descriptor.format}|${descriptor.id}|${this.getContentHash(descriptor)}`;
   }
@@ -504,6 +510,7 @@ function getInteropRegistry(): InteropRegistry {
     const cjsRequire = new Map<string, (resolvedPath: string) => unknown>();
     const requireFactories = new Map<string, ModuleGraphLoaderOptions['createRequire']>();
     const moduleUrls = new Map<string, Map<string, string>>();
+    const runtimeGlobals = new Map<string, Record<string, unknown>>();
     const processes = new Map<string, Record<string, unknown>>();
 
     (globalThis as any).__almostnodeModuleInterop = {
@@ -511,6 +518,7 @@ function getInteropRegistry(): InteropRegistry {
       cjsRequire,
       requireFactories,
       moduleUrls,
+      runtimeGlobals,
       processes,
       getBuiltin(runtimeId: string, builtinId: string): unknown {
         return builtins.get(runtimeId)?.[builtinId];
@@ -538,6 +546,13 @@ function getInteropRegistry(): InteropRegistry {
         }
 
         return factory(fromPath);
+      },
+      getRuntimeGlobal(runtimeId: string): Record<string, unknown> {
+        const runtimeGlobal = runtimeGlobals.get(runtimeId);
+        if (!runtimeGlobal) {
+          throw new Error(`Missing runtime global interop for runtime '${runtimeId}'`);
+        }
+        return runtimeGlobal;
       },
       getProcess(runtimeId: string): Record<string, unknown> | undefined {
         return processes.get(runtimeId);

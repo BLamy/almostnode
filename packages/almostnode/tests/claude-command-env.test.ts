@@ -66,6 +66,52 @@ describe('Claude command environment', () => {
     }
   });
 
+  it('launches the Claude package from /project so project rules are discoverable', async () => {
+    const container = createContainer({ cwd: '/project' });
+
+    container.vfs.mkdirSync('/project/node_modules/@anthropic-ai/claude-code', { recursive: true });
+    container.vfs.writeFileSync('/project/CLAUDE.md', '# project rules\n');
+    container.vfs.writeFileSync(
+      '/project/node_modules/@anthropic-ai/claude-code/package.json',
+      JSON.stringify({
+        name: '@anthropic-ai/claude-code',
+        bin: {
+          claude: './cli.js',
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      '/project/node_modules/@anthropic-ai/claude-code/cli.js',
+      [
+        "const fs = require('fs');",
+        "const path = require('path');",
+        "let dir = process.cwd();",
+        "let found = null;",
+        "while (true) {",
+        "  const candidate = path.join(dir, 'CLAUDE.md');",
+        "  if (fs.existsSync(candidate)) {",
+        "    found = candidate;",
+        "    break;",
+        "  }",
+        "  const parent = path.dirname(dir);",
+        "  if (parent === dir) break;",
+        "  dir = parent;",
+        "}",
+        "console.log(JSON.stringify({ cwd: process.cwd(), found }));",
+      ].join('\n'),
+    );
+
+    const result = await container.run('npx @anthropic-ai/claude-code');
+    const parsed = JSON.parse(result.stdout.trim()) as {
+      cwd: string;
+      found: string | null;
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(parsed.cwd).toBe('/project');
+    expect(parsed.found).toBe('/project/CLAUDE.md');
+  });
+
   it('reads Claude history transcripts one JSON line at a time', async () => {
     const container = createContainer();
 

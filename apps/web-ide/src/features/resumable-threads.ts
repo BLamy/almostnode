@@ -152,7 +152,7 @@ export function toOpenCodeThreads(
 }
 
 export function mergeDiscoveredThreads(
-  existing: ResumableThreadRecord[],
+  _existing: ResumableThreadRecord[],
   discovered: {
     claude: ResumableThreadRecord[];
     opencode: ResumableThreadRecord[];
@@ -164,16 +164,8 @@ export function mergeDiscoveredThreads(
     next.set(thread.id, thread);
   }
 
-  if (discovered.opencode.length > 0) {
-    for (const thread of discovered.opencode) {
-      next.set(thread.id, thread);
-    }
-  } else {
-    for (const thread of existing) {
-      if (thread.harness === 'opencode') {
-        next.set(thread.id, thread);
-      }
-    }
+  for (const thread of discovered.opencode) {
+    next.set(thread.id, thread);
   }
 
   return Array.from(next.values()).sort((left, right) => right.updatedAt - left.updatedAt);

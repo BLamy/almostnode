@@ -13,6 +13,12 @@ import { homedir } from '../../src/shims/os';
 import { assert } from './common';
 
 describe('process module (Node.js compat)', () => {
+  it('marks almostnode-managed process instances for browser interop', () => {
+    const proc = createProcess();
+    expect((proc as { __almostnodeProcessShim?: boolean }).__almostnodeProcessShim).toBe(true);
+    expect(Object.keys(proc)).not.toContain('__almostnodeProcessShim');
+  });
+
   describe('process.env', () => {
     it('should be an object', () => {
       const proc = createProcess();

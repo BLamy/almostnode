@@ -87,6 +87,8 @@ For any task involving multiple steps:
 2. Use the right subagent from `.opencode/agent/` when the work splits cleanly.
 3. Load a project skill from `.claude/skills/` when a task matches an existing workflow.
 4. Verify changes before reporting back.
+5. A scaffolded git hook commits file changes when a todo item moves to `completed`.
+6. When `origin` exists, that same hook pushes the new commit before the todo stays completed.
 
 ## Available Subagents
 
@@ -108,6 +110,7 @@ Claude keeps equivalent prompts in `.claude/agents/`.
 - Use Tailwind utility classes instead of inline styles.
 - Fix console errors before focusing on visual polish.
 - When frontend and backend both change, finish the schema and migration path before final QA.
+- Treat git as part of the workflow: do not disable the scaffolded task-completion git hook unless the user explicitly asks.
 
 ## Common Pitfalls
 

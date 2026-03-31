@@ -42,6 +42,46 @@ describe('Runtime', () => {
       expect(exports).toEqual({ hello: 'world' });
     });
 
+    it('should require transformed CommonJS files from type module packages', async () => {
+      vfs.mkdirSync('/node_modules/string-width', { recursive: true });
+      vfs.writeFileSync('/node_modules/string-width/package.json', JSON.stringify({
+        name: 'string-width',
+        type: 'module',
+        exports: {
+          default: './index.js',
+        },
+      }));
+      vfs.writeFileSync(
+        '/node_modules/string-width/index.js',
+        `
+          "use strict";
+          const stripAnsi = require("strip-ansi");
+          module.exports = (value) => stripAnsi(value);
+        `
+      );
+
+      vfs.mkdirSync('/node_modules/strip-ansi', { recursive: true });
+      vfs.writeFileSync('/node_modules/strip-ansi/package.json', JSON.stringify({
+        name: 'strip-ansi',
+        type: 'module',
+        exports: './index.js',
+      }));
+      vfs.writeFileSync(
+        '/node_modules/strip-ansi/index.js',
+        `
+          "use strict";
+          module.exports = (value) => String(value).replace(/\\u001B\\[[0-9;]*m/g, "");
+        `
+      );
+
+      const { exports } = await runtime.execute(`
+        const strip = require('string-width');
+        module.exports = strip('\\u001B[31mred\\u001B[39m');
+      `, '/project/index.js');
+
+      expect(exports).toBe('red');
+    });
+
     it('should expose a constructible global console.Console with bound methods', async () => {
       const { exports } = await runtime.execute(`
         const redirected = [];
@@ -68,6 +108,29 @@ describe('Runtime', () => {
           ['err', 'boom\n'],
         ],
       });
+    });
+
+    it('should provide CommonJS global process aliases without mutating host globals', async () => {
+      const hostProcess = globalThis.process;
+
+      try {
+        const { exports } = await runtime.execute(`
+          module.exports = {
+            sameProcess: process === globalThis.process,
+            sameGlobalProcess: process === global.process,
+            cwd: globalThis.process.cwd(),
+          };
+        `, '/entry.js');
+
+        expect(exports).toEqual({
+          sameProcess: true,
+          sameGlobalProcess: true,
+          cwd: '/',
+        });
+        expect(globalThis.process).toBe(hostProcess);
+      } finally {
+        globalThis.process = hostProcess;
+      }
     });
 
     it('should proxy cross-origin XMLHttpRequest URLs and ignore forbidden headers', async () => {

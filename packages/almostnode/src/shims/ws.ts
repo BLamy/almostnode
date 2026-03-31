@@ -4,6 +4,8 @@
  */
 
 import { EventEmitter } from './events';
+import { getDefaultNetworkController } from '../network';
+import { getBrowserNativeWebSocket } from '../network/browser-websocket';
 
 // Polyfill for CloseEvent (not available in Node.js)
 const CloseEventPolyfill = typeof CloseEvent !== 'undefined' ? CloseEvent : class CloseEvent extends Event {
@@ -58,6 +60,7 @@ export class WebSocket extends EventEmitter {
   binaryType: 'blob' | 'arraybuffer' = 'blob';
 
   private _id: string;
+  private _requestedProtocols?: string | string[];
   private _server: WebSocketServer | null = null;
   private _nativeWs: globalThis.WebSocket | null = null;
 
@@ -74,6 +77,7 @@ export class WebSocket extends EventEmitter {
 
     if (protocols) {
       this.protocol = Array.isArray(protocols) ? protocols[0] : protocols;
+      this._requestedProtocols = protocols;
     }
 
     // Connect asynchronously
@@ -168,15 +172,7 @@ export class WebSocket extends EventEmitter {
   }
 
   private _connectNative(): void {
-    // Check that the browser's native WebSocket is available and is not our own shim.
-    // Only use native WebSocket in a real browser — Node.js 21+ has native WebSocket
-    // but it connects to real servers, which breaks tests and isn't what the shim needs.
-    const isBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
-    const NativeWS = isBrowser && typeof globalThis.WebSocket === 'function' && globalThis.WebSocket !== (WebSocket as any)
-      ? globalThis.WebSocket
-      : null;
-
-    if (!NativeWS) {
+    if (!getBrowserNativeWebSocket()) {
       // No native WebSocket (test env, Node.js, etc.) — act as if connected
       setTimeout(() => {
         this.readyState = WebSocket.OPEN;
@@ -186,46 +182,50 @@ export class WebSocket extends EventEmitter {
       return;
     }
 
-    try {
-      this._nativeWs = new NativeWS(this.url);
-      this._nativeWs.binaryType = this.binaryType === 'arraybuffer' ? 'arraybuffer' : 'blob';
-    } catch {
-      this.readyState = WebSocket.CLOSED;
-      const errorEvent = new Event('error');
-      this.emit('error', errorEvent);
-      if (this.onerror) this.onerror(errorEvent);
-      return;
-    }
+    void getDefaultNetworkController()
+      .connectWebSocket(this.url, {
+        protocols: this._requestedProtocols,
+      })
+      .then(({ socket }) => {
+        this._nativeWs = socket;
+        this._nativeWs.binaryType = this.binaryType === 'arraybuffer' ? 'arraybuffer' : 'blob';
 
-    this._nativeWs.onopen = () => {
-      this.readyState = WebSocket.OPEN;
-      this.emit('open');
-      if (this.onopen) this.onopen(new Event('open'));
-    };
+        this._nativeWs.onopen = () => {
+          this.readyState = WebSocket.OPEN;
+          this.emit('open');
+          if (this.onopen) this.onopen(new Event('open'));
+        };
 
-    this._nativeWs.onmessage = (event: globalThis.MessageEvent) => {
-      const msgEvent = new MessageEventPolyfill('message', { data: event.data });
-      this.emit('message', msgEvent);
-      if (this.onmessage) this.onmessage(msgEvent as unknown as MessageEvent);
-    };
+        this._nativeWs.onmessage = (event: globalThis.MessageEvent) => {
+          const msgEvent = new MessageEventPolyfill('message', { data: event.data });
+          this.emit('message', msgEvent);
+          if (this.onmessage) this.onmessage(msgEvent as unknown as MessageEvent);
+        };
 
-    this._nativeWs.onclose = (event: globalThis.CloseEvent) => {
-      this.readyState = WebSocket.CLOSED;
-      this._nativeWs = null;
-      const closeEvent = new CloseEventPolyfill('close', {
-        code: event.code,
-        reason: event.reason,
-        wasClean: event.wasClean,
+        this._nativeWs.onclose = (event: globalThis.CloseEvent) => {
+          this.readyState = WebSocket.CLOSED;
+          this._nativeWs = null;
+          const closeEvent = new CloseEventPolyfill('close', {
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
+          });
+          this.emit('close', closeEvent);
+          if (this.onclose) this.onclose(closeEvent as unknown as CloseEvent);
+        };
+
+        this._nativeWs.onerror = () => {
+          const errorEvent = new Event('error');
+          this.emit('error', errorEvent);
+          if (this.onerror) this.onerror(errorEvent);
+        };
+      })
+      .catch(() => {
+        this.readyState = WebSocket.CLOSED;
+        const errorEvent = new Event('error');
+        this.emit('error', errorEvent);
+        if (this.onerror) this.onerror(errorEvent);
       });
-      this.emit('close', closeEvent);
-      if (this.onclose) this.onclose(closeEvent as unknown as CloseEvent);
-    };
-
-    this._nativeWs.onerror = () => {
-      const errorEvent = new Event('error');
-      this.emit('error', errorEvent);
-      if (this.onerror) this.onerror(errorEvent);
-    };
   }
 
   send(data: string | ArrayBuffer | Uint8Array): void {

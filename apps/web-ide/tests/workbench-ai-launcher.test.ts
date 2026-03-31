@@ -10,6 +10,7 @@ const replaceScopedFilesInVfsMock = vi.fn();
 const collectOpenCodeBrowserSnapshotMock = vi.fn();
 const listOpenCodeBrowserSessionsMock = vi.fn();
 const restoreOpenCodeBrowserSnapshotMock = vi.fn();
+const readGhTokenMock = vi.fn();
 
 vi.mock("almostnode", () => ({
   createContainer: vi.fn(),
@@ -90,6 +91,9 @@ vi.mock("../src/features/opencode-browser-session", () => ({
   collectOpenCodeBrowserSnapshot: collectOpenCodeBrowserSnapshotMock,
   listOpenCodeBrowserSessions: listOpenCodeBrowserSessionsMock,
   restoreOpenCodeBrowserSnapshot: restoreOpenCodeBrowserSnapshotMock,
+}));
+vi.mock("../../../packages/almostnode/src/shims/gh-auth", () => ({
+  readGhToken: readGhTokenMock,
 }));
 vi.mock("@codingame/monaco-vscode-api", () => ({
   initialize: vi.fn(),
@@ -267,6 +271,8 @@ beforeEach(() => {
   collectOpenCodeBrowserSnapshotMock.mockReset();
   listOpenCodeBrowserSessionsMock.mockReset();
   restoreOpenCodeBrowserSnapshotMock.mockReset();
+  readGhTokenMock.mockReset();
+  readGhTokenMock.mockReturnValue(null);
 });
 
 describe("WebIDEHost AI launcher behavior", () => {
@@ -470,7 +476,9 @@ describe("WebIDEHost AI launcher behavior", () => {
       ) => Promise<void>;
     }).switchProjectWorkspace("nextjs", files, "project-b");
 
-    expect(replaceProjectFilesInVfsMock).toHaveBeenCalledWith(vfs, files);
+    expect(replaceProjectFilesInVfsMock).toHaveBeenCalledWith(vfs, files, {
+      includeGit: true,
+    });
     expect(order).toEqual([
       "abort",
       "clear-preview-retry",
@@ -487,6 +495,122 @@ describe("WebIDEHost AI launcher behavior", () => {
     expect(host.templateId).toBe("nextjs");
     expect(host.currentProjectDatabaseNamespace).toBe("project-b");
     expect(host.createUserTerminalTab).not.toHaveBeenCalled();
+  });
+
+  it("initializes project git with git add . and restores the configured origin", async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({
+        exitCode: 2,
+        stdout: "",
+        stderr: "error: No such remote: 'origin'\n",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+
+    const host = {
+      container: {
+        vfs: {
+          existsSync: vi.fn(() => false),
+        },
+        run,
+      },
+      runWorkspaceGitCommand: WebIDEHost.prototype["runWorkspaceGitCommand"],
+      ensureProjectRemote: WebIDEHost.prototype["ensureProjectRemote"],
+      quoteShellArg: WebIDEHost.prototype["quoteShellArg"],
+    };
+
+    await (WebIDEHost.prototype as unknown as {
+      ensureGitInitialized: (
+        this: typeof host,
+        project?: {
+          gitRemote?: {
+            name: string;
+            url: string;
+          };
+        },
+      ) => Promise<void>;
+    }).ensureGitInitialized.call(host, {
+      gitRemote: {
+        name: "origin",
+        url: "https://github.com/example/demo.git",
+      },
+    });
+
+    expect(run.mock.calls.map(([command]) => command)).toEqual([
+      "git init",
+      "git add .",
+      'git commit -m "Initial commit"',
+      "git remote get-url 'origin'",
+      "git remote add 'origin' 'https://github.com/example/demo.git'",
+    ]);
+  });
+
+  it("creates a private GitHub remote configuration for new projects", async () => {
+    readGhTokenMock.mockReturnValue({
+      oauth_token: "gho_test",
+      user: "octocat",
+      git_protocol: "https",
+    });
+
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          clone_url: "https://github.com/octocat/demo-app.git",
+          full_name: "octocat/demo-app",
+          html_url: "https://github.com/octocat/demo-app",
+        }),
+        {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    Object.assign(globalThis, { fetch: fetchMock });
+
+    try {
+      const host = {
+        container: { vfs: {} },
+        toGitHubRepositoryName: WebIDEHost.prototype["toGitHubRepositoryName"],
+        fetchGitHubApi: WebIDEHost.prototype["fetchGitHubApi"],
+        resolveGitHubCorsProxy: vi.fn(() => null),
+      };
+
+      const remote = await (WebIDEHost.prototype as unknown as {
+        createGitHubRemote: (
+          this: typeof host,
+          projectName: string,
+        ) => Promise<{
+          name: string;
+          url: string;
+          provider?: string;
+          repositoryFullName?: string;
+          repositoryUrl?: string;
+        }>;
+      }).createGitHubRemote.call(host, "Demo App");
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.github.com/user/repos",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            name: "demo-app",
+            private: true,
+          }),
+        }),
+      );
+      expect(remote).toEqual({
+        name: "origin",
+        url: "https://github.com/octocat/demo-app.git",
+        provider: "github",
+        repositoryFullName: "octocat/demo-app",
+        repositoryUrl: "https://github.com/octocat/demo-app",
+      });
+    } finally {
+      Object.assign(globalThis, { fetch: originalFetch });
+    }
   });
 
   it("reveals the browser AI panel and auto-starts sidebar OpenCode when no AI tab exists", async () => {
@@ -589,10 +713,15 @@ describe("WebIDEHost AI launcher behavior", () => {
         printPrompt,
       },
       tab,
-      "npx opencode-ai",
+      "npx opencode-ai --continue --session ses_123",
     );
 
-    expect(launchAiSession).toHaveBeenCalledWith("opencode");
+    expect(launchAiSession).toHaveBeenCalledWith("opencode", {
+      args: {
+        continue: true,
+        sessionID: "ses_123",
+      },
+    });
     expect(prepareForCommand).not.toHaveBeenCalled();
     expect(sessionRun).not.toHaveBeenCalled();
     expect(writeTerminal).toHaveBeenCalledWith(
@@ -604,6 +733,53 @@ describe("WebIDEHost AI launcher behavior", () => {
       "OpenCode moved to AI panel",
     );
     expect(printPrompt).toHaveBeenCalled();
+  });
+
+  it("normalizes explicit OpenCode resume sessions before creating a sidebar tab", async () => {
+    const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
+    const createOpenCodeSidebarTab = vi.fn().mockResolvedValue(undefined);
+
+    await (WebIDEHost.prototype as unknown as {
+      launchAiSession: (
+        this: unknown,
+        kind: "opencode" | "terminal" | "claude",
+        options?: {
+          title?: string;
+          args?: {
+            continue?: boolean;
+            sessionID?: string;
+            fork?: boolean;
+          };
+        },
+      ) => Promise<void>;
+    }).launchAiSession.call(
+      {
+        agentMode: "browser",
+        revealOpenCodeSidebarView,
+        createOpenCodeSidebarTab,
+        normalizeOpenCodeSidebarArgs: WebIDEHost.prototype["normalizeOpenCodeSidebarArgs"],
+        createAiSidebarTerminalTab: vi.fn(),
+        revealTerminalPanel: vi.fn(),
+        createUserTerminalTab: vi.fn(),
+        getClaudeLauncherAvailable: vi.fn(() => true),
+      },
+      "opencode",
+      {
+        title: "Resume OpenCode",
+        args: {
+          continue: true,
+          sessionID: "ses_123",
+        },
+      },
+    );
+
+    expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(true);
+    expect(createOpenCodeSidebarTab).toHaveBeenCalledWith(true, {
+      title: "Resume OpenCode",
+      args: {
+        sessionID: "ses_123",
+      },
+    });
   });
 
   it("opens a fresh AI sidebar tab and runs the literal Claude resume command", async () => {
@@ -655,6 +831,47 @@ describe("WebIDEHost AI launcher behavior", () => {
         interceptAgentLaunch: false,
       },
     );
+  });
+
+  it("resumes OpenCode threads directly into the OpenCode AI panel", async () => {
+    const launchAiSession = vi.fn().mockResolvedValue(undefined);
+
+    await (WebIDEHost.prototype as unknown as {
+      resumeResumableThread: (
+        this: unknown,
+        thread: {
+          id: string;
+          projectId: string;
+          harness: "claude" | "opencode";
+          title: string;
+          resumeToken: string;
+          createdAt: number;
+          updatedAt: number;
+        },
+      ) => Promise<void>;
+    }).resumeResumableThread.call(
+      {
+        launchAiSession,
+        claudeSidebarCounter: 0,
+        openCodeSidebarTerminalCounter: 0,
+      },
+      {
+        id: "opencode:project-1:session-1",
+        projectId: "project-1",
+        harness: "opencode",
+        title: "Resume OpenCode",
+        resumeToken: "ses_123",
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    );
+
+    expect(launchAiSession).toHaveBeenCalledWith("opencode", {
+      title: "Resume OpenCode",
+      args: {
+        sessionID: "ses_123",
+      },
+    });
   });
 
   it("treats needs-login tailscale sessions as a login action and running sessions as logout", () => {

@@ -1,15 +1,18 @@
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router';
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { TemplateId } from '../features/workspace-seed';
+import { NewProjectDialog } from '../sidebar/new-project-dialog';
 
 type IndexSearch = {
   template?: string;
+  name?: string;
   corsProxy?: string;
 };
 
 export const Route = createFileRoute('/')({
   validateSearch: (search: Record<string, unknown>): IndexSearch => ({
     template: typeof search.template === 'string' ? search.template : undefined,
+    name: typeof search.name === 'string' ? search.name : undefined,
     corsProxy: typeof search.corsProxy === 'string' ? search.corsProxy : undefined,
   }),
   component: Homepage,
@@ -187,7 +190,9 @@ const DEMO_LINES = [
 
 function Homepage() {
   const navigate = useNavigate();
-  const { template, corsProxy } = Route.useSearch();
+  const { template, name, corsProxy } = Route.useSearch();
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<TemplateId>('vite');
 
   const templateFromQuery = TEMPLATES.find((c) => c.id === template)?.id;
 
@@ -198,16 +203,26 @@ function Homepage() {
       replace: true,
       search: {
         template: templateFromQuery,
+        ...(name !== undefined ? { name } : {}),
         ...(corsProxy !== undefined ? { corsProxy } : {}),
       },
     });
-  }, [templateFromQuery, corsProxy, navigate]);
+  }, [templateFromQuery, name, corsProxy, navigate]);
 
-  const handleCardClick = (templateId: TemplateId) => {
+  const openNewProjectDialog = (templateId: TemplateId) => {
+    setSelectedTemplateId(templateId);
+    setNewProjectOpen(true);
+  };
+
+  const handleCreateProject = async (
+    projectName: string,
+    templateId: TemplateId,
+  ) => {
     void navigate({
       to: '/ide',
       search: {
         template: templateId,
+        name: projectName,
         ...(corsProxy !== undefined ? { corsProxy } : {}),
       },
     });
@@ -259,7 +274,7 @@ function Homepage() {
           alternative to WebContainers.
         </p>
         <div className="hp-hero__actions">
-          <button className="hp-hero__cta" onClick={() => handleCardClick('vite')}>
+          <button className="hp-hero__cta" onClick={() => openNewProjectDialog('vite')}>
             Open the IDE
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="5" y1="12" x2="19" y2="12" />
@@ -356,7 +371,7 @@ function Homepage() {
             <div
               key={tmpl.id}
               className="hp-template"
-              onClick={() => handleCardClick(tmpl.id)}
+              onClick={() => openNewProjectDialog(tmpl.id)}
             >
               {tmpl.logo}
               <h3 className="hp-template__title">{tmpl.title}</h3>
@@ -378,6 +393,17 @@ function Homepage() {
           <span className="hp-footer__copy">MIT License</span>
         </div>
       </footer>
+
+      <NewProjectDialog
+        open={newProjectOpen}
+        onOpenChange={setNewProjectOpen}
+        hasGitHubCredentials={false}
+        initialTemplateId={selectedTemplateId}
+        title="Create a new project"
+        description="Pick a starter, add a repo name if you want one, or let opensandbox generate a container-style name for you."
+        submitLabel="Open project"
+        onCreate={handleCreateProject}
+      />
     </div>
   );
 }

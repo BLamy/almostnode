@@ -22,9 +22,10 @@ import { FixtureMarketplaceClient } from "../extensions/fixture-extensions";
 import { OpenVSXClient } from "../extensions/open-vsx";
 import { prunePersistedWorkbenchExtensions } from "../features/persisted-extensions";
 import {
-  matchesOpenCodeLaunchCommand,
+  parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
+import { installHostConsoleBridge } from "../features/host-console-bridge";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
 import { HostTerminalSession } from "../desktop/host-terminal-session";
@@ -37,6 +38,8 @@ import {
 } from "../desktop/project-snapshot";
 import type {
   ProjectAgentStateSnapshot,
+  ProjectGitRemoteRecord,
+  ProjectRecord,
   ResumableThreadRecord,
 } from "../features/project-db";
 import {
@@ -44,6 +47,7 @@ import {
   discoverClaudeThreads,
   toOpenCodeThreads,
 } from "../features/resumable-threads";
+import { readGhToken } from "../../../../packages/almostnode/src/shims/gh-auth";
 import {
   createExtensionServiceOverrides,
   type ExtensionServiceOverrideBundle,
@@ -91,6 +95,7 @@ import {
   collectOpenCodeBrowserSnapshot,
   listOpenCodeBrowserSessions,
   mountOpenCodeBrowserSession,
+  type OpenCodeBrowserLaunchArgs,
   type OpenCodeBrowserSessionHandle,
   type OpenCodeBrowserShellState,
   restoreOpenCodeBrowserSnapshot,
@@ -765,6 +770,7 @@ export class WebIDEHost {
   private currentProjectDatabaseNamespace = "global";
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
+  private removeHostConsoleBridge: (() => void) | null = null;
   private testRecorder:
     | import("../features/test-recorder").TestRecorder
     | null = null;
@@ -1007,6 +1013,65 @@ export class WebIDEHost {
     return this.templateId;
   }
 
+  hasGitHubCredentials(): boolean {
+    return Boolean(readGhToken(this.container.vfs)?.oauth_token);
+  }
+
+  async createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord> {
+    const auth = readGhToken(this.container.vfs);
+    if (!auth?.oauth_token) {
+      throw new Error("GitHub credentials are not available. Run `gh auth login` first.");
+    }
+
+    const repoName = this.toGitHubRepositoryName(projectName);
+    const response = await this.fetchGitHubApi("https://api.github.com/user/repos", {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${auth.oauth_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: repoName,
+        private: true,
+      }),
+    });
+
+    const raw = await response.text();
+    let payload: {
+      message?: string;
+      clone_url?: string;
+      full_name?: string;
+      html_url?: string;
+    } = {};
+    if (raw) {
+      try {
+        payload = JSON.parse(raw) as typeof payload;
+      } catch {
+        payload = {};
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error(payload.message || `GitHub repository creation failed (${response.status}).`);
+    }
+    if (!payload.clone_url) {
+      throw new Error("GitHub repository creation did not return a clone URL.");
+    }
+
+    return {
+      name: "origin",
+      url: payload.clone_url,
+      provider: "github",
+      repositoryFullName: payload.full_name,
+      repositoryUrl: payload.html_url,
+    };
+  }
+
+  async syncProjectGit(project: ProjectRecord): Promise<void> {
+    await this.ensureGitInitialized(project);
+  }
+
   async collectAgentStateSnapshot(): Promise<ProjectAgentStateSnapshot> {
     return {
       claudeFiles: collectScopedFilesBase64(this.container.vfs, [
@@ -1048,34 +1113,37 @@ export class WebIDEHost {
       return { claude, opencode: [] };
     }
 
-    try {
-      const sessions = await listOpenCodeBrowserSessions({
-        container: this.container,
-        cwd: WORKSPACE_ROOT,
-        env: {},
-      });
-      return {
-        claude,
-        opencode: toOpenCodeThreads(projectId, sessions),
-      };
-    } catch {
-      return { claude, opencode: [] };
-    }
+    const sessions = await listOpenCodeBrowserSessions({
+      container: this.container,
+      cwd: WORKSPACE_ROOT,
+      env: {},
+    });
+    return {
+      claude,
+      opencode: toOpenCodeThreads(projectId, sessions),
+    };
   }
 
   async resumeResumableThread(thread: ResumableThreadRecord): Promise<void> {
-    await this.revealOpenCodeSidebarView(true);
-
     const title = thread.title.trim() || (
       thread.harness === "claude"
         ? `Claude Code ${++this.claudeSidebarCounter}`
         : `OpenCode ${++this.openCodeSidebarTerminalCounter}`
     );
+    if (thread.harness === "opencode") {
+      await this.launchAiSession("opencode", {
+        title,
+        args: {
+          sessionID: thread.resumeToken,
+        },
+      });
+      return;
+    }
+
+    await this.revealOpenCodeSidebarView(true);
     const tab = this.createAiSidebarTerminalTab(true, { title });
     const command =
-      thread.harness === "claude"
-        ? `npx @anthropic-ai/claude-code --resume ${thread.resumeToken}`
-        : `npx opencode-ai --continue --session ${thread.resumeToken}`;
+      `npx @anthropic-ai/claude-code --resume ${thread.resumeToken}`;
     await this.runCommand(tab, command, {
       echoCommand: true,
       interceptAgentLaunch: false,
@@ -1207,7 +1275,7 @@ export class WebIDEHost {
     this.databaseSurface.update([], null);
 
     this.templateId = newTemplateId;
-    replaceProjectFilesInVfs(this.container.vfs, files);
+    replaceProjectFilesInVfs(this.container.vfs, files, { includeGit: true });
 
     const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
     if (!this.container.vfs.existsSync(packageJsonPath)) {
@@ -1484,6 +1552,37 @@ export class WebIDEHost {
   private writeTerminal(tab: TerminalTabState, text: string): void {
     if (!text) return;
     tab.terminal.write(normalizeTerminalOutput(text));
+  }
+
+  private stringifyConsoleArg(value: unknown): string {
+    if (typeof value === "string") {
+      return value;
+    }
+    if (value instanceof Error) {
+      return value.stack || value.message;
+    }
+    if (typeof value === "object" && value !== null) {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  }
+
+  private addConsoleEntry(
+    level: string,
+    args: readonly unknown[],
+    timestamp = Date.now(),
+  ): void {
+    const normalizedArgs = args.map((value) => this.stringifyConsoleArg(value));
+    this.consolePanel.addEntry(level, normalizedArgs, timestamp);
+    this.consoleMessageCount++;
+    this.terminalSurface.updateTabStatus(
+      this.consoleTabId,
+      `${this.consoleMessageCount} messages`,
+    );
   }
 
   private updateTerminalStatus(tab: TerminalTabState, text: string): void {
@@ -1826,7 +1925,13 @@ export class WebIDEHost {
       : "npx opencode-ai";
   }
 
-  private async createOpenCodeSidebarTab(focus: boolean): Promise<void> {
+  private async createOpenCodeSidebarTab(
+    focus: boolean,
+    options?: {
+      title?: string;
+      args?: OpenCodeBrowserLaunchArgs;
+    },
+  ): Promise<void> {
     if (this.agentMode === "host") {
       await this.revealTerminalPanel(focus);
       void this.createHostAgentTerminalTab(focus);
@@ -1840,7 +1945,7 @@ export class WebIDEHost {
 
     this.openCodeSidebarCounter += 1;
     const id = `opencode-sidebar-${crypto.randomUUID()}`;
-    const title = `OpenCode ${this.openCodeSidebarCounter}`;
+    const title = options?.title ?? `OpenCode ${this.openCodeSidebarCounter}`;
     const host = this.createOpenCodeHostElement();
 
     this.openCodeSurface.addCustomTab({
@@ -1864,6 +1969,7 @@ export class WebIDEHost {
         element: host,
         cwd: WORKSPACE_ROOT,
         env: {},
+        args: options?.args,
         themeMode: this.workbenchThemeKind,
         onTitleChange: (nextTitle) => {
           const resolvedTitle = nextTitle?.trim() || title;
@@ -1897,7 +2003,34 @@ export class WebIDEHost {
     }
   }
 
-  private async launchAiSession(kind: AgentLaunchKind): Promise<void> {
+  private normalizeOpenCodeSidebarArgs(
+    args?: OpenCodeBrowserLaunchArgs,
+  ): OpenCodeBrowserLaunchArgs | undefined {
+    if (!args) {
+      return undefined;
+    }
+
+    const next: OpenCodeBrowserLaunchArgs = {};
+    if (args.sessionID) {
+      next.sessionID = args.sessionID;
+    }
+    if (args.fork) {
+      next.fork = true;
+    }
+    if (args.continue && !args.sessionID) {
+      next.continue = true;
+    }
+
+    return Object.keys(next).length > 0 ? next : undefined;
+  }
+
+  private async launchAiSession(
+    kind: AgentLaunchKind,
+    options?: {
+      title?: string;
+      args?: OpenCodeBrowserLaunchArgs;
+    },
+  ): Promise<void> {
     if (this.agentMode === "host") {
       await this.revealTerminalPanel(true);
       void this.createHostAgentTerminalTab(true);
@@ -1907,7 +2040,10 @@ export class WebIDEHost {
     await this.revealOpenCodeSidebarView(true);
 
     if (kind === "opencode") {
-      await this.createOpenCodeSidebarTab(true);
+      await this.createOpenCodeSidebarTab(true, {
+        title: options?.title,
+        args: this.normalizeOpenCodeSidebarArgs(options?.args),
+      });
       return;
     }
 
@@ -2451,15 +2587,18 @@ export class WebIDEHost {
     if (
       this.agentMode === "browser"
       && tab.kind === "user"
-      && tab.surface !== "sidebar"
       && options?.interceptAgentLaunch !== false
-      && matchesOpenCodeLaunchCommand(trimmed)
     ) {
-      await this.launchAiSession("opencode");
-      this.writeTerminal(tab, "Launching OpenCode in the AI panel.\n");
-      this.updateTerminalStatus(tab, "OpenCode moved to AI panel");
-      this.printPrompt(tab);
-      return;
+      const openCodeLaunchArgs = parseOpenCodeLaunchCommand(trimmed);
+      if (openCodeLaunchArgs) {
+        await this.launchAiSession("opencode", {
+          args: openCodeLaunchArgs,
+        });
+        this.writeTerminal(tab, "Launching OpenCode in the AI panel.\n");
+        this.updateTerminalStatus(tab, "OpenCode moved to AI panel");
+        this.printPrompt(tab);
+        return;
+      }
     }
 
     if (!(await this.keychain.prepareForCommand(trimmed))) {
@@ -3770,13 +3909,116 @@ export class WebIDEHost {
     }
   }
 
-  private async ensureGitInitialized(): Promise<void> {
-    if (this.container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)) return;
-    await this.container.run("git init", { cwd: WORKSPACE_ROOT });
-    await this.container.run("git add -A", { cwd: WORKSPACE_ROOT });
-    await this.container.run('git commit -m "Initial commit"', {
-      cwd: WORKSPACE_ROOT,
-    });
+  private async ensureGitInitialized(project?: Pick<ProjectRecord, "gitRemote">): Promise<void> {
+    if (!this.container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)) {
+      await this.runWorkspaceGitCommand("git init");
+      await this.runWorkspaceGitCommand("git add .");
+      await this.runWorkspaceGitCommand('git commit -m "Initial commit"');
+    }
+
+    if (project?.gitRemote) {
+      await this.ensureProjectRemote(project.gitRemote);
+    }
+  }
+
+  private async ensureProjectRemote(remote: ProjectGitRemoteRecord): Promise<void> {
+    const remoteName = remote.name || "origin";
+    const current = await this.container.run(
+      `git remote get-url ${this.quoteShellArg(remoteName)}`,
+      { cwd: WORKSPACE_ROOT },
+    );
+
+    if (current.exitCode === 0) {
+      if (current.stdout.trim() === remote.url) {
+        return;
+      }
+      await this.runWorkspaceGitCommand(
+        `git remote set-url ${this.quoteShellArg(remoteName)} ${this.quoteShellArg(remote.url)}`,
+      );
+      return;
+    }
+
+    await this.runWorkspaceGitCommand(
+      `git remote add ${this.quoteShellArg(remoteName)} ${this.quoteShellArg(remote.url)}`,
+    );
+  }
+
+  private async runWorkspaceGitCommand(command: string): Promise<RunResult> {
+    const result = await this.container.run(command, { cwd: WORKSPACE_ROOT });
+    if (result.exitCode !== 0) {
+      throw new Error(
+        (result.stderr || result.stdout || `${command} failed`).trim(),
+      );
+    }
+    return result;
+  }
+
+  private quoteShellArg(value: string): string {
+    return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+  }
+
+  private toGitHubRepositoryName(projectName: string): string {
+    const slug = projectName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .replace(/-{2,}/g, "-");
+    return slug || "untitled-project";
+  }
+
+  private resolveGitHubCorsProxy(): string | null {
+    try {
+      const stored = window.localStorage.getItem("__corsProxyUrl");
+      if (stored !== null) {
+        const trimmed = stored.trim();
+        return trimmed || null;
+      }
+    } catch {
+      // Ignore storage failures.
+    }
+
+    if (
+      typeof window !== "undefined"
+      && ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)
+    ) {
+      return `${window.location.origin}/__api/cors-proxy?url=`;
+    }
+
+    return null;
+  }
+
+  private async fetchGitHubApi(
+    url: string,
+    init: RequestInit,
+  ): Promise<Response> {
+    const corsProxy = this.resolveGitHubCorsProxy();
+    const attempts = corsProxy
+      ? [`${corsProxy}${encodeURIComponent(url)}`, url]
+      : [url];
+
+    let lastResponse: Response | null = null;
+    let lastError: unknown = null;
+
+    for (let index = 0; index < attempts.length; index += 1) {
+      try {
+        const response = await fetch(attempts[index]!, init);
+        if (response.ok || index === attempts.length - 1) {
+          return response;
+        }
+        lastResponse = response;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastResponse) {
+      return lastResponse;
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`GitHub API request failed for ${url}`);
   }
 
   private migrateLegacyTestsToWorkspace(): void {
@@ -3890,18 +4132,19 @@ export class WebIDEHost {
       element: this.consolePanel.root,
       closable: false,
     });
+    this.removeHostConsoleBridge?.();
+    this.removeHostConsoleBridge = installHostConsoleBridge(
+      (level, args, timestamp) => {
+        this.addConsoleEntry(level, args, timestamp);
+      },
+    );
 
     // Listen for console messages from the preview iframe
     window.addEventListener("message", (event) => {
       if (!event.data || event.data.type !== "almostnode-console") return;
       const { level, args, timestamp } = event.data;
       if (!level || !Array.isArray(args)) return;
-      this.consolePanel.addEntry(level, args, timestamp || Date.now());
-      this.consoleMessageCount++;
-      this.terminalSurface.updateTabStatus(
-        this.consoleTabId,
-        `${this.consoleMessageCount} messages`,
-      );
+      this.addConsoleEntry(level, args, timestamp || Date.now());
     });
 
     this.container.on("server-ready", (_port: unknown, url: unknown) => {

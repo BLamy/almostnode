@@ -8,6 +8,7 @@
 import {
   ProjectDB,
   type ProjectAgentStateSnapshot,
+  type ProjectGitRemoteRecord,
   type ProjectRecord,
   type ResumableThreadRecord,
 } from './project-db';
@@ -16,12 +17,16 @@ import {
   type SerializedFile,
 } from '../desktop/project-snapshot';
 import { mergeDiscoveredThreads } from './resumable-threads';
-import type { TemplateId } from './workspace-seed';
+import { resolveProjectName } from './project-names';
+import { isTemplateId, type TemplateId } from './workspace-seed';
 
 export interface ProjectManagerHost {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getVfs(): any;
   getTemplateId(): TemplateId;
+  hasGitHubCredentials(): boolean;
+  createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord>;
+  syncProjectGit(project: ProjectRecord): Promise<void>;
   attachProjectContext(templateId: TemplateId, dbPrefix?: string): Promise<void>;
   switchProjectWorkspace(
     templateId: TemplateId,
@@ -46,9 +51,14 @@ export interface ProjectManagerCallbacks {
   onSwitchingStateChanged: (isSwitching: boolean) => void;
 }
 
+export interface CreateProjectOptions {
+  createGitHubRepo?: boolean;
+}
+
 const ACTIVE_PROJECT_KEY = 'almostnode-active-project-id';
 const URL_PROJECT_PARAM = 'project';
 const URL_TEMPLATE_PARAM = 'template';
+const URL_NAME_PARAM = 'name';
 const AUTO_SAVE_DEBOUNCE_MS = 3000;
 const AI_SIDEBAR_TAB_CLOSED_EVENT = 'almostnode:ai-sidebar-tab-closed';
 
@@ -60,7 +70,7 @@ export class ProjectManager {
   private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private initialized = false;
   private readonly handleAiSidebarTabClosed = () => {
-    void this.syncActiveProjectThreads();
+    void this.saveCurrentProject();
   };
 
   setHost(host: ProjectManagerHost): void {
@@ -79,11 +89,25 @@ export class ProjectManager {
     return this.activeProjectId;
   }
 
+  hasGitHubCredentials(): boolean {
+    return this.host?.hasGitHubCredentials() ?? false;
+  }
+
   async init(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
 
     let projects = await this.db.listProjects();
+    const urlProjectId = readUrlProjectId();
+    let createdProject: ProjectRecord | null = null;
+
+    if (!urlProjectId) {
+      const creationIntent = readUrlProjectCreationIntent();
+      if (creationIntent) {
+        createdProject = await this.createProjectFromUrlIntent(creationIntent);
+        projects = await this.db.listProjects();
+      }
+    }
 
     if (projects.length === 0) {
       const templateId = this.host?.getTemplateId() ?? 'vite';
@@ -91,7 +115,7 @@ export class ProjectManager {
       await this.db.putProject(project);
 
       if (this.host) {
-        const files = collectProjectFilesBase64(this.host.getVfs());
+        const files = collectProjectFilesBase64(this.host.getVfs(), { includeGit: true });
         await this.db.saveProjectFiles(project.id, files);
         const agentState = await this.host.collectAgentStateSnapshot();
         await this.db.putProjectAgentState({
@@ -104,8 +128,7 @@ export class ProjectManager {
       projects = [project];
     }
 
-    const urlProjectId = readUrlProjectId();
-    const storedActiveId = urlProjectId ?? readActiveProjectId();
+    const storedActiveId = urlProjectId ?? createdProject?.id ?? readActiveProjectId();
     const matchingProject = storedActiveId
       ? projects.find((project) => project.id === storedActiveId)
       : null;
@@ -120,7 +143,7 @@ export class ProjectManager {
     if (this.host) {
       const activeProject = matchingProject ?? projects[0]!;
       const activeFiles = await this.db.getProjectFiles(activeProject.id);
-      const currentFiles = collectProjectFilesBase64(this.host.getVfs());
+      const currentFiles = collectProjectFilesBase64(this.host.getVfs(), { includeGit: true });
       const shouldRestoreWorkspace = (
         activeFiles.length === 0
         || this.host.getTemplateId() !== activeProject.templateId
@@ -140,6 +163,8 @@ export class ProjectManager {
         );
       }
 
+      await this.host.syncProjectGit(activeProject);
+
       const agentState = await this.db.getProjectAgentState(activeProject.id);
       await this.host.restoreAgentStateSnapshot(agentState ?? null);
     }
@@ -156,8 +181,18 @@ export class ProjectManager {
     });
   }
 
-  async createProject(name: string, templateId: TemplateId): Promise<ProjectRecord> {
+  async createProject(
+    name: string,
+    templateId: TemplateId,
+    options: CreateProjectOptions = {},
+  ): Promise<ProjectRecord> {
     const project = createProjectRecord(name, templateId);
+    if (options.createGitHubRepo) {
+      if (!this.host?.hasGitHubCredentials()) {
+        throw new Error('GitHub credentials are not available. Run `gh auth login` first.');
+      }
+      project.gitRemote = await this.host.createGitHubRemote(name);
+    }
     await this.db.putProject(project);
     await this.notifyProjectsChanged();
     return project;
@@ -210,6 +245,7 @@ export class ProjectManager {
         files,
         targetProject.dbPrefix,
       );
+      await this.host.syncProjectGit(targetProject);
       await this.host.restoreAgentStateSnapshot(agentState ?? null);
 
       this.activeProjectId = targetId;
@@ -232,7 +268,7 @@ export class ProjectManager {
       return;
     }
 
-    const files = collectProjectFilesBase64(this.host.getVfs());
+    const files = collectProjectFilesBase64(this.host.getVfs(), { includeGit: true });
     await this.db.saveProjectFiles(this.activeProjectId, files);
 
     const agentState = await this.host.collectAgentStateSnapshot();
@@ -275,20 +311,25 @@ export class ProjectManager {
       return [];
     }
 
+    const existing = await this.db.listResumableThreads(this.activeProjectId);
+
     if (!this.host) {
-      const threads = await this.db.listResumableThreads(this.activeProjectId);
       await this.notifyResumableThreadsChanged();
-      return threads;
+      return existing;
     }
 
-    const existing = await this.db.listResumableThreads(this.activeProjectId);
-    const discovered = await this.host.discoverActiveProjectThreads(
-      this.activeProjectId,
-    );
-    const threads = mergeDiscoveredThreads(existing, discovered);
-    await this.db.replaceProjectResumableThreads(this.activeProjectId, threads);
-    await this.notifyResumableThreadsChanged();
-    return threads;
+    try {
+      const discovered = await this.host.discoverActiveProjectThreads(
+        this.activeProjectId,
+      );
+      const threads = mergeDiscoveredThreads(existing, discovered);
+      await this.db.replaceProjectResumableThreads(this.activeProjectId, threads);
+      await this.notifyResumableThreadsChanged();
+      return threads;
+    } catch {
+      await this.notifyResumableThreadsChanged();
+      return existing;
+    }
   }
 
   dispose(): void {
@@ -322,6 +363,32 @@ export class ProjectManager {
   private async notifyProjectsChanged(): Promise<void> {
     const projects = await this.db.listProjects();
     this.callbacks?.onProjectsChanged(projects);
+  }
+
+  private async createProjectFromUrlIntent(
+    intent: UrlProjectCreationIntent,
+  ): Promise<ProjectRecord> {
+    const project = createProjectRecord(
+      resolveProjectName(intent.name),
+      intent.templateId,
+    );
+    await this.db.putProject(project);
+
+    if (!this.host) {
+      return project;
+    }
+
+    const files = collectProjectFilesBase64(this.host.getVfs(), { includeGit: true });
+    await this.db.saveProjectFiles(project.id, files);
+
+    const agentState = await this.host.collectAgentStateSnapshot();
+    await this.db.putProjectAgentState({
+      projectId: project.id,
+      ...agentState,
+      savedAt: Date.now(),
+    });
+
+    return project;
   }
 
   private async emitCurrentStateToCallbacks(): Promise<void> {
@@ -358,6 +425,11 @@ function createProjectRecord(name: string, templateId: TemplateId): ProjectRecor
   };
 }
 
+interface UrlProjectCreationIntent {
+  templateId: TemplateId;
+  name: string | null;
+}
+
 function readActiveProjectId(): string | null {
   try {
     return localStorage.getItem(ACTIVE_PROJECT_KEY);
@@ -383,11 +455,29 @@ function readUrlProjectId(): string | null {
   }
 }
 
+function readUrlProjectCreationIntent(): UrlProjectCreationIntent | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const templateId = params.get(URL_TEMPLATE_PARAM);
+    if (!templateId || !isTemplateId(templateId)) {
+      return null;
+    }
+
+    return {
+      templateId,
+      name: params.get(URL_NAME_PARAM),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function writeUrlProjectId(id: string): void {
   try {
     const url = new URL(window.location.href);
     url.searchParams.set(URL_PROJECT_PARAM, id);
     url.searchParams.delete(URL_TEMPLATE_PARAM);
+    url.searchParams.delete(URL_NAME_PARAM);
     window.history.replaceState(null, '', url.toString());
   } catch {
     // Ignore URL update failures.

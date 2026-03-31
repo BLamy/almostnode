@@ -153,6 +153,9 @@ export class ModuleResolver {
       if (hasEsmSyntax(ast)) {
         return 'esm';
       }
+      if (hasCommonJsSyntax(ast)) {
+        return 'cjs';
+      }
     } catch {
       // Code fails to parse as ESM — treat as CJS regardless of package type
       return 'cjs';
@@ -432,6 +435,101 @@ function hasEsmSyntax(ast: AstNode): boolean {
   }
 
   return false;
+}
+
+function hasCommonJsSyntax(ast: AstNode): boolean {
+  const body = Array.isArray(ast.body) ? ast.body as AstNode[] : [];
+  let found = false;
+
+  const walk = (node: unknown) => {
+    if (found || !node || typeof node !== 'object') {
+      return;
+    }
+
+    const current = node as AstNode;
+
+    if (
+      current.type === 'CallExpression'
+      && (current.callee as AstNode | undefined)?.type === 'Identifier'
+      && (current.callee as { name?: string }).name === 'require'
+    ) {
+      found = true;
+      return;
+    }
+
+    if (current.type === 'AssignmentExpression' && isCommonJsExportTarget(current.left as AstNode | undefined)) {
+      found = true;
+      return;
+    }
+
+    if (
+      current.type === 'Identifier'
+      && (((current as { name?: string }).name === '__dirname') || ((current as { name?: string }).name === '__filename'))
+    ) {
+      found = true;
+      return;
+    }
+
+    for (const [key, value] of Object.entries(current)) {
+      if (
+        key === 'start'
+        || key === 'end'
+        || key === 'loc'
+        || key === 'range'
+        || key === 'parent'
+        || key === 'type'
+      ) {
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          walk(child);
+          if (found) return;
+        }
+      } else {
+        walk(value);
+        if (found) return;
+      }
+    }
+  };
+
+  for (const node of body) {
+    walk(node);
+    if (found) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isCommonJsExportTarget(node: AstNode | undefined): boolean {
+  if (!node || node.type !== 'MemberExpression') {
+    return false;
+  }
+
+  const object = node.object as AstNode | undefined;
+  const property = node.property as AstNode | undefined;
+  const propertyName = property && 'name' in property
+    ? (property as { name?: string }).name
+    : property && 'value' in property
+      ? String((property as { value?: unknown }).value)
+      : undefined;
+
+  if (object?.type === 'Identifier' && (object as { name?: string }).name === 'exports') {
+    return true;
+  }
+
+  if (
+    object?.type === 'Identifier'
+    && (object as { name?: string }).name === 'module'
+    && propertyName === 'exports'
+  ) {
+    return true;
+  }
+
+  return isCommonJsExportTarget(object);
 }
 
 function isFunctionNode(node: AstNode): boolean {

@@ -17,6 +17,15 @@ export interface ProjectRecord {
   createdAt: number;
   lastModified: number;
   dbPrefix: string;
+  gitRemote?: ProjectGitRemoteRecord;
+}
+
+export interface ProjectGitRemoteRecord {
+  name: string;
+  url: string;
+  provider?: 'github';
+  repositoryFullName?: string;
+  repositoryUrl?: string;
 }
 
 export interface ProjectFilesRecord {

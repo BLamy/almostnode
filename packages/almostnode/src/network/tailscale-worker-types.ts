@@ -2,8 +2,8 @@ import type {
   NetworkFetchRequest,
   NetworkLookupOptions,
   NetworkLookupResult,
-  NetworkOptions,
   NetworkFetchResponse,
+  ResolvedNetworkOptions,
   TailscaleAdapterStatus,
 } from './types';
 import type { TailscaleStateSnapshot } from './tailscale-session-storage';
@@ -17,19 +17,29 @@ export type TailscaleWorkerErrorCode =
   | 'runtime_unavailable';
 
 export interface TailscaleWorkerErrorDebug {
-  phase?: 'prepare_public_dns' | 'ipn_start' | 'primary_fetch' | 'fallback_fetch';
+  phase?: 'prepare_public_dns' | 'ipn_start' | 'recover_runtime' | 'primary_fetch' | 'fallback_fetch' | 'read_body';
   url?: string;
   hostname?: string | null;
   ipAddress?: string | null;
   useExitNode?: boolean;
   exitNodeId?: string | null;
   hadLiveIpn?: boolean;
+  timeoutMs?: number;
+  runtimeGeneration?: number;
+  runtimeResetCount?: number;
+  lastRuntimeResetReason?: string | null;
   attemptedIpMapSync?: boolean;
   capabilities?: {
     canStructuredFetch: boolean;
     canReconfigure: boolean;
     canLookup: boolean;
   };
+  responseUrl?: string;
+  responseStatus?: number;
+  hadBodyBase64?: boolean;
+  recentRuntimeSignal?: string | null;
+  recentRuntimeSignalAgeMs?: number | null;
+  bodyReadError?: string;
   fallbackStrategy?: 'rewrite_to_resolved_ip';
   fallbackAttempted?: boolean;
   primaryError?: string;
@@ -49,7 +59,7 @@ export type TailscaleWorkerRequest =
     }
   | {
       type: 'configure';
-      options: Required<NetworkOptions>;
+      options: ResolvedNetworkOptions;
     }
   | {
       type: 'getStatus';

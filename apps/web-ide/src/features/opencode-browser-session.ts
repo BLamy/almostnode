@@ -1,20 +1,19 @@
-import { createProcess, type TerminalSession } from "almostnode";
+import type { TerminalSession } from "almostnode";
 import { WORKSPACE_ROOT } from "./workspace-seed";
 import type { ReturnTypeOfCreateContainer } from "../workbench/workbench-host";
+import { configureBrowserProcess } from "../shims/node-process";
 import "../../../../vendor/opencode/packages/browser/src/shims/bun.browser";
 import { createOpencodeClient } from "../../../../vendor/opencode/packages/browser/src/shims/opencode-sdk.browser";
 import {
-  attachProcessBridge,
-  detachProcessBridge,
-} from "../../../../vendor/opencode/packages/browser/src/shims/child-process.browser";
+  withProcessBridgeScope,
+} from "../shims/opencode-child-process";
 import {
   initBrowserDB,
   exportBrowserDBSnapshot,
   importBrowserDBSnapshot,
 } from "../../../../vendor/opencode/packages/browser/src/shims/db.browser";
 import {
-  attachWorkspaceBridge,
-  detachWorkspaceBridge,
+  withWorkspaceBridgeScope,
 } from "../../../../vendor/opencode/packages/browser/src/shims/fs.browser";
 import { Server } from "../../../../vendor/opencode/packages/opencode/src/server/server";
 
@@ -29,12 +28,19 @@ export interface OpenCodeBrowserShellState {
   env: Record<string, string>;
 }
 
+export interface OpenCodeBrowserLaunchArgs {
+  continue?: boolean;
+  sessionID?: string;
+  fork?: boolean;
+}
+
 export interface OpenCodeBrowserSessionOptions {
   container: ReturnTypeOfCreateContainer;
   element: HTMLElement;
   cwd: string;
   env: Record<string, string>;
   themeMode: OpenCodeThemeMode;
+  args?: OpenCodeBrowserLaunchArgs;
   onTitleChange?: (title: string) => void;
 }
 
@@ -56,22 +62,13 @@ export interface OpenCodeBrowserSessionSummary {
 }
 
 function ensureBrowserProcess(cwd: string, env: Record<string, string>): void {
-  const current = globalThis.process as typeof globalThis.process | undefined;
-  if (
-    current &&
-    typeof current.on === "function" &&
-    typeof current.cwd === "function"
-  ) {
-    return;
-  }
-
-  globalThis.process = createProcess({
+  globalThis.process = configureBrowserProcess({
     cwd,
     env: {
-      ...current?.env,
+      ...(globalThis.process?.env || {}),
       ...env,
     },
-  });
+  }) as typeof globalThis.process;
 }
 
 function quoteShellArg(value: string): string {
@@ -298,10 +295,58 @@ function createProcessBridge(session: TerminalSession) {
   };
 }
 
-function createInternalFetch(): typeof fetch {
+function withScopedBrowserBridges<T>(
+  workspaceBridge: ReturnType<typeof createWorkspaceBridge>,
+  processBridge: ReturnType<typeof createProcessBridge>,
+  fn: () => T,
+): T {
+  return withWorkspaceBridgeScope(workspaceBridge, () =>
+    withProcessBridgeScope(processBridge, fn),
+  );
+}
+
+function scopeResponseBody(
+  response: Response,
+  runWithScope: <T>(fn: () => T) => T,
+): Response {
+  if (!response.body) {
+    return response;
+  }
+
+  const reader = response.body.getReader();
+  const scopedBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const result = await runWithScope(() => reader.read());
+      if (result.done) {
+        controller.close();
+        return;
+      }
+
+      controller.enqueue(result.value);
+    },
+    async cancel(reason) {
+      await runWithScope(() => reader.cancel(reason));
+    },
+  });
+
+  return new Response(scopedBody, {
+    headers: new Headers(response.headers),
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
+function createInternalFetch(
+  workspaceBridge: ReturnType<typeof createWorkspaceBridge>,
+  processBridge: ReturnType<typeof createProcessBridge>,
+): typeof fetch {
+  const runWithScope = <T>(fn: () => T) =>
+    withScopedBrowserBridges(workspaceBridge, processBridge, fn);
+
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
-    return Server.Default().fetch(request);
+    const response = await runWithScope(() => Server.Default().fetch(request));
+    return scopeResponseBody(response, runWithScope);
   }) as typeof fetch;
 }
 
@@ -313,22 +358,20 @@ async function withOpenCodeBrowserRuntime<T>(
     cwd: options.cwd,
     env: options.env,
   });
+  const workspaceBridge = createWorkspaceBridge(options.container);
+  const processBridge = createProcessBridge(bridgeSession);
 
   ensureBrowserProcess(options.cwd, options.env);
-  attachWorkspaceBridge(createWorkspaceBridge(options.container));
-  attachProcessBridge(createProcessBridge(bridgeSession));
 
   try {
     await initBrowserDB();
     const client = createOpencodeClient({
       baseUrl: "http://opencode.internal",
       directory: toOpenCodePath(options.cwd),
-      fetch: createInternalFetch(),
+      fetch: createInternalFetch(workspaceBridge, processBridge),
     });
     return await callback(client);
   } finally {
-    detachWorkspaceBridge();
-    detachProcessBridge();
     bridgeSession.dispose();
   }
 }
@@ -361,6 +404,8 @@ export async function mountOpenCodeBrowserSession(
     cwd: options.cwd,
     env: options.env,
   });
+  const workspaceBridge = createWorkspaceBridge(options.container);
+  const processBridge = createProcessBridge(bridgeSession);
   let disposed = false;
 
   ensureBrowserProcess(options.cwd, options.env);
@@ -371,8 +416,9 @@ export async function mountOpenCodeBrowserSession(
     container: options.element,
     wasmUrl: __OPENTUI_WASM_URL__,
     directory: toOpenCodePath(options.cwd),
-    workspaceBridge: createWorkspaceBridge(options.container),
-    processBridge: createProcessBridge(bridgeSession),
+    workspaceBridge,
+    processBridge,
+    args: options.args ?? {},
     env: {
       copy: async (text) => navigator.clipboard.writeText(text),
       openUrl: (url) => window.open(url, "_blank", "noopener,noreferrer"),

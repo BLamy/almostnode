@@ -1,11 +1,11 @@
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import type { VirtualFS } from '../virtual-fs';
+import { getDefaultNetworkController, networkFetch } from '../network';
 import { readGhToken, writeGhToken, deleteGhToken, hasGhToken } from './gh-auth';
 import type { GhHostConfig } from './gh-auth';
 
 const GH_CLIENT_ID = 'Ov23li3di39s0mmKf6HE';
 const GH_SCOPES = 'repo,read:org,gist';
-const CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
 
 function ok(stdout: string): JustBashExecResult {
   return { stdout, stderr: '', exitCode: 0 };
@@ -21,8 +21,7 @@ async function fetchViaProxy(
   url: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  const proxiedUrl = `${CORS_PROXY}${encodeURIComponent(url)}`;
-  return fetch(proxiedUrl, options);
+  return networkFetch(url, options, getDefaultNetworkController());
 }
 
 // ── Device Flow ─────────────────────────────────────────────────────────────

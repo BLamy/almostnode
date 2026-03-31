@@ -1,10 +1,16 @@
 import { browserFetch } from './fetch';
 import {
-  isTailscaleHostname,
   selectNetworkRouteForHost,
   selectNetworkRouteForUrl,
 } from './routing';
+import {
+  normalizeNetworkOptions,
+  resolveBrowserWebSocketTarget,
+  resolveNetworkPolicy,
+  selectWebSocketRouteForUrl,
+} from './policy';
 import { createNativeTailscaleConnectAdapter } from './tailscale-connect-adapter';
+import { getBrowserNativeWebSocket } from './browser-websocket';
 import type { TailscaleWorkerErrorDebug } from './tailscale-worker-types';
 import type {
   NetworkIntegration,
@@ -14,7 +20,11 @@ import type {
   NetworkLookupResult,
   NetworkOptions,
   NetworkStatus,
+  NetworkWebSocketConnection,
+  NetworkWebSocketInit,
   PersistedNetworkSession,
+  ResolvedNetworkOptions,
+  ResolvedNetworkPolicy,
   TailscaleAdapter,
   TailscaleAdapterFactory,
   TailscaleAdapterStatus,
@@ -22,6 +32,7 @@ import type {
 
 let tailscaleAdapterFactory: TailscaleAdapterFactory | null = null;
 let defaultNetworkController: NetworkController | null = null;
+let defaultNetworkControllerImplicit = false;
 let tailscaleAdapterFactoryPromise: Promise<TailscaleAdapterFactory | null> | null = null;
 
 function nowIso(): string {
@@ -65,19 +76,7 @@ function formatTailscaleError(error: unknown): {
   };
 }
 
-function normalizeOptions(options: NetworkOptions = {}): Required<NetworkOptions> {
-  return {
-    provider: options.provider || 'browser',
-    authMode: options.authMode || 'interactive',
-    useExitNode: Boolean(options.useExitNode),
-    exitNodeId: options.exitNodeId?.trim() || null,
-    acceptDns: options.acceptDns !== false,
-    corsProxy: options.corsProxy ?? null,
-    tailscaleConnected: Boolean(options.tailscaleConnected),
-  };
-}
-
-function buildBrowserStatus(options: Required<NetworkOptions>): NetworkStatus {
+function buildBrowserStatus(options: ResolvedNetworkOptions): NetworkStatus {
   return {
     provider: options.provider,
     state: options.provider === 'tailscale' ? 'needs-login' : 'browser',
@@ -94,7 +93,7 @@ function buildBrowserStatus(options: Required<NetworkOptions>): NetworkStatus {
 }
 
 function mergeStatus(
-  options: Required<NetworkOptions>,
+  options: ResolvedNetworkOptions,
   status: TailscaleAdapterStatus | null,
 ): NetworkStatus {
   if (options.provider !== 'tailscale') {
@@ -140,7 +139,7 @@ function mergeStatus(
 }
 
 export class DefaultNetworkController implements NetworkController {
-  private options: Required<NetworkOptions>;
+  private options: ResolvedNetworkOptions;
   private readonly initialOptionKeys: ReadonlySet<string>;
   private readonly integration: NetworkIntegration | null;
   private listeners = new Set<(status: NetworkStatus) => void>();
@@ -155,13 +154,17 @@ export class DefaultNetworkController implements NetworkController {
     options: NetworkOptions = {},
     integration: NetworkIntegration | null = null,
   ) {
-    this.options = normalizeOptions(options);
+    this.options = normalizeNetworkOptions(options);
     this.initialOptionKeys = new Set(Object.keys(options));
     this.integration = integration;
   }
 
-  getConfig(): Required<NetworkOptions> {
+  getConfig(): ResolvedNetworkOptions {
     return this.getResolvedOptions();
+  }
+
+  getResolvedPolicy(): ResolvedNetworkPolicy {
+    return resolveNetworkPolicy(this.getResolvedOptions());
   }
 
   subscribe(listener: (status: NetworkStatus) => void): () => void {
@@ -174,7 +177,14 @@ export class DefaultNetworkController implements NetworkController {
   async configure(options: Partial<NetworkOptions>): Promise<NetworkStatus> {
     await this.ensureSessionHydrated();
     const previousProvider = this.options.provider;
-    this.options = normalizeOptions({ ...this.options, ...options });
+    this.options = normalizeNetworkOptions({
+      ...this.options,
+      ...options,
+      proxy: {
+        ...this.options.proxy,
+        ...(options.proxy || {}),
+      },
+    });
     this.shouldClearPersistedSession = false;
 
     if (this.adapter?.configure) {
@@ -227,7 +237,7 @@ export class DefaultNetworkController implements NetworkController {
   async login(): Promise<NetworkStatus> {
     await this.ensureSessionHydrated();
     if (this.options.provider !== 'tailscale') {
-      this.options = normalizeOptions({ ...this.options, provider: 'tailscale' });
+      this.options = normalizeNetworkOptions({ ...this.options, provider: 'tailscale' });
     }
     this.shouldClearPersistedSession = false;
 
@@ -285,7 +295,59 @@ export class DefaultNetworkController implements NetworkController {
         throw error;
       }
     }
-    return browserFetch(request, options);
+    return browserFetch(request, this.getResolvedPolicy());
+  }
+
+  async connectWebSocket(
+    url: string,
+    init: NetworkWebSocketInit = {},
+  ): Promise<NetworkWebSocketConnection> {
+    await this.ensureSessionHydrated();
+    if (this.options.provider === 'tailscale' && this.adapterStatus === null) {
+      await this.getStatus();
+    }
+
+    const policy = this.getResolvedPolicy();
+    const route = selectWebSocketRouteForUrl(
+      url,
+      policy,
+      typeof location !== 'undefined' ? location : null,
+    );
+    if (route === 'tailscale') {
+      throw new Error(
+        `Tailscale-routed WebSocket connections are not yet supported for ${url}`,
+      );
+    }
+
+    const NativeWS = getBrowserNativeWebSocket();
+    if (!NativeWS) {
+      throw new TypeError('Failed to fetch');
+    }
+
+    const target = resolveBrowserWebSocketTarget(
+      url,
+      policy,
+      init,
+      typeof location !== 'undefined' ? location : null,
+    );
+
+    if (!target.proxied && init.headers && Object.keys(init.headers).length > 0) {
+      console.warn(
+        `[network] Ignoring custom WebSocket headers for direct browser connection to ${url}`,
+      );
+    }
+
+    const socket = target.constructorProtocols !== undefined
+      ? new NativeWS(target.url, target.constructorProtocols)
+      : new NativeWS(target.url);
+    socket.binaryType = 'arraybuffer';
+
+    return {
+      socket,
+      url: target.url,
+      route,
+      proxied: target.proxied,
+    };
   }
 
   async lookup(
@@ -335,7 +397,7 @@ export class DefaultNetworkController implements NetworkController {
     return this.adapterPromise;
   }
 
-  private getResolvedOptions(): Required<NetworkOptions> {
+  private getResolvedOptions(): ResolvedNetworkOptions {
     const tailscaleConnected = this.adapterStatus?.state === 'running';
 
     if (
@@ -388,7 +450,7 @@ export class DefaultNetworkController implements NetworkController {
       return;
     }
 
-    this.options = normalizeOptions({
+    this.options = normalizeNetworkOptions({
       ...this.options,
       exitNodeId: selectedExitNodeId,
     });
@@ -463,7 +525,7 @@ export class DefaultNetworkController implements NetworkController {
           if (!this.initialOptionKeys.has('acceptDns')) {
             nextOptions.acceptDns = session.acceptDns;
           }
-          this.options = normalizeOptions(nextOptions);
+          this.options = normalizeNetworkOptions(nextOptions);
         })
         .catch(() => {
           this.persistedSession = null;
@@ -508,17 +570,24 @@ export function createNetworkController(
   return new DefaultNetworkController(options, integration);
 }
 
+export function hasExplicitDefaultNetworkController(): boolean {
+  return Boolean(defaultNetworkController) && !defaultNetworkControllerImplicit;
+}
+
 export function getDefaultNetworkController(): NetworkController {
   if (!defaultNetworkController) {
     defaultNetworkController = createNetworkController();
+    defaultNetworkControllerImplicit = true;
   }
   return defaultNetworkController;
 }
 
 export function setDefaultNetworkController(
   controller: NetworkController | null,
+  implicit = false,
 ): void {
   defaultNetworkController = controller;
+  defaultNetworkControllerImplicit = Boolean(controller) && implicit;
 }
 
 export function setTailscaleAdapterFactory(

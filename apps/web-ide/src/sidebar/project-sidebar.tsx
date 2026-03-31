@@ -39,6 +39,7 @@ interface SidebarInnerProps {
 function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
   const { state, dispatch } = useSidebar();
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [hasGitHubCredentials, setHasGitHubCredentials] = useState(() => manager.hasGitHubCredentials());
 
   useEffect(() => {
     manager.setCallbacks({
@@ -67,6 +68,13 @@ function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
   useEffect(() => {
     writeExpandedProjectIds(state.expandedProjectIds);
   }, [state.expandedProjectIds]);
+
+  useEffect(() => {
+    if (!newProjectOpen) {
+      return;
+    }
+    setHasGitHubCredentials(manager.hasGitHubCredentials());
+  }, [manager, newProjectOpen]);
 
   const handleSelectProject = useCallback(
     (id: string) => {
@@ -98,15 +106,18 @@ function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
   );
 
   const handleCreateProject = useCallback(
-    (name: string, templateId: TemplateId) => {
-      void (async () => {
-        const project = await manager.createProject(name, templateId);
-        dispatch({
-          type: 'SET_EXPANDED_PROJECTS',
-          projectIds: Array.from(new Set([...state.expandedProjectIds, project.id])),
-        });
-        await manager.switchProject(project.id);
-      })();
+    async (
+      name: string,
+      templateId: TemplateId,
+      options: { createGitHubRepo: boolean },
+    ) => {
+      const project = await manager.createProject(name, templateId, options);
+      dispatch({
+        type: 'SET_EXPANDED_PROJECTS',
+        projectIds: Array.from(new Set([...state.expandedProjectIds, project.id])),
+      });
+      await manager.switchProject(project.id);
+      await manager.saveCurrentProject();
     },
     [dispatch, manager, state.expandedProjectIds],
   );
@@ -159,6 +170,7 @@ function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
       <NewProjectDialog
         open={newProjectOpen}
         onOpenChange={setNewProjectOpen}
+        hasGitHubCredentials={hasGitHubCredentials}
         onCreate={handleCreateProject}
       />
     </div>

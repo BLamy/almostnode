@@ -17,6 +17,7 @@ describe('ModuleGraphLoader', () => {
         builtinModules: {},
         console: console as unknown as Record<string, unknown>,
         process: {} as Record<string, unknown>,
+        globalObject: { console, process: {}, Buffer } as unknown as Record<string, unknown>,
         requireCjs: () => ({}),
         createRequire: () => {
           const requireFn = (() => ({})) as ((id: string) => unknown) & { resolve?: (id: string) => string };
@@ -47,5 +48,47 @@ describe('ModuleGraphLoader', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('prepends runtime globals to generated ESM source without mutating the host scope', async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync(
+      '/entry.mjs',
+      'export default [console === globalThis.console, process === globalThis.process, process === global.process];\n',
+    );
+
+    const hostConsole = globalThis.console;
+    const hostProcess = globalThis.process as unknown;
+    const loader = new ModuleGraphLoader({
+      vfs,
+      runtimeId: 'test-runtime',
+      builtinModules: {},
+      console: { log: vi.fn() } as unknown as Record<string, unknown>,
+      process: { cwd: () => '/runtime' } as unknown as Record<string, unknown>,
+      globalObject: {
+        console: { log: vi.fn() },
+        process: { cwd: () => '/runtime' },
+        Buffer,
+      } as unknown as Record<string, unknown>,
+      requireCjs: () => ({}),
+      createRequire: () => {
+        const requireFn = (() => ({})) as ((id: string) => unknown) & { resolve?: (id: string) => string };
+        requireFn.resolve = (id: string) => id;
+        return requireFn;
+      },
+    }) as ModuleGraphLoader & {
+      buildModuleSource: (descriptor: unknown) => Promise<string>;
+    };
+
+    const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
+    const source = await loader.buildModuleSource(descriptor);
+
+    expect(source).toContain('const __almostnode_hostGlobal = globalThis;');
+    expect(source).toContain('const globalThis = __almostnode_global;');
+    expect(source).toContain('const global = __almostnode_global;');
+    expect(source).toContain('const console = __almostnode_global.console;');
+    expect(source).toContain('const process = __almostnode_global.process;');
+    expect(globalThis.console).toBe(hostConsole);
+    expect(globalThis.process as unknown).toBe(hostProcess);
   });
 });

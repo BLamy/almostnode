@@ -2,6 +2,13 @@ export type NetworkProvider = 'browser' | 'tailscale';
 
 export type NetworkAuthMode = 'interactive';
 
+export interface NetworkProxyOptions {
+  httpUrl?: string | null;
+  httpsUrl?: string | null;
+  noProxy?: string | null;
+  caBundlePem?: string | null;
+}
+
 export interface NetworkOptions {
   provider?: NetworkProvider;
   authMode?: NetworkAuthMode;
@@ -9,7 +16,19 @@ export interface NetworkOptions {
   exitNodeId?: string | null;
   acceptDns?: boolean;
   corsProxy?: string | null;
+  proxy?: NetworkProxyOptions;
   tailscaleConnected?: boolean;
+}
+
+export interface ResolvedNetworkProxyOptions {
+  httpUrl: string | null;
+  httpsUrl: string | null;
+  noProxy: string | null;
+  caBundlePem: string | null;
+}
+
+export interface ResolvedNetworkOptions extends Omit<Required<NetworkOptions>, 'proxy'> {
+  proxy: ResolvedNetworkProxyOptions;
 }
 
 export interface NetworkExitNode {
@@ -83,13 +102,42 @@ export interface NetworkLookupResult {
 
 export type NetworkRoute = 'browser' | 'tailscale';
 
+export interface ResolvedNetworkPolicy {
+  options: ResolvedNetworkOptions;
+  proxy: ResolvedNetworkProxyOptions & {
+    caBundlePath: string | null;
+  };
+  browser: {
+    corsProxyUrl: string | null;
+    wsRelayUrl: string | null;
+  };
+  env: Record<string, string>;
+}
+
+export interface NetworkWebSocketInit {
+  protocols?: string | string[];
+  headers?: Record<string, string>;
+}
+
+export interface NetworkWebSocketConnection {
+  socket: WebSocket;
+  url: string;
+  route: NetworkRoute;
+  proxied: boolean;
+}
+
 export interface NetworkController {
-  getConfig(): Required<NetworkOptions>;
+  getConfig(): ResolvedNetworkOptions;
+  getResolvedPolicy(): ResolvedNetworkPolicy;
   configure(options: Partial<NetworkOptions>): Promise<NetworkStatus>;
   getStatus(): Promise<NetworkStatus>;
   login(): Promise<NetworkStatus>;
   logout(): Promise<NetworkStatus>;
   fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse>;
+  connectWebSocket(
+    url: string,
+    init?: NetworkWebSocketInit,
+  ): Promise<NetworkWebSocketConnection>;
   lookup(
     hostname: string,
     options?: NetworkLookupOptions,
@@ -130,7 +178,7 @@ export interface NetworkIntegration {
 }
 
 export interface TailscaleAdapter {
-  configure?(options: Required<NetworkOptions>): Promise<void>;
+  configure?(options: ResolvedNetworkOptions): Promise<void>;
   getStatus(): Promise<TailscaleAdapterStatus>;
   login(): Promise<TailscaleAdapterStatus>;
   logout(): Promise<TailscaleAdapterStatus>;
@@ -144,6 +192,6 @@ export interface TailscaleAdapter {
 }
 
 export type TailscaleAdapterFactory = (
-  options: Required<NetworkOptions>,
+  options: ResolvedNetworkOptions,
   onStatus: (status: TailscaleAdapterStatus) => void,
 ) => Promise<TailscaleAdapter>;

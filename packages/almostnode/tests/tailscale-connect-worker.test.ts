@@ -324,6 +324,180 @@ describe('tailscale connect worker', () => {
     expect(fetchArg.headers).not.toHaveProperty('Host');
   });
 
+  it('allows long-running structured POST fetches to use the extended timeout budget', async () => {
+    const dnsFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      expect(url).toContain('cloudflare-dns.com/dns-query');
+      expect(url).toContain('name=api.anthropic.com');
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: [{ type: 1, data: '104.18.33.45' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/dns-json' },
+      });
+    });
+    Object.defineProperty(globalThis, 'fetch', {
+      value: dnsFetch,
+      configurable: true,
+      writable: true,
+    });
+
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      configure: vi.fn(async () => {}),
+      fetch: vi.fn(async (request: {
+        url: string;
+      }) => new Promise((resolve) => {
+        setTimeout(() => resolve({
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/json' },
+          bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+          text: async () => '{"ok":true}',
+        }), 20_000);
+      })),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const fetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://api.anthropic.com/v1/messages',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'test-key',
+        },
+        bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(getResponseMessages(workerScope)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await fetchPromise;
+
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: true,
+      value: expect.objectContaining({
+        url: 'https://api.anthropic.com/v1/messages',
+        status: 200,
+      }),
+    });
+  });
+
+  it('recreates the IPN after a response body read timeout so later requests can recover', async () => {
+    const dnsFetch = vi.fn(async () => new Response(JSON.stringify({
+      Status: 0,
+      Answer: [{ type: 1, data: '104.18.32.47' }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/dns-json' },
+    }));
+    Object.defineProperty(globalThis, 'fetch', {
+      value: dnsFetch,
+      configurable: true,
+      writable: true,
+    });
+
+    const firstIpn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      configure: vi.fn(async () => {}),
+      fetch: vi.fn(async (request: string | { url: string }) => ({
+        url: typeof request === 'string' ? request : request.url,
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+        text: async () => {
+          throw new Error(
+            'reading response body: context deadline exceeded ' +
+            '(Client.Timeout or context cancellation while reading body)',
+          );
+        },
+      })),
+    };
+    const secondIpn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      configure: vi.fn(async () => {}),
+      fetch: vi.fn(async (request: string | { url: string }) => ({
+        url: typeof request === 'string' ? request : request.url,
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+        bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+        text: async () => '{"ok":true}',
+      })),
+    };
+    createIPNMock
+      .mockResolvedValueOnce(firstIpn)
+      .mockResolvedValueOnce(secondIpn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const firstFetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://chatgpt.com/backend-api/codex/responses',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+      },
+    });
+    await vi.runAllTimersAsync();
+    await firstFetchPromise;
+
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: false,
+      error: {
+        code: 'fetch_timeout',
+        message: expect.stringContaining('reading response body: context deadline exceeded'),
+      },
+    });
+
+    const secondFetchPromise = workerScope.dispatch({
+      id: 2,
+      type: 'fetch',
+      request: {
+        url: 'https://chatgpt.com/backend-api/codex/responses',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+      },
+    });
+    await vi.runAllTimersAsync();
+    await secondFetchPromise;
+
+    expect(createIPNMock).toHaveBeenCalledTimes(2);
+    expect(secondIpn.run).toHaveBeenCalledTimes(1);
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 2,
+      ok: true,
+      value: expect.objectContaining({
+        url: 'https://chatgpt.com/backend-api/codex/responses',
+        status: 200,
+      }),
+    });
+  });
+
   it('retries public fetches via direct IP when the runtime still uses loopback DNS', async () => {
     const dnsFetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -415,6 +589,162 @@ describe('tailscale connect worker', () => {
       ok: true,
       value: expect.objectContaining({
         url: 'http://google.com/',
+        status: 200,
+      }),
+    });
+  });
+
+  it('allows long-running structured POST fetches to complete through direct-IP fallback', async () => {
+    const dnsFetch = vi.fn(async () => new Response(JSON.stringify({
+      Status: 0,
+      Answer: [{ type: 1, data: '160.79.104.10' }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/dns-json' },
+    }));
+    Object.defineProperty(globalThis, 'fetch', {
+      value: dnsFetch,
+      configurable: true,
+      writable: true,
+    });
+
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      configure: vi.fn(async () => {}),
+      fetch: vi.fn(async (request: {
+        url: string;
+        tlsServerName?: string;
+      }) => {
+        if (request.url === 'https://api.anthropic.com/v1/messages?beta=true') {
+          throw new Error(
+            'Post "https://api.anthropic.com/v1/messages?beta=true": lookup api.anthropic.com on [::1]:53: ' +
+            'write udp 127.0.0.1:24->[::1]:53: write: Connection reset by peer',
+          );
+        }
+
+        expect(request).toMatchObject({
+          url: 'https://160.79.104.10/v1/messages?beta=true',
+          tlsServerName: 'api.anthropic.com',
+        });
+
+        return new Promise((resolve) => {
+          setTimeout(() => resolve({
+            url: request.url,
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'application/json' },
+            bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+            text: async () => '{"ok":true}',
+          }), 20_000);
+        });
+      }),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const fetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://api.anthropic.com/v1/messages?beta=true',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'test-key',
+        },
+        bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(getResponseMessages(workerScope)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await fetchPromise;
+
+    expect(ipn.fetch).toHaveBeenCalledTimes(2);
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: true,
+      value: expect.objectContaining({
+        url: 'https://api.anthropic.com/v1/messages?beta=true',
+        status: 200,
+      }),
+    });
+  });
+
+  it('recreates the IPN after a runtime panic so the next fetch can recover', async () => {
+    const firstIpn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(async () => {
+        throw new Error('panic: ValueOf: invalid value');
+      }),
+    };
+    const secondIpn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(async (url: string) => ({
+        url,
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'text/plain' },
+        bodyBase64: Buffer.from('tailnet-response').toString('base64'),
+        text: async () => 'tailnet-response',
+      })),
+    };
+    createIPNMock
+      .mockResolvedValueOnce(firstIpn)
+      .mockResolvedValueOnce(secondIpn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const firstFetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://db.ts.net/status',
+        method: 'GET',
+        headers: {},
+      },
+    });
+    await vi.runAllTimersAsync();
+    await firstFetchPromise;
+
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: false,
+      error: {
+        code: 'runtime_panic',
+        message: expect.stringContaining('ValueOf: invalid value'),
+      },
+    });
+
+    const secondFetchPromise = workerScope.dispatch({
+      id: 2,
+      type: 'fetch',
+      request: {
+        url: 'https://db.ts.net/status',
+        method: 'GET',
+        headers: {},
+      },
+    });
+    await vi.runAllTimersAsync();
+    await secondFetchPromise;
+
+    expect(createIPNMock).toHaveBeenCalledTimes(2);
+    expect(secondIpn.run).toHaveBeenCalledTimes(1);
+    expect(secondIpn.fetch).toHaveBeenCalledWith('https://db.ts.net/status');
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 2,
+      ok: true,
+      value: expect.objectContaining({
+        url: 'https://db.ts.net/status',
         status: 200,
       }),
     });

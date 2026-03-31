@@ -63,6 +63,22 @@ describe('desktop project persistence helpers', () => {
     );
   });
 
+  it('can include .git data in persisted project snapshots when requested', () => {
+    const container = createContainer();
+    container.vfs.mkdirSync(`${PROJECT_ROOT}/.git`, { recursive: true });
+    container.vfs.writeFileSync(`${PROJECT_ROOT}/.git/config`, '[remote "origin"]\n');
+    container.vfs.writeFileSync(`${PROJECT_ROOT}/README.md`, '# demo\n');
+
+    const files = collectProjectFilesBase64(container.vfs, { includeGit: true });
+    expect(files.map((file) => file.path)).toContain(`${PROJECT_ROOT}/.git/config`);
+
+    const restored = createContainer();
+    loadProjectFilesIntoVfs(restored.vfs, files, { includeGit: true });
+
+    expect(restored.vfs.readFileSync(`${PROJECT_ROOT}/.git/config`, 'utf8')).toBe('[remote "origin"]\n');
+    expect(restored.vfs.readFileSync(`${PROJECT_ROOT}/README.md`, 'utf8')).toBe('# demo\n');
+  });
+
   it('replaces persisted project files in place while preserving host-managed directories', () => {
     const container = createContainer();
     container.vfs.mkdirSync(`${PROJECT_ROOT}/src`, { recursive: true });

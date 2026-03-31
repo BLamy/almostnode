@@ -10,6 +10,7 @@ import type {
   NetworkLookupOptions,
   NetworkLookupResult,
   NetworkOptions,
+  ResolvedNetworkOptions,
   TailscaleAdapterStatus,
 } from './types';
 import { createFsShim, type Stats } from '../shims/fs';
@@ -80,13 +81,19 @@ class ClassifiedTailscaleWorkerError extends Error {
   }
 }
 
-const defaultOptions: Required<NetworkOptions> = {
+const defaultOptions: ResolvedNetworkOptions = {
   provider: 'tailscale',
   authMode: 'interactive',
   useExitNode: false,
   exitNodeId: null,
   acceptDns: true,
   corsProxy: null,
+  proxy: {
+    httpUrl: null,
+    httpsUrl: null,
+    noProxy: null,
+    caBundlePem: null,
+  },
   tailscaleConnected: false,
 };
 const TAILSCALE_DEFAULT_DNS_IP = '100.100.100.100';
@@ -105,6 +112,9 @@ let ipnPromise: Promise<TailscaleConnectIPN> | null = null;
 let ipnStartScheduled = false;
 let ipnStarted = false;
 let ipnStartPromise: Promise<void> | null = null;
+let ipnGeneration = 0;
+let ipnResetCount = 0;
+let lastRuntimeResetReason: string | null = null;
 let tailscaleConnectModulePromise: Promise<typeof import('@tailscale/connect')> | null = null;
 let state: TailscaleConnectState = 'NoState';
 let netMap: TailscaleConnectNetMap | null = null;
@@ -112,6 +122,9 @@ let loginUrl: string | null = null;
 let panicError: string | null = null;
 let dnsHealthy: boolean | null = null;
 let dnsDetail: string | null = null;
+let lastRuntimeFailureSignal:
+  | { message: string; seenAt: number }
+  | null = null;
 let tailscaleRuntimeCwd = TAILSCALE_RUNTIME_ROOT;
 let allowSnapshotClear = false;
 const fetchIpMap = new Map<string, string>();
@@ -322,6 +335,13 @@ function processRuntimeLog(text: string): void {
     .filter(Boolean);
 
   for (const line of lines) {
+    if (isFatalRuntimeMessage(line)) {
+      lastRuntimeFailureSignal = {
+        message: line,
+        seenAt: Date.now(),
+      };
+    }
+
     if (
       line.includes('dns: resolver: forward: no upstream resolvers set')
       || line.includes('lookup ') && line.includes(' via DoH fallback failed:')
@@ -750,6 +770,22 @@ function overrideGlobalProperty<K extends PropertyKey>(
   };
 }
 
+function isRealNodeProcess(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const processLike = value as {
+    release?: { name?: unknown };
+    platform?: unknown;
+    versions?: { node?: unknown };
+  };
+
+  return processLike.release?.name === 'node'
+    && typeof processLike.platform === 'string'
+    && typeof processLike.versions?.node === 'string';
+}
+
 async function loadTailscaleConnectModule(): Promise<typeof import('@tailscale/connect')> {
   if (!tailscaleConnectModulePromise) {
     tailscaleConnectModulePromise = (async () => {
@@ -759,13 +795,20 @@ async function loadTailscaleConnectModule(): Promise<typeof import('@tailscale/c
       // Also clear Node-ish globals long enough for wasm_exec to install the
       // stubs it expects instead of inheriting browser polyfills from Vite.
       const restoreNavigator = overrideGlobalProperty('navigator', undefined);
-      overrideGlobalProperty('process', undefined);
-      overrideGlobalProperty('fs', undefined);
-      overrideGlobalProperty('path', undefined);
+      const restoreProcess = isRealNodeProcess(
+        (globalThis as { process?: unknown }).process,
+      )
+        ? () => {}
+        : overrideGlobalProperty('process', undefined);
+      const restoreFs = overrideGlobalProperty('fs', undefined);
+      const restorePath = overrideGlobalProperty('path', undefined);
       try {
         return await import('@tailscale/connect');
       } finally {
         restoreNavigator();
+        restoreProcess();
+        restoreFs();
+        restorePath();
       }
     })();
   }
@@ -781,16 +824,29 @@ function getTailscaleGoRuntimeConstructor():
 }
 
 function installTailscaleRuntimeGlobals(): void {
+  const existingProcess = (globalThis as { process?: unknown }).process;
+  const preservedProcess =
+    isRealNodeProcess(existingProcess) && existingProcess && typeof existingProcess === 'object'
+      ? existingProcess as Record<string, unknown>
+      : null;
   const processValue = {
+    ...(preservedProcess || {}),
     env: withTailscaleCertificateEnv({
+      ...(
+        preservedProcess?.env && typeof preservedProcess.env === 'object'
+          ? preservedProcess.env as Record<string, string>
+          : {}
+      ),
       HOME: TAILSCALE_RUNTIME_ROOT,
       TMPDIR: TAILSCALE_RUNTIME_TMP_DIR,
       TS_LOGS_DIR: TAILSCALE_RUNTIME_LOGS_DIR,
       XDG_CACHE_HOME: TAILSCALE_RUNTIME_CACHE_DIR,
     }),
-    argv: ['tailscale-connect-worker'],
-    pid: 1,
-    ppid: 0,
+    argv: Array.isArray(preservedProcess?.argv)
+      ? [...preservedProcess.argv as unknown[]]
+      : ['tailscale-connect-worker'],
+    pid: typeof preservedProcess?.pid === 'number' ? preservedProcess.pid : 1,
+    ppid: typeof preservedProcess?.ppid === 'number' ? preservedProcess.ppid : 0,
     cwd: () => tailscaleRuntimeCwd,
     chdir: (nextPath: string) => {
       tailscaleRuntimeCwd = pathShim.resolve(nextPath);
@@ -1035,9 +1091,34 @@ function mapState(): TailscaleAdapterStatus {
   }
 }
 
-function handleIpnError(error: unknown): void {
-  panicError = error instanceof Error ? error.message : String(error);
+function resetIpnRuntime(reason: string): void {
+  const detail = reason.trim() || 'Unknown Tailscale runtime failure.';
+  const hadLiveIpn = Boolean(ipnPromise || ipnStartPromise || ipnStarted || ipnStartScheduled);
+
+  if (hadLiveIpn) {
+    ipnResetCount += 1;
+    lastRuntimeResetReason = detail;
+    console.warn('[tailscale-worker] resetting live IPN runtime', {
+      reason: detail,
+      generation: ipnGeneration,
+      resetCount: ipnResetCount,
+    });
+  }
+
+  ipnPromise = null;
+  ipnStartPromise = null;
+  ipnStarted = false;
+  ipnStartScheduled = false;
+  panicError = detail;
+  lastRuntimeFailureSignal = {
+    message: detail,
+    seenAt: Date.now(),
+  };
   emitStatus();
+}
+
+function handleIpnError(error: unknown): void {
+  resetIpnRuntime(error instanceof Error ? error.message : String(error));
 }
 
 async function applyCurrentIpnConfig(ipn: TailscaleConnectIPN): Promise<void> {
@@ -1088,9 +1169,8 @@ function createIpnCallbacks(): Parameters<TailscaleConnectIPN['run']>[0] {
       emitStatus();
     },
     notifyPanicRecover: (error) => {
-      panicError = error;
       updateDnsHealth(false, error);
-      emitStatus();
+      resetIpnRuntime(error);
     },
   };
 }
@@ -1500,6 +1580,9 @@ function toTailscaleWorkerErrorPayload(
   if (message.includes('Tailscale fetch timed out after')) {
     return { code: 'fetch_timeout', message, debug };
   }
+  if (isBodyReadFailureMessage(message)) {
+    return { code: 'fetch_timeout', message, debug };
+  }
   if (
     message.includes('Tailscale DNS could not resolve')
     || message.includes('Public DNS query failed')
@@ -1557,7 +1640,21 @@ function extractHostnameFromStateStorage(): string | null {
 
 async function ensureIpn(): Promise<TailscaleConnectIPN> {
   if (!ipnPromise) {
+    const recoveringReason = panicError;
+    if (recoveringReason) {
+      console.warn('[tailscale-worker] recreating IPN after runtime failure', {
+        reason: recoveringReason,
+        previousGeneration: ipnGeneration,
+        resetCount: ipnResetCount,
+      });
+      panicError = null;
+      state = 'Starting';
+      emitStatus();
+    }
+
     const storedHostname = extractHostnameFromStateStorage();
+    lastRuntimeFailureSignal = null;
+    ipnGeneration += 1;
     ipnPromise = createWorkerIpn({
       authKey: '',
       hostname: storedHostname || `almostnode-${Math.random().toString(36).slice(2, 8)}`,
@@ -1567,9 +1664,8 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
       acceptDns: options.acceptDns,
       wasmURL: tailscaleWasmUrl,
       panicHandler: (error: string) => {
-        panicError = error;
         updateDnsHealth(false, error);
-        emitStatus();
+        resetIpnRuntime(error);
       },
     })
       .then((ipn) => {
@@ -1675,6 +1771,59 @@ function isLoopbackDnsFailure(message: string, hostname: string | null): boolean
   return normalized.includes(`lookup ${hostname.toLowerCase()}`);
 }
 
+function isFatalRuntimeMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('unexpected shutdown')
+    || normalized.includes('go program has already exited')
+    || normalized.includes('use of closed network connection')
+    || normalized.includes('close received after close')
+    || normalized.includes('syscall/js.valuecall')
+  );
+}
+
+function isBodyReadFailureMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('reading response body')
+    || normalized.includes('while reading body')
+    || normalized.includes('client.timeout or context cancellation while reading body')
+    || normalized.includes('context deadline exceeded')
+  );
+}
+
+function getRecentRuntimeFailureSignal(
+  maxAgeMs = 60_000,
+): { message: string; ageMs: number } | null {
+  if (!lastRuntimeFailureSignal) {
+    return null;
+  }
+
+  const ageMs = Date.now() - lastRuntimeFailureSignal.seenAt;
+  if (ageMs > maxAgeMs) {
+    return null;
+  }
+
+  return {
+    message: lastRuntimeFailureSignal.message,
+    ageMs,
+  };
+}
+
+function shouldResetRuntimeAfterError(
+  formatted: Pick<TailscaleWorkerErrorPayload, 'code' | 'message' | 'debug'>,
+): boolean {
+  return (
+    formatted.code === 'runtime_panic'
+    || isFatalRuntimeMessage(formatted.message)
+    || isBodyReadFailureMessage(formatted.message)
+    || Boolean(
+      formatted.debug?.recentRuntimeSignal
+      && isFatalRuntimeMessage(formatted.debug.recentRuntimeSignal),
+    )
+  );
+}
+
 function buildDirectIpFallbackRequest(
   request: NetworkFetchRequest,
   hostname: string,
@@ -1735,7 +1884,20 @@ function shouldRetryWithResolvedIp(
   return isLoopbackDnsFailure(getErrorMessage(error), preparedRoute.hostname);
 }
 
-const TAILSCALE_FETCH_TIMEOUT_MS = 15_000;
+const TAILSCALE_DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const TAILSCALE_LONG_RUNNING_FETCH_TIMEOUT_MS = 300_000;
+
+function getTailscaleFetchTimeoutMs(
+  request: NetworkFetchRequest,
+  _mode: 'primary' | 'fallback',
+): number {
+  const method = (request.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return TAILSCALE_DEFAULT_FETCH_TIMEOUT_MS;
+  }
+
+  return TAILSCALE_LONG_RUNNING_FETCH_TIMEOUT_MS;
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -1756,6 +1918,7 @@ async function handleFetch(
   request: NetworkFetchRequest,
 ): Promise<NetworkFetchResponse> {
   const hadLiveIpn = ipnPromise !== null;
+  const recentRuntimeSignal = getRecentRuntimeFailureSignal();
   const fetchLabel = `${request.method || 'GET'} ${request.url}`;
   console.log(`[tailscale-worker] fetch start: ${fetchLabel}`);
   const fetchStart = Date.now();
@@ -1765,6 +1928,11 @@ async function handleFetch(
     useExitNode: options.useExitNode,
     exitNodeId: options.exitNodeId,
     hadLiveIpn,
+    runtimeGeneration: ipnGeneration,
+    runtimeResetCount: ipnResetCount,
+    lastRuntimeResetReason,
+    recentRuntimeSignal: recentRuntimeSignal?.message ?? null,
+    recentRuntimeSignalAgeMs: recentRuntimeSignal?.ageMs ?? null,
   };
 
   try {
@@ -1782,10 +1950,15 @@ async function handleFetch(
     await ensureIpnStarted(ipn);
 
     const capabilities = getTailscaleBridgeCapabilities(ipn);
+    const primaryTimeoutMs = getTailscaleFetchTimeoutMs(request, 'primary');
     fetchDebug = {
       ...fetchDebug,
       phase: 'primary_fetch',
       capabilities,
+      timeoutMs: primaryTimeoutMs,
+      runtimeGeneration: ipnGeneration,
+      runtimeResetCount: ipnResetCount,
+      lastRuntimeResetReason,
       attemptedIpMapSync: Boolean(preparedRoute.mappingChanged && capabilities.canReconfigure),
     };
     console.log(
@@ -1821,7 +1994,7 @@ async function handleFetch(
           : 'follow',
       };
       try {
-        response = await withTimeout(ipn.fetch(fetchReq), TAILSCALE_FETCH_TIMEOUT_MS, fetchLabel);
+        response = await withTimeout(ipn.fetch(fetchReq), primaryTimeoutMs, fetchLabel);
       } catch (primaryError) {
         if (!shouldRetryWithResolvedIp(primaryError, request, preparedRoute, capabilities)) {
           throw primaryError;
@@ -1834,9 +2007,11 @@ async function handleFetch(
           preparedRoute.ipAddress,
         );
         const fallbackLabel = `${fetchLabel} [direct-ip fallback]`;
+        const fallbackTimeoutMs = getTailscaleFetchTimeoutMs(request, 'fallback');
         fetchDebug = {
           ...fetchDebug,
           phase: 'fallback_fetch',
+          timeoutMs: fallbackTimeoutMs,
           fallbackAttempted: true,
           fallbackStrategy: 'rewrite_to_resolved_ip',
           primaryError: primaryErrorMessage,
@@ -1849,7 +2024,7 @@ async function handleFetch(
         try {
           response = await withTimeout(
             ipn.fetch(fallbackRequest),
-            TAILSCALE_FETCH_TIMEOUT_MS,
+            fallbackTimeoutMs,
             fallbackLabel,
           );
           usedDirectIpFallback = true;
@@ -1877,7 +2052,11 @@ async function handleFetch(
           getMinimalRuntimeFetchError(),
         );
       }
-      response = await withTimeout(ipn.fetch(request.url), TAILSCALE_FETCH_TIMEOUT_MS, fetchLabel);
+      response = await withTimeout(
+        ipn.fetch(request.url),
+        getTailscaleFetchTimeoutMs(request, 'primary'),
+        fetchLabel,
+      );
     }
 
     const elapsed = Date.now() - fetchStart;
@@ -1885,7 +2064,34 @@ async function handleFetch(
       `[tailscale-worker] fetch complete: ${response.status} in ${elapsed}ms: ${fetchLabel}${usedDirectIpFallback ? ' (direct-ip fallback)' : ''}`,
     );
 
-    const bodyBase64 = response.bodyBase64 || encodeTextBody(await response.text());
+    fetchDebug = {
+      ...fetchDebug,
+      phase: 'read_body',
+      responseUrl: response.url || request.url,
+      responseStatus: response.status,
+      hadBodyBase64: typeof response.bodyBase64 === 'string',
+    };
+
+    let bodyBase64: string;
+    if (typeof response.bodyBase64 === 'string') {
+      bodyBase64 = response.bodyBase64;
+    } else {
+      try {
+        bodyBase64 = encodeTextBody(await response.text());
+      } catch (bodyReadError) {
+        const bodyReadMessage = getErrorMessage(bodyReadError);
+        throw new ClassifiedTailscaleWorkerError(
+          isBodyReadFailureMessage(bodyReadMessage)
+            ? 'fetch_timeout'
+            : 'runtime_unavailable',
+          `Tailscale response body read failed: ${bodyReadMessage}`,
+          {
+            ...fetchDebug,
+            bodyReadError: bodyReadMessage,
+          },
+        );
+      }
+    }
 
     if (getEffectiveAcceptDns(options)) {
       updateDnsHealth(true, null);
@@ -1900,7 +2106,30 @@ async function handleFetch(
     };
   } catch (error) {
     const elapsed = Date.now() - fetchStart;
-    const formatted = toTailscaleWorkerErrorPayload(error, 'runtime_unavailable', fetchDebug);
+    const recentRuntimeSignalNow = getRecentRuntimeFailureSignal();
+    let formatted = toTailscaleWorkerErrorPayload(error, 'runtime_unavailable', fetchDebug);
+    if (recentRuntimeSignalNow) {
+      formatted = {
+        ...formatted,
+        debug: {
+          ...formatted.debug,
+          recentRuntimeSignal: recentRuntimeSignalNow.message,
+          recentRuntimeSignalAgeMs: recentRuntimeSignalNow.ageMs,
+        },
+      };
+    }
+    if (shouldResetRuntimeAfterError(formatted)) {
+      resetIpnRuntime(formatted.message);
+      formatted = {
+        ...formatted,
+        debug: {
+          ...formatted.debug,
+          runtimeGeneration: ipnGeneration,
+          runtimeResetCount: ipnResetCount,
+          lastRuntimeResetReason,
+        },
+      };
+    }
     console.warn(
       `[tailscale-worker] fetch failed after ${elapsed}ms (${formatted.code}): ${fetchLabel}`,
       formatted.debug

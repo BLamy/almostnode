@@ -1,6 +1,8 @@
 import { EventEmitter } from "../../../../packages/almostnode/src/shims/events.ts";
+import { AsyncLocalStorage } from "async_hooks";
 import path from "path";
 import { PassThrough } from "stream";
+import { promisify } from "node:util";
 import { _vfs_addDir, _vfs_getFile, _vfs_readdir } from "../../../../vendor/opencode/packages/browser/src/shims/fs.browser.ts";
 import { listWorkspaceFiles, searchWorkspaceFiles } from "./opencode-ripgrep-shared.ts";
 
@@ -16,7 +18,32 @@ export interface BrowserProcessBridge {
   }): Promise<{ stdout: string; stderr: string; code: number }>;
 }
 
+interface BrowserExecOptions {
+  cwd?: string;
+  env?: Record<string, string>;
+  input?: string;
+  shell?: boolean | string;
+  signal?: AbortSignal;
+  encoding?: BufferEncoding | "buffer" | null;
+  maxBuffer?: number;
+  timeout?: number;
+}
+
+type BrowserExecCallback = (
+  error: (Error & {
+    code?: number;
+    killed?: boolean;
+    signal?: string | null;
+    cmd?: string;
+    stdout?: string | Buffer;
+    stderr?: string | Buffer;
+  }) | null,
+  stdout: string | Buffer,
+  stderr: string | Buffer,
+) => void;
+
 let processBridge: BrowserProcessBridge | null = null;
+const scopedProcessBridge = new AsyncLocalStorage<BrowserProcessBridge>();
 
 export function attachProcessBridge(bridge: BrowserProcessBridge): void {
   processBridge = bridge;
@@ -24,6 +51,17 @@ export function attachProcessBridge(bridge: BrowserProcessBridge): void {
 
 export function detachProcessBridge(): void {
   processBridge = null;
+}
+
+export function withProcessBridgeScope<T>(
+  bridge: BrowserProcessBridge | null | undefined,
+  fn: () => T,
+): T {
+  if (!bridge) {
+    return fn();
+  }
+
+  return scopedProcessBridge.run(bridge, fn);
 }
 
 class FakeChildProcess extends EventEmitter {
@@ -54,6 +92,76 @@ function normalizeSpawnInput(
   }
 
   return { args: [], opts: argsOrOpts || {} };
+}
+
+function quoteShellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+    return value;
+  }
+
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function normalizeExecInput(
+  optionsOrCallback?: BrowserExecOptions | BrowserExecCallback,
+  maybeCallback?: BrowserExecCallback,
+): {
+  options: BrowserExecOptions;
+  callback?: BrowserExecCallback;
+} {
+  if (typeof optionsOrCallback === "function") {
+    return {
+      options: {},
+      callback: optionsOrCallback,
+    };
+  }
+
+  return {
+    options: optionsOrCallback ?? {},
+    callback: maybeCallback,
+  };
+}
+
+function toExecOutput(
+  value: string,
+  encoding?: BufferEncoding | "buffer" | null,
+): string | Buffer {
+  if (encoding === "buffer" || encoding === null) {
+    return Buffer.from(value);
+  }
+
+  return value;
+}
+
+function createExecError(
+  command: string,
+  code: number,
+  stdout: string | Buffer,
+  stderr: string | Buffer,
+): Error & {
+  code?: number;
+  killed?: boolean;
+  signal?: string | null;
+  cmd?: string;
+  stdout?: string | Buffer;
+  stderr?: string | Buffer;
+} {
+  const stderrText = typeof stderr === "string" ? stderr : stderr.toString();
+  const error = new Error(stderrText || `Command failed: ${command}`) as Error & {
+    code?: number;
+    killed?: boolean;
+    signal?: string | null;
+    cmd?: string;
+    stdout?: string | Buffer;
+    stderr?: string | Buffer;
+  };
+  error.code = code;
+  error.killed = false;
+  error.signal = null;
+  error.cmd = command;
+  error.stdout = stdout;
+  error.stderr = stderr;
+  return error;
 }
 
 function isRgCommand(command: string): boolean {
@@ -237,8 +345,9 @@ async function executeCommand(
     return runRipgrep(args, cwd);
   }
 
-  if (processBridge) {
-    return processBridge.exec({
+  const bridge = scopedProcessBridge.getStore() ?? processBridge;
+  if (bridge) {
+    return bridge.exec({
       command,
       args,
       cwd,
@@ -359,8 +468,13 @@ export function execSync(command: string): string {
   return `[browser] Command not available: ${command}`;
 }
 
-export function exec(command: string, callback?: Function): FakeChildProcess {
-  const child = spawn("sh", ["-c", command]);
+export function exec(
+  command: string,
+  optionsOrCallback?: BrowserExecOptions | BrowserExecCallback,
+  maybeCallback?: BrowserExecCallback,
+): FakeChildProcess {
+  const { options, callback } = normalizeExecInput(optionsOrCallback, maybeCallback);
+  const child = spawn("sh", ["-c", command], options as Record<string, unknown>);
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (data: Buffer | string) => {
@@ -371,17 +485,68 @@ export function exec(command: string, callback?: Function): FakeChildProcess {
   });
   child.on("close", (code: number) => {
     if (callback) {
-      callback(code ? new Error(stderr) : null, stdout, stderr);
+      const stdoutResult = toExecOutput(stdout, options.encoding);
+      const stderrResult = toExecOutput(stderr, options.encoding);
+      callback(
+        code ? createExecError(command, code, stdoutResult, stderrResult) : null,
+        stdoutResult,
+        stderrResult,
+      );
     }
   });
   return child;
 }
 
-export function execFile(file: string, args: string[], opts: unknown, callback?: Function): FakeChildProcess {
-  if (typeof opts === "function") {
-    callback = opts;
+(exec as typeof exec & {
+  [promisify.custom]?: (
+    command: string,
+    options?: BrowserExecOptions,
+  ) => Promise<{ stdout: string | Buffer; stderr: string | Buffer }>;
+})[promisify.custom] = (
+  command: string,
+  options?: BrowserExecOptions,
+) => new Promise((resolve, reject) => {
+  exec(command, options, (error, stdout, stderr) => {
+    if (error) {
+      reject(error);
+      return;
+    }
+
+    resolve({ stdout, stderr });
+  });
+});
+
+export function execFile(
+  file: string,
+  argsOrOptions?: string[] | BrowserExecOptions | BrowserExecCallback,
+  optionsOrCallback?: BrowserExecOptions | BrowserExecCallback,
+  maybeCallback?: BrowserExecCallback,
+): FakeChildProcess {
+  let args: string[] = [];
+  let options: BrowserExecOptions | undefined;
+  let callback: BrowserExecCallback | undefined;
+
+  if (Array.isArray(argsOrOptions)) {
+    args = argsOrOptions;
+    if (typeof optionsOrCallback === "function") {
+      callback = optionsOrCallback;
+    } else {
+      options = optionsOrCallback;
+      callback = maybeCallback;
+    }
+  } else if (typeof argsOrOptions === "function") {
+    callback = argsOrOptions;
+  } else {
+    options = argsOrOptions;
+    if (typeof optionsOrCallback === "function") {
+      callback = optionsOrCallback;
+    } else {
+      callback = maybeCallback;
+    }
   }
-  return exec(`${file} ${args.join(" ")}`, callback);
+
+  const command = [file, ...args.map(quoteShellArg)].join(" ");
+  return exec(command, options, callback);
 }
 
 export function fork(): never {
@@ -416,4 +581,5 @@ export default {
   spawnSync,
   attachProcessBridge,
   detachProcessBridge,
+  withProcessBridgeScope,
 };

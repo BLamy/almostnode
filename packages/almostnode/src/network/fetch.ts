@@ -1,9 +1,11 @@
 import { selectNetworkRouteForUrl } from './routing';
+import { resolveBrowserFetchTarget, resolveNetworkPolicy } from './policy';
 import type {
   NetworkController,
   NetworkFetchRequest,
   NetworkFetchResponse,
   NetworkOptions,
+  ResolvedNetworkPolicy,
 } from './types';
 
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
@@ -19,26 +21,6 @@ function getNativeFetch(): FetchLike {
     return candidate;
   }
   return globalThis.fetch.bind(globalThis);
-}
-
-function normalizeProxyUrl(explicitProxy?: string | null): string {
-  if (explicitProxy && explicitProxy.trim()) {
-    return explicitProxy.trim();
-  }
-
-  const envProxy = (globalThis as { process?: { env?: Record<string, unknown> } }).process?.env?.CORS_PROXY_URL;
-  if (typeof envProxy === 'string' && envProxy.trim()) {
-    return envProxy.trim();
-  }
-
-  if (typeof localStorage !== 'undefined') {
-    const override = localStorage.getItem('__corsProxyUrl');
-    if (override?.trim()) {
-      return override.trim();
-    }
-  }
-
-  return DEFAULT_CORS_PROXY;
 }
 
 function removeProxyFingerprintHeaders(headers: Headers): void {
@@ -108,6 +90,9 @@ function stripProxyMetadataHeaders(headers: Headers): Record<string, string> {
   const next = new Headers(headers);
   next.delete(PROXY_UPSTREAM_STATUS_HEADER);
   next.delete(PROXY_UPSTREAM_STATUS_TEXT_HEADER);
+  next.delete('content-encoding');
+  next.delete('content-length');
+  next.delete('transfer-encoding');
   return headersToRecord(next);
 }
 
@@ -232,11 +217,14 @@ export function createResponseFromNetwork(result: NetworkFetchResponse): Respons
 
 export async function browserFetch(
   request: NetworkFetchRequest,
-  options: Required<NetworkOptions>,
+  policyOrOptions: ResolvedNetworkPolicy | NetworkOptions,
 ): Promise<NetworkFetchResponse> {
+  const policy = 'options' in policyOrOptions && 'browser' in policyOrOptions && 'env' in policyOrOptions
+    ? policyOrOptions
+    : resolveNetworkPolicy(policyOrOptions);
   const locationLike =
     typeof location !== 'undefined' ? location : null;
-  const route = selectNetworkRouteForUrl(request.url, options, locationLike);
+  const route = selectNetworkRouteForUrl(request.url, policy.options, locationLike);
   const nativeFetch = getNativeFetch();
   const headers = new Headers(request.headers);
   const bodyBytes = base64ToUint8Array(request.bodyBase64 || '');
@@ -254,19 +242,15 @@ export async function browserFetch(
     throw new Error(`Browser transport cannot satisfy Tailscale-routed request for ${request.url}`);
   }
 
-  const proxyUrl = normalizeProxyUrl(options.corsProxy);
-  const shouldProxy =
-    request.url.startsWith('http://') ||
-    request.url.startsWith('https://');
-  const targetUrl = shouldProxy ? new URL(request.url, locationLike?.origin).href : request.url;
-  const useProxy =
-    shouldProxy &&
-    !targetUrl.includes('almostnode-cors-proxy') &&
-    !(
-      locationLike &&
-      new URL(targetUrl, locationLike.origin).origin === locationLike.origin
-    ) &&
-    !(locationLike && targetUrl.startsWith(`${locationLike.origin}/`));
+  const {
+    targetUrl,
+    proxied: useProxy,
+    proxyUrl,
+  } = resolveBrowserFetchTarget(
+    request.url,
+    policy,
+    locationLike,
+  );
 
   if (!useProxy) {
     const response = await nativeFetch(targetUrl, init);
@@ -274,18 +258,22 @@ export async function browserFetch(
       url: response.url || targetUrl,
       status: response.status,
       statusText: response.statusText,
-      headers: headersToRecord(response.headers),
+      // The browser fetch implementation already materializes the response body.
+      // Preserve semantic headers, but drop transport/compression metadata that no
+      // longer matches the ArrayBuffer we hand back to runtime consumers.
+      headers: stripProxyMetadataHeaders(response.headers),
       bodyBase64: bytesToBase64(new Uint8Array(await response.arrayBuffer())),
     };
   }
 
   removeProxyFingerprintHeaders(headers);
+  const normalizedProxyUrl = proxyUrl || DEFAULT_CORS_PROXY;
 
   let currentUrl = targetUrl;
   let currentMethod = init.method || 'GET';
   let currentBody = init.body;
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-    const response = await nativeFetch(`${proxyUrl}${encodeURIComponent(currentUrl)}`, {
+    const response = await nativeFetch(`${normalizedProxyUrl}${encodeURIComponent(currentUrl)}`, {
       ...init,
       method: currentMethod,
       body: currentBody,
@@ -294,9 +282,7 @@ export async function browserFetch(
     const proxyRedirect = readProxyRedirectMetadata(response);
     const responseStatus = proxyRedirect?.status ?? response.status;
     const responseStatusText = proxyRedirect?.statusText ?? response.statusText;
-    const responseHeaders = proxyRedirect
-      ? stripProxyMetadataHeaders(response.headers)
-      : headersToRecord(response.headers);
+    const responseHeaders = stripProxyMetadataHeaders(response.headers);
 
     const shouldFollow = (request.redirect || 'follow') === 'follow';
     if (

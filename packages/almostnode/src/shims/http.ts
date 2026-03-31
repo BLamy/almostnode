@@ -10,15 +10,6 @@ import { createHash } from './crypto';
 import { almostnodeDebugLog } from '../utils/debug';
 import { getDefaultNetworkController, networkFetch } from '../network';
 
-// Save the browser's native WebSocket at module load time, BEFORE any CLI bundle
-// can overwrite it (e.g. Convex CLI does `globalThis.WebSocket = bundledWs`).
-// This ensures our WebSocket bridge always uses the real browser implementation.
-// Only capture in a real browser — Node.js 21+ has native WebSocket but it connects
-// to real servers, which isn't what the shim needs.
-const _isBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
-const _BrowserWebSocket: typeof globalThis.WebSocket | null =
-  _isBrowser && typeof globalThis.WebSocket === 'function' ? globalThis.WebSocket : null;
-
 export type RequestListener = (req: IncomingMessage, res: ServerResponse) => void;
 
 export interface RequestOptions {
@@ -755,17 +746,6 @@ export class ClientRequest extends Writable {
     // Get Sec-WebSocket-Key from request headers (sent by ws library)
     const wsKey = this.headers['sec-websocket-key'] || '';
 
-    // Use the saved browser WebSocket (captured at module load time before CLI overrides)
-    const NativeWS = _BrowserWebSocket;
-
-    if (!NativeWS) {
-      // No native WebSocket (test env / Node.js) — emit TypeError like fetch would
-      setTimeout(() => {
-        this.emit('error', new TypeError('Failed to fetch'));
-      }, 0);
-      return;
-    }
-
     // Compute Sec-WebSocket-Accept using the same hash as the ws library.
     // The ws library (bundled in the Convex CLI) uses require("crypto") which
     // resolves to our crypto shim's createHash (syncHash). We must use the same
@@ -774,17 +754,6 @@ export class ClientRequest extends Writable {
     const acceptValue = createHash('sha1')
       .update(wsKey + GUID)
       .digest('base64') as string;
-
-    let nativeWs: globalThis.WebSocket;
-    try {
-      nativeWs = new NativeWS(wsUrl);
-      nativeWs.binaryType = 'arraybuffer';
-    } catch (e) {
-      setTimeout(() => {
-        this.emit('error', e instanceof Error ? e : new Error(String(e)));
-      }, 0);
-      return;
-    }
 
     // Create mock socket for the ws library's frame-level I/O
     const socket = new Socket();
@@ -821,7 +790,7 @@ export class ClientRequest extends Writable {
         const { opcode, payload, totalLength } = parsed;
         writeBuffer = writeBuffer.slice(totalLength);
 
-        if (nativeWs.readyState !== NativeWS.OPEN) continue;
+        if (nativeWs.readyState !== WebSocket.OPEN) continue;
 
         if (opcode === 0x08) {
           // Close frame
@@ -845,72 +814,97 @@ export class ClientRequest extends Writable {
       return true;
     }) as any;
 
-    nativeWs.onopen = () => {
+    const protocolHeader = this.headers['sec-websocket-protocol'];
+    const protocols = protocolHeader
+      ? protocolHeader
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+      : undefined;
+
+    let nativeWs: globalThis.WebSocket;
+    void getDefaultNetworkController()
+      .connectWebSocket(wsUrl, {
+        protocols: protocols && protocols.length > 0 ? protocols : undefined,
+        headers: { ...this.headers },
+      })
+      .then(({ socket: connectedSocket }) => {
+        nativeWs = connectedSocket;
+
+        nativeWs.onopen = () => {
       // Create HTTP 101 response
-      const response = new IncomingMessage(socket);
-      response.statusCode = 101;
-      response.statusMessage = 'Switching Protocols';
-      response.headers = {
-        'upgrade': 'websocket',
-        'connection': 'Upgrade',
-        'sec-websocket-accept': acceptValue,
-      };
-      // Mark as complete so ws library doesn't wait for body
-      response.complete = true;
-      response.push(null);
+          const response = new IncomingMessage(socket);
+          response.statusCode = 101;
+          response.statusMessage = 'Switching Protocols';
+          response.headers = {
+            'upgrade': 'websocket',
+            'connection': 'Upgrade',
+            'sec-websocket-accept': acceptValue,
+          };
+          response.complete = true;
+          response.push(null);
+          this.emit('upgrade', response, socket, Buffer.alloc(0));
+        };
 
-      // Emit upgrade event — ws library listens for this
-      this.emit('upgrade', response, socket, Buffer.alloc(0));
-    };
-
-    nativeWs.onmessage = (event: MessageEvent) => {
+        nativeWs.onmessage = (event: MessageEvent) => {
       // Create unmasked WebSocket frame and push to mock socket
-      let payload: Uint8Array;
-      let opcode: number;
+          let payload: Uint8Array;
+          let opcode: number;
 
-      if (typeof event.data === 'string') {
-        payload = new TextEncoder().encode(event.data);
-        opcode = 0x01; // text
-      } else if (event.data instanceof ArrayBuffer) {
-        payload = new Uint8Array(event.data);
-        opcode = 0x02; // binary
-      } else {
-        return;
-      }
+          if (typeof event.data === 'string') {
+            payload = new TextEncoder().encode(event.data);
+            opcode = 0x01; // text
+          } else if (event.data instanceof ArrayBuffer) {
+            payload = new Uint8Array(event.data);
+            opcode = 0x02; // binary
+          } else {
+            return;
+          }
 
-      const frame = _createWsFrame(opcode, payload, false); // unmasked (server → client)
-      socket._receiveData(Buffer.from(frame));
-    };
+          const frame = _createWsFrame(opcode, payload, false);
+          socket._receiveData(Buffer.from(frame));
+        };
 
-    nativeWs.onclose = (event: CloseEvent) => {
+        nativeWs.onclose = (event: CloseEvent) => {
       // Send close frame to ws library
-      const code = event.code || 1000;
-      const closePayload = new Uint8Array(2);
-      closePayload[0] = (code >> 8) & 0xFF;
-      closePayload[1] = code & 0xFF;
-      const frame = _createWsFrame(0x08, closePayload, false);
-      socket._receiveData(Buffer.from(frame));
+          const code = event.code || 1000;
+          const closePayload = new Uint8Array(2);
+          closePayload[0] = (code >> 8) & 0xFF;
+          closePayload[1] = code & 0xFF;
+          const frame = _createWsFrame(0x08, closePayload, false);
+          socket._receiveData(Buffer.from(frame));
 
-      setTimeout(() => {
-        (socket as any)._readableState.endEmitted = true;
-        socket._receiveEnd();
-        socket.emit('close', false);
-      }, 10);
-    };
+          setTimeout(() => {
+            (socket as any)._readableState.endEmitted = true;
+            socket._receiveEnd();
+            socket.emit('close', false);
+          }, 10);
+        };
 
-    nativeWs.onerror = () => {
-      socket.emit('error', new Error('WebSocket connection error'));
-      socket.destroy();
-    };
+        nativeWs.onerror = () => {
+          socket.emit('error', new Error('WebSocket connection error'));
+          socket.destroy();
+        };
 
-    // Clean up native WS when socket is destroyed
-    const origDestroy = socket.destroy.bind(socket);
-    socket.destroy = ((error?: Error): Socket => {
-      if (nativeWs.readyState === NativeWS.OPEN || nativeWs.readyState === NativeWS.CONNECTING) {
-        nativeWs.close();
-      }
-      return origDestroy(error);
-    }) as any;
+        const origDestroy = socket.destroy.bind(socket);
+        socket.destroy = ((error?: Error): Socket => {
+          if (
+            nativeWs.readyState === WebSocket.OPEN
+            || nativeWs.readyState === WebSocket.CONNECTING
+          ) {
+            nativeWs.close();
+          }
+          return origDestroy(error);
+        }) as any;
+      })
+      .catch((error) => {
+        setTimeout(() => {
+          this.emit(
+            'error',
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }, 0);
+      });
   }
 
 }

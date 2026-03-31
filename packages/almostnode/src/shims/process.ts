@@ -526,6 +526,11 @@ export function createProcess(options?: {
     proc.stderr.isTTY = true;
   }
 
+  Object.defineProperty(proc, '__almostnodeProcessShim', {
+    value: true,
+    configurable: true,
+  });
+
   return proc;
 }
 

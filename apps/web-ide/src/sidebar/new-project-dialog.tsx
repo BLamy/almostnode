@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -11,11 +11,21 @@ import {
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import type { TemplateId } from '../features/workspace-seed';
+import { resolveProjectName } from '../features/project-names';
 
 interface NewProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreate: (name: string, templateId: TemplateId) => void;
+  hasGitHubCredentials: boolean;
+  initialTemplateId?: TemplateId;
+  title?: string;
+  description?: string;
+  submitLabel?: string;
+  onCreate: (
+    name: string,
+    templateId: TemplateId,
+    options: { createGitHubRepo: boolean },
+  ) => Promise<void> | void;
 }
 
 const TEMPLATES: { id: TemplateId; label: string; description: string }[] = [
@@ -24,24 +34,62 @@ const TEMPLATES: { id: TemplateId; label: string; description: string }[] = [
   { id: 'tanstack', label: 'TanStack Start', description: 'Full-stack React' },
 ];
 
-export function NewProjectDialog({ open, onOpenChange, onCreate }: NewProjectDialogProps) {
+export function NewProjectDialog({
+  open,
+  onOpenChange,
+  hasGitHubCredentials,
+  initialTemplateId = 'vite',
+  title = 'New Project',
+  description = 'Create a new project from a template.',
+  submitLabel = 'Create',
+  onCreate,
+}: NewProjectDialogProps) {
   const [name, setName] = useState('');
-  const [templateId, setTemplateId] = useState<TemplateId>('vite');
+  const [templateId, setTemplateId] = useState<TemplateId>(initialTemplateId);
+  const [createGitHubRepo, setCreateGitHubRepo] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleCreate = () => {
-    const trimmed = name.trim() || 'Untitled Project';
-    onCreate(trimmed, templateId);
-    setName('');
-    setTemplateId('vite');
-    onOpenChange(false);
+  useEffect(() => {
+    if (!open) {
+      setName('');
+      setTemplateId(initialTemplateId);
+      setCreateGitHubRepo(false);
+      setIsCreating(false);
+      setError(null);
+      return;
+    }
+
+    setTemplateId(initialTemplateId);
+    setError(null);
+  }, [initialTemplateId, open]);
+
+  const handleCreate = async () => {
+    if (isCreating) {
+      return;
+    }
+
+    const trimmed = resolveProjectName(name);
+    setIsCreating(true);
+    setError(null);
+
+    try {
+      await onCreate(trimmed, templateId, { createGitHubRepo });
+      onOpenChange(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message || 'Failed to create project.');
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>New Project</DialogTitle>
-          <DialogDescription>Create a new project from a template.</DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -52,12 +100,15 @@ export function NewProjectDialog({ open, onOpenChange, onCreate }: NewProjectDia
               Project name
             </label>
             <Input
-              placeholder="My Project"
+              placeholder="reponame or leave blank for magic-frisby"
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
               autoFocus
             />
+            <p style={{ marginTop: '0.35rem', fontSize: '0.72rem', color: 'var(--muted)' }}>
+              Leave it blank to auto-generate a container-style name.
+            </p>
           </div>
 
           <div>
@@ -92,13 +143,60 @@ export function NewProjectDialog({ open, onOpenChange, onCreate }: NewProjectDia
               ))}
             </div>
           </div>
+
+          {hasGitHubCredentials && (
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '0.6rem',
+                padding: '0.7rem 0.75rem',
+                borderRadius: '0.6rem',
+                border: '1px solid var(--panel-border)',
+                background: 'rgba(255, 255, 255, 0.02)',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={createGitHubRepo}
+                onChange={(e) => setCreateGitHubRepo(e.target.checked)}
+                style={{ marginTop: '0.15rem' }}
+              />
+              <span style={{ display: 'flex', flexDirection: 'column', gap: '0.18rem' }}>
+                <span style={{ fontSize: '0.82rem', fontWeight: 500, color: 'var(--text)' }}>
+                  Create GitHub repo
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
+                  Creates a private repository and configures it as <code>origin</code>.
+                </span>
+              </span>
+            </label>
+          )}
+
+          {error && (
+            <div
+              style={{
+                borderRadius: '0.5rem',
+                border: '1px solid rgba(255, 98, 98, 0.35)',
+                background: 'rgba(255, 98, 98, 0.08)',
+                color: '#ffb4b4',
+                fontSize: '0.74rem',
+                padding: '0.6rem 0.7rem',
+              }}
+            >
+              {error}
+            </div>
+          )}
         </div>
 
         <DialogFooter>
           <DialogClose asChild>
-            <Button variant="ghost">Cancel</Button>
+            <Button variant="ghost" disabled={isCreating}>Cancel</Button>
           </DialogClose>
-          <Button onClick={handleCreate}>Create</Button>
+          <Button onClick={() => void handleCreate()} disabled={isCreating}>
+            {isCreating ? 'Creating...' : submitLabel}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

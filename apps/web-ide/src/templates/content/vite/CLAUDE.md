@@ -149,6 +149,8 @@ Delegate troubleshooting to this agent when tests fail or behavior is unexpected
 2. **Assign and delegate** — Use the Task tool to spin up the right subagent for each item. Include the agent's prompt file content and the specific task.
 3. **Parallelize when possible** — Always do backend work first and make sure the database is migrated before doing frontend work, QA runs after both are done.
 4. **Always QA** — After any code changes, delegate a verification task to the QA tester agent
+5. **Let the git hook close the loop** — The scaffolded `TaskCompleted` hook stages file changes and creates the commit when a task is marked done.
+6. **Push when a remote exists** — That same hook pushes the finished commit when `origin` is configured, so fix hook failures before considering the task complete.
 
 ### Example delegation pattern
 
@@ -169,6 +171,7 @@ Steps 1 and 2 can run in parallel. Step 3 runs after both complete.
   - Frontend → `playwright-cli console error` + `playwright-cli snapshot`
   - Backend → `pg "\dt"` + `pg "SELECT * FROM <table>"`
   - QA → Full structured checklist (console → network → database → UI → visual)
+- **Close the git loop** — Do not disable or work around the scaffolded git-completion hook unless the user explicitly asks.
 
 ## Planning Workflows
 

@@ -3,6 +3,7 @@ import {
   matchesClaudeLaunchCommand,
   matchesOpenCodeLaunchCommand,
   matchesShadcnLaunchCommand,
+  parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from '../src/features/terminal-command-routing';
 
@@ -11,6 +12,17 @@ describe('webide terminal command routing', () => {
     expect(matchesOpenCodeLaunchCommand('npx opencode-ai')).toBe(true);
     expect(matchesOpenCodeLaunchCommand('env FOO=bar npm exec -- opencode')).toBe(true);
     expect(matchesOpenCodeLaunchCommand('time ./node_modules/.bin/opencode-ai help')).toBe(true);
+  });
+
+  it('parses OpenCode resume flags across wrappers', () => {
+    expect(parseOpenCodeLaunchCommand('npx opencode-ai --continue --session ses_123')).toEqual({
+      continue: true,
+      sessionID: 'ses_123',
+    });
+    expect(parseOpenCodeLaunchCommand('env FOO=bar npm exec -- opencode -c -s ses_456')).toEqual({
+      continue: true,
+      sessionID: 'ses_456',
+    });
   });
 
   it('matches Claude launch commands across wrappers', () => {

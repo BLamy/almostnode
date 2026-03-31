@@ -653,6 +653,33 @@ execFile('/bin/bash', ['-lc', 'shopt -u extglob 2>/dev/null || true; echo shell-
       expect(consoleOutput.some(o => o.includes('/dev/null'))).toBe(false);
       expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
     });
+
+    it('should route absolute ripgrep paths to the builtin rg command', async () => {
+      vfs.mkdirSync('/workspace/.claude/agents', { recursive: true });
+      vfs.writeFileSync('/workspace/.claude/agents/reviewer.md', '# reviewer\n');
+
+      const code = `
+const { execFile } = require('child_process');
+
+execFile(
+  '/workspace/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/x64-linux/rg',
+  ['--files', '--hidden', '--follow', '--no-ignore', '--glob', '*.md', '/workspace/.claude/agents'],
+  (error, stdout, stderr) => {
+    console.log('STDOUT:' + stdout.trim());
+    console.log('STDERR:' + stderr.trim());
+    if (error) console.log('ERROR:' + error.message);
+  }
+);
+      `;
+
+      await runtime.execute(code, '/test-rg-path.js');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(consoleOutput.some(o => o.includes('STDOUT:/workspace/.claude/agents/reviewer.md'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('STDERR:'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('No such file or directory'))).toBe(false);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
   });
 
   describe('shell features', () => {

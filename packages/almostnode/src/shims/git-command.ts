@@ -8,17 +8,39 @@ import * as path from './path';
 import { readGhToken } from './gh-auth';
 
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 function createProxiedHttp(corsProxy: string) {
   return {
     async request(options: { url: string; method?: string; headers?: Record<string, string>; body?: AsyncIterableIterator<Uint8Array> }) {
-      const proxiedUrl = `${corsProxy}${encodeURIComponent(options.url)}`;
-      try {
-        return await httpClient.request({ ...options, url: proxiedUrl });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`git: network error fetching ${options.url}: ${msg}`);
+      const attempts = corsProxy
+        ? [
+          `${corsProxy}${encodeURIComponent(options.url)}`,
+          options.url,
+        ]
+        : [options.url];
+
+      let lastError: unknown;
+      for (let index = 0; index < attempts.length; index++) {
+        const url = attempts[index];
+        try {
+          const response = await httpClient.request({ ...options, url }) as { statusCode?: number };
+          if (
+            index < attempts.length - 1 &&
+            typeof response.statusCode === 'number' &&
+            response.statusCode >= 400
+          ) {
+            continue;
+          }
+          return response;
+        } catch (err) {
+          lastError = err;
+        }
       }
+
+      const msg = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new Error(`git: network error fetching ${options.url}: ${msg}`);
     }
   };
 }
@@ -70,6 +92,11 @@ interface IgnoreRule {
   dirOnly: boolean;
   anchored: boolean;
   hasSlash: boolean;
+}
+
+interface SimpleTreeNode {
+  files: Map<string, string>;
+  dirs: Map<string, SimpleTreeNode>;
 }
 
 // ── Hash ────────────────────────────────────────────────────────────────────
@@ -155,11 +182,119 @@ function readCommit(vfs: VirtualFS, dir: string, sha: string): SimpleCommit | nu
   return readJSON<SimpleCommit>(vfs, path.join(sgDir(dir), 'commits', `${sha}.json`));
 }
 
-function writeCommit(vfs: VirtualFS, dir: string, commit: SimpleCommit): string {
-  const content = JSON.stringify(commit);
-  const sha = simpleHash(content + Date.now() + Math.random());
+function writeMirroredCommit(vfs: VirtualFS, dir: string, sha: string, commit: SimpleCommit): void {
   writeJSON(vfs, path.join(sgDir(dir), 'commits', `${sha}.json`), commit);
-  return sha;
+}
+
+function getTimezoneOffsetMinutes(timestampSeconds: number): number {
+  return new Date(timestampSeconds * 1000).getTimezoneOffset();
+}
+
+function buildTreeShape(tree: Record<string, string>): SimpleTreeNode {
+  const root: SimpleTreeNode = {
+    files: new Map<string, string>(),
+    dirs: new Map<string, SimpleTreeNode>(),
+  };
+
+  for (const [filepath, hash] of Object.entries(tree)) {
+    const parts = filepath.split('/').filter(Boolean);
+    if (parts.length === 0) continue;
+
+    let cursor = root;
+    for (let index = 0; index < parts.length - 1; index++) {
+      const segment = parts[index];
+      let next = cursor.dirs.get(segment);
+      if (!next) {
+        next = {
+          files: new Map<string, string>(),
+          dirs: new Map<string, SimpleTreeNode>(),
+        };
+        cursor.dirs.set(segment, next);
+      }
+      cursor = next;
+    }
+
+    cursor.files.set(parts[parts.length - 1], hash);
+  }
+
+  return root;
+}
+
+async function writeGitTreeFromSimpleTree(
+  vfs: VirtualFS,
+  dir: string,
+  tree: Record<string, string>,
+): Promise<string> {
+  const gitFs = createGitFs(vfs);
+  const root = buildTreeShape(tree);
+
+  const writeNode = async (node: SimpleTreeNode): Promise<string> => {
+    const entries: Array<{ mode: string; path: string; oid: string; type: 'blob' | 'tree' }> = [];
+
+    for (const [name, child] of [...node.dirs.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      const oid = await writeNode(child);
+      entries.push({
+        mode: '040000',
+        path: name,
+        oid,
+        type: 'tree',
+      });
+    }
+
+    for (const [name, hash] of [...node.files.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      const content = readBlob(vfs, dir, hash);
+      const oid = await git.writeBlob({
+        fs: gitFs,
+        dir,
+        blob: textEncoder.encode(content),
+      });
+      entries.push({
+        mode: '100644',
+        path: name,
+        oid,
+        type: 'blob',
+      });
+    }
+
+    return git.writeTree({
+      fs: gitFs,
+      dir,
+      tree: entries,
+    });
+  };
+
+  return writeNode(root);
+}
+
+async function writeCommitAsync(vfs: VirtualFS, dir: string, commit: SimpleCommit): Promise<string> {
+  const gitFs = createGitFs(vfs);
+  const timestamp = commit.author.timestamp;
+  const timezoneOffset = getTimezoneOffsetMinutes(timestamp);
+  const tree = await writeGitTreeFromSimpleTree(vfs, dir, commit.tree);
+  const oid = await git.writeCommit({
+    fs: gitFs,
+    dir,
+    commit: {
+      message: commit.message,
+      tree,
+      parent: commit.parent ? [commit.parent] : [],
+      author: {
+        name: commit.author.name,
+        email: commit.author.email,
+        timestamp,
+        timezoneOffset,
+      },
+      committer: {
+        name: commit.author.name,
+        email: commit.author.email,
+        timestamp,
+        timezoneOffset,
+      },
+    },
+  });
+
+  writeMirroredCommit(vfs, dir, oid, commit);
+  return oid;
 }
 
 // ── Refs ────────────────────────────────────────────────────────────────────
@@ -203,22 +338,135 @@ function getHeadCommitSha(vfs: VirtualFS, dir: string): string | null {
   return getRefSha(vfs, dir, branch);
 }
 
-function getHeadTree(vfs: VirtualFS, dir: string): Record<string, string> {
+function relativizeGitPath(cwd: string, target: string): string {
+  const relative = path.relative(normalizePath(cwd), normalizePath(target));
+  return relative ? normalizePath(relative).replace(/^\//, '') : '.';
+}
+
+async function readGitTreeAsSimpleTree(
+  vfs: VirtualFS,
+  dir: string,
+  treeOid: string,
+  prefix = '',
+): Promise<Record<string, string>> {
+  const gitFs = createGitFs(vfs);
+  const result: Record<string, string> = {};
+  const { tree } = await git.readTree({
+    fs: gitFs,
+    dir,
+    oid: treeOid,
+  });
+
+  for (const entry of tree) {
+    const filepath = prefix ? `${prefix}/${entry.path}` : entry.path;
+    if (entry.type === 'tree') {
+      Object.assign(result, await readGitTreeAsSimpleTree(vfs, dir, entry.oid, filepath));
+      continue;
+    }
+    if (entry.type !== 'blob') {
+      continue;
+    }
+
+    const { blob } = await git.readBlob({
+      fs: gitFs,
+      dir,
+      oid: entry.oid,
+    });
+    result[filepath] = writeBlob(vfs, dir, textDecoder.decode(blob));
+  }
+
+  return result;
+}
+
+async function readCommitAsync(vfs: VirtualFS, dir: string, sha: string): Promise<SimpleCommit | null> {
+  const mirrored = readCommit(vfs, dir, sha);
+  if (mirrored) {
+    return mirrored;
+  }
+
+  try {
+    const gitFs = createGitFs(vfs);
+    const { commit } = await git.readCommit({
+      fs: gitFs,
+      dir,
+      oid: sha,
+    });
+    const simpleCommit: SimpleCommit = {
+      parent: commit.parent[0] ?? null,
+      message: commit.message,
+      author: {
+        name: commit.author.name,
+        email: commit.author.email,
+        timestamp: commit.author.timestamp,
+      },
+      tree: await readGitTreeAsSimpleTree(vfs, dir, commit.tree),
+    };
+    writeMirroredCommit(vfs, dir, sha, simpleCommit);
+    return simpleCommit;
+  } catch {
+    return null;
+  }
+}
+
+async function getHeadTreeAsync(vfs: VirtualFS, dir: string): Promise<Record<string, string>> {
   const sha = getHeadCommitSha(vfs, dir);
   if (!sha) return {};
-  const commit = readCommit(vfs, dir, sha);
+  const commit = await readCommitAsync(vfs, dir, sha);
   return commit?.tree ?? {};
 }
 
-function resolveToSha(vfs: VirtualFS, dir: string, refOrSha: string): string | null {
-  // Try as branch name first
-  const branchSha = getRefSha(vfs, dir, refOrSha);
-  if (branchSha) return branchSha;
-  // Try as raw SHA (check if commit exists)
-  const commit = readCommit(vfs, dir, refOrSha);
-  if (commit) return refOrSha;
-  // Try HEAD
-  if (refOrSha === 'HEAD') return getHeadCommitSha(vfs, dir);
+async function ensureIndexInitialized(vfs: VirtualFS, dir: string): Promise<Record<string, string>> {
+  const data = readJSON<{ entries: Record<string, string> }>(
+    vfs,
+    path.join(sgDir(dir), 'index.json'),
+  );
+  if (data?.entries) {
+    return data.entries;
+  }
+
+  const headTree = await getHeadTreeAsync(vfs, dir);
+  writeIndex(vfs, dir, { ...headTree });
+  return { ...headTree };
+}
+
+async function syncIndexToHead(vfs: VirtualFS, dir: string): Promise<void> {
+  writeIndex(vfs, dir, await getHeadTreeAsync(vfs, dir));
+}
+
+async function resolveToSha(vfs: VirtualFS, dir: string, refOrSha: string): Promise<string | null> {
+  if (refOrSha === 'HEAD') {
+    return getHeadCommitSha(vfs, dir);
+  }
+
+  const mirrored = readCommit(vfs, dir, refOrSha);
+  if (mirrored) {
+    return refOrSha;
+  }
+
+  const gitFs = createGitFs(vfs);
+  const candidates = refOrSha.startsWith('refs/')
+    ? [refOrSha]
+    : [refOrSha, `refs/heads/${refOrSha}`, `refs/remotes/${refOrSha}`];
+
+  for (const candidate of candidates) {
+    try {
+      return await git.resolveRef({
+        fs: gitFs,
+        dir,
+        ref: candidate,
+      });
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  if (/^[0-9a-f]{40}$/i.test(refOrSha)) {
+    const commit = await readCommitAsync(vfs, dir, refOrSha);
+    if (commit) {
+      return refOrSha;
+    }
+  }
+
   return null;
 }
 
@@ -536,7 +784,7 @@ export async function runGitCommand(
         '',
         'Supported commands:',
         '  init, clone, status, add, commit, log, branch, checkout, remote',
-        '  diff, rebase, fetch, pull, push',
+        '  diff, reset, rebase, fetch, pull, push, rev-parse, rev-list',
         '',
       ].join('\n'),
       stderr: '',
@@ -566,6 +814,8 @@ export async function runGitCommand(
         return handleRemote(args.slice(1), ctx, vfs);
       case 'diff':
         return handleDiff(args.slice(1), ctx, vfs);
+      case 'reset':
+        return handleReset(args.slice(1), ctx, vfs);
       case 'rebase':
         return handleRebase(args.slice(1), ctx, vfs);
       case 'fetch':
@@ -574,6 +824,10 @@ export async function runGitCommand(
         return handlePull(args.slice(1), ctx, vfs);
       case 'push':
         return handlePush(args.slice(1), ctx, vfs);
+      case 'rev-parse':
+        return handleRevParse(args.slice(1), ctx, vfs);
+      case 'rev-list':
+        return handleRevList(args.slice(1), ctx, vfs);
       default:
         return failure(`git: unsupported subcommand '${subcommand}'`, 2);
     }
@@ -584,7 +838,7 @@ export async function runGitCommand(
 
 // ── Local handlers ──────────────────────────────────────────────────────────
 
-function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let initialBranch: string | undefined;
   let targetDir: string | undefined;
 
@@ -614,19 +868,11 @@ function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBa
   }
 
   const branch = initialBranch || 'main';
-  const gitDir = normalizePath(path.join(dir, '.git'));
-  if (!vfs.existsSync(gitDir)) {
-    vfs.mkdirSync(gitDir, { recursive: true });
-  }
-
-  // Standard HEAD format (compatible with isomorphic-git's currentBranch)
-  writeHeadRef(vfs, dir, branch);
-
-  // Create refs/heads directory
-  const refsDir = normalizePath(path.join(dir, '.git/refs/heads'));
-  if (!vfs.existsSync(refsDir)) {
-    vfs.mkdirSync(refsDir, { recursive: true });
-  }
+  await git.init({
+    fs: createGitFs(vfs),
+    dir,
+    defaultBranch: branch,
+  });
 
   // Create simplegit directory
   const sg = sgDir(dir);
@@ -640,7 +886,7 @@ function handleInit(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBa
   return success(`Initialized empty Git repository in ${normalizePath(path.join(dir, '.git'))}\n`);
 }
 
-function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let short = false;
 
   for (const arg of args) {
@@ -654,8 +900,8 @@ function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   }
 
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
-  const headTree = getHeadTree(vfs, dir);
-  const index = readIndex(vfs, dir);
+  const headTree = await getHeadTreeAsync(vfs, dir);
+  const index = await ensureIndexInitialized(vfs, dir);
   const trackedPaths = new Set([
     ...Object.keys(headTree),
     ...Object.keys(index),
@@ -673,7 +919,7 @@ function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   return success(lines.length === 0 ? '' : `${lines.join('\n')}\n`);
 }
 
-function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   if (args.length === 0) {
     return failure('git add: missing pathspec', 2);
   }
@@ -706,15 +952,21 @@ function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
     return failure('git add: missing pathspec', 2);
   }
 
-  const index = readIndex(vfs, dir);
-  const headTree = getHeadTree(vfs, dir);
+  const index = await ensureIndexInitialized(vfs, dir);
+  const headTree = await getHeadTreeAsync(vfs, dir);
+  const trackedPaths = new Set([
+    ...Object.keys(headTree),
+    ...Object.keys(index),
+  ]);
+  const recursiveWorkFiles = explicitPaths.some((arg) => {
+    const absPath = resolvePath(ctx.cwd, arg);
+    return vfs.existsSync(absPath) && vfs.statSync(absPath).isDirectory();
+  })
+    ? collectWorkingTreeFiles(vfs, dir, trackedPaths)
+    : null;
 
   if (addAll) {
     // Stage everything: add all working tree files, remove deleted files
-    const trackedPaths = new Set([
-      ...Object.keys(headTree),
-      ...Object.keys(index),
-    ]);
     const workFiles = collectWorkingTreeFiles(vfs, dir, trackedPaths);
 
     // Add/update all working tree files
@@ -737,12 +989,41 @@ function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
     const filepath = toRepoRelativePath(dir, absPath);
 
     if (vfs.existsSync(absPath)) {
+      if (vfs.statSync(absPath).isDirectory()) {
+        const workFiles = recursiveWorkFiles ?? collectWorkingTreeFiles(vfs, dir, trackedPaths);
+        const prefix = filepath === '.' ? '' : `${filepath}/`;
+        const matchingFiles = Object.entries(workFiles).filter(([candidate]) => (
+          candidate === filepath || candidate.startsWith(prefix)
+        ));
+
+        for (const [candidate, content] of matchingFiles) {
+          index[candidate] = writeBlob(vfs, dir, content);
+        }
+
+        for (const candidate of new Set([...Object.keys(headTree), ...Object.keys(index)])) {
+          if ((candidate === filepath || candidate.startsWith(prefix)) && !(candidate in workFiles)) {
+            delete index[candidate];
+          }
+        }
+
+        continue;
+      }
+
       const content = vfs.readFileSync(absPath, 'utf8');
       const hash = writeBlob(vfs, dir, content);
       index[filepath] = hash;
     } else {
-      // File was deleted
-      delete index[filepath];
+      const prefix = filepath === '.' ? '' : `${filepath}/`;
+      let removedAny = false;
+      for (const candidate of new Set([...Object.keys(headTree), ...Object.keys(index)])) {
+        if (candidate === filepath || candidate.startsWith(prefix)) {
+          delete index[candidate];
+          removedAny = true;
+        }
+      }
+      if (!removedAny) {
+        delete index[filepath];
+      }
     }
   }
 
@@ -750,7 +1031,7 @@ function handleAdd(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
   return success('');
 }
 
-function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let message: string | undefined;
   let authorFlag: string | undefined;
   let amend = false;
@@ -795,11 +1076,11 @@ function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
 
   const branch = readHeadRef(vfs, dir);
   const currentSha = getRefSha(vfs, dir, branch);
-  const index = readIndex(vfs, dir);
+  const index = await ensureIndexInitialized(vfs, dir);
 
   let parentSha: string | null;
   if (amend && currentSha) {
-    const currentCommit = readCommit(vfs, dir, currentSha);
+    const currentCommit = await readCommitAsync(vfs, dir, currentSha);
     parentSha = currentCommit?.parent ?? null;
   } else {
     parentSha = currentSha;
@@ -812,13 +1093,20 @@ function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
     tree: { ...index },
   };
 
-  const oid = writeCommit(vfs, dir, commit);
+  const oid = await writeCommitAsync(vfs, dir, commit);
   setRefSha(vfs, dir, branch, oid);
+  await git.checkout({
+    fs: createGitFs(vfs),
+    dir,
+    ref: branch,
+    force: true,
+  });
+  await syncIndexToHead(vfs, dir);
 
   return success(`[${branch} ${oid.slice(0, 7)}] ${message}\n`);
 }
 
-function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let depth: number | undefined;
   let ref: string | undefined;
 
@@ -850,7 +1138,7 @@ function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
 
   let startSha: string | null;
   if (ref && ref !== 'HEAD') {
-    startSha = resolveToSha(vfs, dir, ref);
+    startSha = await resolveToSha(vfs, dir, ref);
     if (!startSha) {
       return failure(`fatal: unknown revision '${ref}'`, 128);
     }
@@ -867,7 +1155,7 @@ function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
   const maxDepth = depth ?? 1000;
 
   while (current && entries.length < maxDepth) {
-    const commit = readCommit(vfs, dir, current);
+    const commit = await readCommitAsync(vfs, dir, current);
     if (!commit) break;
     entries.push({ oid: current, commit });
     current = commit.parent;
@@ -895,25 +1183,89 @@ function handleLog(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBas
   return success(chunks.join(''));
 }
 
-function handleBranch(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleBranch(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const gitFs = createGitFs(vfs);
+  let rename = false;
+  let forceRename = false;
+  const positionals: string[] = [];
 
-  if (args.length === 0) {
-    const branches = listBranches(vfs, dir);
-    const current = readHeadRef(vfs, dir);
+  for (const arg of args) {
+    if (arg === '-m' || arg === '--move') {
+      rename = true;
+      continue;
+    }
+    if (arg === '-M') {
+      rename = true;
+      forceRename = true;
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git branch: unsupported option '${arg}'`, 2);
+    }
+    positionals.push(arg);
+  }
+
+  if (!rename && positionals.length === 0) {
+    const branches = (await git.listBranches({ fs: gitFs, dir })).sort((left, right) => left.localeCompare(right));
+    const current = await git.currentBranch({ fs: gitFs, dir, fullname: false }) || readHeadRef(vfs, dir);
     const output = branches
       .map((branch) => `${branch === current ? '*' : ' '} ${branch}`)
       .join('\n');
     return success(output ? `${output}\n` : '');
   }
 
-  if (args.length > 1) {
+  if (rename) {
+    if (positionals.length === 0 || positionals.length > 2) {
+      return failure('usage: git branch (-m | -M) [<oldbranch>] <newbranch>', 2);
+    }
+
+    const current = await git.currentBranch({ fs: gitFs, dir, fullname: false }) || readHeadRef(vfs, dir);
+    const oldref = positionals.length === 2 ? positionals[0] : current;
+    const ref = positionals[positionals.length - 1];
+
+    if (!oldref) {
+      return failure('git branch -m: detached HEAD is not supported', 1);
+    }
+
+    const branches = await git.listBranches({ fs: gitFs, dir });
+    if (!branches.includes(oldref)) {
+      return failure(`error: branch '${oldref}' not found.`, 1);
+    }
+    if (oldref === ref) {
+      return success('');
+    }
+
+    if (branches.includes(ref)) {
+      if (!forceRename) {
+        return failure(`fatal: a branch named '${ref}' already exists`, 1);
+      }
+      await git.deleteRef({
+        fs: gitFs,
+        dir,
+        ref: `refs/heads/${ref}`,
+      });
+      await clearBranchConfig(gitFs, dir, ref);
+    }
+
+    await git.renameBranch({
+      fs: gitFs,
+      dir,
+      oldref,
+      ref,
+      checkout: current === oldref,
+    });
+    await moveBranchConfig(gitFs, dir, oldref, ref);
+    return success(`Branch '${oldref}' renamed to '${ref}'\n`);
+  }
+
+  if (positionals.length > 1) {
     return failure('git branch: too many arguments', 2);
   }
 
-  const ref = args[0];
-  if (!ref || ref.startsWith('-')) {
-    return failure(`git branch: unsupported option '${ref || ''}'`, 2);
+  const ref = positionals[0];
+  if (!ref) {
+    return failure('git branch: missing branch name', 2);
   }
 
   // Create branch pointing to current HEAD
@@ -922,12 +1274,17 @@ function handleBranch(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
     return failure('git branch: no commits yet', 1);
   }
 
-  setRefSha(vfs, dir, ref, headSha);
+  await git.branch({
+    fs: gitFs,
+    dir,
+    ref,
+  });
   return success('');
 }
 
-function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const gitFs = createGitFs(vfs);
   let createBranch: string | undefined;
   let ref: string | undefined;
 
@@ -948,12 +1305,31 @@ function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): Ju
   }
 
   if (createBranch) {
-    const headSha = getHeadCommitSha(vfs, dir);
-    if (!headSha) {
-      return failure('git checkout: no commits yet', 1);
+    if (ref) {
+      const targetSha = await resolveToSha(vfs, dir, ref);
+      if (!targetSha) {
+        return failure(`error: pathspec '${ref}' did not match any known refs`, 1);
+      }
+      await git.branch({
+        fs: gitFs,
+        dir,
+        ref: createBranch,
+        object: targetSha,
+        checkout: true,
+      });
+    } else {
+      const headSha = getHeadCommitSha(vfs, dir);
+      if (!headSha) {
+        return failure('git checkout: no commits yet', 1);
+      }
+      await git.branch({
+        fs: gitFs,
+        dir,
+        ref: createBranch,
+        checkout: true,
+      });
     }
-    setRefSha(vfs, dir, createBranch, headSha);
-    writeHeadRef(vfs, dir, createBranch);
+    await syncIndexToHead(vfs, dir);
     return success(`Switched to a new branch '${createBranch}'\n`);
   }
 
@@ -961,47 +1337,25 @@ function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualFS): Ju
     return failure('git checkout: missing branch or commit', 2);
   }
 
-  const targetSha = resolveToSha(vfs, dir, ref);
+  try {
+    await git.checkout({
+      fs: gitFs,
+      dir,
+      ref,
+      force: true,
+    });
+    await syncIndexToHead(vfs, dir);
+    return success(`Switched to '${ref}'\n`);
+  } catch {
+    // Fall back to a detached checkout for raw SHAs or remote refs isomorphic-git won't accept directly.
+  }
+
+  const targetSha = await resolveToSha(vfs, dir, ref);
   if (!targetSha) {
     return failure(`error: pathspec '${ref}' did not match any known refs`, 1);
   }
 
-  // Get current tree to know what files to potentially remove
-  const oldTree = getHeadTree(vfs, dir);
-  const targetCommit = readCommit(vfs, dir, targetSha);
-  const newTree = targetCommit?.tree ?? {};
-
-  // Remove files that exist in old tree but not in new tree
-  for (const filepath of Object.keys(oldTree)) {
-    if (!(filepath in newTree)) {
-      const absPath = normalizePath(path.join(dir, filepath));
-      if (vfs.existsSync(absPath)) {
-        vfs.unlinkSync(absPath);
-      }
-    }
-  }
-
-  // Write files from new tree
-  for (const [filepath, blobHash] of Object.entries(newTree)) {
-    const content = readBlob(vfs, dir, blobHash);
-    const absPath = normalizePath(path.join(dir, filepath));
-    const parent = path.dirname(absPath);
-    if (parent && parent !== '/' && !vfs.existsSync(parent)) {
-      vfs.mkdirSync(parent, { recursive: true });
-    }
-    vfs.writeFileSync(absPath, content);
-  }
-
-  // Update index to match new tree
-  writeIndex(vfs, dir, { ...newTree });
-
-  // Update HEAD
-  const branchSha = getRefSha(vfs, dir, ref);
-  if (branchSha) {
-    writeHeadRef(vfs, dir, ref);
-  }
-  // If ref is a raw SHA, leave HEAD as-is (detached HEAD not fully supported)
-
+  await restoreTree(vfs, dir, targetSha);
   return success(`Switched to '${ref}'\n`);
 }
 
@@ -1036,6 +1390,10 @@ async function handleRemote(args: string[], ctx: CommandContext, vfs: VirtualFS)
 
       const remote = positionals[1];
       const url = positionals[2];
+      const remoteUrlError = getRemoteUrlSupportError(url);
+      if (remoteUrlError) {
+        return failure(remoteUrlError, 1);
+      }
       const remotes = await git.listRemotes({ fs: gitFs, dir });
       if (remotes.some((entry) => entry.remote === remote)) {
         return failure(`error: remote ${remote} already exists.`, 3);
@@ -1062,27 +1420,104 @@ async function handleRemote(args: string[], ctx: CommandContext, vfs: VirtualFS)
       await git.deleteRemote({ fs: gitFs, dir, remote });
       return success('');
     }
+    case 'get-url': {
+      if (verbose) {
+        return failure('git remote get-url: unsupported option \'-v\'', 2);
+      }
+      if (positionals.length !== 2) {
+        return failure('usage: git remote get-url <name>', 2);
+      }
+
+      const remote = positionals[1];
+      const remotes = await git.listRemotes({ fs: gitFs, dir });
+      const match = remotes.find((entry) => entry.remote === remote);
+      if (!match) {
+        return failure(`error: No such remote: '${remote}'`, 2);
+      }
+
+      return success(`${match.url}\n`);
+    }
+    case 'set-url': {
+      if (verbose) {
+        return failure('git remote set-url: unsupported option \'-v\'', 2);
+      }
+      if (positionals.length !== 3) {
+        return failure('usage: git remote set-url <name> <newurl>', 2);
+      }
+
+      const remote = positionals[1];
+      const url = positionals[2];
+      const remoteUrlError = getRemoteUrlSupportError(url);
+      if (remoteUrlError) {
+        return failure(remoteUrlError, 1);
+      }
+      const remotes = await git.listRemotes({ fs: gitFs, dir });
+      if (!remotes.some((entry) => entry.remote === remote)) {
+        return failure(`error: No such remote: '${remote}'`, 2);
+      }
+
+      await git.setConfig({
+        fs: gitFs,
+        dir,
+        path: `remote.${remote}.url`,
+        value: url,
+      });
+      return success('');
+    }
+    case 'rename': {
+      if (verbose) {
+        return failure('git remote rename: unsupported option \'-v\'', 2);
+      }
+      if (positionals.length !== 3) {
+        return failure('usage: git remote rename <old> <new>', 2);
+      }
+
+      const oldName = positionals[1];
+      const newName = positionals[2];
+      const remotes = await git.listRemotes({ fs: gitFs, dir });
+      const existing = remotes.find((entry) => entry.remote === oldName);
+      if (!existing) {
+        return failure(`error: No such remote: '${oldName}'`, 2);
+      }
+      if (remotes.some((entry) => entry.remote === newName)) {
+        return failure(`error: remote ${newName} already exists.`, 3);
+      }
+
+      await git.addRemote({ fs: gitFs, dir, remote: newName, url: existing.url });
+      await git.deleteRemote({ fs: gitFs, dir, remote: oldName });
+      return success('');
+    }
     default:
       return failure(`git remote: unsupported subcommand '${action}'`, 2);
   }
 }
 
-function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let staged = false;
   let nameOnly = false;
   const refs: string[] = [];
+  const pathspecs: string[] = [];
+  let sawDoubleDash = false;
 
   for (const arg of args) {
-    if (arg === '--staged' || arg === '--cached') {
+    if (!sawDoubleDash && arg === '--') {
+      sawDoubleDash = true;
+      continue;
+    }
+    if (!sawDoubleDash && (arg === '--staged' || arg === '--cached')) {
       staged = true;
       continue;
     }
-    if (arg === '--name-only') {
+    if (!sawDoubleDash && arg === '--name-only') {
       nameOnly = true;
       continue;
     }
-    if (arg.startsWith('-')) {
+    if (!sawDoubleDash && arg.startsWith('-')) {
       return failure(`git diff: unsupported option '${arg}'`, 2);
+    }
+    if (sawDoubleDash) {
+      pathspecs.push(arg);
+      continue;
     }
     refs.push(arg);
   }
@@ -1096,17 +1531,19 @@ function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBa
   }
 
   const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  await ensureIndexInitialized(vfs, dir);
 
   let entries: DiffEntry[];
 
   if (refs.length === 2) {
-    entries = collectRefDiff(vfs, dir, refs[0], refs[1]);
+    entries = await collectRefDiff(vfs, dir, refs[0], refs[1]);
   } else if (staged) {
-    entries = collectStagedDiff(vfs, dir);
+    entries = await collectStagedDiff(vfs, dir);
   } else {
     entries = collectUnstagedDiff(vfs, dir);
   }
 
+  entries = filterDiffEntries(entries, dir, ctx.cwd, pathspecs);
   entries = entries.sort((a, b) => a.filepath.localeCompare(b.filepath));
 
   if (nameOnly) {
@@ -1117,7 +1554,125 @@ function handleDiff(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBa
   return success(patchText);
 }
 
-function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): JustBashExecResult {
+async function handleReset(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
+  let mode: 'soft' | 'mixed' | 'hard' = 'mixed';
+  const positionals: string[] = [];
+
+  for (const arg of args) {
+    if (arg === '--soft') {
+      mode = 'soft';
+      continue;
+    }
+    if (arg === '--mixed') {
+      mode = 'mixed';
+      continue;
+    }
+    if (arg === '--hard') {
+      mode = 'hard';
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git reset: unsupported option '${arg}'`, 2);
+    }
+    positionals.push(arg);
+  }
+
+  if (positionals.length > 1) {
+    return failure('git reset: too many revision arguments', 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const gitFs = createGitFs(vfs);
+  const currentBranch = await git.currentBranch({ fs: gitFs, dir, fullname: false }) || readHeadRef(vfs, dir);
+  const ref = positionals[0] || 'HEAD';
+  const targetSha = await resolveToSha(vfs, dir, ref);
+
+  if (!targetSha) {
+    return failure(`fatal: unknown revision '${ref}'`, 128);
+  }
+
+  if (mode === 'hard') {
+    await restoreTree(vfs, dir, targetSha);
+  }
+
+  setRefSha(vfs, dir, currentBranch, targetSha);
+
+  if (mode !== 'soft') {
+    await syncIndexToHead(vfs, dir);
+  }
+
+  return success('');
+}
+
+async function handleRevParse(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+
+  if (args.length === 0) {
+    return failure('git rev-parse: missing arguments', 2);
+  }
+
+  if (args.length === 1) {
+    switch (args[0]) {
+      case '--git-dir':
+      case '--git-common-dir':
+        return success(`${relativizeGitPath(ctx.cwd, normalizePath(path.join(dir, '.git')))}\n`);
+      case '--show-toplevel':
+        return success(`${dir}\n`);
+      case '--is-inside-work-tree':
+        return success('true\n');
+      default:
+        break;
+    }
+  }
+
+  if (args.length === 2 && args[0] === '--abbrev-ref' && args[1] === 'HEAD') {
+    return success(`${readHeadRef(vfs, dir)}\n`);
+  }
+
+  return failure(`git rev-parse: unsupported arguments '${args.join(' ')}'`, 2);
+}
+
+async function handleRevList(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
+  let maxParents: number | null = null;
+  const positionals: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--max-parents' && index + 1 < args.length) {
+      maxParents = Number(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--max-parents=')) {
+      maxParents = Number(arg.slice('--max-parents='.length));
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git rev-list: unsupported option '${arg}'`, 2);
+    }
+    positionals.push(arg);
+  }
+
+  if (maxParents !== 0 || positionals.length !== 1 || positionals[0] !== 'HEAD') {
+    return failure(`git rev-list: unsupported arguments '${args.join(' ')}'`, 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  let current = getHeadCommitSha(vfs, dir);
+  if (!current) {
+    return failure("fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.", 128);
+  }
+
+  while (true) {
+    const commit = await readCommitAsync(vfs, dir, current);
+    if (!commit?.parent) {
+      return success(`${current}\n`);
+    }
+    current = commit.parent;
+  }
+}
+
+async function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   if (args.length !== 1 || args[0].startsWith('-')) {
     return failure('git rebase: only `git rebase <upstream>` is supported in v1', 2);
   }
@@ -1131,13 +1686,16 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
     return failure('git rebase: no commits on current branch', 1);
   }
 
-  const upstreamSha = resolveToSha(vfs, dir, upstreamRef);
+  const upstreamSha = await resolveToSha(vfs, dir, upstreamRef);
   if (!upstreamSha) {
     return failure(`fatal: unknown revision '${upstreamRef}'`, 1);
   }
 
-  // Find merge base
-  const mergeBase = findMergeBase(vfs, dir, originalHead, upstreamSha);
+  const [mergeBase] = await git.findMergeBase({
+    fs: createGitFs(vfs),
+    dir,
+    oids: [originalHead, upstreamSha],
+  });
   if (!mergeBase) {
     return failure(`git rebase: unable to find merge base for '${upstreamRef}'`, 1);
   }
@@ -1150,7 +1708,13 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   // Fast-forward case
   if (mergeBase === originalHead) {
     setRefSha(vfs, dir, currentBranch, upstreamSha);
-    restoreTree(vfs, dir, upstreamSha);
+    await git.checkout({
+      fs: createGitFs(vfs),
+      dir,
+      ref: currentBranch,
+      force: true,
+    });
+    await syncIndexToHead(vfs, dir);
     return success(`Successfully rebased and fast-forwarded '${currentBranch}'.\n`);
   }
 
@@ -1158,7 +1722,7 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   const replay: Array<{ oid: string; commit: SimpleCommit }> = [];
   let walk: string | null = originalHead;
   while (walk && walk !== mergeBase) {
-    const commit = readCommit(vfs, dir, walk);
+    const commit = await readCommitAsync(vfs, dir, walk);
     if (!commit) break;
     replay.push({ oid: walk, commit });
     walk = commit.parent;
@@ -1170,9 +1734,9 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
   }
 
   // Check for conflicts and replay
-  const mergeBaseCommit = readCommit(vfs, dir, mergeBase);
+  const mergeBaseCommit = await readCommitAsync(vfs, dir, mergeBase);
   const mergeBaseTree = mergeBaseCommit?.tree ?? {};
-  const upstreamCommit = readCommit(vfs, dir, upstreamSha);
+  const upstreamCommit = await readCommitAsync(vfs, dir, upstreamSha);
   const upstreamTree = upstreamCommit?.tree ?? {};
 
   let currentParentSha = upstreamSha;
@@ -1180,7 +1744,7 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
 
   for (const entry of replay) {
     const parentTree = entry.commit.parent
-      ? (readCommit(vfs, dir, entry.commit.parent)?.tree ?? {})
+      ? ((await readCommitAsync(vfs, dir, entry.commit.parent))?.tree ?? {})
       : {};
     const commitTree = entry.commit.tree;
 
@@ -1196,7 +1760,13 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
       if (inBase !== inUpstream) {
         // Conflict! Both branches modified this file — roll back
         setRefSha(vfs, dir, currentBranch, originalHead);
-        restoreTree(vfs, dir, originalHead);
+        await git.checkout({
+          fs: createGitFs(vfs),
+          dir,
+          ref: currentBranch,
+          force: true,
+        });
+        await syncIndexToHead(vfs, dir);
         return mapGitError(new Error(`CONFLICT: merge conflict in ${filepath}`));
       }
     }
@@ -1222,43 +1792,28 @@ function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS): Just
       tree: { ...currentTree },
     };
 
-    currentParentSha = writeCommit(vfs, dir, newCommit);
+    currentParentSha = await writeCommitAsync(vfs, dir, newCommit);
   }
 
   // Update branch ref and restore working tree
   setRefSha(vfs, dir, currentBranch, currentParentSha);
-  restoreTree(vfs, dir, currentParentSha);
+  await git.checkout({
+    fs: createGitFs(vfs),
+    dir,
+    ref: currentBranch,
+    force: true,
+  });
+  await syncIndexToHead(vfs, dir);
 
   return success(`Successfully rebased '${currentBranch}' onto '${upstreamRef}'.\n`);
 }
 
-function findMergeBase(vfs: VirtualFS, dir: string, oid1: string, oid2: string): string | null {
-  const ancestors1 = new Set<string>();
-  let current: string | null = oid1;
-  while (current) {
-    ancestors1.add(current);
-    const commit = readCommit(vfs, dir, current);
-    if (!commit?.parent) break;
-    current = commit.parent;
-  }
-
-  current = oid2;
-  while (current) {
-    if (ancestors1.has(current)) return current;
-    const commit = readCommit(vfs, dir, current);
-    if (!commit?.parent) break;
-    current = commit.parent;
-  }
-
-  return null;
-}
-
-function restoreTree(vfs: VirtualFS, dir: string, sha: string): void {
-  const commit = readCommit(vfs, dir, sha);
+async function restoreTree(vfs: VirtualFS, dir: string, sha: string): Promise<void> {
+  const commit = await readCommitAsync(vfs, dir, sha);
   const tree = commit?.tree ?? {};
 
   // Get current HEAD tree to remove stale files
-  const oldTree = getHeadTree(vfs, dir);
+  const oldTree = await getHeadTreeAsync(vfs, dir);
 
   for (const filepath of Object.keys(oldTree)) {
     if (!(filepath in tree)) {
@@ -1325,9 +1880,26 @@ function collectUnstagedDiff(vfs: VirtualFS, dir: string): DiffEntry[] {
   return entries;
 }
 
-function collectStagedDiff(vfs: VirtualFS, dir: string): DiffEntry[] {
-  const headTree = getHeadTree(vfs, dir);
-  const index = readIndex(vfs, dir);
+function filterDiffEntries(entries: DiffEntry[], dir: string, cwd: string, pathspecs: string[]): DiffEntry[] {
+  if (pathspecs.length === 0) {
+    return entries;
+  }
+
+  const repoPathspecs = pathspecs.map((pathspec) => toRepoRelativePath(dir, resolvePath(cwd, pathspec)));
+  return entries.filter((entry) => repoPathspecs.some((pathspec) => matchesDiffPathspec(entry.filepath, pathspec)));
+}
+
+function matchesDiffPathspec(filepath: string, pathspec: string): boolean {
+  if (pathspec === '.') {
+    return true;
+  }
+
+  return filepath === pathspec || filepath.startsWith(`${pathspec}/`);
+}
+
+async function collectStagedDiff(vfs: VirtualFS, dir: string): Promise<DiffEntry[]> {
+  const headTree = await getHeadTreeAsync(vfs, dir);
+  const index = await ensureIndexInitialized(vfs, dir);
   const entries: DiffEntry[] = [];
 
   const allPaths = new Set([...Object.keys(headTree), ...Object.keys(index)]);
@@ -1350,12 +1922,12 @@ function collectStagedDiff(vfs: VirtualFS, dir: string): DiffEntry[] {
   return entries;
 }
 
-function collectRefDiff(vfs: VirtualFS, dir: string, leftRef: string, rightRef: string): DiffEntry[] {
-  const leftSha = resolveToSha(vfs, dir, leftRef);
-  const rightSha = resolveToSha(vfs, dir, rightRef);
+async function collectRefDiff(vfs: VirtualFS, dir: string, leftRef: string, rightRef: string): Promise<DiffEntry[]> {
+  const leftSha = await resolveToSha(vfs, dir, leftRef);
+  const rightSha = await resolveToSha(vfs, dir, rightRef);
 
-  const leftTree = leftSha ? (readCommit(vfs, dir, leftSha)?.tree ?? {}) : {};
-  const rightTree = rightSha ? (readCommit(vfs, dir, rightSha)?.tree ?? {}) : {};
+  const leftTree = leftSha ? ((await readCommitAsync(vfs, dir, leftSha))?.tree ?? {}) : {};
+  const rightTree = rightSha ? ((await readCommitAsync(vfs, dir, rightSha))?.tree ?? {}) : {};
 
   const entries: DiffEntry[] = [];
   const allPaths = new Set([...Object.keys(leftTree), ...Object.keys(rightTree)]);
@@ -1465,6 +2037,10 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
   const url = positionals[0];
   const targetArg = positionals[1] || inferCloneTarget(url);
   const dir = resolvePath(ctx.cwd, targetArg);
+  const remoteUrlError = getRemoteUrlSupportError(url);
+  if (remoteUrlError) {
+    return failure(remoteUrlError, 1);
+  }
 
   if (depth !== undefined && (!Number.isFinite(depth) || depth <= 0)) {
     return failure('git clone: --depth must be a positive number', 2);
@@ -1477,12 +2053,12 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
     http: proxiedHttp,
     dir,
     url,
-    corsProxy: gitEnv.corsProxy,
     depth,
     singleBranch,
     ref,
     onAuth: () => resolveGitAuth(gitEnv),
   });
+  await syncIndexToHead(vfs, dir);
 
   return success(`Cloned ${url} into ${dir}\n`);
 }
@@ -1490,12 +2066,17 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
 async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   let depth: number | undefined;
   let singleBranch = false;
+  let prune = false;
   const positionals: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--single-branch') {
       singleBranch = true;
+      continue;
+    }
+    if (arg === '--prune' || arg === '-p') {
+      prune = true;
       continue;
     }
     if (arg === '--depth' && i + 1 < args.length) {
@@ -1523,19 +2104,23 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
 
   const remote = positionals[0] || 'origin';
   const ref = positionals[1];
-  const remoteLooksLikeUrl = isUrlLike(remote);
+  const remoteValidation = await validateRemoteTarget(gitFs, dir, remote);
+  if (remoteValidation.error) {
+    return failure(remoteValidation.error, remoteValidation.exitCode);
+  }
+  const remoteLooksLikeUrl = remoteValidation.remoteLooksLikeUrl;
 
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.fetch({
     fs: gitFs,
     http: proxiedHttp,
     dir,
-    corsProxy: gitEnv.corsProxy,
     remote: remoteLooksLikeUrl ? undefined : remote,
     url: remoteLooksLikeUrl ? remote : undefined,
     ref,
     singleBranch,
     depth,
+    prune,
     onAuth: () => resolveGitAuth(gitEnv),
   });
 
@@ -1545,10 +2130,15 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
 async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   const positionals: string[] = [];
   let fastForwardOnly = false;
+  let rebase = false;
 
   for (const arg of args) {
     if (arg === '--ff-only') {
       fastForwardOnly = true;
+      continue;
+    }
+    if (arg === '--rebase') {
+      rebase = true;
       continue;
     }
     if (arg.startsWith('-')) {
@@ -1568,13 +2158,36 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
 
   const remote = positionals[0] || 'origin';
   const remoteRef = positionals[1] || localRef;
+  const remoteValidation = await validateRemoteTarget(gitFs, dir, remote);
+  if (remoteValidation.error) {
+    return failure(remoteValidation.error, remoteValidation.exitCode);
+  }
+  const remoteLooksLikeUrl = remoteValidation.remoteLooksLikeUrl;
+
+  if (rebase) {
+    if (remoteLooksLikeUrl) {
+      return failure('git pull --rebase: remote URLs are not supported; use a named remote', 2);
+    }
+
+    const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
+    await git.fetch({
+      fs: gitFs,
+      http: proxiedHttp,
+      dir,
+      remote,
+      ref: remoteRef,
+      singleBranch: true,
+      onAuth: () => resolveGitAuth(gitEnv),
+    });
+
+    return handleRebase([`${remote}/${remoteRef}`], ctx, vfs);
+  }
 
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.pull({
     fs: gitFs,
     http: proxiedHttp,
     dir,
-    corsProxy: gitEnv.corsProxy,
     remote,
     ref: localRef,
     remoteRef,
@@ -1590,6 +2203,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
       email: gitEnv.authorEmail,
     },
   });
+  await syncIndexToHead(vfs, dir);
 
   return success(`Pulled ${remote}/${remoteRef} into ${localRef}\n`);
 }
@@ -1597,10 +2211,19 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
 async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
   const positionals: string[] = [];
   let force = false;
+  let setUpstream = false;
 
   for (const arg of args) {
     if (arg === '--force' || arg === '-f') {
       force = true;
+      continue;
+    }
+    if (arg === '--force-with-lease') {
+      force = true;
+      continue;
+    }
+    if (arg === '--set-upstream' || arg === '-u') {
+      setUpstream = true;
       continue;
     }
     if (arg.startsWith('-')) {
@@ -1619,22 +2242,51 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
   }
 
   const remote = positionals[0] || 'origin';
-  const ref = positionals[1] || current;
+  const refSpec = positionals[1] || current;
+  const remoteValidation = await validateRemoteTarget(gitFs, dir, remote);
+  if (remoteValidation.error) {
+    return failure(remoteValidation.error, remoteValidation.exitCode);
+  }
+  const [sourceRefRaw, remoteRefRaw] = refSpec.includes(':')
+    ? refSpec.split(':', 2)
+    : [refSpec, refSpec];
+  const ref = !sourceRefRaw || sourceRefRaw === 'HEAD' ? current : sourceRefRaw;
+  const remoteRef = remoteRefRaw || ref;
+  const sourceSha = ref === current
+    ? getHeadCommitSha(vfs, dir)
+    : await resolveToSha(vfs, dir, ref);
+
+  if (!sourceSha) {
+    return failure(`error: src refspec '${ref}' does not match any (repository has no commits yet)`, 1);
+  }
 
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.push({
     fs: gitFs,
     http: proxiedHttp,
     dir,
-    corsProxy: gitEnv.corsProxy,
     remote,
     ref,
-    remoteRef: ref,
+    remoteRef,
     force,
     onAuth: () => resolveGitAuth(gitEnv),
   });
+  if (setUpstream) {
+    await git.setConfig({
+      fs: gitFs,
+      dir,
+      path: `branch.${current}.remote`,
+      value: remote,
+    });
+    await git.setConfig({
+      fs: gitFs,
+      dir,
+      path: `branch.${current}.merge`,
+      value: `refs/heads/${remoteRef}`,
+    });
+  }
 
-  return success(`Pushed ${ref} to ${remote}\n`);
+  return success(`Pushed ${remoteRef} to ${remote}\n`);
 }
 
 // ── Utilities ───────────────────────────────────────────────────────────────
@@ -1749,8 +2401,150 @@ function inferCloneTarget(url: string): string {
   return last.endsWith('.git') ? last.slice(0, -4) : last;
 }
 
+function isSshUrlLike(value: string): boolean {
+  return /^ssh:\/\//i.test(value);
+}
+
+function isScpLikeUrl(value: string): boolean {
+  return /^[^/@\s][^:\s]*@[^:\s]+:.+$/.test(value);
+}
+
+function inferHttpsSuggestion(url: string): string | null {
+  const scpMatch = url.match(/^(?:[^@\s]+@)?([^:\s]+):(.+)$/);
+  if (scpMatch) {
+    const host = scpMatch[1].toLowerCase();
+    const repoPath = scpMatch[2].replace(/^\/+/, '');
+    if (host === 'github.com') {
+      return `https://github.com/${repoPath}`;
+    }
+  }
+
+  const sshMatch = url.match(/^ssh:\/\/(?:[^@\s/]+@)?([^/:\s]+)(?::\d+)?\/(.+)$/i);
+  if (sshMatch) {
+    const host = sshMatch[1].toLowerCase();
+    const repoPath = sshMatch[2].replace(/^\/+/, '');
+    if (host === 'github.com') {
+      return `https://github.com/${repoPath}`;
+    }
+  }
+
+  return null;
+}
+
+function getRemoteUrlSupportError(url: string, remoteName?: string): string | null {
+  if (isUrlLike(url)) {
+    return null;
+  }
+
+  const subject = remoteName ? `remote '${remoteName}'` : 'remote URL';
+
+  if (isSshUrlLike(url) || isScpLikeUrl(url)) {
+    const suggestion = inferHttpsSuggestion(url);
+    if (suggestion) {
+      return [
+        `git: ${subject} uses SSH, which is not supported in this browser runtime.`,
+        'Use HTTPS instead:',
+        `  ${suggestion}`,
+      ].join('\n');
+    }
+    return `git: ${subject} uses SSH, which is not supported in this browser runtime. Use an https:// remote URL instead.`;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    return `git: ${subject} uses an unsupported protocol in this browser runtime: ${url}`;
+  }
+
+  return null;
+}
+
 function isUrlLike(value: string): boolean {
   return /^https?:\/\//i.test(value);
+}
+
+async function validateRemoteTarget(
+  gitFs: ReturnType<typeof createGitFs>,
+  dir: string,
+  remoteOrUrl: string,
+): Promise<{ remoteLooksLikeUrl: boolean; error: string | null; exitCode: number }> {
+  const directError = getRemoteUrlSupportError(remoteOrUrl);
+  if (directError) {
+    return {
+      remoteLooksLikeUrl: false,
+      error: directError,
+      exitCode: 1,
+    };
+  }
+  if (isUrlLike(remoteOrUrl)) {
+    return {
+      remoteLooksLikeUrl: true,
+      error: null,
+      exitCode: 0,
+    };
+  }
+
+  const remotes = await git.listRemotes({ fs: gitFs, dir });
+  const match = remotes.find((entry) => entry.remote === remoteOrUrl);
+  if (!match) {
+    return {
+      remoteLooksLikeUrl: false,
+      error: `error: No such remote: '${remoteOrUrl}'`,
+      exitCode: 2,
+    };
+  }
+
+  return {
+    remoteLooksLikeUrl: false,
+    error: getRemoteUrlSupportError(match.url, remoteOrUrl),
+    exitCode: 1,
+  };
+}
+
+async function moveBranchConfig(
+  gitFs: ReturnType<typeof createGitFs>,
+  dir: string,
+  oldref: string,
+  ref: string,
+): Promise<void> {
+  if (oldref === ref) {
+    return;
+  }
+
+  const configKeys = ['remote', 'merge', 'rebase', 'pushRemote', 'description'];
+  for (const key of configKeys) {
+    const oldPath = `branch.${oldref}.${key}`;
+    const value = await git.getConfig({ fs: gitFs, dir, path: oldPath });
+    if (value === undefined) {
+      continue;
+    }
+    await git.setConfig({
+      fs: gitFs,
+      dir,
+      path: `branch.${ref}.${key}`,
+      value,
+    });
+    await git.setConfig({
+      fs: gitFs,
+      dir,
+      path: oldPath,
+      value: undefined,
+    });
+  }
+}
+
+async function clearBranchConfig(
+  gitFs: ReturnType<typeof createGitFs>,
+  dir: string,
+  ref: string,
+): Promise<void> {
+  const configKeys = ['remote', 'merge', 'rebase', 'pushRemote', 'description'];
+  for (const key of configKeys) {
+    await git.setConfig({
+      fs: gitFs,
+      dir,
+      path: `branch.${ref}.${key}`,
+      value: undefined,
+    });
+  }
 }
 
 async function listRemotes(
@@ -1785,6 +2579,9 @@ function mapGitError(error: unknown): JustBashExecResult {
   }
   if (lower.includes('unknown revision')) {
     return failure(message, 128);
+  }
+  if (lower.includes('could not find head')) {
+    return failure('error: src refspec does not match any (repository has no commits yet)', 1);
   }
   if (lower.includes('network error') || lower.includes('failed to fetch')) {
     return failure(`git: network error — check your internet connection\n${message}`, 1);

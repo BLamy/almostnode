@@ -46,7 +46,7 @@ describe('resumable thread discovery', () => {
     ]);
   });
 
-  it('keeps only root OpenCode sessions and preserves persisted sessions when discovery is empty', () => {
+  it('keeps only root OpenCode sessions and clears stale persisted OpenCode rows on an empty rescan', () => {
     const existing: ResumableThreadRecord[] = [
       {
         id: 'opencode:project-1:session-old',
@@ -84,6 +84,6 @@ describe('resumable thread discovery', () => {
       },
     ]);
 
-    expect(mergeDiscoveredThreads(existing, { claude: [], opencode: [] })).toEqual(existing);
+    expect(mergeDiscoveredThreads(existing, { claude: [], opencode: [] })).toEqual([]);
   });
 });

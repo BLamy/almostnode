@@ -3,7 +3,6 @@ import { stream } from 'almostnode';
 export const PROJECT_ROOT = '/project';
 const SKIPPED_PATH_PREFIXES = [
   `${PROJECT_ROOT}/node_modules`,
-  `${PROJECT_ROOT}/.git`,
 ] as const;
 
 const { Buffer } = stream;
@@ -13,10 +12,17 @@ export interface SerializedFile {
   contentBase64: string;
 }
 
-function serializedFilesToMap(files: Iterable<SerializedFile>): Map<string, string> {
+export interface ProjectSnapshotOptions {
+  includeGit?: boolean;
+}
+
+function serializedFilesToMap(
+  files: Iterable<SerializedFile>,
+  options: ProjectSnapshotOptions = {},
+): Map<string, string> {
   const snapshot = new Map<string, string>();
   for (const file of files) {
-    if (!shouldPersistProjectPath(file.path)) {
+    if (!shouldPersistProjectPath(file.path, options)) {
       continue;
     }
     snapshot.set(normalizeProjectPath(file.path), file.contentBase64);
@@ -70,12 +76,21 @@ function toBase64(raw: unknown): string {
   return Buffer.from(String(raw), 'utf8').toString('base64');
 }
 
-export function shouldPersistProjectPath(vfsPath: string): boolean {
+export function shouldPersistProjectPath(
+  vfsPath: string,
+  options: ProjectSnapshotOptions = {},
+): boolean {
   const normalized = vfsPath.replace(/\\/g, '/');
   if (
     normalized === PROJECT_ROOT
     || normalized === `${PROJECT_ROOT}/`
     || !normalized.startsWith(`${PROJECT_ROOT}/`)
+  ) {
+    return false;
+  }
+  if (
+    !options.includeGit
+    && (normalized === `${PROJECT_ROOT}/.git` || normalized.startsWith(`${PROJECT_ROOT}/.git/`))
   ) {
     return false;
   }
@@ -93,8 +108,9 @@ function collectProjectFiles(
   },
   directoryPath: string,
   out: SerializedFile[],
+  options: ProjectSnapshotOptions = {},
 ): void {
-  if (!shouldPersistProjectPath(directoryPath) && directoryPath !== PROJECT_ROOT) {
+  if (!shouldPersistProjectPath(directoryPath, options) && directoryPath !== PROJECT_ROOT) {
     return;
   }
 
@@ -110,10 +126,10 @@ function collectProjectFiles(
     try {
       const stat = vfs.statSync(fullPath);
       if (stat.isDirectory()) {
-        collectProjectFiles(vfs, fullPath, out);
+        collectProjectFiles(vfs, fullPath, out, options);
         continue;
       }
-      if (!shouldPersistProjectPath(fullPath)) {
+      if (!shouldPersistProjectPath(fullPath, options)) {
         continue;
       }
 
@@ -180,13 +196,14 @@ export function collectProjectFilesBase64(
     statSync: (path: string) => { isDirectory: () => boolean };
     readFileSync: (path: string) => unknown;
   },
+  options: ProjectSnapshotOptions = {},
 ): SerializedFile[] {
   if (!vfs.existsSync(PROJECT_ROOT)) {
     return [];
   }
 
   const files: SerializedFile[] = [];
-  collectProjectFiles(vfs, PROJECT_ROOT, files);
+  collectProjectFiles(vfs, PROJECT_ROOT, files, options);
   files.sort((left, right) => left.path.localeCompare(right.path));
   return files;
 }
@@ -232,12 +249,13 @@ export function loadProjectFilesIntoVfs(
     writeFileSync: (path: string, content: Buffer | Uint8Array | string) => void;
   },
   files: SerializedFile[],
+  options: ProjectSnapshotOptions = {},
 ): void {
   vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
 
   for (const file of files) {
     const normalizedPath = normalizeProjectPath(file.path);
-    if (!shouldPersistProjectPath(normalizedPath)) {
+    if (!shouldPersistProjectPath(normalizedPath, options)) {
       continue;
     }
     const separatorIndex = normalizedPath.lastIndexOf('/');
@@ -262,11 +280,12 @@ export function replaceProjectFilesInVfs(
     rmdirSync: (path: string) => void;
   },
   files: SerializedFile[],
+  options: ProjectSnapshotOptions = {},
 ): void {
   vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
 
-  const previousMap = serializedFilesToMap(collectProjectFilesBase64(vfs));
-  const nextMap = serializedFilesToMap(files);
+  const previousMap = serializedFilesToMap(collectProjectFilesBase64(vfs, options), options);
+  const nextMap = serializedFilesToMap(files, options);
 
   for (const [path, contentBase64] of nextMap.entries()) {
     if (previousMap.get(path) === contentBase64) {

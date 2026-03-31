@@ -28,6 +28,7 @@ const gitSettingsStatus = document.getElementById('gitSettingsStatus') as HTMLDi
 
 const container = createContainer();
 
+const RUNTIME_CORS_PROXY_STORAGE_KEY = '__corsProxyUrl';
 const DEFAULT_GIT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
 const GIT_AUTH_STORAGE_KEY = 'almostnode.shadcn.gitAuth.encrypted';
 const GIT_CORS_STORAGE_KEY = 'almostnode.shadcn.gitAuth.corsProxy';
@@ -42,6 +43,20 @@ let skipPrompt = false;
 
 const commandHistory: string[] = [];
 let gitEncryptionKey: CryptoKey | null = null;
+
+function normalizeDemoCorsProxyStorage() {
+  try {
+    const stored = localStorage.getItem(RUNTIME_CORS_PROXY_STORAGE_KEY)?.trim();
+    const localWorkbenchProxy = `${window.location.origin}/__api/cors-proxy?url=`;
+    if (stored === localWorkbenchProxy) {
+      localStorage.setItem(RUNTIME_CORS_PROXY_STORAGE_KEY, DEFAULT_GIT_CORS_PROXY);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+normalizeDemoCorsProxyStorage();
 
 function setGitSettingsStatus(message: string, type: 'info' | 'error' | 'success' = 'info') {
   gitSettingsStatus.textContent = message;

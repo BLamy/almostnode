@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ModuleResolver } from '../src/module-resolution';
+import { VirtualFS } from '../src/virtual-fs';
 
 const fakeVfs = {
   existsSync: () => true,
@@ -27,5 +28,29 @@ describe('ModuleResolver.detectFormat', () => {
     `;
 
     expect(resolver.detectFormat('/project/meta-only.js', code)).toBe('esm');
+  });
+
+  it('treats transformed CommonJS in type module packages as CJS', () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync('/node_modules/string-width', { recursive: true });
+    vfs.writeFileSync('/node_modules/string-width/package.json', JSON.stringify({
+      name: 'string-width',
+      type: 'module',
+      exports: {
+        default: './index.js',
+      },
+    }));
+    vfs.writeFileSync(
+      '/node_modules/string-width/index.js',
+      `
+        "use strict";
+        var stripAnsi = require("strip-ansi");
+        module.exports = { stripAnsi };
+      `
+    );
+
+    const resolver = new ModuleResolver(vfs);
+
+    expect(resolver.detectFormat('/node_modules/string-width/index.js')).toBe('cjs');
   });
 });

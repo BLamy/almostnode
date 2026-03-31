@@ -3,8 +3,8 @@ import type {
   NetworkFetchResponse,
   NetworkLookupOptions,
   NetworkLookupResult,
-  NetworkOptions,
   PersistedNetworkSession,
+  ResolvedNetworkOptions,
   TailscaleAdapter,
   TailscaleAdapterFactory,
   TailscaleAdapterStatus,
@@ -57,14 +57,14 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   private sessionSnapshot: TailscaleStateSnapshot | null;
 
   constructor(
-    private options: Required<NetworkOptions>,
+    private options: ResolvedNetworkOptions,
     private readonly onStatus: (status: TailscaleAdapterStatus) => void,
     private readonly hooks: TailscaleConnectAdapterHooks = {},
   ) {
     this.sessionSnapshot = hooks.initialSnapshot ?? null;
   }
 
-  async configure(options: Required<NetworkOptions>): Promise<void> {
+  async configure(options: ResolvedNetworkOptions): Promise<void> {
     this.options = options;
     await this.sendRequest<null>({
       type: 'configure',
@@ -320,7 +320,7 @@ export function createTailscaleConnectAdapterFactory(): TailscaleAdapterFactory 
 }
 
 export function createNativeTailscaleConnectAdapter(
-  options: Required<NetworkOptions>,
+  options: ResolvedNetworkOptions,
   onStatus: (status: TailscaleAdapterStatus) => void,
   hooks: TailscaleConnectAdapterHooks = {},
 ): TailscaleAdapter {

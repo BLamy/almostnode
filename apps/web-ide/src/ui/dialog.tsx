@@ -11,18 +11,11 @@ export const DialogContent = forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className, children, ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay className="fixed inset-0 z-[9999] bg-black/60 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+    <DialogPrimitive.Overlay className="almostnode-dialog__overlay" />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed left-[50%] top-[50%] z-[10000] w-full max-w-md translate-x-[-50%] translate-y-[-50%]',
-        'rounded-xl border border-[var(--panel-border)]',
-        'bg-[var(--panel-bg)] text-[var(--text)]',
-        'shadow-[0_24px_80px_rgba(0,0,0,0.4)]',
-        'p-6',
-        'data-[state=open]:animate-in data-[state=closed]:animate-out',
-        'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
-        'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+        'almostnode-dialog__content',
         className,
       )}
       {...props}
@@ -35,17 +28,17 @@ export const DialogContent = forwardRef<
 DialogContent.displayName = 'DialogContent';
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-col gap-1.5 mb-4', className)} {...props} />;
+  return <div className={cn('almostnode-dialog__header', className)} {...props} />;
 }
 
 export function DialogTitle({ className, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
-  return <h2 className={cn('text-base font-semibold leading-none', className)} {...props} />;
+  return <h2 className={cn('almostnode-dialog__title', className)} {...props} />;
 }
 
 export function DialogDescription({ className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
-  return <p className={cn('text-xs text-[var(--muted)]', className)} {...props} />;
+  return <p className={cn('almostnode-dialog__description', className)} {...props} />;
 }
 
 export function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex justify-end gap-2 mt-4', className)} {...props} />;
+  return <div className={cn('almostnode-dialog__footer', className)} {...props} />;
 }

@@ -193,6 +193,9 @@ export function WorkbenchScreen({
       manager.setHost({
         getVfs: () => host.getVfs(),
         getTemplateId: () => host.getTemplateId(),
+        hasGitHubCredentials: () => host.hasGitHubCredentials(),
+        createGitHubRemote: (projectName) => host.createGitHubRemote(projectName),
+        syncProjectGit: (project) => host.syncProjectGit(project),
         attachProjectContext: (tid, dbPrefix) =>
           host.attachProjectContext(tid, dbPrefix),
         switchProjectWorkspace: (tid, files, dbPrefix) =>

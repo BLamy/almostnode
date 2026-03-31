@@ -672,8 +672,14 @@ function maybeRunCustomCommandDirect(
   if (/[|;&]/.test(withoutQuoted)) return null;
 
   const cmd = tokens[0];
-  const registered = controller.activeShellCommands.get(cmd);
-  if (!registered?.interceptShellParsing) {
+  const directRegistered = controller.activeShellCommands.get(cmd);
+  const basenameRegistered = cmd.includes('/')
+    ? controller.activeShellCommands.get(path.basename(cmd))
+    : undefined;
+  const registered = directRegistered ?? basenameRegistered;
+  const shouldDirectDispatch = Boolean(directRegistered?.interceptShellParsing)
+    || Boolean(basenameRegistered);
+  if (!registered || !shouldDirectDispatch) {
     return null;
   }
 
@@ -1124,6 +1130,9 @@ export function initChildProcess(
 
     const proc = runtime.getProcess();
     execution.activeProcess = proc;
+    const globalScope = globalThis as { __almostnodeActiveProcess?: Process };
+    const previousActiveProcess = globalScope.__almostnodeActiveProcess;
+    globalScope.__almostnodeActiveProcess = proc;
     proc.exit = ((code = 0) => {
       if (!exitCalled) {
         exitCalled = true;
@@ -1324,6 +1333,9 @@ module.exports = (async () => {
       // Free all cached module data (parsed ASTs, transformed code, resolver caches)
       // to avoid accumulating memory across consecutive node command invocations.
       runtime.clearCache();
+      if (globalScope.__almostnodeActiveProcess === proc) {
+        globalScope.__almostnodeActiveProcess = previousActiveProcess;
+      }
       execution.activeProcessStdin = null;
       execution.onForkedChildExit = prevChildExitHandler;
       if (hasGlobalRejectionEvents) {
@@ -4095,6 +4107,7 @@ function parseGrepArgs(args: string[], isEgrep: boolean, isFgrep: boolean): Pars
 interface ParsedRgArgs {
   pattern: string | null;
   paths: string[];
+  listFiles: boolean;
   caseInsensitive: boolean;
   caseSensitive: boolean;
   smartCase: boolean;
@@ -4120,6 +4133,7 @@ function parseRgArgs(args: string[]): ParsedRgArgs {
   const parsed: ParsedRgArgs = {
     pattern: null,
     paths: [],
+    listFiles: false,
     caseInsensitive: false,
     caseSensitive: false,
     smartCase: true,
@@ -4193,6 +4207,7 @@ function parseRgArgs(args: string[]): ParsedRgArgs {
         case '--line-number': parsed.lineNumbers = true; parsed.noLineNumbers = false; break;
         case '--no-line-number': parsed.noLineNumbers = true; parsed.lineNumbers = false; break;
         case '--files-with-matches': parsed.filesOnly = true; break;
+        case '--files': parsed.listFiles = true; break;
         case '--count': parsed.countOnly = true; break;
         case '--invert-match': parsed.invert = true; break;
         case '--quiet': parsed.quiet = true; break;
@@ -4636,6 +4651,10 @@ async function executeRgCommand(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const parsed = parseRgArgs(args);
 
+  if (parsed.listFiles) {
+    return rgFilesViaVfs(parsed, ctx);
+  }
+
   if (parsed.pattern === null) {
     return { stdout: '', stderr: 'error: The following required arguments were not provided:\n  <PATTERN>\n\nUsage:\n  rg <PATTERN> [PATH ...]\n', exitCode: 2 };
   }
@@ -4715,6 +4734,70 @@ function rgTypeToGlob(typeFilter: string): string | null {
     c: '*.c', cpp: '*.cpp', h: '*.h',
   };
   return typeMap[typeFilter] ?? null;
+}
+
+function buildRgGlobFilters(parsed: ParsedRgArgs): {
+  includeGlob: string | null;
+  excludeGlob: string | null;
+} {
+  let includeGlob: string | null = null;
+  if (parsed.typeFilters.length > 0) {
+    const g = rgTypeToGlob(parsed.typeFilters[0]);
+    if (g) includeGlob = g;
+  }
+
+  for (const g of parsed.globs) {
+    if (!g.startsWith('!')) {
+      includeGlob = g;
+      break;
+    }
+  }
+
+  let excludeGlob: string | null = null;
+  for (const g of parsed.globs) {
+    if (g.startsWith('!')) {
+      excludeGlob = g.slice(1);
+      break;
+    }
+  }
+
+  return { includeGlob, excludeGlob };
+}
+
+async function rgFilesViaVfs(
+  parsed: ParsedRgArgs,
+  ctx: CommandContext,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const { includeGlob, excludeGlob } = buildRgGlobFilters(parsed);
+  const searchRoots = parsed.paths.length > 0 ? parsed.paths : [ctx.cwd];
+  const files: string[] = [];
+
+  for (const candidate of searchRoots) {
+    const absPath = resolvePath(ctx.cwd, candidate);
+    let stat;
+    try {
+      stat = await ctx.fs.stat(absPath);
+    } catch {
+      continue;
+    }
+
+    if (stat.isDirectory) {
+      files.push(...await collectFiles(ctx.fs, absPath, true, includeGlob, excludeGlob));
+      continue;
+    }
+
+    if (stat.isFile) {
+      const name = path.basename(absPath);
+      if (includeGlob && !simpleGlobMatch(includeGlob, name)) continue;
+      if (excludeGlob && simpleGlobMatch(excludeGlob, name)) continue;
+      files.push(absPath);
+    }
+  }
+
+  const stdout = files.length > 0
+    ? `${files.map((file) => relativizePath(file, ctx.cwd)).join('\n')}\n`
+    : '';
+  return { stdout, stderr: '', exitCode: 0 };
 }
 
 async function rgViaSearchProvider(
@@ -4817,20 +4900,7 @@ async function rgViaVfs(
     caseInsensitive = parsed.pattern === parsed.pattern!.toLowerCase();
   }
 
-  // Build include glob from type filters
-  let includeGlob: string | null = null;
-  if (parsed.typeFilters.length > 0) {
-    const g = rgTypeToGlob(parsed.typeFilters[0]);
-    if (g) includeGlob = g;
-  }
-  // Simple globs (non-negated)
-  for (const g of parsed.globs) {
-    if (!g.startsWith('!')) { includeGlob = g; break; }
-  }
-  let excludeGlob: string | null = null;
-  for (const g of parsed.globs) {
-    if (g.startsWith('!')) { excludeGlob = g.slice(1); break; }
-  }
+  const { includeGlob, excludeGlob } = buildRgGlobFilters(parsed);
 
   const grepParsed: ParsedGrepArgs = {
     pattern: parsed.pattern!,

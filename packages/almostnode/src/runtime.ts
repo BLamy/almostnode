@@ -60,12 +60,20 @@ import { transformEsmToCjsSimple } from './frameworks/code-transforms';
 import * as acorn from 'acorn';
 import { almostnodeDebugError, almostnodeDebugLog } from './utils/debug';
 import {
+  createNetworkController,
+  getResolvedPolicy as getResolvedControllerPolicy,
   getDefaultNetworkController,
+  hasExplicitDefaultNetworkController,
   networkFetch,
+  resolveBrowserFetchTarget,
   selectNetworkRouteForUrl,
   setDefaultNetworkController,
 } from './network';
 import type { NetworkController, NetworkOptions } from './network/types';
+import {
+  materializeNetworkCaBundle,
+  syncProjectedNetworkEnv,
+} from './network/runtime-policy';
 
 const CJS_REQUIRE_HELPER = '__almostnodeRequire';
 
@@ -119,21 +127,20 @@ function isLikelyTopLevelAwaitSyntaxError(message: string): boolean {
 }
 
 function createWrappedModuleCode(moduleCode: string, asyncBody = false): string {
-  return `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport) {
+  return `(function($exports, $require, $module, $filename, $dirname, $process, $console, $importMeta, $dynamicImport, $globalObject) {
 var exports = $exports;
 var require = $require;
 var ${CJS_REQUIRE_HELPER} = $require;
 var module = $module;
 var __filename = $filename;
 var __dirname = $dirname;
-var process = $process;
-var console = $console;
+var globalThis = $globalObject;
+var global = $globalObject;
+var process = $globalObject.process;
+var console = $globalObject.console;
+var Buffer = $globalObject.Buffer;
 var import_meta = $importMeta;
 var __dynamicImport = $dynamicImport;
-// Set up global.process and globalThis.process for code that accesses them directly
-var global = globalThis;
-globalThis.process = $process;
-global.process = $process;
 return (${asyncBody ? 'async ' : ''}function() {
 ${moduleCode}
 }).call(this);
@@ -552,7 +559,6 @@ const HOST_CONSOLE = globalThis.console;
 
 type ConsoleMethodName = typeof CONSOLE_METHOD_NAMES[number];
 
-const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
 const FORBIDDEN_XHR_HEADERS = new Set([
   'accept-charset',
   'accept-encoding',
@@ -576,29 +582,6 @@ const FORBIDDEN_XHR_HEADERS = new Set([
   'user-agent',
   'via',
 ]);
-
-function getRuntimeCorsProxy(): string {
-  const envProxy = (globalThis as { process?: { env?: Record<string, unknown> } }).process?.env?.CORS_PROXY_URL;
-  if (typeof envProxy === 'string' && envProxy) {
-    return envProxy;
-  }
-  if (typeof localStorage !== 'undefined') {
-    const override = localStorage.getItem('__corsProxyUrl');
-    if (override) return override;
-  }
-  return DEFAULT_CORS_PROXY;
-}
-
-function shouldProxyBrowserUrl(rawUrl: string): boolean {
-  if (typeof rawUrl !== 'string' || !rawUrl.startsWith('http')) return false;
-  if (rawUrl.includes('almostnode-cors-proxy')) return false;
-  if (typeof location !== 'undefined' && rawUrl.includes(location.host)) return false;
-  return true;
-}
-
-function getProxiedBrowserUrl(rawUrl: string): string {
-  return getRuntimeCorsProxy() + encodeURIComponent(rawUrl);
-}
 
 type AlmostnodePatchedXMLHttpRequest = XMLHttpRequest & {
   __almostnodeOriginalUrl?: string;
@@ -670,13 +653,43 @@ function setXhrReadyState(
 
 function getXhrRoute(
   rawUrl: string,
-): 'browser' | 'tailscale' {
+): {
+  route: 'browser' | 'tailscale';
+  effectiveUrl: string;
+  proxied: boolean;
+} {
   const controller = getDefaultNetworkController();
-  return selectNetworkRouteForUrl(
-    rawUrl,
-    controller.getConfig(),
+  const policy = getResolvedControllerPolicy(
+    controller,
     typeof location !== 'undefined' ? location : null,
   );
+  const route = selectNetworkRouteForUrl(
+    rawUrl,
+    policy.options,
+    typeof location !== 'undefined' ? location : null,
+  );
+  if (route !== 'browser') {
+    return {
+      route,
+      effectiveUrl: rawUrl,
+      proxied: false,
+    };
+  }
+
+  const { targetUrl, proxied, proxyUrl } = resolveBrowserFetchTarget(
+    rawUrl,
+    policy,
+    typeof location !== 'undefined' ? location : null,
+  );
+
+  return {
+    route,
+    effectiveUrl:
+      proxied && proxyUrl
+        ? `${proxyUrl}${encodeURIComponent(targetUrl)}`
+        : targetUrl,
+    proxied,
+  };
 }
 
 function formatXhrResponseHeaders(headers: Headers): string {
@@ -923,6 +936,7 @@ function createRequire(
   vfs: VirtualFS,
   fsShim: FsShim,
   process: Process,
+  runtimeGlobalObject: Record<string, unknown>,
   currentDir: string,
   moduleCache: Record<string, Module>,
   builtinModuleMap: Record<string, unknown>,
@@ -1299,6 +1313,7 @@ function createRequire(
       vfs,
       fsShim,
       process,
+      runtimeGlobalObject,
       dirname,
       moduleCache,
       builtinModules,
@@ -1354,7 +1369,8 @@ function createRequire(
         process,
         consoleWrapper,
         { url: importMetaUrl, dirname, filename: resolvedPath },
-        dynamicImport
+        dynamicImport,
+        runtimeGlobalObject,
       );
       if (executionResult && typeof (executionResult as Promise<unknown>).then === 'function') {
         module.executionPromise = executionResult as Promise<unknown>;
@@ -1428,6 +1444,7 @@ function createRequire(
             vfs,
             fsShim,
             process,
+            runtimeGlobalObject,
             fromDir,
             moduleCache,
             builtinModules,
@@ -1590,6 +1607,73 @@ function createConsoleWrapper(
   return wrapper as unknown as Console;
 }
 
+function createRuntimeGlobalObject(
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  const hostGlobal = globalThis as Record<PropertyKey, unknown>;
+  const overlay = new Map<PropertyKey, unknown>();
+  let runtimeGlobal!: Record<string, unknown>;
+
+  for (const [key, value] of Object.entries(overrides)) {
+    overlay.set(key, value);
+  }
+
+  runtimeGlobal = new Proxy(Object.create(null) as Record<string, unknown>, {
+    get(_target, prop) {
+      if (overlay.has(prop)) {
+        return overlay.get(prop);
+      }
+      return Reflect.get(hostGlobal, prop, hostGlobal);
+    },
+    set(_target, prop, value) {
+      overlay.set(prop, value);
+      return true;
+    },
+    has(_target, prop) {
+      return overlay.has(prop) || Reflect.has(hostGlobal, prop);
+    },
+    ownKeys() {
+      return Array.from(new Set([...Reflect.ownKeys(hostGlobal), ...overlay.keys()]));
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      if (overlay.has(prop)) {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: overlay.get(prop),
+        };
+      }
+
+      const descriptor = Reflect.getOwnPropertyDescriptor(hostGlobal, prop);
+      if (!descriptor) {
+        return undefined;
+      }
+
+      return {
+        ...descriptor,
+        configurable: true,
+      };
+    },
+    defineProperty(_target, prop, descriptor) {
+      if ('value' in descriptor) {
+        overlay.set(prop, descriptor.value);
+      } else {
+        overlay.set(prop, undefined);
+      }
+      return true;
+    },
+    deleteProperty(_target, prop) {
+      return overlay.delete(prop);
+    },
+  });
+
+  overlay.set('globalThis', runtimeGlobal);
+  overlay.set('global', runtimeGlobal);
+
+  return runtimeGlobal;
+}
+
 /**
  * Runtime class for executing code in virtual environment
  * Note: This class has sync methods for backward compatibility.
@@ -1599,6 +1683,7 @@ export class Runtime {
   private vfs: VirtualFS;
   private fsShim: FsShim;
   private process: Process;
+  private runtimeGlobalObject: Record<string, unknown>;
   private runtimeId: string;
   private pendingRefedTimers = new Set<AlmostNodeTimerHandle>();
   private moduleCache: Record<string, Module> = {};
@@ -1607,6 +1692,8 @@ export class Runtime {
   private moduleLoader: ModuleGraphLoader;
   private options: RuntimeOptions;
   private networkController: NetworkController;
+  private readonly explicitEnvKeys: ReadonlySet<string>;
+  private projectedNetworkEnv: Record<string, string> = {};
   /** Cache for pre-processed code (after ESM transform) before eval */
   private processedCodeCache: Map<string, string> = new Map();
   /** Shared resolver caches to avoid per-module duplication and exception churn */
@@ -1619,17 +1706,32 @@ export class Runtime {
     this.vfs = vfs;
     this.runtimeId = createRuntimeId();
     const childProcessController = options.childProcessController ?? initChildProcess(vfs);
-    this.networkController = options.networkController ?? getDefaultNetworkController();
-    setDefaultNetworkController(this.networkController);
-    if (options.network) {
+    const shouldReuseDefaultController =
+      !options.networkController && hasExplicitDefaultNetworkController();
+    this.networkController = options.networkController
+      ?? (
+        shouldReuseDefaultController
+          ? getDefaultNetworkController()
+          : createNetworkController(options.network)
+      );
+    setDefaultNetworkController(
+      this.networkController,
+      !options.networkController && !shouldReuseDefaultController,
+    );
+    if ((options.networkController || shouldReuseDefaultController) && options.network) {
       void this.networkController.configure(options.network);
     }
+    this.explicitEnvKeys = new Set(Object.keys(options.env || {}));
     // Create process first so we can get cwd for fs shim
     this.process = createProcess({
       cwd: options.cwd || '/',
       env: options.env,
       onStdout: options.onStdout,
       onStderr: options.onStderr,
+    });
+    this.applyNetworkPolicy();
+    this.networkController.subscribe(() => {
+      this.applyNetworkPolicy();
     });
     // Create fs shim with cwd getter for relative path resolution
     this.fsShim = createFsShim(vfs, () => this.process.cwd());
@@ -1645,6 +1747,12 @@ export class Runtime {
       ...options,
       childProcessController,
     };
+    const consoleWrapper = createConsoleWrapper(this.options.onConsole);
+    this.runtimeGlobalObject = createRuntimeGlobalObject({
+      console: consoleWrapper,
+      process: this.process,
+      Buffer: bufferShim.Buffer,
+    });
     this.formatDetector = new ModuleResolver(this.vfs, {
       builtinModules: this.builtinModules,
     });
@@ -1652,8 +1760,9 @@ export class Runtime {
       vfs: this.vfs,
       runtimeId: this.runtimeId,
       builtinModules: this.builtinModules,
-      console: createConsoleWrapper(this.options.onConsole) as unknown as Record<string, unknown>,
+      console: consoleWrapper as unknown as Record<string, unknown>,
       process: this.process as unknown as Record<string, unknown>,
+      globalObject: this.runtimeGlobalObject,
       requireCjs: (resolvedPath: string) => this.requireCommonJsModule(resolvedPath),
       createRequire: (fromPath: string) => this.createLegacyRequire(pathShim.dirname(fromPath)),
     });
@@ -1719,18 +1828,16 @@ export class Runtime {
         password?: string | null
       ) {
         const requestedUrl = typeof url === 'string' ? url : String(url);
-        const route = getXhrRoute(requestedUrl);
-        const proxied = route === 'browser' && shouldProxyBrowserUrl(requestedUrl);
-        const effectiveUrl = proxied ? getProxiedBrowserUrl(requestedUrl) : requestedUrl;
+        const transport = getXhrRoute(requestedUrl);
         const xhr = this as AlmostnodePatchedXMLHttpRequest;
         xhr.__almostnodeOriginalUrl = requestedUrl;
         xhr.__almostnodeRequestMethod = method;
-        xhr.__almostnodeRoute = route;
-        xhr.__almostnodeProxied = proxied;
+        xhr.__almostnodeRoute = transport.route;
+        xhr.__almostnodeProxied = transport.proxied;
         xhr.__almostnodeRequestHeaders = new Headers();
         xhr.__almostnodeResponseHeaders = new Headers();
         xhr.__almostnodeAborted = false;
-        return origOpen.call(this, method, effectiveUrl, async ?? true, username ?? null, password ?? null);
+        return origOpen.call(this, method, transport.effectiveUrl, async ?? true, username ?? null, password ?? null);
       };
 
       xhrProto.setRequestHeader = function (name: string, value: string) {
@@ -2243,6 +2350,7 @@ export class Runtime {
       this.vfs,
       this.fsShim,
       this.process,
+      this.runtimeGlobalObject,
       currentDir,
       this.moduleCache,
       this.builtinModules,
@@ -2422,6 +2530,20 @@ export class Runtime {
 
   getNetwork(): NetworkController {
     return this.networkController;
+  }
+
+  private applyNetworkPolicy(): void {
+    const policy = getResolvedControllerPolicy(
+      this.networkController,
+      typeof location !== 'undefined' ? location : null,
+    );
+    materializeNetworkCaBundle(this.vfs, policy);
+    this.projectedNetworkEnv = syncProjectedNetworkEnv(
+      this.process.env,
+      this.explicitEnvKeys,
+      this.projectedNetworkEnv,
+      policy.env,
+    );
   }
 
   /**

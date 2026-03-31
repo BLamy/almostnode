@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { createContainer } from 'almostnode';
 import { ProjectManager } from '../src/features/project-manager';
@@ -9,8 +9,19 @@ import type {
   ProjectRecord,
   ResumableThreadRecord,
 } from '../src/features/project-db';
+import {
+  attachWorkspaceBridge,
+  detachWorkspaceBridge,
+  readFile,
+  withWorkspaceBridgeScope,
+} from '../../../vendor/opencode/packages/browser/src/shims/fs.browser';
 
 describe('ProjectManager init', () => {
+  afterEach(() => {
+    detachWorkspaceBridge();
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     const dom = new JSDOM('<!doctype html><html><body></body></html>', {
       url: 'http://localhost:5173/ide?template=vite&project=project-next',
@@ -57,6 +68,7 @@ describe('ProjectManager init', () => {
       claude: [],
       opencode: [],
     }));
+    const syncProjectGit = vi.fn(async () => undefined);
 
     Object.defineProperty(manager, 'db', {
       configurable: true,
@@ -76,6 +88,11 @@ describe('ProjectManager init', () => {
     manager.setHost({
       getVfs: () => container.vfs,
       getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit,
       attachProjectContext,
       switchProjectWorkspace,
       collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
@@ -92,12 +109,386 @@ describe('ProjectManager init', () => {
       'next-db',
     );
     expect(attachProjectContext).not.toHaveBeenCalled();
+    expect(syncProjectGit).toHaveBeenCalledWith(project);
     expect(restoreAgentStateSnapshot).toHaveBeenCalledWith(null);
     expect(discoverActiveProjectThreads).toHaveBeenCalledWith('project-next');
 
     const url = new URL(window.location.href);
     expect(url.searchParams.get('project')).toBe('project-next');
     expect(url.searchParams.has('template')).toBe(false);
+
+    manager.dispose();
+  });
+
+  it('creates a new project from template and name query params before restoring saved projects', async () => {
+    window.history.replaceState({}, '', 'http://localhost:5173/ide?template=nextjs&name=reponame');
+
+    const randomUuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('project-created');
+    const manager = new ProjectManager();
+    const container = createContainer();
+    container.vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
+    container.vfs.writeFileSync(
+      `${PROJECT_ROOT}/package.json`,
+      JSON.stringify({ name: 'fresh-next-project' }, null, 2),
+    );
+
+    const existingProject: ProjectRecord = {
+      id: 'project-existing',
+      name: 'Existing project',
+      templateId: 'vite',
+      createdAt: Date.now() - 10_000,
+      lastModified: Date.now() - 10_000,
+      dbPrefix: 'existing',
+    };
+
+    const projects = new Map<string, ProjectRecord>([
+      [existingProject.id, existingProject],
+    ]);
+    const filesByProject = new Map<string, SerializedFile[]>();
+    const agentStateByProject = new Map<string, ProjectAgentStateRecord>();
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        listProjects: vi.fn(async () => Array.from(projects.values())),
+        putProject: vi.fn(async (project: ProjectRecord) => {
+          projects.set(project.id, project);
+        }),
+        getProjectFiles: vi.fn(async (projectId: string) => filesByProject.get(projectId) ?? []),
+        saveProjectFiles: vi.fn(async (projectId: string, files: SerializedFile[]) => {
+          filesByProject.set(projectId, files);
+        }),
+        getProjectAgentState: vi.fn(async (projectId: string) => agentStateByProject.get(projectId)),
+        putProjectAgentState: vi.fn(async (state: ProjectAgentStateRecord) => {
+          agentStateByProject.set(state.projectId, state);
+        }),
+        listResumableThreads: vi.fn(async () => []),
+        replaceProjectResumableThreads: vi.fn(async () => undefined),
+        listAllResumableThreads: vi.fn(async () => []),
+      },
+    });
+
+    const attachProjectContext = vi.fn(async () => undefined);
+    const switchProjectWorkspace = vi.fn(async () => undefined);
+    const collectAgentStateSnapshot = vi.fn(async () => ({
+      claudeFiles: [],
+      openCodeDb: null,
+    }));
+    const restoreAgentStateSnapshot = vi.fn(async () => undefined);
+    const syncProjectGit = vi.fn(async () => undefined);
+    const discoverActiveProjectThreads = vi.fn(async () => ({
+      claude: [],
+      opencode: [],
+    }));
+
+    manager.setHost({
+      getVfs: () => container.vfs,
+      getTemplateId: () => 'nextjs',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit,
+      attachProjectContext,
+      switchProjectWorkspace,
+      collectAgentStateSnapshot,
+      restoreAgentStateSnapshot,
+      discoverActiveProjectThreads,
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    await manager.init();
+
+    const createdProject = projects.get('project-created');
+    expect(randomUuidSpy).toHaveBeenCalled();
+    expect(createdProject).toEqual(expect.objectContaining({
+      id: 'project-created',
+      name: 'reponame',
+      templateId: 'nextjs',
+      dbPrefix: 'project-',
+    }));
+    expect(filesByProject.get('project-created')).toEqual([
+      {
+        path: `${PROJECT_ROOT}/package.json`,
+        contentBase64: Buffer.from(
+          JSON.stringify({ name: 'fresh-next-project' }, null, 2),
+          'utf8',
+        ).toString('base64'),
+      },
+    ]);
+    expect(collectAgentStateSnapshot).toHaveBeenCalled();
+    expect(switchProjectWorkspace).not.toHaveBeenCalled();
+    expect(attachProjectContext).toHaveBeenCalledWith('nextjs', 'project-');
+    expect(syncProjectGit).toHaveBeenCalledWith(createdProject);
+    expect(restoreAgentStateSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'project-created',
+        claudeFiles: [],
+        openCodeDb: null,
+      }),
+    );
+    expect(discoverActiveProjectThreads).toHaveBeenCalledWith('project-created');
+
+    const url = new URL(window.location.href);
+    expect(url.searchParams.get('project')).toBe('project-created');
+    expect(url.searchParams.has('template')).toBe(false);
+    expect(url.searchParams.has('name')).toBe(false);
+
+    manager.dispose();
+  });
+
+  it('generates a container-style project name when template creation omits one', async () => {
+    window.history.replaceState({}, '', 'http://localhost:5173/ide?template=vite');
+
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('project-random');
+    const manager = new ProjectManager();
+    const container = createContainer();
+    container.vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
+    container.vfs.writeFileSync(`${PROJECT_ROOT}/README.md`, '# demo\n');
+
+    const projects = new Map<string, ProjectRecord>();
+    const filesByProject = new Map<string, SerializedFile[]>();
+    const agentStateByProject = new Map<string, ProjectAgentStateRecord>();
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        listProjects: vi.fn(async () => Array.from(projects.values())),
+        putProject: vi.fn(async (project: ProjectRecord) => {
+          projects.set(project.id, project);
+        }),
+        getProjectFiles: vi.fn(async (projectId: string) => filesByProject.get(projectId) ?? []),
+        saveProjectFiles: vi.fn(async (projectId: string, files: SerializedFile[]) => {
+          filesByProject.set(projectId, files);
+        }),
+        getProjectAgentState: vi.fn(async (projectId: string) => agentStateByProject.get(projectId)),
+        putProjectAgentState: vi.fn(async (state: ProjectAgentStateRecord) => {
+          agentStateByProject.set(state.projectId, state);
+        }),
+        listResumableThreads: vi.fn(async () => []),
+        replaceProjectResumableThreads: vi.fn(async () => undefined),
+        listAllResumableThreads: vi.fn(async () => []),
+      },
+    });
+
+    manager.setHost({
+      getVfs: () => container.vfs,
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit: vi.fn(async () => undefined),
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace: vi.fn(async () => undefined),
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    await manager.init();
+
+    expect(projects.get('project-random')?.name).toMatch(/^[a-z0-9]+-[a-z0-9]+$/);
+
+    manager.dispose();
+  });
+
+  it('keeps the mounted OpenCode workspace bridge readable after thread sync runs', async () => {
+    window.history.replaceState({}, '', 'http://localhost:5173/ide?project=project-open');
+
+    const manager = new ProjectManager();
+    const container = createContainer();
+    container.vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
+    container.vfs.writeFileSync(
+      `${PROJECT_ROOT}/package.json`,
+      JSON.stringify({ name: 'project-open' }, null, 2),
+    );
+
+    const savedFiles: SerializedFile[] = [
+      {
+        path: `${PROJECT_ROOT}/package.json`,
+        contentBase64: Buffer.from(
+          JSON.stringify({ name: 'project-open' }, null, 2),
+          'utf8',
+        ).toString('base64'),
+      },
+    ];
+
+    const project: ProjectRecord = {
+      id: 'project-open',
+      name: 'Open project',
+      templateId: 'vite',
+      createdAt: Date.now(),
+      lastModified: Date.now(),
+      dbPrefix: 'open-db',
+    };
+
+    const mountedDirectories = new Set<string>(['/', '/workspace']);
+    attachWorkspaceBridge({
+      exists(path: string) {
+        if (path === '/workspace') {
+          return true;
+        }
+        if (path.startsWith('/workspace/')) {
+          return container.vfs.existsSync(`${PROJECT_ROOT}${path.slice('/workspace'.length)}`);
+        }
+        return false;
+      },
+      mkdir(path: string) {
+        mountedDirectories.add(path);
+      },
+      readFile(path: string) {
+        if (!path.startsWith('/workspace/')) {
+          return undefined;
+        }
+        const mapped = `${PROJECT_ROOT}${path.slice('/workspace'.length)}`;
+        try {
+          if (container.vfs.statSync(mapped).isDirectory()) {
+            return undefined;
+          }
+          return String(container.vfs.readFileSync(mapped, 'utf8'));
+        } catch {
+          return undefined;
+        }
+      },
+      writeFile(path: string, content: string) {
+        const mapped = `${PROJECT_ROOT}${path.slice('/workspace'.length)}`;
+        const directory = mapped.slice(0, mapped.lastIndexOf('/'));
+        if (directory) {
+          container.vfs.mkdirSync(directory, { recursive: true });
+        }
+        container.vfs.writeFileSync(mapped, content);
+      },
+      readdir(path: string) {
+        if (path === '/workspace') {
+          return (container.vfs.readdirSync(PROJECT_ROOT) as string[]).map((name) => {
+            const stat = container.vfs.statSync(`${PROJECT_ROOT}/${name}`);
+            return {
+              name,
+              isDirectory: () => stat.isDirectory(),
+              isFile: () => stat.isFile(),
+              isSymbolicLink: () => false,
+            };
+          });
+        }
+        return [];
+      },
+      stat(path: string) {
+        if (mountedDirectories.has(path)) {
+          return {
+            isDirectory: () => true,
+            isFile: () => false,
+            mtime: new Date(),
+            mtimeMs: Date.now(),
+            size: 0,
+          };
+        }
+
+        if (!path.startsWith('/workspace/')) {
+          return undefined;
+        }
+
+        const mapped = `${PROJECT_ROOT}${path.slice('/workspace'.length)}`;
+        try {
+          const stat = container.vfs.statSync(mapped);
+          return {
+            isDirectory: () => stat.isDirectory(),
+            isFile: () => stat.isFile(),
+            mtime: new Date(),
+            mtimeMs: Date.now(),
+            size: Number(stat.size ?? 0),
+          };
+        } catch {
+          return undefined;
+        }
+      },
+    });
+
+    const helperDirectories = new Set<string>(['/', '/workspace']);
+    const helperBridge = {
+      exists(path: string) {
+        return path === '/workspace' || path === '/workspace/package.json';
+      },
+      mkdir(path: string) {
+        helperDirectories.add(path);
+      },
+      readFile(path: string) {
+        if (path === '/workspace/package.json') {
+          return '{"name":"helper-open"}';
+        }
+        return undefined;
+      },
+      writeFile() {},
+      readdir() {
+        return [];
+      },
+      stat(path: string) {
+        if (helperDirectories.has(path)) {
+          return {
+            isDirectory: () => true,
+            isFile: () => false,
+            mtime: new Date(),
+            mtimeMs: Date.now(),
+            size: 0,
+          };
+        }
+
+        if (path === '/workspace/package.json') {
+          const content = '{"name":"helper-open"}';
+          return {
+            isDirectory: () => false,
+            isFile: () => true,
+            mtime: new Date(),
+            mtimeMs: Date.now(),
+            size: content.length,
+          };
+        }
+
+        return undefined;
+      },
+    };
+
+    const discoverActiveProjectThreads = vi.fn(async () => {
+      await withWorkspaceBridgeScope(helperBridge, async () => {
+        await expect(readFile('/workspace/package.json', 'utf8')).resolves.toContain('"helper-open"');
+      });
+      return { claude: [], opencode: [] };
+    });
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        listProjects: vi.fn(async () => [project]),
+        getProjectFiles: vi.fn(async () => savedFiles),
+        getProjectAgentState: vi.fn(async () => undefined),
+        listResumableThreads: vi.fn(async () => []),
+        replaceProjectResumableThreads: vi.fn(async () => undefined),
+        listAllResumableThreads: vi.fn(async () => []),
+      },
+    });
+
+    manager.setHost({
+      getVfs: () => container.vfs,
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit: vi.fn(async () => undefined),
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace: vi.fn(async () => undefined),
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      discoverActiveProjectThreads,
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    await expect(readFile('/workspace/package.json', 'utf8')).resolves.toContain('"project-open"');
+    await manager.init();
+
+    expect(discoverActiveProjectThreads).toHaveBeenCalledWith('project-open');
+    await expect(readFile('/workspace/package.json', 'utf8')).resolves.toContain('"project-open"');
 
     manager.dispose();
   });
@@ -190,6 +581,13 @@ describe('ProjectManager init', () => {
     manager.setHost({
       getVfs: () => container.vfs,
       getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit: vi.fn(async (project: ProjectRecord) => {
+        events.push(`sync-git:${project.id}`);
+      }),
       attachProjectContext: vi.fn(async () => undefined),
       switchProjectWorkspace: vi.fn(async (templateId) => {
         events.push(`switch:${templateId}`);
@@ -211,10 +609,146 @@ describe('ProjectManager init', () => {
 
     expect(events).toEqual([
       'switch:nextjs',
+      'sync-git:project-b',
       'restore-agent',
       'resume-thread',
     ]);
 
     manager.dispose();
+  });
+
+  it('persists agent state when an AI sidebar tab closes', async () => {
+    window.history.replaceState({}, '', 'http://localhost:5173/ide?project=project-open');
+
+    const manager = new ProjectManager();
+    const container = createContainer();
+    container.vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
+    container.vfs.writeFileSync(
+      `${PROJECT_ROOT}/package.json`,
+      JSON.stringify({ name: 'project-open' }, null, 2),
+    );
+
+    const savedFiles: SerializedFile[] = [
+      {
+        path: `${PROJECT_ROOT}/package.json`,
+        contentBase64: Buffer.from(
+          JSON.stringify({ name: 'project-open' }, null, 2),
+          'utf8',
+        ).toString('base64'),
+      },
+    ];
+
+    const project: ProjectRecord = {
+      id: 'project-open',
+      name: 'Open project',
+      templateId: 'vite',
+      createdAt: Date.now(),
+      lastModified: Date.now(),
+      dbPrefix: 'open-db',
+    };
+
+    const putProjectAgentState = vi.fn(async () => undefined);
+    const saveProjectFiles = vi.fn(async () => undefined);
+    const putProject = vi.fn(async () => undefined);
+    const openCodeDb = new Uint8Array([1, 2, 3, 4]);
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        listProjects: vi.fn(async () => [project]),
+        getProject: vi.fn(async () => project),
+        putProject,
+        getProjectFiles: vi.fn(async () => savedFiles),
+        saveProjectFiles,
+        getProjectAgentState: vi.fn(async () => undefined),
+        putProjectAgentState,
+        listResumableThreads: vi.fn(async () => []),
+        replaceProjectResumableThreads: vi.fn(async () => undefined),
+        listAllResumableThreads: vi.fn(async () => []),
+      },
+    });
+
+    manager.setHost({
+      getVfs: () => container.vfs,
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit: vi.fn(async () => undefined),
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace: vi.fn(async () => undefined),
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    await manager.init();
+    window.dispatchEvent(new window.CustomEvent('almostnode:ai-sidebar-tab-closed'));
+
+    await vi.waitFor(() => {
+      expect(saveProjectFiles).toHaveBeenCalled();
+      expect(putProjectAgentState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: 'project-open',
+          openCodeDb,
+        }),
+      );
+    });
+
+    manager.dispose();
+  });
+
+  it('creates a project with a GitHub remote when requested', async () => {
+    const manager = new ProjectManager();
+    const putProject = vi.fn(async () => undefined);
+    const notifyProjectsChanged = vi.fn(async () => undefined);
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        putProject,
+      },
+    });
+
+    Object.defineProperty(manager, 'notifyProjectsChanged', {
+      configurable: true,
+      value: notifyProjectsChanged,
+    });
+
+    manager.setHost({
+      getVfs: () => ({}),
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => true,
+      createGitHubRemote: vi.fn(async () => ({
+        name: 'origin',
+        url: 'https://github.com/example/demo.git',
+        provider: 'github' as const,
+        repositoryFullName: 'example/demo',
+        repositoryUrl: 'https://github.com/example/demo',
+      })),
+      syncProjectGit: vi.fn(async () => undefined),
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace: vi.fn(async () => undefined),
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    const project = await manager.createProject('Demo App', 'vite', {
+      createGitHubRepo: true,
+    });
+
+    expect(project.gitRemote).toEqual({
+      name: 'origin',
+      url: 'https://github.com/example/demo.git',
+      provider: 'github',
+      repositoryFullName: 'example/demo',
+      repositoryUrl: 'https://github.com/example/demo',
+    });
+    expect(putProject).toHaveBeenCalledWith(project);
+    expect(notifyProjectsChanged).toHaveBeenCalled();
   });
 });

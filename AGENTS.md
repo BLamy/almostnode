@@ -87,6 +87,12 @@ ps
 - For runtime compatibility issues, prefer generic shim/runtime fixes over one-off library adapters.
 - Preserve existing worktree changes that are unrelated to your task.
 
+## File Editing
+
+- Never create or overwrite source files with shell heredocs such as `cat > file <<'EOF'`.
+- Use the available editor or patch tool for file creation and modification.
+- If shell execution is required, avoid inlining source code inside quoted shell commands.
+
 ## Work Strategy
 
 For multi-step work, delegation is a strong default, not an absolute rule.
