@@ -42,6 +42,7 @@ describe("OpenCode browser Bun shim", () => {
     try {
       expect(new Function("return Bun.which('bash')")()).toBe("/bin/sh");
       expect(new Function("return typeof Bun.$")()).toBe("function");
+      expect(new Function("return typeof Bun.hash")()).toBe("function");
     } finally {
       restore();
     }
@@ -53,6 +54,27 @@ describe("OpenCode browser Bun shim", () => {
     try {
       expect(mod.which("osascript")).toBeNull();
       expect(mod.default.which("sandbox-exec")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it("provides deterministic Bun.hash compatibility helpers", async () => {
+    const { mod, restore } = await loadBunShim();
+
+    try {
+      const helloFromString = mod.hash("hello");
+      const helloFromBytes = mod.hash(new Uint8Array([104, 101, 108, 108, 111]));
+
+      expect(typeof helloFromString).toBe("bigint");
+      expect(helloFromString).toBe(helloFromBytes);
+      expect(mod.default.hash("hello")).toBe(helloFromString);
+      expect(mod.hash("hello")).toBe(helloFromString);
+      expect(mod.hash("hello", 1n)).not.toBe(helloFromString);
+      expect(mod.hash("hello")).not.toBe(mod.hash("goodbye"));
+      expect(mod.hash.wyhash("hello")).toBe(helloFromString);
+      expect(typeof mod.hash.crc32("hello")).toBe("number");
+      expect(new Function("return Bun.hash('hello')")()).toBe(helloFromString);
     } finally {
       restore();
     }

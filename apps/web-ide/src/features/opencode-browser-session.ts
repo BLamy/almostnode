@@ -11,11 +11,14 @@ import {
   initBrowserDB,
   exportBrowserDBSnapshot,
   importBrowserDBSnapshot,
+  isRecoverableBrowserDBError,
+  resetBrowserDB,
 } from "../../../../vendor/opencode/packages/browser/src/shims/db.browser";
 import {
   withWorkspaceBridgeScope,
 } from "../../../../vendor/opencode/packages/browser/src/shims/fs.browser";
 import { Server } from "../../../../vendor/opencode/packages/opencode/src/server/server";
+import { Database } from "../../../../vendor/opencode/packages/opencode/src/storage/db";
 
 declare const __OPENTUI_WASM_URL__: string;
 
@@ -60,6 +63,8 @@ export interface OpenCodeBrowserSessionSummary {
     updated: number;
   };
 }
+
+let browserDbRecoveryPromise: Promise<void> | null = null;
 
 function ensureBrowserProcess(cwd: string, env: Record<string, string>): void {
   globalThis.process = configureBrowserProcess({
@@ -379,12 +384,36 @@ async function withOpenCodeBrowserRuntime<T>(
 export async function listOpenCodeBrowserSessions(
   options: Pick<OpenCodeBrowserSessionOptions, "container" | "cwd" | "env">,
 ): Promise<OpenCodeBrowserSessionSummary[]> {
-  return withOpenCodeBrowserRuntime(options, async (client) => {
+  const listSessions = () => withOpenCodeBrowserRuntime(options, async (client) => {
     const sessions = await client.session.list();
     return Array.isArray(sessions)
       ? sessions as OpenCodeBrowserSessionSummary[]
       : [];
   });
+
+  try {
+    return await listSessions();
+  } catch (error) {
+    if (!isRecoverableBrowserDBError(error)) {
+      throw error;
+    }
+
+    if (!browserDbRecoveryPromise) {
+      browserDbRecoveryPromise = (async () => {
+        console.warn(
+          "[opencode-browser] Recovering browser database after /session failed.",
+          error,
+        );
+        Database.Client.reset();
+        await resetBrowserDB();
+      })().finally(() => {
+        browserDbRecoveryPromise = null;
+      });
+    }
+
+    await browserDbRecoveryPromise;
+    return listSessions();
+  }
 }
 
 export async function collectOpenCodeBrowserSnapshot(): Promise<Uint8Array | null> {
