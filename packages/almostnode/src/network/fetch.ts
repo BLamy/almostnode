@@ -14,6 +14,9 @@ const PROXY_UPSTREAM_STATUS_HEADER = 'x-almostnode-upstream-status';
 const PROXY_UPSTREAM_STATUS_TEXT_HEADER = 'x-almostnode-upstream-status-text';
 
 type FetchLike = typeof globalThis.fetch;
+type NetworkFetchRequestInit = RequestInit & {
+  retryOnTailscaleRecovery?: boolean;
+};
 
 function getNativeFetch(): FetchLike {
   const candidate = (globalThis as { __almostnodeNativeFetch?: FetchLike }).__almostnodeNativeFetch;
@@ -160,6 +163,7 @@ export async function serializeFetchRequest(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<NetworkFetchRequest> {
+  const requestInit = init as NetworkFetchRequestInit | undefined;
   const url =
     typeof input === 'string'
       ? input
@@ -192,6 +196,12 @@ export async function serializeFetchRequest(
       init?.credentials ||
       (input instanceof Request ? input.credentials : undefined) ||
       'same-origin',
+    retryOnTailscaleRecovery:
+      requestInit?.retryOnTailscaleRecovery === true
+      || (
+        input instanceof Request
+        && (input as Request & { retryOnTailscaleRecovery?: boolean }).retryOnTailscaleRecovery === true
+      ),
   };
 }
 

@@ -75,6 +75,7 @@ export interface NetworkFetchRequest {
   bodyBase64?: string;
   redirect?: RequestRedirect;
   credentials?: RequestCredentials;
+  retryOnTailscaleRecovery?: boolean;
 }
 
 export interface NetworkFetchResponse {

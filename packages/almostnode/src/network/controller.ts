@@ -76,6 +76,61 @@ function formatTailscaleError(error: unknown): {
   };
 }
 
+function isRecoverableTailscaleRuntimeError(input: {
+  code: string | null;
+  message: string;
+  debug: TailscaleWorkerErrorDebug | null;
+}): boolean {
+  if (input.code === 'runtime_panic') {
+    return true;
+  }
+
+  if (input.debug?.recentRuntimeSignal || input.debug?.lastRuntimeResetReason) {
+    return true;
+  }
+
+  if (input.code === 'fetch_timeout') {
+    return input.message.includes('Tailscale response body read failed');
+  }
+
+  if (input.code !== 'runtime_unavailable') {
+    return false;
+  }
+
+  return (
+    input.message.includes('Tailscale worker crashed')
+    || input.message.includes('structured fetch response omitted bodyBase64')
+  );
+}
+
+function buildRecoverableTailscaleRequestError(
+  target: string,
+  input: {
+    code: string | null;
+    message: string;
+    debug: TailscaleWorkerErrorDebug | null;
+  },
+): Error {
+  const error = new Error(
+    `Tailscale request failed for ${target}: ${input.message}. ` +
+    'Tailscale is reconnecting, but this request was not retried automatically ' +
+    'because it was not marked safe to replay. Retry the request once Tailscale ' +
+    'returns to Running.',
+  ) as Error & {
+    code?: string;
+    debug?: TailscaleWorkerErrorDebug;
+  };
+
+  if (input.code) {
+    error.code = input.code;
+  }
+  if (input.debug) {
+    error.debug = input.debug;
+  }
+
+  return error;
+}
+
 function buildBrowserStatus(options: ResolvedNetworkOptions): NetworkStatus {
   return {
     provider: options.provider,
@@ -149,6 +204,7 @@ export class DefaultNetworkController implements NetworkController {
   private persistedSession: PersistedNetworkSession | null = null;
   private sessionHydrationPromise: Promise<void> | null = null;
   private shouldClearPersistedSession = false;
+  private tailscaleRecoveryPromise: Promise<NetworkStatus> | null = null;
 
   constructor(
     options: NetworkOptions = {},
@@ -275,9 +331,9 @@ export class DefaultNetworkController implements NetworkController {
     const options = this.getResolvedOptions();
     const route = selectNetworkRouteForUrl(request.url, options);
     if (route === 'tailscale') {
+      const adapter = await this.ensureAdapter();
+      await this.syncResolvedExitNodeSelection();
       try {
-        const adapter = await this.ensureAdapter();
-        await this.syncResolvedExitNodeSelection();
         return await adapter.fetch(request);
       } catch (error) {
         const hostname = this.extractHostname(request.url);
@@ -292,6 +348,45 @@ export class DefaultNetworkController implements NetworkController {
               }
             : formatted.message,
         );
+
+        if (isRecoverableTailscaleRuntimeError(formatted)) {
+          if (request.retryOnTailscaleRecovery === true) {
+            console.warn(
+              `[network] Attempting one Tailscale recovery retry for ${target}`,
+            );
+            await this.recoverTailscaleRuntime();
+            try {
+              return await adapter.fetch(request);
+            } catch (retryError) {
+              const retryFormatted = formatTailscaleError(retryError);
+              console.warn(
+                `[network] Tailscale recovery retry failed for ${target}${retryFormatted.code ? ` (${retryFormatted.code})` : ''}`,
+                retryFormatted.debug
+                  ? {
+                      message: retryFormatted.message,
+                      debug: retryFormatted.debug,
+                    }
+                  : retryFormatted.message,
+              );
+              throw retryError;
+            }
+          }
+
+          void this.recoverTailscaleRuntime().catch((recoveryError) => {
+            const recoveryFormatted = formatTailscaleError(recoveryError);
+            console.warn(
+              `[network] Tailscale background recovery failed for ${target}${recoveryFormatted.code ? ` (${recoveryFormatted.code})` : ''}`,
+              recoveryFormatted.debug
+                ? {
+                    message: recoveryFormatted.message,
+                    debug: recoveryFormatted.debug,
+                  }
+                : recoveryFormatted.message,
+            );
+          });
+          throw buildRecoverableTailscaleRequestError(target, formatted);
+        }
+
         throw error;
       }
     }
@@ -497,6 +592,21 @@ export class DefaultNetworkController implements NetworkController {
     );
     this.adapter = adapter;
     return adapter;
+  }
+
+  private async recoverTailscaleRuntime(): Promise<NetworkStatus> {
+    if (!this.tailscaleRecoveryPromise) {
+      this.tailscaleRecoveryPromise = (async () => {
+        const status = await this.getStatus();
+        this.emit(status);
+        await this.persistSession();
+        return status;
+      })().finally(() => {
+        this.tailscaleRecoveryPromise = null;
+      });
+    }
+
+    return this.tailscaleRecoveryPromise;
   }
 
   private async ensureSessionHydrated(): Promise<void> {

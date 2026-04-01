@@ -37,6 +37,7 @@ export interface TailscaleWorkerErrorDebug {
   responseUrl?: string;
   responseStatus?: number;
   hadBodyBase64?: boolean;
+  expectedBodyBase64?: boolean;
   recentRuntimeSignal?: string | null;
   recentRuntimeSignalAgeMs?: number | null;
   bodyReadError?: string;

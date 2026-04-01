@@ -23,8 +23,17 @@ type WorkerResponseMessage =
       error: {
         code: string;
         message: string;
+        debug?: Record<string, unknown>;
       };
     };
+
+type WorkerStatusMessage = {
+  type: 'status';
+  status: {
+    state?: string;
+    detail?: string;
+  };
+};
 
 class MockWorkerGlobal {
   readonly posted: unknown[] = [];
@@ -64,6 +73,14 @@ function getResponseMessages(workerScope: MockWorkerGlobal): WorkerResponseMessa
     typeof message === 'object'
     && message !== null
     && (message as { type?: unknown }).type === 'response'
+  ));
+}
+
+function getStatusMessages(workerScope: MockWorkerGlobal): WorkerStatusMessage[] {
+  return workerScope.posted.filter((message): message is WorkerStatusMessage => (
+    typeof message === 'object'
+    && message !== null
+    && (message as { type?: unknown }).type === 'status'
   ));
 }
 
@@ -395,7 +412,7 @@ describe('tailscale connect worker', () => {
     });
   });
 
-  it('recreates the IPN after a response body read timeout so later requests can recover', async () => {
+  it('recreates the IPN when a structured fetch omits bodyBase64 and emits starting status while recovering', async () => {
     const dnsFetch = vi.fn(async () => new Response(JSON.stringify({
       Status: 0,
       Answer: [{ type: 1, data: '104.18.32.47' }],
@@ -409,6 +426,12 @@ describe('tailscale connect worker', () => {
       writable: true,
     });
 
+    const firstResponseText = vi.fn(async () => {
+      throw new Error(
+        'reading response body: context deadline exceeded ' +
+        '(Client.Timeout or context cancellation while reading body)',
+      );
+    });
     const firstIpn = {
       run: vi.fn(),
       login: vi.fn(),
@@ -419,12 +442,7 @@ describe('tailscale connect worker', () => {
         status: 200,
         statusText: 'OK',
         headers: { 'content-type': 'application/json' },
-        text: async () => {
-          throw new Error(
-            'reading response body: context deadline exceeded ' +
-            '(Client.Timeout or context cancellation while reading body)',
-          );
-        },
+        text: firstResponseText,
       })),
     };
     const secondIpn = {
@@ -462,14 +480,28 @@ describe('tailscale connect worker', () => {
     await vi.runAllTimersAsync();
     await firstFetchPromise;
 
+    expect(firstResponseText).not.toHaveBeenCalled();
     expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
       id: 1,
       ok: false,
       error: {
-        code: 'fetch_timeout',
-        message: expect.stringContaining('reading response body: context deadline exceeded'),
+        code: 'runtime_unavailable',
+        message: 'Tailscale structured fetch response omitted bodyBase64.',
+        debug: expect.objectContaining({
+          expectedBodyBase64: true,
+          hadBodyBase64: false,
+          lastRuntimeResetReason: 'Tailscale structured fetch response omitted bodyBase64.',
+        }),
       },
     });
+    expect(getStatusMessages(workerScope)).toContainEqual(
+      expect.objectContaining({
+        status: expect.objectContaining({
+          state: 'starting',
+          detail: expect.stringContaining('omitted bodyBase64'),
+        }),
+      }),
+    );
 
     const secondFetchPromise = workerScope.dispatch({
       id: 2,
@@ -493,6 +525,102 @@ describe('tailscale connect worker', () => {
       ok: true,
       value: expect.objectContaining({
         url: 'https://chatgpt.com/backend-api/codex/responses',
+        status: 200,
+      }),
+    });
+  });
+
+  it('treats syscall/js.valueNew runtime logs as fatal recovery signals', async () => {
+    const firstIpn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(async () => {
+        const runtimeFs = (globalThis as {
+          fs?: {
+            writeSync: (
+              fd: number,
+              buffer: Uint8Array,
+              offset?: number,
+              length?: number,
+              position?: number | null,
+            ) => number;
+          };
+        }).fs;
+        const runtimeLog = 'panic: syscall/js.valueNew returned an invalid handle\n';
+        runtimeFs?.writeSync(
+          2,
+          new TextEncoder().encode(runtimeLog),
+          0,
+          runtimeLog.length,
+          null,
+        );
+        throw new Error('runtime bridge closed');
+      }),
+    };
+    const secondIpn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(async (url: string) => ({
+        url,
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'text/plain' },
+        bodyBase64: Buffer.from('tailnet-response').toString('base64'),
+        text: async () => 'tailnet-response',
+      })),
+    };
+    createIPNMock
+      .mockResolvedValueOnce(firstIpn)
+      .mockResolvedValueOnce(secondIpn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const firstFetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://db.ts.net/status',
+        method: 'GET',
+        headers: {},
+      },
+    });
+    await vi.runAllTimersAsync();
+    await firstFetchPromise;
+
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: false,
+      error: {
+        code: 'runtime_unavailable',
+        message: 'runtime bridge closed',
+        debug: expect.objectContaining({
+          recentRuntimeSignal: expect.stringContaining('syscall/js.valueNew'),
+          lastRuntimeResetReason: 'runtime bridge closed',
+        }),
+      },
+    });
+
+    const secondFetchPromise = workerScope.dispatch({
+      id: 2,
+      type: 'fetch',
+      request: {
+        url: 'https://db.ts.net/status',
+        method: 'GET',
+        headers: {},
+      },
+    });
+    await vi.runAllTimersAsync();
+    await secondFetchPromise;
+
+    expect(createIPNMock).toHaveBeenCalledTimes(2);
+    expect(secondIpn.run).toHaveBeenCalledTimes(1);
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 2,
+      ok: true,
+      value: expect.objectContaining({
+        url: 'https://db.ts.net/status',
         status: 200,
       }),
     });

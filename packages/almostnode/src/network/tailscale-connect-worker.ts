@@ -120,6 +120,7 @@ let state: TailscaleConnectState = 'NoState';
 let netMap: TailscaleConnectNetMap | null = null;
 let loginUrl: string | null = null;
 let panicError: string | null = null;
+let recoveringFromRuntimeFailure = false;
 let dnsHealthy: boolean | null = null;
 let dnsDetail: string | null = null;
 let lastRuntimeFailureSignal:
@@ -973,6 +974,23 @@ function mapState(): TailscaleAdapterStatus {
   const resolvedDnsDetail = dnsDetail ?? undefined;
   const dnsEnabled = getEffectiveAcceptDns(options);
 
+  if (recoveringFromRuntimeFailure) {
+    return {
+      state: 'starting',
+      dnsEnabled,
+      dnsHealthy,
+      dnsDetail: resolvedDnsDetail ?? panicError ?? undefined,
+      exitNodes,
+      selectedExitNodeId,
+      detail: panicError
+        ? `Recovering Tailscale runtime after failure: ${panicError}`
+        : 'Recovering Tailscale runtime.',
+      loginUrl,
+      selfName: netMap?.self?.name || null,
+      tailnetName: extractTailnetName(netMap?.self?.name),
+    };
+  }
+
   if (panicError) {
     return {
       state: 'error',
@@ -1110,6 +1128,10 @@ function resetIpnRuntime(reason: string): void {
   ipnStarted = false;
   ipnStartScheduled = false;
   panicError = detail;
+  recoveringFromRuntimeFailure = hadLiveIpn;
+  if (recoveringFromRuntimeFailure) {
+    state = 'Starting';
+  }
   lastRuntimeFailureSignal = {
     message: detail,
     seenAt: Date.now(),
@@ -1647,7 +1669,7 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
         previousGeneration: ipnGeneration,
         resetCount: ipnResetCount,
       });
-      panicError = null;
+      recoveringFromRuntimeFailure = true;
       state = 'Starting';
       emitStatus();
     }
@@ -1672,6 +1694,8 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
         if (!ipn || typeof ipn.run !== 'function') {
           throw new Error('Tailscale IPN initialization failed.');
         }
+        panicError = null;
+        recoveringFromRuntimeFailure = false;
         emitStatus();
         return ipn;
       })
@@ -1778,7 +1802,7 @@ function isFatalRuntimeMessage(message: string): boolean {
     || normalized.includes('go program has already exited')
     || normalized.includes('use of closed network connection')
     || normalized.includes('close received after close')
-    || normalized.includes('syscall/js.valuecall')
+    || normalized.includes('syscall/js.value')
   );
 }
 
@@ -1817,6 +1841,10 @@ function shouldResetRuntimeAfterError(
     formatted.code === 'runtime_panic'
     || isFatalRuntimeMessage(formatted.message)
     || isBodyReadFailureMessage(formatted.message)
+    || Boolean(
+      formatted.debug?.expectedBodyBase64
+      && formatted.debug.hadBodyBase64 === false,
+    )
     || Boolean(
       formatted.debug?.recentRuntimeSignal
       && isFatalRuntimeMessage(formatted.debug.recentRuntimeSignal),
@@ -1983,7 +2011,9 @@ async function handleFetch(
 
     let response: Awaited<ReturnType<TailscaleConnectIPN['fetch']>>;
     let usedDirectIpFallback = false;
+    let usedStructuredFetch = false;
     if (capabilities.canStructuredFetch) {
+      usedStructuredFetch = true;
       const fetchReq: Parameters<TailscaleConnectIPN['fetch']>[0] = {
         url: request.url,
         method: request.method,
@@ -2070,11 +2100,18 @@ async function handleFetch(
       responseUrl: response.url || request.url,
       responseStatus: response.status,
       hadBodyBase64: typeof response.bodyBase64 === 'string',
+      expectedBodyBase64: usedStructuredFetch,
     };
 
     let bodyBase64: string;
     if (typeof response.bodyBase64 === 'string') {
       bodyBase64 = response.bodyBase64;
+    } else if (usedStructuredFetch) {
+      throw new ClassifiedTailscaleWorkerError(
+        'runtime_unavailable',
+        'Tailscale structured fetch response omitted bodyBase64.',
+        fetchDebug,
+      );
     } else {
       try {
         bodyBase64 = encodeTextBody(await response.text());
@@ -2333,6 +2370,7 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
       case 'configure':
         options = request.options;
         panicError = null;
+        recoveringFromRuntimeFailure = false;
         if (!getEffectiveAcceptDns(options)) {
           updateDnsHealth(null, null);
         }
@@ -2374,6 +2412,7 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
         loginUrl = null;
         tailscaleStateStorage.clear();
         panicError = null;
+        recoveringFromRuntimeFailure = false;
         updateDnsHealth(null, null);
         emitStatus();
         sendResponse(request.id, true, mapState());

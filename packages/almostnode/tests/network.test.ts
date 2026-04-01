@@ -72,6 +72,20 @@ class FakeTailscaleAdapter implements TailscaleAdapter {
   }
 }
 
+function createRecoverableTailscaleError(
+  message = 'Tailscale structured fetch response omitted bodyBase64.',
+): Error {
+  const error = new Error(message) as Error & {
+    code?: string;
+    debug?: Record<string, unknown>;
+  };
+  error.code = 'runtime_unavailable';
+  error.debug = {
+    lastRuntimeResetReason: message,
+  };
+  return error;
+}
+
 describe('network controller', () => {
   let nativeFetch: ReturnType<typeof vi.fn>;
 
@@ -406,6 +420,124 @@ describe('network controller', () => {
       headers: {},
     })).rejects.toThrow('tailnet peer refused connection');
     expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it('retries one tailscale fetch after runtime recovery only when the request is marked safe to replay', async () => {
+    const fetches: NetworkFetchRequest[] = [];
+    let getStatusCalls = 0;
+
+    setTailscaleAdapterFactory(async (_options, onStatus) => ({
+      async getStatus(): Promise<TailscaleAdapterStatus> {
+        getStatusCalls += 1;
+        const status = {
+          state: 'running' as const,
+          selectedExitNodeId: 'node-sfo',
+        };
+        onStatus(status);
+        return status;
+      },
+      async login(): Promise<TailscaleAdapterStatus> {
+        return {
+          state: 'running',
+          selectedExitNodeId: 'node-sfo',
+        };
+      },
+      async logout(): Promise<TailscaleAdapterStatus> {
+        return { state: 'stopped' };
+      },
+      async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
+        fetches.push(request);
+        if (fetches.length === 1) {
+          throw createRecoverableTailscaleError();
+        }
+        return {
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'text/plain' },
+          bodyBase64: Buffer.from('tailnet-response').toString('base64'),
+        };
+      },
+      async lookup(): Promise<NetworkLookupResult> {
+        return { hostname: 'opencode.ai', addresses: [] };
+      },
+    }));
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    const response = await controller.fetch({
+      url: 'https://opencode.ai/install',
+      method: 'GET',
+      headers: {},
+      retryOnTailscaleRecovery: true,
+    });
+
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(fetches).toHaveLength(2);
+    expect(getStatusCalls).toBe(2);
+    expect(nativeFetch).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a recoverable tailscale error for opaque POSTs without replaying them', async () => {
+    let fetchCalls = 0;
+    let getStatusCalls = 0;
+
+    setTailscaleAdapterFactory(async (_options, onStatus) => ({
+      async getStatus(): Promise<TailscaleAdapterStatus> {
+        getStatusCalls += 1;
+        const status = {
+          state: getStatusCalls === 1 ? 'running' as const : 'starting' as const,
+          selectedExitNodeId: 'node-sfo',
+          detail: getStatusCalls === 1
+            ? undefined
+            : 'Recovering Tailscale runtime after failure.',
+        };
+        onStatus(status);
+        return status;
+      },
+      async login(): Promise<TailscaleAdapterStatus> {
+        return {
+          state: 'running',
+          selectedExitNodeId: 'node-sfo',
+        };
+      },
+      async logout(): Promise<TailscaleAdapterStatus> {
+        return { state: 'stopped' };
+      },
+      async fetch(): Promise<NetworkFetchResponse> {
+        fetchCalls += 1;
+        throw createRecoverableTailscaleError();
+      },
+      async lookup(): Promise<NetworkLookupResult> {
+        return { hostname: 'chatgpt.com', addresses: [] };
+      },
+    }));
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    setDefaultNetworkController(controller);
+
+    await expect(controller.fetch({
+      url: 'https://chatgpt.com/backend-api/codex/responses',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      bodyBase64: Buffer.from('{}').toString('base64'),
+    })).rejects.toMatchObject({
+      message: expect.stringContaining('not retried automatically because it was not marked safe to replay'),
+      code: 'runtime_unavailable',
+    });
+
+    expect(fetchCalls).toBe(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(getStatusCalls).toBe(2);
+    });
   });
 
   it('routes generic public fetches through tailscale after tailscale login', async () => {
