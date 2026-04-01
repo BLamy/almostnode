@@ -26,6 +26,24 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+interface AuthPopupWindow {
+  closed?: boolean;
+  close?: () => void;
+  focus?: () => void;
+  opener?: unknown;
+  location?: {
+    href?: string;
+    replace?: (url: string) => void;
+  };
+  document?: {
+    body?: { innerHTML?: string };
+    close?: () => void;
+    open?: () => void;
+    title?: string;
+    write?: (html: string) => void;
+  };
+}
+
 class TailscaleAdapterError extends Error {
   readonly code?: string;
   readonly debug?: TailscaleWorkerErrorDebug;
@@ -55,6 +73,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   private status: TailscaleAdapterStatus = { state: 'needs-login' };
   private lastAuthUrl: string | null = null;
   private sessionSnapshot: TailscaleStateSnapshot | null;
+  private pendingAuthPopup: AuthPopupWindow | null = null;
 
   constructor(
     private options: ResolvedNetworkOptions,
@@ -78,6 +97,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
         type: 'getStatus',
       });
       this.handleAuthUrl(this.status.loginUrl ?? null);
+      this.syncAuthPopupWithStatus(this.status);
       this.onStatus(this.status);
     } catch (error) {
       this.status = {
@@ -91,19 +111,28 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   }
 
   async login(): Promise<TailscaleAdapterStatus> {
-    this.status = await this.sendRequest<TailscaleAdapterStatus>({
-      type: 'login',
-    });
-    this.handleAuthUrl(this.status.loginUrl ?? null);
-    this.onStatus(this.status);
-    return this.status;
+    this.ensurePendingAuthPopup();
+    try {
+      this.status = await this.sendRequest<TailscaleAdapterStatus>({
+        type: 'login',
+      });
+      this.handleAuthUrl(this.status.loginUrl ?? null);
+      this.syncAuthPopupWithStatus(this.status);
+      this.onStatus(this.status);
+      return this.status;
+    } catch (error) {
+      this.closePendingAuthPopup();
+      throw error;
+    }
   }
 
   async logout(): Promise<TailscaleAdapterStatus> {
     this.status = await this.sendRequest<TailscaleAdapterStatus>({
       type: 'logout',
     });
+    this.closePendingAuthPopup();
     this.handleAuthUrl(this.status.loginUrl ?? null);
+    this.syncAuthPopupWithStatus(this.status);
     this.onStatus(this.status);
     return this.status;
   }
@@ -131,6 +160,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   }
 
   dispose(): void {
+    this.closePendingAuthPopup();
     for (const pending of this.pendingRequests.values()) {
       pending.reject(new Error('Tailscale adapter disposed.'));
     }
@@ -172,6 +202,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       if (message.type === 'status') {
         this.status = message.status;
         this.handleAuthUrl(message.status.loginUrl ?? null);
+        this.syncAuthPopupWithStatus(this.status);
         this.onStatus(this.status);
         return;
       }
@@ -190,6 +221,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     });
 
     const handleWorkerFailure = (detail: string) => {
+      this.closePendingAuthPopup();
       this.status = { state: 'error', detail };
       this.onStatus(this.status);
       this.workerConfigured = false;
@@ -274,7 +306,108 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       return;
     }
     this.lastAuthUrl = url;
+    if (url && this.navigatePendingAuthPopup(url)) {
+      return;
+    }
     this.hooks.onAuthUrl?.(url);
+  }
+
+  private ensurePendingAuthPopup(): void {
+    const existing = this.pendingAuthPopup;
+    if (existing && !existing.closed) {
+      return;
+    }
+
+    let popup: AuthPopupWindow | null = null;
+    try {
+      popup = globalThis.open?.('', '_blank') as AuthPopupWindow | null;
+    } catch {
+      popup = null;
+    }
+
+    if (!popup) {
+      this.pendingAuthPopup = null;
+      return;
+    }
+
+    this.pendingAuthPopup = popup;
+    try {
+      popup.document?.open?.();
+      popup.document?.write?.(
+        '<!doctype html><title>Tailscale Login</title>' +
+          '<body style="font-family: sans-serif; padding: 24px;">' +
+          '<p>Waiting for Tailscale login...</p>' +
+          '</body>',
+      );
+      popup.document?.close?.();
+    } catch {
+      // Ignore same-origin document write failures and still reuse the popup.
+    }
+  }
+
+  private navigatePendingAuthPopup(url: string): boolean {
+    const popup = this.pendingAuthPopup;
+    if (!popup) {
+      return false;
+    }
+
+    this.pendingAuthPopup = null;
+    if (popup.closed) {
+      return false;
+    }
+
+    try {
+      popup.opener = null;
+    } catch {
+      // Ignore opener assignment failures and continue navigation.
+    }
+
+    try {
+      if (typeof popup.location?.replace === 'function') {
+        popup.location.replace(url);
+      } else if (popup.location && typeof popup.location.href === 'string') {
+        popup.location.href = url;
+      } else {
+        throw new Error('Pending auth popup does not expose a location.');
+      }
+      popup.focus?.();
+      return true;
+    } catch {
+      try {
+        popup.close?.();
+      } catch {
+        // Ignore popup cleanup failures.
+      }
+      return false;
+    }
+  }
+
+  private closePendingAuthPopup(): void {
+    const popup = this.pendingAuthPopup;
+    this.pendingAuthPopup = null;
+    if (!popup || popup.closed) {
+      return;
+    }
+
+    try {
+      popup.close?.();
+    } catch {
+      // Ignore popup cleanup failures.
+    }
+  }
+
+  private syncAuthPopupWithStatus(status: TailscaleAdapterStatus): void {
+    if (status.loginUrl) {
+      return;
+    }
+
+    switch (status.state) {
+      case 'needs-login':
+      case 'starting':
+        return;
+      default:
+        this.closePendingAuthPopup();
+    }
   }
 
   private buildPersistedSession(): PersistedNetworkSession | null {

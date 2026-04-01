@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createTailscaleConnectAdapterFactory } from '../src/network/tailscale-connect-adapter';
+import {
+  createNativeTailscaleConnectAdapter,
+  createTailscaleConnectAdapterFactory,
+} from '../src/network/tailscale-connect-adapter';
 import {
   parseTailscaleStateSnapshot,
   TAILSCALE_SESSION_STORAGE_KEY,
@@ -107,6 +110,7 @@ class FakeWorker {
 
 describe('tailscale connect adapter', () => {
   const originalWorker = globalThis.Worker;
+  const originalOpen = Object.getOwnPropertyDescriptor(globalThis, 'open');
   const originalSessionStorage = Object.getOwnPropertyDescriptor(
     globalThis,
     'sessionStorage',
@@ -119,6 +123,12 @@ describe('tailscale connect adapter', () => {
 
   afterEach(() => {
     globalThis.Worker = originalWorker;
+
+    if (originalOpen) {
+      Object.defineProperty(globalThis, 'open', originalOpen);
+    } else {
+      delete (globalThis as typeof globalThis & { open?: typeof globalThis.open }).open;
+    }
 
     if (originalSessionStorage) {
       Object.defineProperty(globalThis, 'sessionStorage', originalSessionStorage);
@@ -223,6 +233,83 @@ describe('tailscale connect adapter', () => {
     expect(worker?.messages[2]).toMatchObject({
       type: 'login',
     });
+  });
+
+  it('pre-opens and reuses an auth popup when the login URL arrives asynchronously', async () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      document: {
+        close: vi.fn(),
+        open: vi.fn(),
+        write: vi.fn(),
+      },
+      focus: vi.fn(),
+      location: {
+        replace: vi.fn(),
+      },
+      opener: { current: true },
+    };
+    const open = vi.fn(() => popup as unknown as Window);
+    Object.defineProperty(globalThis, 'open', {
+      value: open,
+      configurable: true,
+      writable: true,
+    });
+
+    const onAuthUrl = vi.fn();
+    const adapter = createNativeTailscaleConnectAdapter(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+      { onAuthUrl },
+    );
+
+    await adapter.login();
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith('', '_blank');
+    expect(popup.document.write).toHaveBeenCalled();
+    expect(popup.location.replace).toHaveBeenCalledWith('https://login.tailscale.test');
+    expect(popup.focus).toHaveBeenCalledTimes(1);
+    expect(popup.opener).toBeNull();
+    expect(onAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the auth hook when the browser blocks the pre-opened popup', async () => {
+    const open = vi.fn(() => null);
+    Object.defineProperty(globalThis, 'open', {
+      value: open,
+      configurable: true,
+      writable: true,
+    });
+
+    const onAuthUrl = vi.fn();
+    const adapter = createNativeTailscaleConnectAdapter(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+      { onAuthUrl },
+    );
+
+    await adapter.login();
+
+    expect(open).toHaveBeenCalledWith('', '_blank');
+    expect(onAuthUrl).toHaveBeenCalledWith('https://login.tailscale.test');
   });
 
   it('clears persisted state on explicit logout', async () => {
