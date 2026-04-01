@@ -26,6 +26,14 @@ class MemorySessionStorage {
 
 class FakeWorker {
   static lastInstance: FakeWorker | null = null;
+  static getStatusValue: Record<string, unknown> = {
+    state: 'running',
+    selectedExitNodeId: 'node-sfo',
+  };
+  static loginValue: Record<string, unknown> = {
+    state: 'needs-login',
+    loginUrl: 'https://login.tailscale.test',
+  };
 
   readonly messages: Array<Record<string, unknown>> = [];
   private readonly listeners = {
@@ -65,10 +73,7 @@ class FakeWorker {
           type: 'response',
           id: message.id,
           ok: true,
-          value: {
-            state: 'running',
-            selectedExitNodeId: 'node-sfo',
-          },
+          value: FakeWorker.getStatusValue,
         });
         break;
       case 'login':
@@ -76,10 +81,7 @@ class FakeWorker {
           type: 'response',
           id: message.id,
           ok: true,
-          value: {
-            state: 'needs-login',
-            loginUrl: 'https://login.tailscale.test',
-          },
+          value: FakeWorker.loginValue,
         });
         break;
       case 'logout':
@@ -118,6 +120,14 @@ describe('tailscale connect adapter', () => {
 
   beforeEach(() => {
     FakeWorker.lastInstance = null;
+    FakeWorker.getStatusValue = {
+      state: 'running',
+      selectedExitNodeId: 'node-sfo',
+    };
+    FakeWorker.loginValue = {
+      state: 'needs-login',
+      loginUrl: 'https://login.tailscale.test',
+    };
     globalThis.Worker = FakeWorker as unknown as typeof Worker;
   });
 
@@ -194,7 +204,7 @@ describe('tailscale connect adapter', () => {
     expect(storage.getItem(TAILSCALE_SESSION_STORAGE_KEY)).toBeNull();
   });
 
-  it('logs in directly from a hydrated session without a synthetic logout', async () => {
+  it('reuses a hydrated running session without forcing a new login', async () => {
     const storage = new MemorySessionStorage();
     storage.setItem(
       TAILSCALE_SESSION_STORAGE_KEY,
@@ -231,6 +241,56 @@ describe('tailscale connect adapter', () => {
       type: 'configure',
     });
     expect(worker?.messages[2]).toMatchObject({
+      type: 'getStatus',
+    });
+  });
+
+  it('logs out stale hydrated sessions before requesting a new login', async () => {
+    const storage = new MemorySessionStorage();
+    storage.setItem(
+      TAILSCALE_SESSION_STORAGE_KEY,
+      JSON.stringify({ profile: 'alpha' }),
+    );
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: storage,
+      configurable: true,
+    });
+    FakeWorker.getStatusValue = {
+      state: 'needs-login',
+    };
+
+    const adapterFactory = createTailscaleConnectAdapterFactory();
+    const adapter = await adapterFactory(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+    );
+
+    await adapter.login();
+    const worker = FakeWorker.lastInstance;
+
+    expect(worker?.messages).toHaveLength(5);
+    expect(worker?.messages[0]).toMatchObject({
+      type: 'hydrateStorage',
+      snapshot: { profile: 'alpha' },
+    });
+    expect(worker?.messages[1]).toMatchObject({
+      type: 'configure',
+    });
+    expect(worker?.messages[2]).toMatchObject({
+      type: 'getStatus',
+    });
+    expect(worker?.messages[3]).toMatchObject({
+      type: 'logout',
+    });
+    expect(worker?.messages[4]).toMatchObject({
       type: 'login',
     });
   });
@@ -276,10 +336,72 @@ describe('tailscale connect adapter', () => {
 
     expect(open).toHaveBeenCalledTimes(1);
     expect(open).toHaveBeenCalledWith('', '_blank');
-    expect(popup.document.write).toHaveBeenCalled();
+    expect(popup.document.write).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('Waiting for Tailscale login'),
+    );
+    expect(popup.document.write).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('Continue to Tailscale login'),
+    );
+    expect(popup.document.write).toHaveBeenLastCalledWith(
+      expect.stringContaining('https://login.tailscale.test'),
+    );
     expect(popup.location.replace).toHaveBeenCalledWith('https://login.tailscale.test');
     expect(popup.focus).toHaveBeenCalledTimes(1);
     expect(popup.opener).toBeNull();
+    expect(onAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it('keeps the popup actionable when scripted navigation to the auth URL fails', async () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      document: {
+        close: vi.fn(),
+        open: vi.fn(),
+        write: vi.fn(),
+      },
+      focus: vi.fn(),
+      location: {
+        replace: vi.fn(() => {
+          throw new Error('navigation blocked');
+        }),
+      },
+      opener: { current: true },
+    };
+    const open = vi.fn(() => popup as unknown as Window);
+    Object.defineProperty(globalThis, 'open', {
+      value: open,
+      configurable: true,
+      writable: true,
+    });
+
+    const onAuthUrl = vi.fn();
+    const adapter = createNativeTailscaleConnectAdapter(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+      { onAuthUrl },
+    );
+
+    await adapter.login();
+
+    expect(popup.document.write).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('Continue to Tailscale login'),
+    );
+    expect(popup.document.write).toHaveBeenLastCalledWith(
+      expect.stringContaining('https://login.tailscale.test'),
+    );
+    expect(popup.close).not.toHaveBeenCalled();
     expect(onAuthUrl).not.toHaveBeenCalled();
   });
 

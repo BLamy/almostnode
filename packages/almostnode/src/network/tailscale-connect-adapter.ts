@@ -63,6 +63,47 @@ interface TailscaleConnectAdapterHooks {
   onPersistedSessionChange?: (session: PersistedNetworkSession | null) => void;
 }
 
+function escapeAuthPopupHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function buildAuthPopupHtml(state: 'waiting' | 'redirect', url?: string): string {
+  const linkMarkup = state === 'redirect' && url
+    ? `<p style="margin: 0 0 16px;">` +
+        `If the redirect does not start automatically, use this link:</p>` +
+        `<p style="margin: 0;">` +
+        `<a href="${escapeAuthPopupHtml(url)}" ` +
+          `style="color: #0f766e; font-weight: 600; text-decoration: none;">` +
+          `Continue to Tailscale login</a>` +
+        `</p>`
+    : '';
+  const redirectScript = state === 'redirect' && url
+    ? `<meta http-equiv="refresh" content="0; url=${escapeAuthPopupHtml(url)}">` +
+        `<script>window.location.replace(${JSON.stringify(url)});</script>`
+    : '';
+  const message = state === 'redirect'
+    ? 'Redirecting to Tailscale login...'
+    : 'Waiting for Tailscale login...';
+
+  return '<!doctype html>' +
+    '<html><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>Tailscale Login</title>' +
+    redirectScript +
+    '</head><body style="' +
+      'margin:0;padding:24px;font-family:system-ui,-apple-system,BlinkMacSystemFont,' +
+      '\'Segoe UI\',sans-serif;background:#f8fafc;color:#0f172a;">' +
+    '<main style="max-width:420px;">' +
+    `<p style="margin: 0 0 16px; font-size: 16px; line-height: 1.5;">${message}</p>` +
+    linkMarkup +
+    '</main></body></html>';
+}
+
 class TailscaleConnectAdapter implements TailscaleAdapter {
   private worker: Worker | null = null;
   private nextRequestId = 1;
@@ -113,6 +154,15 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   async login(): Promise<TailscaleAdapterStatus> {
     this.ensurePendingAuthPopup();
     try {
+      if (this.hasPersistedSessionSnapshot()) {
+        const currentStatus = await this.refreshStatus();
+        if (currentStatus.state === 'running') {
+          return currentStatus;
+        }
+        if (this.shouldResetSessionBeforeLogin(currentStatus)) {
+          await this.resetSessionBeforeLogin();
+        }
+      }
       this.status = await this.sendRequest<TailscaleAdapterStatus>({
         type: 'login',
       });
@@ -331,18 +381,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     }
 
     this.pendingAuthPopup = popup;
-    try {
-      popup.document?.open?.();
-      popup.document?.write?.(
-        '<!doctype html><title>Tailscale Login</title>' +
-          '<body style="font-family: sans-serif; padding: 24px;">' +
-          '<p>Waiting for Tailscale login...</p>' +
-          '</body>',
-      );
-      popup.document?.close?.();
-    } catch {
-      // Ignore same-origin document write failures and still reuse the popup.
-    }
+    this.writePendingAuthPopupDocument(buildAuthPopupHtml('waiting'));
   }
 
   private navigatePendingAuthPopup(url: string): boolean {
@@ -351,8 +390,8 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       return false;
     }
 
-    this.pendingAuthPopup = null;
     if (popup.closed) {
+      this.pendingAuthPopup = null;
       return false;
     }
 
@@ -362,24 +401,39 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       // Ignore opener assignment failures and continue navigation.
     }
 
+    const renderedRedirectPage = this.writePendingAuthPopupDocument(
+      buildAuthPopupHtml('redirect', url),
+    );
+    let navigated = false;
     try {
       if (typeof popup.location?.replace === 'function') {
         popup.location.replace(url);
+        navigated = true;
       } else if (popup.location && typeof popup.location.href === 'string') {
         popup.location.href = url;
-      } else {
-        throw new Error('Pending auth popup does not expose a location.');
+        navigated = true;
       }
-      popup.focus?.();
-      return true;
     } catch {
-      try {
-        popup.close?.();
-      } catch {
-        // Ignore popup cleanup failures.
-      }
-      return false;
+      navigated = false;
     }
+
+    try {
+      popup.focus?.();
+    } catch {
+      // Ignore focus failures.
+    }
+
+    if (renderedRedirectPage || navigated) {
+      return true;
+    }
+
+    try {
+      popup.close?.();
+    } catch {
+      // Ignore popup cleanup failures.
+    }
+    this.pendingAuthPopup = null;
+    return false;
   }
 
   private closePendingAuthPopup(): void {
@@ -407,6 +461,51 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
         return;
       default:
         this.closePendingAuthPopup();
+    }
+  }
+
+  private async refreshStatus(): Promise<TailscaleAdapterStatus> {
+    this.status = await this.sendRequest<TailscaleAdapterStatus>({
+      type: 'getStatus',
+    });
+    this.handleAuthUrl(this.status.loginUrl ?? null);
+    this.syncAuthPopupWithStatus(this.status);
+    this.onStatus(this.status);
+    return this.status;
+  }
+
+  private shouldResetSessionBeforeLogin(
+    status: TailscaleAdapterStatus,
+  ): boolean {
+    return status.state === 'needs-login' && this.hasPersistedSessionSnapshot();
+  }
+
+  private hasPersistedSessionSnapshot(): boolean {
+    return Boolean(this.sessionSnapshot && Object.keys(this.sessionSnapshot).length > 0);
+  }
+
+  private async resetSessionBeforeLogin(): Promise<void> {
+    this.status = await this.sendRequest<TailscaleAdapterStatus>({
+      type: 'logout',
+    });
+    this.handleAuthUrl(this.status.loginUrl ?? null);
+    this.syncAuthPopupWithStatus(this.status);
+    this.onStatus(this.status);
+  }
+
+  private writePendingAuthPopupDocument(html: string): boolean {
+    const popup = this.pendingAuthPopup;
+    if (!popup || popup.closed || typeof popup.document?.write !== 'function') {
+      return false;
+    }
+
+    try {
+      popup.document.open?.();
+      popup.document.write(html);
+      popup.document.close?.();
+      return true;
+    } catch {
+      return false;
     }
   }
 
