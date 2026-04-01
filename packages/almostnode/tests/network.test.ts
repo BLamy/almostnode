@@ -628,6 +628,99 @@ describe('network controller', () => {
     expect(controller.getConfig().tailscaleConnected).toBe(true);
   });
 
+  it('auto-selects the first exit node before routing public fetches through tailscale', async () => {
+    const tailscaleFetches: NetworkFetchRequest[] = [];
+    const configuredOptions: Array<Required<NetworkOptions>> = [];
+
+    setTailscaleAdapterFactory(async (_options, onStatus) => ({
+      async getStatus(): Promise<TailscaleAdapterStatus> {
+        const status = {
+          state: 'running' as const,
+          selectedExitNodeId: null,
+          exitNodes: [
+            {
+              id: 'node-ord',
+              name: 'ord',
+              online: false,
+              selected: false,
+            },
+            {
+              id: 'node-self',
+              name: 'bretts-macbook-air',
+              online: true,
+              selected: false,
+            },
+          ],
+        };
+        onStatus(status);
+        return status;
+      },
+      async login(): Promise<TailscaleAdapterStatus> {
+        return {
+          state: 'running',
+          selectedExitNodeId: null,
+          exitNodes: [
+            {
+              id: 'node-ord',
+              name: 'ord',
+              online: false,
+              selected: false,
+            },
+            {
+              id: 'node-self',
+              name: 'bretts-macbook-air',
+              online: true,
+              selected: false,
+            },
+          ],
+        };
+      },
+      async logout(): Promise<TailscaleAdapterStatus> {
+        return { state: 'stopped' };
+      },
+      async configure(options: Required<NetworkOptions>): Promise<void> {
+        configuredOptions.push({ ...options });
+      },
+      async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
+        tailscaleFetches.push(request);
+        return {
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'text/plain' },
+          bodyBase64: Buffer.from('tailnet-response').toString('base64'),
+        };
+      },
+      async lookup(): Promise<NetworkLookupResult> {
+        return { hostname: 'chatgpt.com', addresses: [] };
+      },
+    }));
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+      exitNodeId: null,
+    });
+    setDefaultNetworkController(controller);
+
+    const response = await controller.fetch({
+      url: 'https://chatgpt.com/backend-api/codex/responses',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      bodyBase64: Buffer.from('{}').toString('base64'),
+    });
+
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(tailscaleFetches).toHaveLength(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(controller.getConfig().exitNodeId).toBe('node-self');
+    expect(configuredOptions.at(-1)).toMatchObject({
+      provider: 'tailscale',
+      useExitNode: true,
+      exitNodeId: 'node-self',
+    });
+  });
+
   it('boots the tailscale adapter on getStatus when tailscale is already selected', async () => {
     const createdAdapters: FakeTailscaleAdapter[] = [];
     setTailscaleAdapterFactory(async (_options, onStatus) => {

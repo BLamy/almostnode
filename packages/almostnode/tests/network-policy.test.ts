@@ -4,6 +4,7 @@ import {
   resolveBrowserWebSocketTarget,
   resolveNetworkPolicy,
   selectNetworkRouteForUrl,
+  selectWebSocketRouteForUrl,
   shouldBypassProxy,
 } from '../src/network';
 
@@ -51,7 +52,8 @@ describe('network policy', () => {
     const baseOptions = normalizeNetworkOptions({
       provider: 'tailscale',
       tailscaleConnected: true,
-      useExitNode: false,
+      useExitNode: true,
+      exitNodeId: null,
     });
 
     expect(
@@ -68,6 +70,19 @@ describe('network policy', () => {
         { origin: 'https://app.example.com' },
       ),
     ).toBe('browser');
+
+    const websocketPolicy = resolveNetworkPolicy(
+      baseOptions,
+      { origin: 'https://app.example.com' },
+    );
+    expect(
+      selectWebSocketRouteForUrl(
+        'wss://platform.claude.com/socket',
+        websocketPolicy,
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('browser');
+
     expect(
       selectNetworkRouteForUrl(
         'https://db.ts.net/status',

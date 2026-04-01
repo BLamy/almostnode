@@ -514,6 +514,21 @@ export class DefaultNetworkController implements NetworkController {
     };
   }
 
+  private getPreferredExitNodeId(): string | null {
+    const selectedExitNodeId = this.adapterStatus?.selectedExitNodeId?.trim() || null;
+    if (selectedExitNodeId) {
+      return selectedExitNodeId;
+    }
+
+    const exitNodes = this.adapterStatus?.exitNodes || [];
+    const preferredExitNode =
+      exitNodes.find((exitNode) => exitNode.online)
+      ?? exitNodes[0]
+      ?? null;
+    const preferredExitNodeId = preferredExitNode?.id?.trim() || null;
+    return preferredExitNodeId;
+  }
+
   private extractHostname(rawUrl: string): string | null {
     try {
       return new URL(
@@ -540,14 +555,14 @@ export class DefaultNetworkController implements NetworkController {
       return;
     }
 
-    const selectedExitNodeId = this.adapterStatus?.selectedExitNodeId?.trim() || null;
-    if (!selectedExitNodeId) {
+    const resolvedExitNodeId = this.getPreferredExitNodeId();
+    if (!resolvedExitNodeId) {
       return;
     }
 
     this.options = normalizeNetworkOptions({
       ...this.options,
-      exitNodeId: selectedExitNodeId,
+      exitNodeId: resolvedExitNodeId,
     });
 
     if (this.adapter?.configure) {

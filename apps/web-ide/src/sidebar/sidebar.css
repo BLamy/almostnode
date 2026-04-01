@@ -11,8 +11,9 @@
 .almostnode-project-sidebar {
   display: flex;
   flex-direction: column;
+  flex: 0 0 280px;
   width: 280px;
-  min-width: 0;
+  max-width: 280px;
   height: 100%;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
@@ -66,6 +67,18 @@
 .almostnode-sidebar__toggle:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* Prevent horizontal overflow in the sidebar scroll area.
+   Radix ScrollArea viewport uses an inner div with `display: table`
+   which expands to fit content and breaks text truncation. Override to block. */
+.almostnode-project-sidebar [data-radix-scroll-area-viewport] {
+  overflow-x: hidden !important;
+}
+
+.almostnode-project-sidebar [data-radix-scroll-area-viewport] > div {
+  display: block !important;
+  min-width: 0 !important;
 }
 
 /* Project list item */
@@ -164,6 +177,7 @@
   transition: opacity 0.1s;
   display: flex;
   align-items: center;
+  flex: none;
 }
 
 .almostnode-project-item:hover .almostnode-project-item__menu-trigger,

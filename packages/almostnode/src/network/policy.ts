@@ -97,6 +97,16 @@ function getResolvedOptions(
   return normalizeNetworkOptions(options);
 }
 
+function hasActiveTailscaleExitNode(
+  options: Pick<ResolvedNetworkOptions, 'useExitNode' | 'tailscaleConnected' | 'exitNodeId'>,
+): boolean {
+  return Boolean(
+    options.useExitNode
+    && options.tailscaleConnected
+    && options.exitNodeId?.trim(),
+  );
+}
+
 function ipv4ToInt(input: string): number {
   return input
     .split('.')
@@ -403,7 +413,7 @@ export function selectNetworkRouteForUrl(
     return 'browser';
   }
 
-  return resolvedOptions.useExitNode && resolvedOptions.tailscaleConnected
+  return hasActiveTailscaleExitNode(resolvedOptions)
     ? 'tailscale'
     : 'browser';
 }
@@ -433,7 +443,7 @@ export function selectNetworkRouteForHost(
     return 'browser';
   }
 
-  return resolvedOptions.useExitNode && resolvedOptions.tailscaleConnected
+  return hasActiveTailscaleExitNode(resolvedOptions)
     ? 'tailscale'
     : 'browser';
 }
@@ -477,7 +487,7 @@ export function selectWebSocketRouteForUrl(
     return 'browser';
   }
 
-  return policy.options.useExitNode && policy.options.tailscaleConnected
+  return hasActiveTailscaleExitNode(policy.options)
     ? 'tailscale'
     : 'browser';
 }
