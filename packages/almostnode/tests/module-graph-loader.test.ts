@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ModuleGraphLoader } from '../src/module-graph-loader';
+import * as urlShim from '../src/shims/url';
 import { VirtualFS } from '../src/virtual-fs';
 
 describe('ModuleGraphLoader', () => {
@@ -83,12 +84,71 @@ describe('ModuleGraphLoader', () => {
     const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
     const source = await loader.buildModuleSource(descriptor);
 
-    expect(source).toContain('const __almostnode_hostGlobal = globalThis;');
+    expect(source).toContain('const __almostnode_hostGlobal = Function("return globalThis")();');
     expect(source).toContain('const globalThis = __almostnode_global;');
     expect(source).toContain('const global = __almostnode_global;');
     expect(source).toContain('const console = __almostnode_global.console;');
     expect(source).toContain('const process = __almostnode_global.process;');
     expect(globalThis.console).toBe(hostConsole);
     expect(globalThis.process as unknown).toBe(hostProcess);
+  });
+
+  it('provides file-based import.meta values for graph-loaded ESM modules', async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync(
+      '/entry.mjs',
+      `
+        import { fileURLToPath } from 'url';
+        import { createRequire } from 'module';
+
+        const require = createRequire(import.meta.url);
+
+        export default {
+          url: import.meta.url,
+          filename: import.meta.filename,
+          dirname: import.meta.dirname,
+          path: fileURLToPath(import.meta.url),
+          fromMetaObject: import.meta.filename,
+          resolved: require.resolve('./dep.js'),
+        };
+      `,
+    );
+
+    const loader = new ModuleGraphLoader({
+      vfs,
+      runtimeId: 'test-runtime-import-meta',
+      builtinModules: {
+        module: {},
+        url: urlShim,
+      },
+      console: console as unknown as Record<string, unknown>,
+      process: { cwd: () => '/' } as unknown as Record<string, unknown>,
+      globalObject: {
+        console,
+        process: { cwd: () => '/' },
+        Buffer,
+      } as unknown as Record<string, unknown>,
+      requireCjs: () => ({}),
+      createRequire: (fromPath) => {
+        const requireFn = (() => ({})) as ((id: string) => unknown) & { resolve?: (id: string) => string };
+        requireFn.resolve = (id: string) => `${fromPath}:${id}`;
+        return requireFn;
+      },
+    }) as ModuleGraphLoader & {
+      getModuleUrl: (descriptor: unknown) => Promise<string>;
+    };
+
+    const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
+    const url = await loader.getModuleUrl(descriptor);
+    const mod = await import(url);
+
+    expect(mod.default).toEqual({
+      url: 'file:///entry.mjs',
+      filename: '/entry.mjs',
+      dirname: '/',
+      path: '/entry.mjs',
+      fromMetaObject: '/entry.mjs',
+      resolved: '/entry.mjs:./dep.js',
+    });
   });
 });

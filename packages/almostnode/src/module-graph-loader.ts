@@ -253,15 +253,21 @@ export class ModuleGraphLoader {
 
     return [
       runtimePreamble,
+      `const __almostnode_url = ${JSON.stringify(`file://${descriptor.resolvedPath}`)};`,
       `const __almostnode_filename = ${JSON.stringify(descriptor.resolvedPath)};`,
       `const __almostnode_dirname = ${JSON.stringify(pathShim.dirname(descriptor.resolvedPath))};`,
+      'const __almostnode_import_meta = Object.assign(Object.create(null), import.meta, {',
+      '  url: __almostnode_url,',
+      '  filename: __almostnode_filename,',
+      '  dirname: __almostnode_dirname,',
+      '});',
       rewritten.code,
     ].join('\n');
   }
 
   private createRuntimePreamble(): string {
     return [
-      'const __almostnode_hostGlobal = globalThis;',
+      'const __almostnode_hostGlobal = Function("return globalThis")();',
       `const __almostnode_global = __almostnode_hostGlobal.__almostnodeModuleInterop.getRuntimeGlobal(${JSON.stringify(this.runtimeId)});`,
       'const globalThis = __almostnode_global;',
       'const global = __almostnode_global;',
@@ -369,22 +375,10 @@ export class ModuleGraphLoader {
             await addSpecifierReplacement(node.source);
           }
           break;
-        case 'MemberExpression':
-          if (
-            node.object?.type === 'MetaProperty' &&
-            node.object.meta?.name === 'import' &&
-            node.object.property?.name === 'meta' &&
-            !node.computed &&
-            node.property?.type === 'Identifier'
-          ) {
-            if (node.property.name === 'filename') {
-              replacements.push([node.start, node.end, '__almostnode_filename']);
-              metaNeedsPreamble = true;
-            }
-            if (node.property.name === 'dirname') {
-              replacements.push([node.start, node.end, '__almostnode_dirname']);
-              metaNeedsPreamble = true;
-            }
+        case 'MetaProperty':
+          if (node.meta?.name === 'import' && node.property?.name === 'meta') {
+            replacements.push([node.start, node.end, '__almostnode_import_meta']);
+            metaNeedsPreamble = true;
           }
           break;
         default:
