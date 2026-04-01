@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react"
 import { createProcess } from "almostnode"
 import { AlmostnodeProvider, EditorPane, PreviewPane, useWorkspace } from "almostnode-react"
 import { createWorkspace } from "almostnode-sdk"
+import { setWorkspaceRoot } from "../../../vendor/opencode/packages/browser/src/shims/fs.browser"
 
 declare const __OPENTUI_WASM_URL__: string
 
@@ -41,6 +42,13 @@ function mapWorkspacePath(path: string): string {
   if (path === "/workspace") return "/project"
   if (path.startsWith("/workspace/")) return `/project${path.slice("/workspace".length)}`
   return path
+}
+
+function toOpenCodePath(path: string): string {
+  if (path === "/workspace") return "/project"
+  if (path.startsWith("/workspace/")) return `/project${path.slice("/workspace".length)}`
+  if (path === "/project" || path.startsWith("/project/")) return path
+  return "/project"
 }
 
 function createWorkspaceBridge(workspace: ReturnType<typeof createWorkspace>) {
@@ -111,7 +119,7 @@ function createWorkspaceBridge(workspace: ReturnType<typeof createWorkspace>) {
     rename(oldPath: string, newPath: string) {
       vfs.renameSync(mapWorkspacePath(oldPath), mapWorkspacePath(newPath))
     },
-    listFiles(root = "/workspace"): string[] {
+    listFiles(root = "/project"): string[] {
       const mapped = mapWorkspacePath(root)
       if (!vfs.existsSync(mapped)) {
         return []
@@ -128,7 +136,7 @@ function createWorkspaceBridge(workspace: ReturnType<typeof createWorkspace>) {
         }
 
         const relative = currentPath.slice("/project".length)
-        files.push(`/workspace${relative}`)
+        files.push(`/project${relative}`)
       }
 
       visit(mapped)
@@ -147,7 +155,7 @@ function createProcessBridge(workspace: ReturnType<typeof createWorkspace>) {
       signal?: AbortSignal
       shell?: boolean | string
     }) {
-      const cwd = mapWorkspacePath(input.cwd || "/workspace")
+      const cwd = mapWorkspacePath(input.cwd || "/project")
       const commandString =
         input.shell || input.args.length === 0
           ? input.command
@@ -183,6 +191,7 @@ function OpenCodePane(): React.ReactElement {
     let disposed = false
 
     ensureBrowserProcess("/project")
+    setWorkspaceRoot("/project")
 
     void import("opencode-browser-tui")
       .then(async ({ mountOpenCodeTui }) => {
@@ -190,7 +199,7 @@ function OpenCodePane(): React.ReactElement {
         const session = await mountOpenCodeTui({
           container: host,
           wasmUrl: __OPENTUI_WASM_URL__,
-          directory: "/workspace",
+          directory: toOpenCodePath("/project"),
           workspaceBridge: createWorkspaceBridge(workspace),
           processBridge: createProcessBridge(workspace),
           env: {

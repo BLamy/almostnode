@@ -261,6 +261,29 @@ describe('Stream module (Node.js compat)', () => {
         assert.strictEqual(result, 'hello world');
       });
 
+      it('should not drop synchronous chunks when consumed via async iterator', async () => {
+        const readable = Readable.from(['hello', ' ', 'world']);
+        const chunks: Buffer[] = [];
+
+        for await (const chunk of readable) {
+          chunks.push(chunk);
+        }
+
+        const result = Buffer.concat(chunks).toString();
+        assert.strictEqual(result, 'hello world');
+      });
+
+      it('should treat string input as a single chunk', async () => {
+        const readable = Readable.from('hello world');
+        const chunks: Buffer[] = [];
+
+        for await (const chunk of readable) {
+          chunks.push(chunk);
+        }
+
+        expect(chunks.map((chunk) => chunk.toString())).toEqual(['hello world']);
+      });
+
       it('should create stream from generator', async () => {
         function* generator() {
           yield 'a';

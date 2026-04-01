@@ -3,7 +3,14 @@ import type {
   TailscaleConnectStateStorage,
 } from '@tailscale/connect';
 import tailscaleWasmUrl from '@tailscale/connect/main.wasm?url';
+import { almostnodeDebugError, almostnodeDebugLog, almostnodeDebugWarn } from '../utils/debug';
+import { NETWORK_DIAGNOSTIC_FAILURE_BUCKETS } from './types';
 import type {
+  NetworkDiagnosticsCounters,
+  NetworkDiagnosticsFailureBucket,
+  NetworkDiagnosticsFailureEntry,
+  NetworkDiagnosticsRequestShape,
+  NetworkDiagnosticsSnapshot,
   NetworkExitNode,
   NetworkFetchRequest,
   NetworkFetchResponse,
@@ -106,6 +113,7 @@ const TAILSCALE_RUNTIME_TMP_DIR = `${TAILSCALE_RUNTIME_ROOT}/tmp`;
 const TAILSCALE_RUNTIME_STDIN_PATH = `${TAILSCALE_RUNTIME_ROOT}/stdin`;
 const TAILSCALE_RUNTIME_STDOUT_PATH = `${TAILSCALE_RUNTIME_ROOT}/stdout`;
 const TAILSCALE_RUNTIME_STDERR_PATH = `${TAILSCALE_RUNTIME_ROOT}/stderr`;
+const DIAGNOSTIC_RECENT_FAILURE_LIMIT = 20;
 
 let options = defaultOptions;
 let ipnPromise: Promise<TailscaleConnectIPN> | null = null;
@@ -129,6 +137,9 @@ let lastRuntimeFailureSignal:
 let tailscaleRuntimeCwd = TAILSCALE_RUNTIME_ROOT;
 let allowSnapshotClear = false;
 const fetchIpMap = new Map<string, string>();
+let diagnosticsCounters = createEmptyDiagnosticsCounters();
+let diagnosticFailureBuckets = createEmptyFailureBuckets();
+const recentDiagnosticFailures: NetworkDiagnosticsFailureEntry[] = [];
 const tailscaleStateStorageInner = createTailscaleSessionStateStore(
   null,
   (snapshot) => {
@@ -254,6 +265,26 @@ const tailscaleRuntimeFsWithGoMethods = tailscaleRuntimeFs as typeof tailscaleRu
   ) => void;
 };
 
+function createEmptyDiagnosticsCounters(): NetworkDiagnosticsCounters {
+  return {
+    totalFetches: 0,
+    publicFetches: 0,
+    tailnetFetches: 0,
+    structuredFetches: 0,
+    directIpFallbacks: 0,
+    runtimeResets: 0,
+    recoveriesAttempted: 0,
+    successes: 0,
+    failures: 0,
+  };
+}
+
+function createEmptyFailureBuckets(): Record<NetworkDiagnosticsFailureBucket, number> {
+  return Object.fromEntries(
+    NETWORK_DIAGNOSTIC_FAILURE_BUCKETS.map((bucket) => [bucket, 0]),
+  ) as Record<NetworkDiagnosticsFailureBucket, number>;
+}
+
 function queueFsCallback<T extends unknown[]>(
   callback: ((...args: T) => void) | undefined,
   ...args: T
@@ -375,9 +406,9 @@ tailscaleRuntimeFs.writeSync = ((fd, buffer, offset, length, position) => {
     if (text) {
       processRuntimeLog(text);
       if (fd === 2) {
-        console.error(text);
+        almostnodeDebugError('tailscale', '[tailscale-worker][runtime][stderr]', text.trimEnd());
       } else {
-        console.log(text);
+        almostnodeDebugLog('tailscale', '[tailscale-worker][runtime][stdout]', text.trimEnd());
       }
     }
     return typeof buffer === 'string' ? buffer.length : length ?? buffer.length;
@@ -459,9 +490,9 @@ tailscaleRuntimeFsWithGoMethods.write = ((
       );
       if (text) {
         if (fd === 2) {
-          console.error(text);
+          almostnodeDebugError('tailscale', '[tailscale-worker][runtime][stderr]', text.trimEnd());
         } else {
-          console.log(text);
+          almostnodeDebugLog('tailscale', '[tailscale-worker][runtime][stdout]', text.trimEnd());
         }
       }
       const written =
@@ -893,7 +924,7 @@ async function createWorkerIpn(
   const restoreGo = overrideGlobalProperty('Go', AlmostnodeTailscaleGo);
   try {
     const acceptDns = getEffectiveAcceptDns(config);
-    console.log('[tailscale-worker] create IPN:', {
+    almostnodeDebugLog('tailscale', '[tailscale-worker][ipn] create', {
       exitNodeId: config.exitNodeId,
       routeAll: config.useExitNode,
       acceptDns,
@@ -1115,8 +1146,9 @@ function resetIpnRuntime(reason: string): void {
 
   if (hadLiveIpn) {
     ipnResetCount += 1;
+    diagnosticsCounters.runtimeResets += 1;
     lastRuntimeResetReason = detail;
-    console.warn('[tailscale-worker] resetting live IPN runtime', {
+    almostnodeDebugWarn('tailscale', '[tailscale-worker][runtime] resetting live IPN runtime', {
       reason: detail,
       generation: ipnGeneration,
       resetCount: ipnResetCount,
@@ -1148,12 +1180,12 @@ async function applyCurrentIpnConfig(ipn: TailscaleConnectIPN): Promise<void> {
     configure?: (config: TailscaleConfigureOptions) => Promise<void>;
   };
   if (typeof configurableIpn.configure !== 'function') {
-    console.warn('[tailscale-worker] IPN does not support configure()');
+    almostnodeDebugWarn('tailscale', '[tailscale-worker][ipn] configure() unavailable');
     return;
   }
   const config = buildIpnConfig();
   const configRecord = config as Record<string, unknown>;
-  console.log('[tailscale-worker] configure IPN:', {
+  almostnodeDebugLog('tailscale', '[tailscale-worker][ipn] configure', {
     routeAll: configRecord.RouteAll,
     exitNodeId: configRecord.ExitNodeID,
     corpDns: configRecord.CorpDNS,
@@ -1405,6 +1437,180 @@ function extractRequestHostname(input: string): string | null {
   }
 }
 
+function applyWorkerDebugRaw(raw: string | null): void {
+  const workerGlobal = globalThis as typeof globalThis & {
+    __almostnodeDebug?: string;
+  };
+  if (raw && raw.trim()) {
+    workerGlobal.__almostnodeDebug = raw;
+    return;
+  }
+
+  delete workerGlobal.__almostnodeDebug;
+}
+
+function getHeaderValue(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string | null {
+  if (!headers) {
+    return null;
+  }
+
+  const normalized = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === normalized) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function buildDiagnosticsRequestShape(
+  request: NetworkFetchRequest,
+): NetworkDiagnosticsRequestShape {
+  const method = (request.method || 'GET').toUpperCase();
+  const contentType = getHeaderValue(request.headers, 'content-type');
+  const accept = getHeaderValue(request.headers, 'accept');
+
+  return {
+    method,
+    hasBody: typeof request.bodyBase64 === 'string' && request.bodyBase64.length > 0,
+    contentType: contentType?.trim() || null,
+    acceptsEventStream: Boolean(
+      accept?.toLowerCase().split(',').some((part) => part.trim().startsWith('text/event-stream')),
+    ),
+  };
+}
+
+function getDiagnosticsTargetType(
+  hostname: string | null,
+): NetworkDiagnosticsFailureEntry['targetType'] {
+  if (!hostname) {
+    return 'unknown';
+  }
+  if (isTailscaleInternalHostname(hostname)) {
+    return 'tailnet';
+  }
+  if (isIPv4(hostname) || isIPv6(hostname)) {
+    return 'unknown';
+  }
+  return 'public';
+}
+
+function classifyDiagnosticsFailureBucket(
+  formatted: Pick<TailscaleWorkerErrorPayload, 'code' | 'message' | 'debug'>,
+): NetworkDiagnosticsFailureBucket {
+  if (formatted.message.includes('direct-IP retry failed')) {
+    return 'direct_ip_fallback_failed';
+  }
+
+  if (
+    formatted.message.includes('structured fetch response omitted bodyBase64')
+    || Boolean(formatted.debug?.expectedBodyBase64 && formatted.debug.hadBodyBase64 === false)
+  ) {
+    return 'structured_fetch_missing_body_base64';
+  }
+
+  if (
+    formatted.message.includes('Tailscale response body read failed')
+    || isBodyReadFailureMessage(formatted.message)
+  ) {
+    return 'body_read_timeout';
+  }
+
+  if (
+    formatted.code === 'runtime_panic'
+    || Boolean(
+      formatted.debug?.recentRuntimeSignal
+      && isFatalRuntimeMessage(formatted.debug.recentRuntimeSignal),
+    )
+    || /\bpanic\b/i.test(formatted.message)
+  ) {
+    return 'runtime_panic';
+  }
+
+  if (formatted.code === 'tls_sni_failed') {
+    return 'tls_sni_failed';
+  }
+
+  if (isLoopbackDnsFailure(formatted.message, formatted.debug?.hostname ?? null)) {
+    return 'dns_loopback';
+  }
+
+  if (formatted.code === 'fetch_timeout') {
+    return 'fetch_timeout_other';
+  }
+
+  return 'runtime_unavailable_other';
+}
+
+function recordDiagnosticFailure(
+  formatted: Pick<TailscaleWorkerErrorPayload, 'code' | 'message' | 'debug'>,
+  request: NetworkFetchRequest,
+  requestShape: NetworkDiagnosticsRequestShape,
+): void {
+  const bucket = classifyDiagnosticsFailureBucket(formatted);
+  diagnosticFailureBuckets[bucket] += 1;
+
+  const host = formatted.debug?.hostname ?? extractRequestHostname(request.url);
+  recentDiagnosticFailures.unshift({
+    seenAt: new Date().toISOString(),
+    host,
+    targetType: getDiagnosticsTargetType(host),
+    bucket,
+    errorCode: formatted.code,
+    message: formatted.message,
+    phase: formatted.debug?.phase ?? null,
+    requestShape,
+    useExitNode: formatted.debug?.useExitNode ?? options.useExitNode,
+    exitNodeId: formatted.debug?.exitNodeId ?? options.exitNodeId,
+    runtimeGeneration: formatted.debug?.runtimeGeneration ?? ipnGeneration,
+    runtimeResetCount: formatted.debug?.runtimeResetCount ?? ipnResetCount,
+    lastRuntimeResetReason:
+      formatted.debug?.lastRuntimeResetReason ?? lastRuntimeResetReason,
+  });
+
+  if (recentDiagnosticFailures.length > DIAGNOSTIC_RECENT_FAILURE_LIMIT) {
+    recentDiagnosticFailures.length = DIAGNOSTIC_RECENT_FAILURE_LIMIT;
+  }
+}
+
+function getDominantFailureBucket():
+  | NetworkDiagnosticsFailureBucket
+  | null {
+  let dominant: NetworkDiagnosticsFailureBucket | null = null;
+  let dominantCount = 0;
+
+  for (const bucket of NETWORK_DIAGNOSTIC_FAILURE_BUCKETS) {
+    const count = diagnosticFailureBuckets[bucket];
+    if (count > dominantCount) {
+      dominant = bucket;
+      dominantCount = count;
+    }
+  }
+
+  return dominantCount > 0 ? dominant : null;
+}
+
+function getDiagnosticsSnapshot(): NetworkDiagnosticsSnapshot {
+  return {
+    provider: 'tailscale',
+    available: true,
+    state: mapState().state ?? 'needs-login',
+    counters: { ...diagnosticsCounters },
+    failureBuckets: { ...diagnosticFailureBuckets },
+    dominantFailureBucket: getDominantFailureBucket(),
+    recentFailures: recentDiagnosticFailures.map((entry) => ({
+      ...entry,
+      requestShape: { ...entry.requestShape },
+    })),
+    runtimeGeneration: ipnGeneration,
+    runtimeResetCount: ipnResetCount,
+    lastRuntimeResetReason,
+  };
+}
+
 function pushResolvedAddress(
   entries: Array<{ address: string; family: 4 | 6 }>,
   address: string,
@@ -1494,8 +1700,9 @@ async function resolveHostnameWithoutIpn(
     const family = isIPv6(cachedAddress) ? 6 : 4;
     const requestedFamily = lookupOptions?.family;
     if (!requestedFamily || requestedFamily === family) {
-      console.log(
-        `[tailscale-worker] public DNS cache hit: host=${hostname} ip=${cachedAddress}`,
+      almostnodeDebugLog(
+        'tailscale',
+        `[tailscale-worker][dns] public cache hit: host=${hostname} ip=${cachedAddress}`,
       );
       return {
         hostname,
@@ -1506,8 +1713,9 @@ async function resolveHostnameWithoutIpn(
 
   const requestedFamily =
     lookupOptions?.family === 6 ? 6 : lookupOptions?.family === 4 ? 4 : undefined;
-  console.log(
-    `[tailscale-worker] resolving public hostname via DoH: host=${hostname} family=${requestedFamily ?? 'auto'}`,
+  almostnodeDebugLog(
+    'tailscale',
+    `[tailscale-worker][dns] resolving public hostname via DoH: host=${hostname} family=${requestedFamily ?? 'auto'}`,
   );
   const addresses = await resolveHostnameViaPublicDnsJson(hostname, requestedFamily);
   if (addresses.length === 0) {
@@ -1664,7 +1872,8 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
   if (!ipnPromise) {
     const recoveringReason = panicError;
     if (recoveringReason) {
-      console.warn('[tailscale-worker] recreating IPN after runtime failure', {
+      diagnosticsCounters.recoveriesAttempted += 1;
+      almostnodeDebugWarn('tailscale', '[tailscale-worker][runtime] recreating IPN after failure', {
         reason: recoveringReason,
         previousGeneration: ipnGeneration,
         resetCount: ipnResetCount,
@@ -1763,8 +1972,9 @@ async function preparePublicHostnameIpMap(url: string): Promise<{
   const mappingChanged = previousAddress !== ipAddress;
   fetchIpMap.set(normalizedHost, ipAddress);
 
-  console.log(
-    `[tailscale-worker] prepared public route: host=${hostname} ip=${ipAddress} changed=${mappingChanged ? 'yes' : 'no'}`,
+  almostnodeDebugLog(
+    'tailscale',
+    `[tailscale-worker][dns] prepared public route: host=${hostname} ip=${ipAddress} changed=${mappingChanged ? 'yes' : 'no'}`,
   );
 
   return {
@@ -1947,8 +2157,20 @@ async function handleFetch(
 ): Promise<NetworkFetchResponse> {
   const hadLiveIpn = ipnPromise !== null;
   const recentRuntimeSignal = getRecentRuntimeFailureSignal();
+  const requestShape = buildDiagnosticsRequestShape(request);
   const fetchLabel = `${request.method || 'GET'} ${request.url}`;
-  console.log(`[tailscale-worker] fetch start: ${fetchLabel}`);
+  diagnosticsCounters.totalFetches += 1;
+  const requestHostname = extractRequestHostname(request.url);
+  const targetType = getDiagnosticsTargetType(requestHostname);
+  if (targetType === 'public') {
+    diagnosticsCounters.publicFetches += 1;
+  } else if (targetType === 'tailnet') {
+    diagnosticsCounters.tailnetFetches += 1;
+  }
+  almostnodeDebugLog('tailscale', `[tailscale-worker][fetch] start: ${fetchLabel}`, {
+    requestShape,
+    targetType,
+  });
   const fetchStart = Date.now();
   let fetchDebug: TailscaleWorkerErrorDebug = {
     phase: 'prepare_public_dns',
@@ -1989,8 +2211,9 @@ async function handleFetch(
       lastRuntimeResetReason,
       attemptedIpMapSync: Boolean(preparedRoute.mappingChanged && capabilities.canReconfigure),
     };
-    console.log(
-      `[tailscale-worker] fetch capabilities: structured=${capabilities.canStructuredFetch ? 'yes' : 'no'} reconfigure=${capabilities.canReconfigure ? 'yes' : 'no'} lookup=${capabilities.canLookup ? 'yes' : 'no'} liveIpn=${hadLiveIpn ? 'yes' : 'no'}`,
+    almostnodeDebugLog(
+      'tailscale',
+      `[tailscale-worker][fetch] capabilities: structured=${capabilities.canStructuredFetch ? 'yes' : 'no'} reconfigure=${capabilities.canReconfigure ? 'yes' : 'no'} lookup=${capabilities.canLookup ? 'yes' : 'no'} liveIpn=${hadLiveIpn ? 'yes' : 'no'}`,
     );
 
     if (preparedRoute.mappingChanged) {
@@ -2002,8 +2225,9 @@ async function handleFetch(
           );
         }
       } else {
-        console.log(
-          `[tailscale-worker] syncing ipMap before fetch: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
+        almostnodeDebugLog(
+          'tailscale',
+          `[tailscale-worker][fetch] syncing ipMap before fetch: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
         );
         await applyCurrentIpnConfig(ipn);
       }
@@ -2014,6 +2238,7 @@ async function handleFetch(
     let usedStructuredFetch = false;
     if (capabilities.canStructuredFetch) {
       usedStructuredFetch = true;
+      diagnosticsCounters.structuredFetches += 1;
       const fetchReq: Parameters<TailscaleConnectIPN['fetch']>[0] = {
         url: request.url,
         method: request.method,
@@ -2046,8 +2271,9 @@ async function handleFetch(
           fallbackStrategy: 'rewrite_to_resolved_ip',
           primaryError: primaryErrorMessage,
         };
-        console.warn(
-          `[tailscale-worker] primary fetch hit loopback DNS despite ipMap; retrying direct IP: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
+        almostnodeDebugWarn(
+          'tailscale',
+          `[tailscale-worker][fetch] primary fetch hit loopback DNS despite ipMap; retrying direct IP: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
           fetchDebug,
         );
 
@@ -2058,6 +2284,7 @@ async function handleFetch(
             fallbackLabel,
           );
           usedDirectIpFallback = true;
+          diagnosticsCounters.directIpFallbacks += 1;
         } catch (fallbackError) {
           const fallbackMessage = getErrorMessage(fallbackError);
           const fallbackPayload = toTailscaleWorkerErrorPayload(
@@ -2090,8 +2317,10 @@ async function handleFetch(
     }
 
     const elapsed = Date.now() - fetchStart;
-    console.log(
-      `[tailscale-worker] fetch complete: ${response.status} in ${elapsed}ms: ${fetchLabel}${usedDirectIpFallback ? ' (direct-ip fallback)' : ''}`,
+    diagnosticsCounters.successes += 1;
+    almostnodeDebugLog(
+      'tailscale',
+      `[tailscale-worker][fetch] complete: ${response.status} in ${elapsed}ms: ${fetchLabel}${usedDirectIpFallback ? ' (direct-ip fallback)' : ''}`,
     );
 
     fetchDebug = {
@@ -2144,6 +2373,7 @@ async function handleFetch(
   } catch (error) {
     const elapsed = Date.now() - fetchStart;
     const recentRuntimeSignalNow = getRecentRuntimeFailureSignal();
+    diagnosticsCounters.failures += 1;
     let formatted = toTailscaleWorkerErrorPayload(error, 'runtime_unavailable', fetchDebug);
     if (recentRuntimeSignalNow) {
       formatted = {
@@ -2167,8 +2397,10 @@ async function handleFetch(
         },
       };
     }
-    console.warn(
-      `[tailscale-worker] fetch failed after ${elapsed}ms (${formatted.code}): ${fetchLabel}`,
+    recordDiagnosticFailure(formatted, request, requestShape);
+    almostnodeDebugWarn(
+      'tailscale',
+      `[tailscale-worker][fetch] failed after ${elapsed}ms (${formatted.code}): ${fetchLabel}`,
       formatted.debug
         ? {
             message: formatted.message,
@@ -2363,6 +2595,10 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
 
   try {
     switch (request.type) {
+      case 'setDebug':
+        applyWorkerDebugRaw(request.raw);
+        sendResponse(request.id, true, null);
+        break;
       case 'hydrateStorage':
         hydrateStateStorage(request.snapshot);
         sendResponse(request.id, true, null);
@@ -2387,6 +2623,9 @@ self.addEventListener('message', async (event: MessageEvent<TailscaleWorkerReque
           void ensureIpnStarted(ipn).catch(handleIpnError);
         }
         sendResponse(request.id, true, mapState());
+        break;
+      case 'getDiagnostics':
+        sendResponse(request.id, true, getDiagnosticsSnapshot());
         break;
       case 'login': {
         const ipn = await ensureIpn();

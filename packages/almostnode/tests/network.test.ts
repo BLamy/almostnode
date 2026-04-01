@@ -9,19 +9,59 @@ import {
   setTailscaleAdapterFactory,
 } from '../src/network';
 import type {
+  NetworkDiagnosticsSnapshot,
   NetworkFetchRequest,
   NetworkFetchResponse,
   NetworkLookupResult,
   NetworkOptions,
+  ResolvedNetworkOptions,
   TailscaleAdapter,
   TailscaleAdapterStatus,
 } from '../src/network/types';
 
+function buildDiagnostics(
+  overrides: Partial<NetworkDiagnosticsSnapshot> = {},
+): NetworkDiagnosticsSnapshot {
+  return {
+    provider: 'tailscale',
+    available: true,
+    state: 'running',
+    counters: {
+      totalFetches: 0,
+      publicFetches: 0,
+      tailnetFetches: 0,
+      structuredFetches: 0,
+      directIpFallbacks: 0,
+      runtimeResets: 0,
+      recoveriesAttempted: 0,
+      successes: 0,
+      failures: 0,
+    },
+    failureBuckets: {
+      dns_loopback: 0,
+      direct_ip_fallback_failed: 0,
+      structured_fetch_missing_body_base64: 0,
+      body_read_timeout: 0,
+      fetch_timeout_other: 0,
+      runtime_panic: 0,
+      runtime_unavailable_other: 0,
+      tls_sni_failed: 0,
+    },
+    dominantFailureBucket: null,
+    recentFailures: [],
+    runtimeGeneration: 1,
+    runtimeResetCount: 0,
+    lastRuntimeResetReason: null,
+    ...overrides,
+  };
+}
+
 class FakeTailscaleAdapter implements TailscaleAdapter {
   private status: TailscaleAdapterStatus = { state: 'needs-login' };
+  public diagnostics: NetworkDiagnosticsSnapshot = buildDiagnostics();
   public fetches: NetworkFetchRequest[] = [];
   public getStatusCalls = 0;
-  public configuredOptions: Array<Required<NetworkOptions>> = [];
+  public configuredOptions: ResolvedNetworkOptions[] = [];
 
   constructor(
     private readonly onStatus: (status: TailscaleAdapterStatus) => void,
@@ -49,8 +89,12 @@ class FakeTailscaleAdapter implements TailscaleAdapter {
     return this.status;
   }
 
-  async configure(options: Required<NetworkOptions>): Promise<void> {
+  async configure(options: ResolvedNetworkOptions): Promise<void> {
     this.configuredOptions.push({ ...options });
+  }
+
+  async getDiagnostics(): Promise<NetworkDiagnosticsSnapshot> {
+    return this.diagnostics;
   }
 
   async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
@@ -482,6 +526,79 @@ describe('network controller', () => {
     expect(nativeFetch).not.toHaveBeenCalled();
   });
 
+  it('passes diagnostics through for tailscale sessions and returns empty browser diagnostics otherwise', async () => {
+    const createdAdapters: FakeTailscaleAdapter[] = [];
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const adapter = new FakeTailscaleAdapter(onStatus);
+      adapter.diagnostics = buildDiagnostics({
+        counters: {
+          totalFetches: 3,
+          publicFetches: 2,
+          tailnetFetches: 1,
+          structuredFetches: 2,
+          directIpFallbacks: 1,
+          runtimeResets: 1,
+          recoveriesAttempted: 1,
+          successes: 2,
+          failures: 1,
+        },
+        failureBuckets: {
+          dns_loopback: 1,
+          direct_ip_fallback_failed: 0,
+          structured_fetch_missing_body_base64: 0,
+          body_read_timeout: 0,
+          fetch_timeout_other: 0,
+          runtime_panic: 0,
+          runtime_unavailable_other: 0,
+          tls_sni_failed: 0,
+        },
+        dominantFailureBucket: 'dns_loopback',
+      });
+      createdAdapters.push(adapter);
+      return adapter;
+    });
+
+    const tailscaleController = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+    });
+    await tailscaleController.login();
+
+    await expect(tailscaleController.getDiagnostics()).resolves.toMatchObject({
+      provider: 'tailscale',
+      available: true,
+      dominantFailureBucket: 'dns_loopback',
+      counters: {
+        totalFetches: 3,
+        directIpFallbacks: 1,
+      },
+    });
+
+    const browserController = createNetworkController({ provider: 'browser' });
+    await browserController.fetch({
+      url: 'https://registry.npmjs.org/react',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+      },
+      bodyBase64: Buffer.from('{"probe":true}').toString('base64'),
+    });
+
+    await expect(browserController.getDiagnostics()).resolves.toMatchObject({
+      provider: 'browser',
+      available: false,
+      state: 'browser',
+      counters: {
+        totalFetches: 0,
+        failures: 0,
+      },
+      dominantFailureBucket: null,
+    });
+
+    expect(createdAdapters).toHaveLength(1);
+  });
+
   it('surfaces a recoverable tailscale error for opaque POSTs without replaying them', async () => {
     let fetchCalls = 0;
     let getStatusCalls = 0;
@@ -628,58 +745,45 @@ describe('network controller', () => {
     expect(controller.getConfig().tailscaleConnected).toBe(true);
   });
 
-  it('auto-selects the first exit node before routing public fetches through tailscale', async () => {
+  it('waits for runtime-selected exit-node confirmation before routing public fetches through tailscale', async () => {
     const tailscaleFetches: NetworkFetchRequest[] = [];
-    const configuredOptions: Array<Required<NetworkOptions>> = [];
+    const configuredOptions: ResolvedNetworkOptions[] = [];
+    let selectedExitNodeId: string | null = null;
+
+    const buildStatus = (): TailscaleAdapterStatus => ({
+      state: 'running',
+      selectedExitNodeId,
+      exitNodes: [
+        {
+          id: 'node-ord',
+          name: 'ord',
+          online: false,
+          selected: selectedExitNodeId === 'node-ord',
+        },
+        {
+          id: 'node-self',
+          name: 'bretts-macbook-air',
+          online: true,
+          selected: selectedExitNodeId === 'node-self',
+        },
+      ],
+    });
 
     setTailscaleAdapterFactory(async (_options, onStatus) => ({
       async getStatus(): Promise<TailscaleAdapterStatus> {
-        const status = {
-          state: 'running' as const,
-          selectedExitNodeId: null,
-          exitNodes: [
-            {
-              id: 'node-ord',
-              name: 'ord',
-              online: false,
-              selected: false,
-            },
-            {
-              id: 'node-self',
-              name: 'bretts-macbook-air',
-              online: true,
-              selected: false,
-            },
-          ],
-        };
+        const status = buildStatus();
         onStatus(status);
         return status;
       },
       async login(): Promise<TailscaleAdapterStatus> {
-        return {
-          state: 'running',
-          selectedExitNodeId: null,
-          exitNodes: [
-            {
-              id: 'node-ord',
-              name: 'ord',
-              online: false,
-              selected: false,
-            },
-            {
-              id: 'node-self',
-              name: 'bretts-macbook-air',
-              online: true,
-              selected: false,
-            },
-          ],
-        };
+        return buildStatus();
       },
       async logout(): Promise<TailscaleAdapterStatus> {
         return { state: 'stopped' };
       },
-      async configure(options: Required<NetworkOptions>): Promise<void> {
+      async configure(options: ResolvedNetworkOptions): Promise<void> {
         configuredOptions.push({ ...options });
+        selectedExitNodeId = options.exitNodeId;
       },
       async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
         tailscaleFetches.push(request);
@@ -710,10 +814,41 @@ describe('network controller', () => {
       bodyBase64: Buffer.from('{}').toString('base64'),
     });
 
-    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
-    expect(tailscaleFetches).toHaveLength(1);
-    expect(nativeFetch).not.toHaveBeenCalled();
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('browser-response');
+    expect(tailscaleFetches).toHaveLength(0);
+    expect(nativeFetch).toHaveBeenCalledTimes(1);
     expect(controller.getConfig().exitNodeId).toBe('node-self');
+    expect(controller.getConfig().activeExitNodeId).toBeNull();
+    expect(
+      selectNetworkRouteForUrl(
+        'https://chatgpt.com/backend-api/codex/responses',
+        controller.getConfig(),
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('browser');
+    await expect(controller.getStatus()).resolves.toMatchObject({
+      selectedExitNodeId: 'node-self',
+      exitNodes: [
+        expect.objectContaining({
+          id: 'node-ord',
+          selected: false,
+        }),
+        expect.objectContaining({
+          id: 'node-self',
+          selected: true,
+        }),
+      ],
+    });
+    expect(controller.getConfig().activeExitNodeId).toBe('node-self');
+    const retriedResponse = await controller.fetch({
+      url: 'https://chatgpt.com/backend-api/codex/responses',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      bodyBase64: Buffer.from('{}').toString('base64'),
+    });
+    expect(Buffer.from(retriedResponse.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(tailscaleFetches).toHaveLength(1);
+    expect(nativeFetch).toHaveBeenCalledTimes(1);
     expect(configuredOptions.at(-1)).toMatchObject({
       provider: 'tailscale',
       useExitNode: true,

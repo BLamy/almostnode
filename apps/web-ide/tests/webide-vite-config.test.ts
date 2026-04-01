@@ -32,6 +32,13 @@ describe("web-ide vite config", () => {
         && "name" in plugin
         && plugin.name === "stub-module-prefixes",
     );
+    const stripPolyfillPlugin = config.plugins?.find(
+      (plugin) =>
+        plugin
+        && typeof plugin === "object"
+        && "name" in plugin
+        && plugin.name === "strip-node-polyfill-self-inject",
+    );
 
     expect(config.optimizeDeps?.noDiscovery).toBe(true);
 
@@ -177,6 +184,14 @@ describe("web-ide vite config", () => {
       ),
     ).toBe(true);
 
+    const eventsShimPath = aliases.find(
+      (entry) =>
+        typeof entry === "object"
+        && "find" in entry
+        && entry.find === "events"
+        && typeof entry.replacement === "string",
+    )?.replacement;
+
     expect(
       aliases.some(
         (entry) =>
@@ -240,5 +255,33 @@ describe("web-ide vite config", () => {
           && entry.find === "process",
       ),
     ).toBe(false);
+
+    expect(
+      stripPolyfillPlugin && typeof stripPolyfillPlugin === "object" && "transform" in stripPolyfillPlugin,
+    ).toBe(true);
+
+    const polyfillPrelude = [
+      'import __buffer_polyfill from "/buffer"',
+      'globalThis.Buffer = globalThis.Buffer || __buffer_polyfill',
+      'import __global_polyfill from "/global"',
+      'globalThis.global = globalThis.global || __global_polyfill',
+      'import __process_polyfill from "/process"',
+      'globalThis.process = globalThis.process || __process_polyfill',
+      '',
+      'export class EventEmitter {}',
+    ].join("\n");
+
+    const strippedEvents = typeof stripPolyfillPlugin?.transform === "function"
+      && typeof eventsShimPath === "string"
+      ? stripPolyfillPlugin.transform(
+          polyfillPrelude,
+          eventsShimPath,
+        )
+      : null;
+
+    expect(strippedEvents).toEqual({
+      code: "export class EventEmitter {}",
+      map: null,
+    });
   });
 });

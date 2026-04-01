@@ -49,6 +49,11 @@ export {
 } from './policy';
 export type {
   NetworkController,
+  NetworkDiagnosticsCounters,
+  NetworkDiagnosticsFailureBucket,
+  NetworkDiagnosticsFailureEntry,
+  NetworkDiagnosticsRequestShape,
+  NetworkDiagnosticsSnapshot,
   NetworkExitNode,
   NetworkFetchRequest,
   NetworkFetchResponse,
@@ -71,3 +76,4 @@ export type {
   TailscaleAdapterFactory,
   TailscaleAdapterStatus,
 } from './types';
+export { NETWORK_DIAGNOSTIC_FAILURE_BUCKETS } from './types';

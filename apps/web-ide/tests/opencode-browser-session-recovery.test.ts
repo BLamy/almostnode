@@ -5,6 +5,7 @@ const createOpencodeClientMock = vi.fn();
 const initBrowserDBMock = vi.fn();
 const resetBrowserDBMock = vi.fn();
 const databaseClientResetMock = vi.fn();
+const setWorkspaceRootMock = vi.fn();
 
 vi.mock("../src/shims/node-process", () => ({
   configureBrowserProcess: vi.fn(({ cwd, env }: { cwd: string; env: Record<string, string> }) => ({
@@ -24,6 +25,7 @@ vi.mock("../src/shims/opencode-child-process", () => ({
 }));
 
 vi.mock("../../../vendor/opencode/packages/browser/src/shims/fs.browser", () => ({
+  setWorkspaceRoot: setWorkspaceRootMock,
   withWorkspaceBridgeScope: (_bridge: unknown, fn: () => unknown) => fn(),
 }));
 
@@ -61,7 +63,7 @@ function createFakeContainer() {
     createTerminalSession: vi.fn(() => ({
       dispose: vi.fn(),
       getState: () => ({
-        cwd: "/workspace",
+        cwd: "/project",
         env: {},
       }),
       run: vi.fn(async () => ({
@@ -110,12 +112,16 @@ describe("OpenCode browser session recovery", () => {
     const { listOpenCodeBrowserSessions } = await import("../src/features/opencode-browser-session");
     const sessions = await listOpenCodeBrowserSessions({
       container: createFakeContainer() as never,
-      cwd: "/workspace",
+      cwd: "/project",
       env: {},
     });
 
     expect(sessions).toEqual([{ id: "session-1", title: "Recovered session" }]);
     expect(sessionList).toHaveBeenCalledTimes(2);
+    expect(setWorkspaceRootMock).toHaveBeenCalledWith("/project");
+    expect(createOpencodeClientMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      directory: "/project",
+    }));
     expect(databaseClientResetMock).toHaveBeenCalledTimes(1);
     expect(resetBrowserDBMock).toHaveBeenCalledTimes(1);
   });
@@ -133,7 +139,7 @@ describe("OpenCode browser session recovery", () => {
     await expect(
       listOpenCodeBrowserSessions({
         container: createFakeContainer() as never,
-        cwd: "/workspace",
+        cwd: "/project",
         env: {},
       }),
     ).rejects.toThrow("permission denied");

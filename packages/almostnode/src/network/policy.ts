@@ -45,6 +45,13 @@ function trimToNull(value: string | null | undefined): string | null {
   return next ? next : null;
 }
 
+function trimOptionalToOptionalNull(value: string | null | undefined): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return trimToNull(value);
+}
+
 function getProcessEnvValue(key: string): string | null {
   const value = (globalThis as { process?: { env?: Record<string, unknown> } })
     .process?.env?.[key];
@@ -78,7 +85,9 @@ export function normalizeNetworkOptions(
 ): ResolvedNetworkOptions {
   const record = options as NetworkOptions & {
     proxy?: NetworkProxyOptions | ResolvedNetworkOptions['proxy'];
+    activeExitNodeId?: string | null;
   };
+  const hasActiveExitNodeId = Object.prototype.hasOwnProperty.call(record, 'activeExitNodeId');
   return {
     provider: record.provider || 'browser',
     authMode: record.authMode || 'interactive',
@@ -88,6 +97,11 @@ export function normalizeNetworkOptions(
     corsProxy: trimToNull(record.corsProxy),
     proxy: normalizeProxyOptions(record.proxy),
     tailscaleConnected: Boolean(record.tailscaleConnected),
+    ...(hasActiveExitNodeId
+      ? {
+          activeExitNodeId: trimOptionalToOptionalNull(record.activeExitNodeId),
+        }
+      : {}),
   };
 }
 
@@ -97,13 +111,25 @@ function getResolvedOptions(
   return normalizeNetworkOptions(options);
 }
 
+function getActiveTailscaleExitNodeId(
+  options: Pick<ResolvedNetworkOptions, 'exitNodeId' | 'activeExitNodeId'>,
+): string | null {
+  if (Object.prototype.hasOwnProperty.call(options, 'activeExitNodeId')) {
+    return trimToNull(options.activeExitNodeId);
+  }
+  return trimToNull(options.exitNodeId);
+}
+
 function hasActiveTailscaleExitNode(
-  options: Pick<ResolvedNetworkOptions, 'useExitNode' | 'tailscaleConnected' | 'exitNodeId'>,
+  options: Pick<
+    ResolvedNetworkOptions,
+    'useExitNode' | 'tailscaleConnected' | 'exitNodeId' | 'activeExitNodeId'
+  >,
 ): boolean {
   return Boolean(
     options.useExitNode
     && options.tailscaleConnected
-    && options.exitNodeId?.trim(),
+    && getActiveTailscaleExitNodeId(options),
   );
 }
 

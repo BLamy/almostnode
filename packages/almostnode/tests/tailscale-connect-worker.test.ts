@@ -84,6 +84,23 @@ function getStatusMessages(workerScope: MockWorkerGlobal): WorkerStatusMessage[]
   ));
 }
 
+async function requestDiagnostics(
+  workerScope: MockWorkerGlobal,
+  id = 9_999,
+): Promise<Record<string, any>> {
+  await workerScope.dispatch({
+    id,
+    type: 'getDiagnostics',
+  });
+
+  const response = getResponseMessages(workerScope).find(
+    (message) => message.id === id && message.ok,
+  );
+  expect(response).toBeDefined();
+  expect(response?.ok).toBe(true);
+  return response?.value as Record<string, any>;
+}
+
 describe('tailscale connect worker', () => {
   let workerScope: MockWorkerGlobal;
   let processDescriptor: PropertyDescriptor | undefined;
@@ -503,6 +520,36 @@ describe('tailscale connect worker', () => {
       }),
     );
 
+    await expect(requestDiagnostics(workerScope, 101)).resolves.toMatchObject({
+      counters: expect.objectContaining({
+        totalFetches: 1,
+        publicFetches: 1,
+        structuredFetches: 1,
+        runtimeResets: 1,
+        recoveriesAttempted: 0,
+        failures: 1,
+      }),
+      failureBuckets: expect.objectContaining({
+        structured_fetch_missing_body_base64: 1,
+      }),
+      dominantFailureBucket: 'structured_fetch_missing_body_base64',
+      runtimeResetCount: 1,
+      lastRuntimeResetReason: 'Tailscale structured fetch response omitted bodyBase64.',
+      recentFailures: [
+        expect.objectContaining({
+          host: 'chatgpt.com',
+          bucket: 'structured_fetch_missing_body_base64',
+          phase: 'read_body',
+          requestShape: expect.objectContaining({
+            method: 'POST',
+            hasBody: true,
+            contentType: 'application/json',
+            acceptsEventStream: false,
+          }),
+        }),
+      ],
+    });
+
     const secondFetchPromise = workerScope.dispatch({
       id: 2,
       type: 'fetch',
@@ -720,6 +767,21 @@ describe('tailscale connect worker', () => {
         status: 200,
       }),
     });
+
+    await expect(requestDiagnostics(workerScope, 201)).resolves.toMatchObject({
+      counters: expect.objectContaining({
+        totalFetches: 1,
+        publicFetches: 1,
+        structuredFetches: 1,
+        directIpFallbacks: 1,
+        successes: 1,
+        failures: 0,
+      }),
+      failureBuckets: expect.objectContaining({
+        dns_loopback: 0,
+      }),
+      dominantFailureBucket: null,
+    });
   });
 
   it('allows long-running structured POST fetches to complete through direct-IP fallback', async () => {
@@ -804,6 +866,158 @@ describe('tailscale connect worker', () => {
     });
   });
 
+  it('classifies body-read timeouts separately from generic fetch timeouts', async () => {
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(async (url: string) => ({
+        url,
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'text/plain' },
+        text: async () => {
+          throw new Error(
+            'reading response body: context deadline exceeded ' +
+            '(Client.Timeout or context cancellation while reading body)',
+          );
+        },
+      })),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const fetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://db.ts.net/status',
+        method: 'GET',
+        headers: {},
+      },
+    });
+    await vi.runAllTimersAsync();
+    await fetchPromise;
+
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: false,
+      error: {
+        code: 'fetch_timeout',
+        message: expect.stringContaining('Tailscale response body read failed'),
+      },
+    });
+
+    await expect(requestDiagnostics(workerScope, 401)).resolves.toMatchObject({
+      counters: expect.objectContaining({
+        totalFetches: 1,
+        tailnetFetches: 1,
+        runtimeResets: 1,
+        failures: 1,
+      }),
+      failureBuckets: expect.objectContaining({
+        body_read_timeout: 1,
+      }),
+      dominantFailureBucket: 'body_read_timeout',
+      recentFailures: [
+        expect.objectContaining({
+          host: 'db.ts.net',
+          bucket: 'body_read_timeout',
+          phase: 'read_body',
+          requestShape: expect.objectContaining({
+            method: 'GET',
+            hasBody: false,
+            acceptsEventStream: false,
+          }),
+        }),
+      ],
+    });
+  });
+
+  it('classifies direct-IP fallback failures when loopback DNS persists after ipMap sync', async () => {
+    const dnsFetch = vi.fn(async () => new Response(JSON.stringify({
+      Status: 0,
+      Answer: [{ type: 1, data: '142.250.190.14' }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/dns-json' },
+    }));
+    Object.defineProperty(globalThis, 'fetch', {
+      value: dnsFetch,
+      configurable: true,
+      writable: true,
+    });
+
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      configure: vi.fn(async () => {}),
+      fetch: vi.fn(async (request: { url: string }) => {
+        if (request.url === 'https://google.com/') {
+          throw new Error(
+            'Get "https://google.com/": lookup google.com on [::1]:53: ' +
+            'write udp 127.0.0.1:8->[::1]:53: write: Connection reset by peer',
+          );
+        }
+        throw new Error('connect ECONNRESET');
+      }),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const fetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://google.com/',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        bodyBase64: Buffer.from('{"probe":true}').toString('base64'),
+      },
+    });
+    await vi.runAllTimersAsync();
+    await fetchPromise;
+
+    expect(getResponseMessages(workerScope).at(-1)).toMatchObject({
+      id: 1,
+      ok: false,
+      error: {
+        message: expect.stringContaining('direct-IP retry failed'),
+      },
+    });
+
+    await expect(requestDiagnostics(workerScope, 402)).resolves.toMatchObject({
+      counters: expect.objectContaining({
+        totalFetches: 1,
+        publicFetches: 1,
+        structuredFetches: 1,
+        directIpFallbacks: 0,
+        failures: 1,
+      }),
+      failureBuckets: expect.objectContaining({
+        direct_ip_fallback_failed: 1,
+      }),
+      dominantFailureBucket: 'direct_ip_fallback_failed',
+      recentFailures: [
+        expect.objectContaining({
+          host: 'google.com',
+          bucket: 'direct_ip_fallback_failed',
+          phase: 'fallback_fetch',
+          requestShape: expect.objectContaining({
+            method: 'POST',
+            hasBody: true,
+            contentType: 'application/json',
+          }),
+        }),
+      ],
+    });
+  });
+
   it('recreates the IPN after a runtime panic so the next fetch can recover', async () => {
     const firstIpn = {
       run: vi.fn(),
@@ -851,6 +1065,29 @@ describe('tailscale connect worker', () => {
         code: 'runtime_panic',
         message: expect.stringContaining('ValueOf: invalid value'),
       },
+    });
+
+    await expect(requestDiagnostics(workerScope, 301)).resolves.toMatchObject({
+      counters: expect.objectContaining({
+        totalFetches: 1,
+        tailnetFetches: 1,
+        runtimeResets: 1,
+        failures: 1,
+      }),
+      failureBuckets: expect.objectContaining({
+        runtime_panic: 1,
+      }),
+      dominantFailureBucket: 'runtime_panic',
+      recentFailures: [
+        expect.objectContaining({
+          host: 'db.ts.net',
+          bucket: 'runtime_panic',
+          requestShape: expect.objectContaining({
+            method: 'GET',
+            hasBody: false,
+          }),
+        }),
+      ],
     });
 
     const secondFetchPromise = workerScope.dispatch({

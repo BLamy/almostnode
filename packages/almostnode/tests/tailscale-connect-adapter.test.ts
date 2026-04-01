@@ -34,6 +34,37 @@ class FakeWorker {
     state: 'needs-login',
     loginUrl: 'https://login.tailscale.test',
   };
+  static diagnosticsValue: Record<string, unknown> = {
+    provider: 'tailscale',
+    available: true,
+    state: 'running',
+    counters: {
+      totalFetches: 0,
+      publicFetches: 0,
+      tailnetFetches: 0,
+      structuredFetches: 0,
+      directIpFallbacks: 0,
+      runtimeResets: 0,
+      recoveriesAttempted: 0,
+      successes: 0,
+      failures: 0,
+    },
+    failureBuckets: {
+      dns_loopback: 0,
+      direct_ip_fallback_failed: 0,
+      structured_fetch_missing_body_base64: 0,
+      body_read_timeout: 0,
+      fetch_timeout_other: 0,
+      runtime_panic: 0,
+      runtime_unavailable_other: 0,
+      tls_sni_failed: 0,
+    },
+    dominantFailureBucket: null,
+    recentFailures: [],
+    runtimeGeneration: 1,
+    runtimeResetCount: 0,
+    lastRuntimeResetReason: null,
+  };
 
   readonly messages: Array<Record<string, unknown>> = [];
   private readonly listeners = {
@@ -59,6 +90,7 @@ class FakeWorker {
     this.messages.push(message);
 
     switch (message.type) {
+      case 'setDebug':
       case 'hydrateStorage':
       case 'configure':
         this.emitMessage({
@@ -74,6 +106,14 @@ class FakeWorker {
           id: message.id,
           ok: true,
           value: FakeWorker.getStatusValue,
+        });
+        break;
+      case 'getDiagnostics':
+        this.emitMessage({
+          type: 'response',
+          id: message.id,
+          ok: true,
+          value: FakeWorker.diagnosticsValue,
         });
         break;
       case 'login':
@@ -113,6 +153,7 @@ class FakeWorker {
 describe('tailscale connect adapter', () => {
   const originalWorker = globalThis.Worker;
   const originalOpen = Object.getOwnPropertyDescriptor(globalThis, 'open');
+  const originalDebug = Object.getOwnPropertyDescriptor(globalThis, '__almostnodeDebug');
   const originalSessionStorage = Object.getOwnPropertyDescriptor(
     globalThis,
     'sessionStorage',
@@ -128,6 +169,37 @@ describe('tailscale connect adapter', () => {
       state: 'needs-login',
       loginUrl: 'https://login.tailscale.test',
     };
+    FakeWorker.diagnosticsValue = {
+      provider: 'tailscale',
+      available: true,
+      state: 'running',
+      counters: {
+        totalFetches: 0,
+        publicFetches: 0,
+        tailnetFetches: 0,
+        structuredFetches: 0,
+        directIpFallbacks: 0,
+        runtimeResets: 0,
+        recoveriesAttempted: 0,
+        successes: 0,
+        failures: 0,
+      },
+      failureBuckets: {
+        dns_loopback: 0,
+        direct_ip_fallback_failed: 0,
+        structured_fetch_missing_body_base64: 0,
+        body_read_timeout: 0,
+        fetch_timeout_other: 0,
+        runtime_panic: 0,
+        runtime_unavailable_other: 0,
+        tls_sni_failed: 0,
+      },
+      dominantFailureBucket: null,
+      recentFailures: [],
+      runtimeGeneration: 1,
+      runtimeResetCount: 0,
+      lastRuntimeResetReason: null,
+    };
     globalThis.Worker = FakeWorker as unknown as typeof Worker;
   });
 
@@ -138,6 +210,12 @@ describe('tailscale connect adapter', () => {
       Object.defineProperty(globalThis, 'open', originalOpen);
     } else {
       delete (globalThis as typeof globalThis & { open?: typeof globalThis.open }).open;
+    }
+
+    if (originalDebug) {
+      Object.defineProperty(globalThis, '__almostnodeDebug', originalDebug);
+    } else {
+      delete (globalThis as typeof globalThis & { __almostnodeDebug?: string }).__almostnodeDebug;
     }
 
     if (originalSessionStorage) {
@@ -524,5 +602,51 @@ describe('tailscale connect adapter', () => {
         fallbackStrategy: 'rewrite_to_resolved_ip',
       },
     });
+  });
+
+  it('forwards diagnostics and propagates the debug selector to the worker', async () => {
+    Object.defineProperty(globalThis, '__almostnodeDebug', {
+      value: 'tailscale,network,http',
+      configurable: true,
+      writable: true,
+    });
+
+    const adapterFactory = createTailscaleConnectAdapterFactory();
+    const adapter = await adapterFactory(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+    );
+
+    const diagnostics = await adapter.getDiagnostics();
+    const worker = FakeWorker.lastInstance;
+
+    expect(worker?.messages[0]).toMatchObject({
+      type: 'setDebug',
+      raw: 'tailscale,network,http',
+    });
+    expect(worker?.messages[1]).toMatchObject({
+      type: 'hydrateStorage',
+    });
+    expect(worker?.messages[2]).toMatchObject({
+      type: 'configure',
+    });
+    expect(worker?.messages[3]).toMatchObject({
+      type: 'getDiagnostics',
+    });
+    expect(diagnostics).toMatchObject({
+      provider: 'tailscale',
+      available: true,
+      state: 'running',
+    });
+
+    delete (globalThis as typeof globalThis & { __almostnodeDebug?: string }).__almostnodeDebug;
   });
 });

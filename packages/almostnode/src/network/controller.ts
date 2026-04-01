@@ -1,4 +1,6 @@
 import { browserFetch } from './fetch';
+import { almostnodeDebugWarn } from '../utils/debug';
+import { NETWORK_DIAGNOSTIC_FAILURE_BUCKETS } from './types';
 import {
   selectNetworkRouteForHost,
   selectNetworkRouteForUrl,
@@ -15,10 +17,13 @@ import type { TailscaleWorkerErrorDebug } from './tailscale-worker-types';
 import type {
   NetworkIntegration,
   NetworkController,
+  NetworkDiagnosticsSnapshot,
   NetworkFetchRequest,
   NetworkFetchResponse,
   NetworkLookupResult,
+  NetworkProvider,
   NetworkOptions,
+  NetworkState,
   NetworkStatus,
   NetworkWebSocketConnection,
   NetworkWebSocketInit,
@@ -147,6 +152,36 @@ function buildBrowserStatus(options: ResolvedNetworkOptions): NetworkStatus {
   };
 }
 
+function buildEmptyDiagnosticsSnapshot(
+  provider: NetworkProvider,
+  state: NetworkState,
+): NetworkDiagnosticsSnapshot {
+  return {
+    provider,
+    available: false,
+    state,
+    counters: {
+      totalFetches: 0,
+      publicFetches: 0,
+      tailnetFetches: 0,
+      structuredFetches: 0,
+      directIpFallbacks: 0,
+      runtimeResets: 0,
+      recoveriesAttempted: 0,
+      successes: 0,
+      failures: 0,
+    },
+    failureBuckets: Object.fromEntries(
+      NETWORK_DIAGNOSTIC_FAILURE_BUCKETS.map((bucket) => [bucket, 0]),
+    ) as NetworkDiagnosticsSnapshot['failureBuckets'],
+    dominantFailureBucket: null,
+    recentFailures: [],
+    runtimeGeneration: 0,
+    runtimeResetCount: 0,
+    lastRuntimeResetReason: null,
+  };
+}
+
 function mergeStatus(
   options: ResolvedNetworkOptions,
   status: TailscaleAdapterStatus | null,
@@ -173,6 +208,11 @@ function mergeStatus(
   }
 
   const state = status.state || 'needs-login';
+  const resolvedSelectedExitNodeId = status.selectedExitNodeId?.trim() || null;
+  const exitNodes = (status.exitNodes || []).map((exitNode) => ({
+    ...exitNode,
+    selected: exitNode.id === resolvedSelectedExitNodeId,
+  }));
   return {
     provider: 'tailscale',
     state,
@@ -183,8 +223,8 @@ function mergeStatus(
     dnsEnabled: status.dnsEnabled ?? options.acceptDns,
     dnsHealthy: status.dnsHealthy ?? null,
     dnsDetail: status.dnsDetail,
-    exitNodes: status.exitNodes || [],
-    selectedExitNodeId: status.selectedExitNodeId ?? null,
+    exitNodes,
+    selectedExitNodeId: resolvedSelectedExitNodeId,
     detail: status.detail,
     loginUrl: status.loginUrl,
     selfName: status.selfName,
@@ -290,6 +330,20 @@ export class DefaultNetworkController implements NetworkController {
     return mergeStatus(this.options, this.adapterStatus);
   }
 
+  async getDiagnostics(): Promise<NetworkDiagnosticsSnapshot> {
+    await this.ensureSessionHydrated();
+    if (this.options.provider !== 'tailscale') {
+      return buildEmptyDiagnosticsSnapshot(this.options.provider, 'browser');
+    }
+
+    const status = await this.getStatus();
+    if (!this.adapter?.getDiagnostics) {
+      return buildEmptyDiagnosticsSnapshot('tailscale', status.state);
+    }
+
+    return this.adapter.getDiagnostics();
+  }
+
   async login(): Promise<NetworkStatus> {
     await this.ensureSessionHydrated();
     if (this.options.provider !== 'tailscale') {
@@ -339,8 +393,9 @@ export class DefaultNetworkController implements NetworkController {
         const hostname = this.extractHostname(request.url);
         const formatted = formatTailscaleError(error);
         const target = hostname || request.url;
-        console.warn(
-          `[network] Tailscale fetch failed for ${target}${formatted.code ? ` (${formatted.code})` : ''}`,
+        almostnodeDebugWarn(
+          'network',
+          `[network][tailscale] fetch failed for ${target}${formatted.code ? ` (${formatted.code})` : ''}`,
           formatted.debug
             ? {
                 message: formatted.message,
@@ -351,16 +406,18 @@ export class DefaultNetworkController implements NetworkController {
 
         if (isRecoverableTailscaleRuntimeError(formatted)) {
           if (request.retryOnTailscaleRecovery === true) {
-            console.warn(
-              `[network] Attempting one Tailscale recovery retry for ${target}`,
+            almostnodeDebugWarn(
+              'network',
+              `[network][tailscale] attempting one recovery retry for ${target}`,
             );
             await this.recoverTailscaleRuntime();
             try {
               return await adapter.fetch(request);
             } catch (retryError) {
               const retryFormatted = formatTailscaleError(retryError);
-              console.warn(
-                `[network] Tailscale recovery retry failed for ${target}${retryFormatted.code ? ` (${retryFormatted.code})` : ''}`,
+              almostnodeDebugWarn(
+                'network',
+                `[network][tailscale] recovery retry failed for ${target}${retryFormatted.code ? ` (${retryFormatted.code})` : ''}`,
                 retryFormatted.debug
                   ? {
                       message: retryFormatted.message,
@@ -374,8 +431,9 @@ export class DefaultNetworkController implements NetworkController {
 
           void this.recoverTailscaleRuntime().catch((recoveryError) => {
             const recoveryFormatted = formatTailscaleError(recoveryError);
-            console.warn(
-              `[network] Tailscale background recovery failed for ${target}${recoveryFormatted.code ? ` (${recoveryFormatted.code})` : ''}`,
+            almostnodeDebugWarn(
+              'network',
+              `[network][tailscale] background recovery failed for ${target}${recoveryFormatted.code ? ` (${recoveryFormatted.code})` : ''}`,
               recoveryFormatted.debug
                 ? {
                     message: recoveryFormatted.message,
@@ -494,28 +552,22 @@ export class DefaultNetworkController implements NetworkController {
 
   private getResolvedOptions(): ResolvedNetworkOptions {
     const tailscaleConnected = this.adapterStatus?.state === 'running';
-
-    if (
-      this.options.provider !== 'tailscale' ||
-      !this.options.useExitNode ||
-      this.options.exitNodeId
-    ) {
-      return {
-        ...this.options,
-        tailscaleConnected,
-      };
-    }
-
-    const selectedExitNodeId = this.adapterStatus?.selectedExitNodeId?.trim() || null;
     return {
       ...this.options,
-      exitNodeId: selectedExitNodeId,
       tailscaleConnected,
+      activeExitNodeId:
+        this.options.provider === 'tailscale' && this.options.useExitNode
+          ? this.getActiveExitNodeId()
+          : null,
     };
   }
 
+  private getActiveExitNodeId(): string | null {
+    return this.adapterStatus?.selectedExitNodeId?.trim() || null;
+  }
+
   private getPreferredExitNodeId(): string | null {
-    const selectedExitNodeId = this.adapterStatus?.selectedExitNodeId?.trim() || null;
+    const selectedExitNodeId = this.getActiveExitNodeId();
     if (selectedExitNodeId) {
       return selectedExitNodeId;
     }
@@ -661,16 +713,15 @@ export class DefaultNetworkController implements NetworkController {
   }
 
   private buildPersistedSession(): PersistedNetworkSession | null {
-    const resolvedOptions = this.getResolvedOptions();
-    if (resolvedOptions.provider !== 'tailscale' || this.shouldClearPersistedSession) {
+    if (this.options.provider !== 'tailscale' || this.shouldClearPersistedSession) {
       return null;
     }
 
     return {
       provider: 'tailscale',
-      useExitNode: resolvedOptions.useExitNode,
-      exitNodeId: resolvedOptions.exitNodeId,
-      acceptDns: resolvedOptions.acceptDns,
+      useExitNode: this.options.useExitNode,
+      exitNodeId: this.options.exitNodeId,
+      acceptDns: this.options.acceptDns,
       stateSnapshot: this.adapter?.getSessionSnapshot?.()
         ?? this.persistedSession?.stateSnapshot
         ?? null,

@@ -14,6 +14,7 @@ import {
   type BrowserWorkspaceBridge,
   type OpenCodeTuiSession,
 } from "opencode-browser-tui";
+import { setWorkspaceRoot } from "../../../vendor/opencode/packages/browser/src/shims/fs.browser";
 import { preloadYogaLayout } from "./yoga-layout-shim";
 
 declare const __OPENTUI_WASM_URL__: string;
@@ -127,6 +128,15 @@ function mapWorkspacePath(path: string): string {
   if (path === "/workspace") return PROJECT_ROOT;
   if (path.startsWith("/workspace/")) return `${PROJECT_ROOT}${path.slice("/workspace".length)}`;
   return path;
+}
+
+function toOpenCodePath(path: string): string {
+  if (path === "/workspace") return PROJECT_ROOT;
+  if (path.startsWith("/workspace/")) return `${PROJECT_ROOT}${path.slice("/workspace".length)}`;
+  if (path === PROJECT_ROOT || path.startsWith(`${PROJECT_ROOT}/`)) {
+    return path;
+  }
+  return PROJECT_ROOT;
 }
 
 function ensureDirectory(
@@ -356,7 +366,7 @@ export function createOpenCodeWorkspaceBridge(
     rename(oldPath: string, newPath: string): void {
       vfs.renameSync(mapWorkspacePath(oldPath), mapWorkspacePath(newPath));
     },
-    listFiles(root = "/workspace"): string[] {
+    listFiles(root = PROJECT_ROOT): string[] {
       const mappedRoot = mapWorkspacePath(root);
       if (!vfs.existsSync(mappedRoot)) {
         return [];
@@ -373,7 +383,7 @@ export function createOpenCodeWorkspaceBridge(
         }
 
         const relative = currentPath.slice(PROJECT_ROOT.length);
-        files.push(`/workspace${relative}`);
+        files.push(`${PROJECT_ROOT}${relative}`);
       };
 
       visit(mappedRoot);
@@ -388,7 +398,7 @@ export function createOpenCodeProcessBridge(
 ): BrowserProcessBridge {
   return {
     async exec(input) {
-      const cwd = mapWorkspacePath(input.cwd || "/workspace");
+      const cwd = mapWorkspacePath(input.cwd || PROJECT_ROOT);
       const commandString =
         input.shell || input.args.length === 0
           ? input.command
@@ -412,10 +422,11 @@ export async function mountMobileOpenCodeTui(
   options: MountMobileOpenCodeTuiOptions,
 ): Promise<OpenCodeTuiSession> {
   ensureBrowserProcess(PROJECT_ROOT);
+  setWorkspaceRoot(PROJECT_ROOT);
   await preloadYogaLayout();
   return mountOpenCodeTui({
     container: options.container,
-    directory: options.directory ?? "/workspace",
+    directory: toOpenCodePath(options.directory ?? PROJECT_ROOT),
     wasmUrl: __OPENTUI_WASM_URL__,
     workspaceBridge: createOpenCodeWorkspaceBridge(options.workspace),
     processBridge: createOpenCodeProcessBridge(options.workspace),

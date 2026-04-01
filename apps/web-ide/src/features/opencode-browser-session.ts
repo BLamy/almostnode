@@ -15,6 +15,7 @@ import {
   resetBrowserDB,
 } from "../../../../vendor/opencode/packages/browser/src/shims/db.browser";
 import {
+  setWorkspaceRoot,
   withWorkspaceBridgeScope,
 } from "../../../../vendor/opencode/packages/browser/src/shims/fs.browser";
 import { Server } from "../../../../vendor/opencode/packages/opencode/src/server/server";
@@ -145,11 +146,14 @@ function toContainerPath(path: string): string {
 }
 
 function toOpenCodePath(path: string): string {
-  if (path === WORKSPACE_ROOT) return "/workspace";
-  if (path.startsWith(`${WORKSPACE_ROOT}/`)) {
-    return `/workspace${path.slice(WORKSPACE_ROOT.length)}`;
+  if (path === "/workspace") return WORKSPACE_ROOT;
+  if (path.startsWith("/workspace/")) {
+    return `${WORKSPACE_ROOT}${path.slice("/workspace".length)}`;
   }
-  return "/workspace";
+  if (path === WORKSPACE_ROOT || path.startsWith(`${WORKSPACE_ROOT}/`)) {
+    return path;
+  }
+  return WORKSPACE_ROOT;
 }
 
 function createWorkspaceBridge(container: ReturnTypeOfCreateContainer) {
@@ -367,6 +371,7 @@ async function withOpenCodeBrowserRuntime<T>(
   const processBridge = createProcessBridge(bridgeSession);
 
   ensureBrowserProcess(options.cwd, options.env);
+  setWorkspaceRoot(options.cwd);
 
   try {
     await initBrowserDB();
@@ -438,6 +443,7 @@ export async function mountOpenCodeBrowserSession(
   let disposed = false;
 
   ensureBrowserProcess(options.cwd, options.env);
+  setWorkspaceRoot(options.cwd);
 
   const { mountOpenCodeTui } =
     (await import("opencode-browser-tui")) as OpenCodeBrowserModule;

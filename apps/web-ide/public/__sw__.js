@@ -5,6 +5,9 @@
  */
 
 const DEBUG = false;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const LONG_REQUEST_TIMEOUT_MS = 300_000;
+const MODULE_REQUEST_TIMEOUT_MS = 60_000;
 
 // Communication port with main thread
 let mainPort = null;
@@ -41,6 +44,43 @@ function base64ToBytes(base64) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+function getHeaderValue(headers, name) {
+  if (!headers) return null;
+  const normalized = String(name || '').toLowerCase();
+  for (const key in headers) {
+    if (Object.prototype.hasOwnProperty.call(headers, key) && String(key).toLowerCase() === normalized) {
+      return headers[key];
+    }
+  }
+  return null;
+}
+
+function getVirtualRequestTimeoutMs(method, url, headers) {
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  const accept = String(getHeaderValue(headers, 'accept') || '').toLowerCase();
+  let pathname = '';
+
+  try {
+    pathname = new URL(url, 'https://almostnode.invalid').pathname || '';
+  } catch (error) {
+    pathname = '';
+  }
+
+  if (accept.includes('text/event-stream')) {
+    return LONG_REQUEST_TIMEOUT_MS;
+  }
+
+  if (pathname.startsWith('/api/')) {
+    return LONG_REQUEST_TIMEOUT_MS;
+  }
+
+  if (normalizedMethod !== 'GET' && normalizedMethod !== 'HEAD' && normalizedMethod !== 'OPTIONS') {
+    return LONG_REQUEST_TIMEOUT_MS;
+  }
+
+  return DEFAULT_REQUEST_TIMEOUT_MS;
 }
 
 /**
@@ -197,6 +237,7 @@ async function sendRequest(port, method, url, headers, body) {
   }
 
   const id = ++requestId;
+  const timeoutMs = getVirtualRequestTimeoutMs(method, url, headers);
 
   return new Promise((resolve, reject) => {
     pendingRequests.set(id, { resolve, reject });
@@ -205,9 +246,9 @@ async function sendRequest(port, method, url, headers, body) {
     setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
-        reject(new Error('Request timeout'));
+        reject(new Error(`Request timeout after ${timeoutMs}ms: ${String(method || 'GET').toUpperCase()} ${url}`));
       }
-    }, 30000);
+    }, timeoutMs);
 
     mainPort.postMessage({
       type: 'request',
@@ -240,9 +281,9 @@ async function sendModuleRequest(url) {
     setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
-        reject(new Error('Request timeout'));
+        reject(new Error(`Request timeout after ${MODULE_REQUEST_TIMEOUT_MS}ms: MODULE ${url}`));
       }
-    }, 30000);
+    }, MODULE_REQUEST_TIMEOUT_MS);
 
     mainPort.postMessage({
       type: 'module-request',

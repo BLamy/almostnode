@@ -1,4 +1,5 @@
 import type {
+  NetworkDiagnosticsSnapshot,
   NetworkFetchRequest,
   NetworkFetchResponse,
   NetworkLookupOptions,
@@ -113,6 +114,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   private workerHydrationPromise: Promise<void> | null = null;
   private status: TailscaleAdapterStatus = { state: 'needs-login' };
   private lastAuthUrl: string | null = null;
+  private lastWorkerDebugRaw: string | null | undefined = undefined;
   private sessionSnapshot: TailscaleStateSnapshot | null;
   private pendingAuthPopup: AuthPopupWindow | null = null;
 
@@ -149,6 +151,12 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     }
 
     return this.status;
+  }
+
+  async getDiagnostics(): Promise<NetworkDiagnosticsSnapshot> {
+    return this.sendRequest<NetworkDiagnosticsSnapshot>({
+      type: 'getDiagnostics',
+    });
   }
 
   async login(): Promise<TailscaleAdapterStatus> {
@@ -218,6 +226,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     this.workerConfigured = false;
     this.workerHydrated = false;
     this.workerHydrationPromise = null;
+    this.lastWorkerDebugRaw = undefined;
     this.worker?.terminate();
     this.worker = null;
   }
@@ -277,6 +286,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       this.workerConfigured = false;
       this.workerHydrated = false;
       this.workerHydrationPromise = null;
+      this.lastWorkerDebugRaw = undefined;
       for (const pending of this.pendingRequests.values()) {
         pending.reject(new TailscaleAdapterError({
           code: 'runtime_unavailable',
@@ -334,6 +344,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   }
 
   private async sendRequest<T>(request: TailscaleWorkerRequest): Promise<T> {
+    await this.ensureWorkerDebugConfigured();
     await this.ensureWorkerHydrated();
 
     if (!this.workerConfigured && request.type !== 'configure') {
@@ -349,6 +360,24 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
       this.workerConfigured = true;
     }
     return value;
+  }
+
+  private async ensureWorkerDebugConfigured(): Promise<void> {
+    const raw = getActiveAlmostnodeDebugRaw();
+    if (raw === this.lastWorkerDebugRaw) {
+      return;
+    }
+
+    if (raw === null && this.lastWorkerDebugRaw === undefined) {
+      this.lastWorkerDebugRaw = null;
+      return;
+    }
+
+    await this.postRequest<null>({
+      type: 'setDebug',
+      raw,
+    });
+    this.lastWorkerDebugRaw = raw;
   }
 
   private handleAuthUrl(url: string | null): void {
@@ -568,4 +597,39 @@ function getBrowserSessionStorage(): StorageLike | null {
   } catch {
     return null;
   }
+}
+
+function getActiveAlmostnodeDebugRaw(): string | null {
+  try {
+    const processValue = (globalThis as { process?: { env?: { ALMOSTNODE_DEBUG?: unknown } } }).process
+      ?.env?.ALMOSTNODE_DEBUG;
+    if (typeof processValue === 'string' && processValue.trim()) {
+      return processValue;
+    }
+  } catch {
+    // Ignore process env lookup failures.
+  }
+
+  try {
+    const globalValue = (globalThis as { __almostnodeDebug?: unknown }).__almostnodeDebug;
+    if (typeof globalValue === 'string' && globalValue.trim()) {
+      return globalValue;
+    }
+  } catch {
+    // Ignore global debug lookup failures.
+  }
+
+  try {
+    if (typeof localStorage === 'undefined') {
+      return null;
+    }
+    const storedValue = localStorage.getItem('__almostnodeDebug');
+    if (typeof storedValue === 'string' && storedValue.trim()) {
+      return storedValue;
+    }
+  } catch {
+    // Ignore storage lookup failures.
+  }
+
+  return null;
 }

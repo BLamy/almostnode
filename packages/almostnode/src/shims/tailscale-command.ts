@@ -1,6 +1,6 @@
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import { getDefaultNetworkController } from '../network';
-import type { NetworkStatus } from '../network/types';
+import type { NetworkDiagnosticsSnapshot, NetworkStatus } from '../network/types';
 
 function ok(stdout: string): JustBashExecResult {
   return { stdout, stderr: '', exitCode: 0 };
@@ -45,6 +45,44 @@ function renderStatus(status: NetworkStatus): string {
       `exitNodes: ${status.exitNodes
         .map((exitNode) => `${exitNode.selected ? '*' : ''}${exitNode.name}`)
         .join(', ')}`,
+    );
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+function renderDebugSummary(
+  status: NetworkStatus,
+  diagnostics: NetworkDiagnosticsSnapshot,
+): string {
+  const lines = [
+    `provider: ${status.provider}`,
+    `state: ${status.state}`,
+    `diagnosticsAvailable: ${diagnostics.available ? 'yes' : 'no'}`,
+    `diagnosticsState: ${diagnostics.state}`,
+    `runtimeGeneration: ${diagnostics.runtimeGeneration}`,
+    `runtimeResetCount: ${diagnostics.runtimeResetCount}`,
+    `recoveriesAttempted: ${diagnostics.counters.recoveriesAttempted}`,
+    `dominantFailureBucket: ${diagnostics.dominantFailureBucket ?? 'none'}`,
+    `fetches: total=${diagnostics.counters.totalFetches} public=${diagnostics.counters.publicFetches} tailnet=${diagnostics.counters.tailnetFetches} structured=${diagnostics.counters.structuredFetches}`,
+    `results: successes=${diagnostics.counters.successes} failures=${diagnostics.counters.failures} directIpFallbacks=${diagnostics.counters.directIpFallbacks}`,
+  ];
+
+  if (diagnostics.lastRuntimeResetReason) {
+    lines.push(`lastRuntimeResetReason: ${diagnostics.lastRuntimeResetReason}`);
+  }
+
+  const nonZeroBuckets = Object.entries(diagnostics.failureBuckets)
+    .filter(([, count]) => count > 0)
+    .map(([bucket, count]) => `${bucket}=${count}`);
+  if (nonZeroBuckets.length > 0) {
+    lines.push(`failureBuckets: ${nonZeroBuckets.join(', ')}`);
+  }
+
+  const lastFailure = diagnostics.recentFailures[0];
+  if (lastFailure) {
+    lines.push(
+      `lastFailure: ${lastFailure.seenAt} ${lastFailure.bucket} host=${lastFailure.host ?? 'unknown'} phase=${lastFailure.phase ?? 'unknown'} code=${lastFailure.errorCode ?? 'unknown'} method=${lastFailure.requestShape.method}`,
     );
   }
 
@@ -117,16 +155,35 @@ export async function runTailscaleCommand(
         const status = await controller.getStatus();
         return ok(renderStatus(status));
       }
+      case 'debug': {
+        const json = args.slice(1);
+        if (json.length > 1 || (json[0] && json[0] !== '--json')) {
+          return err(`tailscale debug: unknown flag '${json[0]}'\n`);
+        }
+
+        const status = await controller.getStatus();
+        const diagnostics = await controller.getDiagnostics();
+        if (json[0] === '--json') {
+          return ok(`${JSON.stringify({ status, diagnostics }, null, 2)}\n`);
+        }
+        return ok(renderDebugSummary(status, diagnostics));
+      }
       case '--help':
       case 'help':
-        return ok(`Usage: tailscale <status|up|down|set|login|logout>
+        return ok(`Usage: tailscale <status|up|down|set|debug|login|logout>
 Commands:
   status   Show the current almostnode Tailscale session status
   up       Start an interactive Tailscale login for almostnode networking
   down     Disconnect the current almostnode Tailscale session
   set      Update exit-node and DNS preferences
+  debug    Show Tailscale diagnostics summary (--json for structured output)
   login    Alias for 'up'
   logout   Alias for 'down'
+
+Debug repro:
+  1. Open the IDE with ?debug=tailscale,network,http
+  2. Reproduce the failure or recovery
+  3. Run: tailscale debug --json
 `);
       default:
         return err(`tailscale: unknown subcommand '${command}'\n`);

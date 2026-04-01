@@ -145,47 +145,59 @@ export class Readable extends Stream {
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Buffer> {
-    while (true) {
-      const buffered = this.read();
-      if (buffered !== null) {
-        yield buffered;
-        continue;
+    const queue: Buffer[] = [];
+    let ended = this._ended && this._buffer.length === 0;
+    let failure: Error | null = null;
+    const waiters = new Set<() => void>();
+
+    const wake = () => {
+      for (const waiter of waiters) {
+        waiter();
       }
+      waiters.clear();
+    };
 
-      if (this._ended) {
-        return;
+    const onData = (chunk: unknown) => {
+      queue.push(chunk as Buffer);
+      wake();
+    };
+    const onEnd = () => {
+      ended = true;
+      wake();
+    };
+    const onError = (error: unknown) => {
+      failure = error instanceof Error ? error : new Error(String(error));
+      ended = true;
+      wake();
+    };
+
+    this.on('data', onData);
+    this.on('end', onEnd);
+    this.on('error', onError);
+    this.resume();
+
+    try {
+      while (true) {
+        while (queue.length > 0) {
+          yield queue.shift()!;
+        }
+
+        if (failure) {
+          throw failure;
+        }
+
+        if (ended) {
+          return;
+        }
+
+        await new Promise<void>((resolve) => {
+          waiters.add(resolve);
+        });
       }
-
-      const nextChunk = await new Promise<Buffer | null>((resolve, reject) => {
-        const onData = (chunk: unknown) => {
-          cleanup();
-          resolve(chunk as Buffer);
-        };
-        const onEnd = () => {
-          cleanup();
-          resolve(null);
-        };
-        const onError = (error: unknown) => {
-          cleanup();
-          reject(error);
-        };
-        const cleanup = () => {
-          this.off('data', onData);
-          this.off('end', onEnd);
-          this.off('error', onError);
-        };
-
-        this.on('data', onData);
-        this.on('end', onEnd);
-        this.on('error', onError);
-        this.resume();
-      });
-
-      if (nextChunk === null) {
-        return;
-      }
-
-      yield nextChunk;
+    } finally {
+      this.off('data', onData);
+      this.off('end', onEnd);
+      this.off('error', onError);
     }
   }
 
@@ -250,12 +262,13 @@ export class Readable extends Stream {
     options?: { objectMode?: boolean; highWaterMark?: number }
   ): Readable {
     const readable = new Readable();
+    const source = typeof iterable === 'string' ? [iterable] : iterable;
 
     // Handle async iteration
     (async () => {
       try {
         // Use for-await-of which works with both sync and async iterables
-        for await (const chunk of iterable as AsyncIterable<unknown>) {
+        for await (const chunk of source as AsyncIterable<unknown>) {
           if (chunk !== null && chunk !== undefined) {
             // Convert to Buffer if it's a string
             const data = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;

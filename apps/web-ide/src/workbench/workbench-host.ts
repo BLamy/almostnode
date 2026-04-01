@@ -747,6 +747,7 @@ export class WebIDEHost {
   private readonly keychain: Keychain;
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
   private tailscaleStatus: NetworkStatus | null = null;
+  private tailscaleDiagnosticsHintPrinted = false;
   private hadTailscaleKeychainData = false;
   private pendingTailscaleKeychainActivation = false;
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
@@ -1143,11 +1144,8 @@ export class WebIDEHost {
     await this.revealOpenCodeSidebarView(true);
     const tab = this.createAiSidebarTerminalTab(true, { title });
     const command =
-      `npx @anthropic-ai/claude-code --resume ${thread.resumeToken}`;
-    await this.runCommand(tab, command, {
-      echoCommand: true,
-      interceptAgentLaunch: false,
-    });
+      `CLAUDE_CODE_NO_FLICKER=1 npx @anthropic-ai/claude-code --resume ${thread.resumeToken}`;
+    await this.runCommand(tab, command, { echoCommand: true, interceptAgentLaunch: false });
   }
 
   private normalizeProjectDatabaseNamespace(dbPrefix?: string): string {
@@ -1719,6 +1717,19 @@ export class WebIDEHost {
       terminal.write(
         `\r\n[almostnode debug] enabled: ${this.debugSections.join(", ")}`,
       );
+      if (
+        !this.tailscaleDiagnosticsHintPrinted &&
+        this.debugSections.some(
+          (section) =>
+            section.toLowerCase() === "tailscale" ||
+            section.toLowerCase() === "network",
+        )
+      ) {
+        terminal.write(
+          "\r\n[almostnode debug] Tailscale diagnostics available via `tailscale debug`",
+        );
+        this.tailscaleDiagnosticsHintPrinted = true;
+      }
     }
     if (kind === "agent") {
       terminal.write("almostnode opencode terminal");
@@ -1921,7 +1932,7 @@ export class WebIDEHost {
     kind: Exclude<AgentLaunchKind, "terminal">,
   ): string {
     return kind === "claude"
-      ? "npx @anthropic-ai/claude-code"
+      ? "CLAUDE_CODE_NO_FLICKER=1 npx @anthropic-ai/claude-code"
       : "npx opencode-ai";
   }
 
@@ -2073,7 +2084,12 @@ export class WebIDEHost {
         surface: "sidebar",
       },
     );
-    await this.runCommand(tab, command, { echoCommand: true });
+    await this.runCommand(tab, command, { 
+      echoCommand: true,
+      env: {
+        CLAUDE_CODE_NO_FLICKER: "1",
+      },
+    });
   }
 
   private async createOpenCodeTerminalTab(

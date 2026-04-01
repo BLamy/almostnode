@@ -14,6 +14,7 @@ export interface NetworkOptions {
   authMode?: NetworkAuthMode;
   useExitNode?: boolean;
   exitNodeId?: string | null;
+  activeExitNodeId?: string | null;
   acceptDns?: boolean;
   corsProxy?: string | null;
   proxy?: NetworkProxyOptions;
@@ -27,8 +28,10 @@ export interface ResolvedNetworkProxyOptions {
   caBundlePem: string | null;
 }
 
-export interface ResolvedNetworkOptions extends Omit<Required<NetworkOptions>, 'proxy'> {
+export interface ResolvedNetworkOptions
+  extends Omit<Required<NetworkOptions>, 'proxy' | 'activeExitNodeId'> {
   proxy: ResolvedNetworkProxyOptions;
+  activeExitNodeId?: string | null;
 }
 
 export interface NetworkExitNode {
@@ -66,6 +69,68 @@ export interface NetworkStatus {
   selfName?: string | null;
   tailnetName?: string | null;
   updatedAt: string;
+}
+
+export const NETWORK_DIAGNOSTIC_FAILURE_BUCKETS = [
+  'dns_loopback',
+  'direct_ip_fallback_failed',
+  'structured_fetch_missing_body_base64',
+  'body_read_timeout',
+  'fetch_timeout_other',
+  'runtime_panic',
+  'runtime_unavailable_other',
+  'tls_sni_failed',
+] as const;
+
+export type NetworkDiagnosticsFailureBucket =
+  typeof NETWORK_DIAGNOSTIC_FAILURE_BUCKETS[number];
+
+export interface NetworkDiagnosticsRequestShape {
+  method: string;
+  hasBody: boolean;
+  contentType: string | null;
+  acceptsEventStream: boolean;
+}
+
+export interface NetworkDiagnosticsFailureEntry {
+  seenAt: string;
+  host: string | null;
+  targetType: 'public' | 'tailnet' | 'unknown';
+  bucket: NetworkDiagnosticsFailureBucket;
+  errorCode: string | null;
+  message: string;
+  phase: string | null;
+  requestShape: NetworkDiagnosticsRequestShape;
+  useExitNode: boolean;
+  exitNodeId: string | null;
+  runtimeGeneration: number;
+  runtimeResetCount: number;
+  lastRuntimeResetReason: string | null;
+}
+
+export interface NetworkDiagnosticsCounters {
+  totalFetches: number;
+  publicFetches: number;
+  tailnetFetches: number;
+  structuredFetches: number;
+  directIpFallbacks: number;
+  runtimeResets: number;
+  recoveriesAttempted: number;
+  successes: number;
+  failures: number;
+}
+
+export interface NetworkDiagnosticsSnapshot {
+  provider: NetworkProvider;
+  available: boolean;
+  state: NetworkState;
+  counters: NetworkDiagnosticsCounters;
+  failureBuckets: Record<NetworkDiagnosticsFailureBucket, number>;
+  dominantFailureBucket: NetworkDiagnosticsFailureBucket | null;
+  recentFailures: NetworkDiagnosticsFailureEntry[];
+  runtimeGeneration: number;
+  runtimeResetCount: number;
+  lastRuntimeResetReason: string | null;
 }
 
 export interface NetworkFetchRequest {
@@ -132,6 +197,7 @@ export interface NetworkController {
   getResolvedPolicy(): ResolvedNetworkPolicy;
   configure(options: Partial<NetworkOptions>): Promise<NetworkStatus>;
   getStatus(): Promise<NetworkStatus>;
+  getDiagnostics(): Promise<NetworkDiagnosticsSnapshot>;
   login(): Promise<NetworkStatus>;
   logout(): Promise<NetworkStatus>;
   fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse>;
@@ -181,6 +247,7 @@ export interface NetworkIntegration {
 export interface TailscaleAdapter {
   configure?(options: ResolvedNetworkOptions): Promise<void>;
   getStatus(): Promise<TailscaleAdapterStatus>;
+  getDiagnostics?(): Promise<NetworkDiagnosticsSnapshot>;
   login(): Promise<TailscaleAdapterStatus>;
   logout(): Promise<TailscaleAdapterStatus>;
   fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse>;

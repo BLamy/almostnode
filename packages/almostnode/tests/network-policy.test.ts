@@ -55,6 +55,20 @@ describe('network policy', () => {
       useExitNode: true,
       exitNodeId: null,
     });
+    const pendingExitNodeOptions = normalizeNetworkOptions({
+      provider: 'tailscale',
+      tailscaleConnected: true,
+      useExitNode: true,
+      exitNodeId: 'node-sfo',
+      activeExitNodeId: null,
+    });
+    const activeExitNodeOptions = normalizeNetworkOptions({
+      provider: 'tailscale',
+      tailscaleConnected: true,
+      useExitNode: true,
+      exitNodeId: 'node-sfo',
+      activeExitNodeId: 'node-sfo',
+    });
 
     expect(
       selectNetworkRouteForUrl(
@@ -67,6 +81,13 @@ describe('network policy', () => {
       selectNetworkRouteForUrl(
         'https://platform.claude.com/oauth/token',
         baseOptions,
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('browser');
+    expect(
+      selectNetworkRouteForUrl(
+        'https://chatgpt.com/backend-api/codex/responses',
+        pendingExitNodeOptions,
         { origin: 'https://app.example.com' },
       ),
     ).toBe('browser');
@@ -87,6 +108,13 @@ describe('network policy', () => {
       selectNetworkRouteForUrl(
         'https://db.ts.net/status',
         baseOptions,
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('tailscale');
+    expect(
+      selectNetworkRouteForUrl(
+        'https://chatgpt.com/backend-api/codex/responses',
+        activeExitNodeOptions,
         { origin: 'https://app.example.com' },
       ),
     ).toBe('tailscale');

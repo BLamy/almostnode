@@ -339,7 +339,11 @@ async function executeCommand(
   args: string[],
   opts: Record<string, unknown> = {},
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  const cwd = typeof opts.cwd === "string" ? opts.cwd : "/workspace";
+  const cwd = typeof opts.cwd === "string"
+    ? opts.cwd
+    : typeof globalThis.process?.cwd === "function"
+      ? globalThis.process.cwd()
+      : "/workspace";
 
   if (isRgCommand(command)) {
     return runRipgrep(args, cwd);
@@ -555,7 +559,10 @@ export function fork(): never {
 
 export function spawnSync(command: string, args: string[] = []) {
   if (isRgCommand(command)) {
-    const result = runRipgrep(args, "/workspace");
+    const cwd = typeof globalThis.process?.cwd === "function"
+      ? globalThis.process.cwd()
+      : "/workspace";
+    const result = runRipgrep(args, cwd);
     return {
       status: result.code,
       stdout: Buffer.from(result.stdout),

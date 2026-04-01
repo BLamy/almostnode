@@ -1,4 +1,5 @@
 import type {
+  NetworkDiagnosticsSnapshot,
   NetworkFetchRequest,
   NetworkLookupOptions,
   NetworkLookupResult,
@@ -55,6 +56,10 @@ export interface TailscaleWorkerErrorPayload {
 
 export type TailscaleWorkerRequest =
   | {
+      type: 'setDebug';
+      raw: string | null;
+    }
+  | {
       type: 'hydrateStorage';
       snapshot: TailscaleStateSnapshot | null;
     }
@@ -64,6 +69,9 @@ export type TailscaleWorkerRequest =
     }
   | {
       type: 'getStatus';
+    }
+  | {
+      type: 'getDiagnostics';
     }
   | {
       type: 'login';
@@ -101,6 +109,7 @@ export type TailscaleWorkerEvent =
       value:
         | null
         | TailscaleAdapterStatus
+        | NetworkDiagnosticsSnapshot
         | NetworkFetchResponse
         | NetworkLookupResult;
     }

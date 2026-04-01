@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setDefaultNetworkController } from '../src/network';
 import { runTailscaleCommand } from '../src/shims/tailscale-command';
-import type { NetworkController, NetworkStatus } from '../src/network/types';
+import type {
+  NetworkController,
+  NetworkDiagnosticsSnapshot,
+  NetworkStatus,
+} from '../src/network/types';
 
 function buildStatus(
   overrides: Partial<NetworkStatus> = {},
@@ -22,6 +26,43 @@ function buildStatus(
   };
 }
 
+function buildDiagnostics(
+  overrides: Partial<NetworkDiagnosticsSnapshot> = {},
+): NetworkDiagnosticsSnapshot {
+  return {
+    provider: 'tailscale',
+    available: true,
+    state: 'running',
+    counters: {
+      totalFetches: 0,
+      publicFetches: 0,
+      tailnetFetches: 0,
+      structuredFetches: 0,
+      directIpFallbacks: 0,
+      runtimeResets: 0,
+      recoveriesAttempted: 0,
+      successes: 0,
+      failures: 0,
+    },
+    failureBuckets: {
+      dns_loopback: 0,
+      direct_ip_fallback_failed: 0,
+      structured_fetch_missing_body_base64: 0,
+      body_read_timeout: 0,
+      fetch_timeout_other: 0,
+      runtime_panic: 0,
+      runtime_unavailable_other: 0,
+      tls_sni_failed: 0,
+    },
+    dominantFailureBucket: null,
+    recentFailures: [],
+    runtimeGeneration: 1,
+    runtimeResetCount: 0,
+    lastRuntimeResetReason: null,
+    ...overrides,
+  };
+}
+
 describe('tailscale command', () => {
   afterEach(() => {
     setDefaultNetworkController(null);
@@ -31,6 +72,7 @@ describe('tailscale command', () => {
     const controller: NetworkController = {
       getConfig: vi.fn(),
       configure: vi.fn(),
+      getDiagnostics: vi.fn(async () => buildDiagnostics()),
       getStatus: vi.fn(async () =>
         buildStatus({
           dnsHealthy: false,
@@ -68,6 +110,7 @@ describe('tailscale command', () => {
     const controller: NetworkController = {
       getConfig: vi.fn(),
       configure,
+      getDiagnostics: vi.fn(async () => buildDiagnostics()),
       getStatus: vi.fn(),
       login,
       logout: vi.fn(async () => buildStatus({ state: 'stopped', active: false })),
@@ -96,6 +139,85 @@ describe('tailscale command', () => {
       useExitNode: true,
       exitNodeId: 'node-ord',
       acceptDns: false,
+    });
+  });
+
+  it('renders a compact diagnostics summary and supports --json output', async () => {
+    const controller: NetworkController = {
+      getConfig: vi.fn(),
+      configure: vi.fn(),
+      getDiagnostics: vi.fn(async () => buildDiagnostics({
+        counters: {
+          totalFetches: 12,
+          publicFetches: 8,
+          tailnetFetches: 4,
+          structuredFetches: 6,
+          directIpFallbacks: 2,
+          runtimeResets: 3,
+          recoveriesAttempted: 2,
+          successes: 9,
+          failures: 3,
+        },
+        failureBuckets: {
+          dns_loopback: 1,
+          direct_ip_fallback_failed: 1,
+          structured_fetch_missing_body_base64: 0,
+          body_read_timeout: 1,
+          fetch_timeout_other: 0,
+          runtime_panic: 0,
+          runtime_unavailable_other: 0,
+          tls_sni_failed: 0,
+        },
+        dominantFailureBucket: 'dns_loopback',
+        recentFailures: [{
+          seenAt: '2026-04-01T12:00:00.000Z',
+          host: 'chatgpt.com',
+          targetType: 'public',
+          bucket: 'body_read_timeout',
+          errorCode: 'fetch_timeout',
+          message: 'Tailscale response body read failed: context deadline exceeded',
+          phase: 'read_body',
+          requestShape: {
+            method: 'POST',
+            hasBody: true,
+            contentType: 'application/json',
+            acceptsEventStream: true,
+          },
+          useExitNode: true,
+          exitNodeId: 'node-sfo',
+          runtimeGeneration: 4,
+          runtimeResetCount: 3,
+          lastRuntimeResetReason: 'Tailscale response body read failed: context deadline exceeded',
+        }],
+        runtimeGeneration: 4,
+        runtimeResetCount: 3,
+        lastRuntimeResetReason: 'Tailscale response body read failed: context deadline exceeded',
+      })),
+      getStatus: vi.fn(async () => buildStatus()),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(),
+      lookup: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+    };
+    setDefaultNetworkController(controller);
+
+    const summary = await runTailscaleCommand(['debug'], {} as never);
+    const json = await runTailscaleCommand(['debug', '--json'], {} as never);
+
+    expect(summary.exitCode).toBe(0);
+    expect(summary.stdout).toContain('diagnosticsAvailable: yes');
+    expect(summary.stdout).toContain('dominantFailureBucket: dns_loopback');
+    expect(summary.stdout).toContain('failureBuckets: dns_loopback=1, direct_ip_fallback_failed=1, body_read_timeout=1');
+    expect(summary.stdout).toContain('lastFailure: 2026-04-01T12:00:00.000Z body_read_timeout host=chatgpt.com phase=read_body code=fetch_timeout method=POST');
+
+    expect(json.exitCode).toBe(0);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      status: { state: 'running' },
+      diagnostics: {
+        dominantFailureBucket: 'dns_loopback',
+        runtimeResetCount: 3,
+      },
     });
   });
 });

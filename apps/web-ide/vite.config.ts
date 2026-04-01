@@ -803,6 +803,7 @@ export default defineConfig(async ({ mode }) => {
           },
         },
         stripNodePolyfillSelfInject([
+          webIdeEventsShimPath,
           webIdeBufferShimPath,
           webIdeGlobalShimPath,
           webIdeProcessShimPath,

@@ -44,6 +44,8 @@ afterEach(() => {
   networkMocks.selectNetworkRouteForUrl.mockReset();
   networkMocks.selectNetworkRouteForUrl.mockReturnValue("browser");
   globalThis.fetch = originalFetch;
+  delete (globalThis as typeof globalThis & { __almostnodeDebug?: string })
+    .__almostnodeDebug;
 });
 
 describe("OpenCode CORS proxy shim", () => {
@@ -151,5 +153,36 @@ describe("OpenCode CORS proxy shim", () => {
 
     expect(networkMocks.networkFetch).toHaveBeenCalledTimes(1);
     expect(browserFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not change proxy routing behavior when debug mode is enabled", async () => {
+    (globalThis as typeof globalThis & { __almostnodeDebug?: string })
+      .__almostnodeDebug = "tailscale,network,http";
+    networkMocks.selectNetworkRouteForUrl.mockReturnValue("tailscale");
+    networkMocks.networkFetch.mockResolvedValue(
+      new Response("tailnet-response", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    const browserFetch = vi.fn<typeof fetch>();
+    globalThis.fetch = browserFetch;
+
+    const fetchFn = createProxiedFetch("test-key");
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514" }),
+    });
+
+    expect(networkMocks.selectNetworkRouteForUrl).toHaveBeenCalledTimes(1);
+    expect(networkMocks.networkFetch).toHaveBeenCalledTimes(1);
+    expect(browserFetch).not.toHaveBeenCalled();
+    expect(await response.text()).toBe("tailnet-response");
   });
 });
