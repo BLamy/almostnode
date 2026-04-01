@@ -639,6 +639,18 @@ export default defineConfig(async ({ mode }) => {
         "gitlab-ai-provider",
         "opencode-gitlab-auth",
       ]),
+      stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/bun-bundle.browser.ts"), [
+        "bun:bundle",
+      ]),
+      stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/bun-sqlite.browser.ts"), [
+        "bun:sqlite",
+      ]),
+      stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/bun-ffi.browser.ts"), [
+        "bun:ffi",
+      ]),
+      stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/bun.browser.ts"), [
+        "bun",
+      ]),
       ...(isTest ? [] : [
         tanstackStart({ spa: { enabled: true } }),
         react(),
@@ -1021,6 +1033,10 @@ export default defineConfig(async ({ mode }) => {
         {
           find: "#db",
           replacement: resolve(opencodeBrowserSrc, "shims/db.browser.ts"),
+        },
+        {
+          find: "bun:bundle",
+          replacement: resolve(opencodeBrowserSrc, "shims/bun-bundle.browser.ts"),
         },
         {
           find: "bun:sqlite",
