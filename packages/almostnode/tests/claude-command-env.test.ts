@@ -128,6 +128,10 @@ describe('Claude command environment', () => {
     container.vfs.writeFileSync(
       '/project/node_modules/@anthropic-ai/claude-code/cli.js',
       [
+        'Object.defineProperty(globalThis, Symbol.for("undici.globalDispatcher.1"), {',
+        '  value: { ok: true },',
+        '  configurable: false,',
+        '});',
         'console.log(JSON.stringify({',
         '  argv: process.argv.slice(2),',
         '  cwd: process.cwd(),',

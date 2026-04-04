@@ -209,13 +209,27 @@ const controllersByVfs = new WeakMap<VirtualFS, ChildProcessController>();
 const controllersById = new Map<string, ChildProcessController>();
 let defaultChildProcessController: ChildProcessController | null = null;
 
-// Patch Object.defineProperty globally to force configurable: true on globalThis properties.
+function isGlobalLikeTarget(target: object): boolean {
+  if (target === globalThis) {
+    return true;
+  }
+
+  try {
+    return Reflect.get(target, 'globalThis', target) === target
+      || Reflect.get(target, 'global', target) === target;
+  } catch {
+    return false;
+  }
+}
+
+// Patch Object.defineProperty globally to force configurable: true on global-like objects.
 // In real Node.js, each process has its own globalThis. In our browser environment,
-// all forks share globalThis, so libraries like vitest that define non-configurable
-// properties (e.g. __vitest_index__) need them to be configurable for re-runs.
+// runtime globals are proxy-backed and all forks ultimately share the same page state,
+// so libraries like vitest or undici that define non-configurable globals need them
+// relaxed for re-runs and proxy invariants.
 const _realDefineProperty = Object.defineProperty;
 Object.defineProperty = function(target: object, key: PropertyKey, descriptor: PropertyDescriptor): object {
-  if (target === globalThis && descriptor && !descriptor.configurable) {
+  if (descriptor && !descriptor.configurable && isGlobalLikeTarget(target)) {
     descriptor = { ...descriptor, configurable: true };
   }
   return _realDefineProperty.call(Object, target, key, descriptor) as object;

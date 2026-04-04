@@ -444,7 +444,7 @@ importers:
         specifier: ^3.1022.0
         version: 3.1022.0
       '@napi-rs/wasm-runtime':
-        specifier: ^1.1.1
+        specifier: ^1.1.2
         version: 1.1.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@smithy/protocol-http':
         specifier: ^5.3.12
@@ -12721,7 +12721,7 @@ snapshots:
       react-refresh: 0.18.0
       remotion: 4.0.441(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       source-map: 0.7.3
-      style-loader: 4.0.0(webpack@5.105.0(@swc/core@1.15.18))
+      style-loader: 4.0.0(webpack@5.105.0(@swc/core@1.15.18)(esbuild@0.25.0))
       webpack: 5.105.0(@swc/core@1.15.18)(esbuild@0.25.0)
     transitivePeerDependencies:
       - '@swc/core'
@@ -19027,7 +19027,7 @@ snapshots:
 
   structured-headers@0.4.1: {}
 
-  style-loader@4.0.0(webpack@5.105.0(@swc/core@1.15.18)):
+  style-loader@4.0.0(webpack@5.105.0(@swc/core@1.15.18)(esbuild@0.25.0)):
     dependencies:
       webpack: 5.105.0(@swc/core@1.15.18)(esbuild@0.25.0)
 
@@ -19103,7 +19103,7 @@ snapshots:
       ansi-escapes: 4.3.2
       supports-hyperlinks: 2.3.0
 
-  terser-webpack-plugin@5.4.0(@swc/core@1.15.18)(esbuild@0.25.0)(webpack@5.105.0(@swc/core@1.15.18)):
+  terser-webpack-plugin@5.4.0(@swc/core@1.15.18)(esbuild@0.25.0)(webpack@5.105.0(@swc/core@1.15.18)(esbuild@0.25.0)):
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       jest-worker: 27.5.1
@@ -19630,7 +19630,7 @@ snapshots:
       neo-async: 2.6.2
       schema-utils: 4.3.3
       tapable: 2.3.0
-      terser-webpack-plugin: 5.4.0(@swc/core@1.15.18)(esbuild@0.25.0)(webpack@5.105.0(@swc/core@1.15.18))
+      terser-webpack-plugin: 5.4.0(@swc/core@1.15.18)(esbuild@0.25.0)(webpack@5.105.0(@swc/core@1.15.18)(esbuild@0.25.0))
       watchpack: 2.5.1
       webpack-sources: 3.3.4
     transitivePeerDependencies:
