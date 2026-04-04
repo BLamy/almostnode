@@ -13,6 +13,7 @@ import {
   setupAlmostnodeCommandBridgeServer,
   stopAlmostnodeCommandBridgeServer,
 } from './almostnode-command-bridge';
+import { ensureAlmostnodeToolingCliWrappers } from './oxc-tooling-cli';
 import {
   clearProjectSessionForSender,
   createWorkspaceProject,
@@ -815,6 +816,7 @@ app.whenReady().then(async () => {
   setupApplicationMenu();
   setupProjectStorageHandlers();
   setupAlmostNodeBridge();
+  await ensureAlmostnodeToolingCliWrappers();
   await setupAlmostnodeCommandBridgeServer({
     invokeRenderer: invokeRendererForWindowId,
     resolveProjectWindowId: resolveProjectWindowIdForDirectory,

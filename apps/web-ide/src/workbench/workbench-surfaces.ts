@@ -108,6 +108,7 @@ function isNodeModulesChangePath(path: string, workspaceRoot: string): boolean {
 interface PreviewSurfaceCommands {
   run(): void;
   refresh(): void;
+  toggleSelect(): void;
 }
 
 export interface RegisteredWorkbenchSurfaces {
@@ -1013,6 +1014,7 @@ export class PreviewSurface {
   private readonly actions = document.createElement("div");
   private readonly runButton = document.createElement("button");
   private readonly refreshButton = document.createElement("button");
+  private readonly selectButton = document.createElement("button");
   private readonly devtoolsButton = document.createElement("button");
   private readonly body = document.createElement("div");
   private readonly emptyState = document.createElement("div");
@@ -1047,6 +1049,13 @@ export class PreviewSurface {
       commands.refresh();
     });
 
+    this.selectButton.type = "button";
+    this.selectButton.className = "almostnode-preview-surface__button";
+    this.selectButton.textContent = "Select";
+    this.selectButton.addEventListener("click", () => {
+      commands.toggleSelect();
+    });
+
     this.devtoolsButton.type = "button";
     this.devtoolsButton.className = "almostnode-preview-surface__button";
     this.devtoolsButton.textContent = "DevTools";
@@ -1057,6 +1066,7 @@ export class PreviewSurface {
     this.actions.append(
       this.runButton,
       this.refreshButton,
+      this.selectButton,
       this.devtoolsButton,
     );
     this.toolbar.append(this.status, this.actions);
@@ -1167,6 +1177,11 @@ export class PreviewSurface {
 
   getIframe(): HTMLIFrameElement {
     return this.iframe;
+  }
+
+  setSelectActive(active: boolean): void {
+    this.selectButton.classList.toggle("is-active", active);
+    this.selectButton.setAttribute("aria-pressed", active ? "true" : "false");
   }
 
   getBody(): HTMLDivElement {
@@ -1745,7 +1760,7 @@ export class OpenCodeTerminalSurface {
       items.push({
         kind: "claude",
         label: "Claude Code",
-        detail: "Run npx @anthropic-ai/claude-code in this panel",
+        detail: "Run Claude Code in this panel",
       });
     }
 
@@ -2382,8 +2397,10 @@ export interface KeychainSlotStatus {
   /** Whether this slot supports login/logout buttons in the sidebar */
   canAuth?: boolean;
   authAction?: string;
+  authLabel?: string;
   authDisabled?: boolean;
   statusText?: string;
+  statusDetail?: string;
   selectActionPrefix?: string;
   selectOptions?: Array<{ label: string; value: string }>;
   selectValue?: string;
@@ -2521,6 +2538,14 @@ export class KeychainSidebarSurface {
 
       info.append(label, statusText);
 
+      if (slot.statusDetail) {
+        const statusDetail = document.createElement("div");
+        statusDetail.style.cssText =
+          "font-size: 10px; color: var(--almostnode-quiet); line-height: 1.35; margin-top: 2px;";
+        statusDetail.textContent = slot.statusDetail;
+        info.appendChild(statusDetail);
+      }
+
       if (slot.selectOptions?.length && slot.selectActionPrefix) {
         const selectWrap = document.createElement("div");
         selectWrap.style.cssText =
@@ -2578,7 +2603,7 @@ export class KeychainSidebarSurface {
           ?? (slot.active ? `logout:${slot.name}` : `login:${slot.name}`);
         const isLogout = action.startsWith("logout:");
         const authBtn = document.createElement("button");
-        authBtn.textContent = isLogout ? "Logout" : "Login";
+        authBtn.textContent = slot.authLabel ?? (isLogout ? "Logout" : "Login");
         const isDisabled = Boolean(slot.authDisabled);
         authBtn.style.cssText = `
           background: ${isDisabled ? "var(--almostnode-button-bg)" : isLogout ? "var(--almostnode-button-bg)" : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)"};

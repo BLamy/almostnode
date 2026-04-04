@@ -588,25 +588,428 @@ function getErudaInjectionScript() {
     };
   })();
 
-  // ── Eruda devtools ──
-  var script = document.createElement('script');
-  script.src = 'https://cdn.jsdelivr.net/npm/eruda@3.4.0/eruda.min.js';
-  script.onload = function() {
-    if (typeof eruda === 'undefined') return;
-    eruda.init({ useShadowDom: true, defaults: { theme: 'Dark' } });
-    eruda.hide();
-    // Eruda overrides console but omits some methods React 19 needs
-    if (typeof console.timeStamp !== 'function') {
-      console.timeStamp = function() {};
+  // ── React Grab source picker ──
+  var reactGrabScriptUrl = 'https://unpkg.com/react-grab@0.1.29/dist/index.global.js';
+  var elementSourceScriptUrl = 'https://unpkg.com/element-source@0.0.5/dist/index.global.js';
+  var reactGrabScriptPromise = null;
+  var elementSourceScriptPromise = null;
+  var reactGrabApi = null;
+  var reactGrabPluginRegistered = false;
+  var reactGrabOpenMode = false;
+
+  function postSourcePickerMessage(payload) {
+    try {
+      window.parent.postMessage(Object.assign({
+        type: 'almostnode-preview-source-picker'
+      }, payload), '*');
+    } catch(e) { /* ignore bridge errors */ }
+  }
+
+  function getReactGrabApi() {
+    return window.__REACT_GRAB__ || reactGrabApi || null;
+  }
+
+  function getElementSourceApi() {
+    return window.ElementSource || null;
+  }
+
+  function waitForReactGrabApi() {
+    var existing = getReactGrabApi();
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise(function(resolve, reject) {
+      var timeoutId = window.setTimeout(function() {
+        cleanup();
+        reject(new Error('Timed out loading react-grab.'));
+      }, 15000);
+
+      function cleanup() {
+        window.clearTimeout(timeoutId);
+        window.removeEventListener('react-grab:init', onInit);
+      }
+
+      function onInit(event) {
+        var api = event && event.detail ? event.detail : getReactGrabApi();
+        if (!api) return;
+        reactGrabApi = api;
+        cleanup();
+        resolve(api);
+      }
+
+      window.addEventListener('react-grab:init', onInit);
+    });
+  }
+
+  function ensureReactGrabLoaded() {
+    var existing = getReactGrabApi();
+    if (existing) {
+      reactGrabApi = existing;
+      return Promise.resolve(existing);
     }
-  };
-  script.onerror = function() { /* CDN unavailable — console bridge still works */ };
-  document.head.appendChild(script);
+
+    if (reactGrabScriptPromise) {
+      return reactGrabScriptPromise;
+    }
+
+    reactGrabScriptPromise = new Promise(function(resolve, reject) {
+      var existingScript = document.querySelector('script[data-almostnode-react-grab]');
+      if (existingScript) {
+        waitForReactGrabApi().then(resolve, reject);
+        return;
+      }
+
+      var script = document.createElement('script');
+      script.src = reactGrabScriptUrl;
+      script.async = true;
+      script.crossOrigin = 'anonymous';
+      script.setAttribute('data-almostnode-react-grab', 'true');
+      script.onload = function() {
+        waitForReactGrabApi().then(resolve, reject);
+      };
+      script.onerror = function() {
+        reject(new Error('Failed to load react-grab.'));
+      };
+      document.head.appendChild(script);
+    }).then(function(api) {
+      reactGrabApi = api;
+      return api;
+    }).catch(function(error) {
+      reactGrabScriptPromise = null;
+      throw error;
+    });
+
+    return reactGrabScriptPromise;
+  }
+
+  function waitForElementSourceApi() {
+    var existing = getElementSourceApi();
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise(function(resolve, reject) {
+      var timeoutId = window.setTimeout(function() {
+        cleanup();
+        reject(new Error('Timed out loading element-source.'));
+      }, 15000);
+      var intervalId = window.setInterval(function() {
+        var api = getElementSourceApi();
+        if (!api) return;
+        cleanup();
+        resolve(api);
+      }, 50);
+
+      function cleanup() {
+        window.clearTimeout(timeoutId);
+        window.clearInterval(intervalId);
+      }
+    });
+  }
+
+  function ensureElementSourceLoaded() {
+    var existing = getElementSourceApi();
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+
+    if (elementSourceScriptPromise) {
+      return elementSourceScriptPromise;
+    }
+
+    elementSourceScriptPromise = new Promise(function(resolve, reject) {
+      var existingScript = document.querySelector('script[data-almostnode-element-source]');
+      if (existingScript) {
+        waitForElementSourceApi().then(resolve, reject);
+        return;
+      }
+
+      var script = document.createElement('script');
+      script.src = elementSourceScriptUrl;
+      script.async = true;
+      script.crossOrigin = 'anonymous';
+      script.setAttribute('data-almostnode-element-source', 'true');
+      script.onload = function() {
+        waitForElementSourceApi().then(resolve, reject);
+      };
+      script.onerror = function() {
+        reject(new Error('Failed to load element-source.'));
+      };
+      document.head.appendChild(script);
+    }).catch(function(error) {
+      elementSourceScriptPromise = null;
+      throw error;
+    });
+
+    return elementSourceScriptPromise;
+  }
+
+  function normalizeSourcePickerComparisonKey(value) {
+    if (typeof value !== 'string') {
+      return '';
+    }
+
+    var normalized = value.trim();
+    if (!normalized) {
+      return '';
+    }
+
+    try {
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) {
+        normalized = new URL(normalized).pathname || normalized;
+      }
+    } catch(e) { /* ignore invalid URLs */ }
+
+    normalized = normalized
+      .replace(/\\/g, '/')
+      .split(/[?#]/, 1)[0]
+      .trim();
+
+    normalized = normalized.replace(/^about:\/\/React\/[^/]+\//, '/');
+    normalized = normalized.replace(/^rsc:\/\/React\/[^/]+\//, '/');
+    normalized = normalized.replace(/^file:\/\/+/, '/');
+    normalized = normalized.replace(/^webpack(?:-internal)?:\/\/+/, '/');
+    normalized = normalized.replace(/^turbopack:\/\/+/, '/');
+    normalized = normalized.replace(/^metro:\/\/+/, '/');
+    normalized = normalized.replace(/^\/(?:\(app-pages-browser\)|app-pages-browser)\//, '/');
+
+    if (normalized.indexOf('//') === 0) {
+      var hostIndex = normalized.indexOf('/', 2);
+      normalized = hostIndex === -1 ? '' : normalized.slice(hostIndex);
+    }
+
+    normalized = normalized.replace(/^\/?__virtual__\/\d+(?=\/)/, '');
+    normalized = normalized.replace(/^[^/]+:\d+(?=\/)/, '');
+    normalized = normalized.replace(/^\/?\d+(?=\/(src|app|pages|components|lib|routes|tests?|e2e|drizzle|public)\b)/, '');
+
+    if (normalized && normalized.charAt(0) !== '/') {
+      normalized = '/' + normalized;
+    }
+
+    return normalized.toLowerCase();
+  }
+
+  function isLikelySourcePickerPath(value) {
+    return /(^|\/)(src|app|pages|components|lib|routes|tests?|e2e|drizzle|public)\//.test(value) || /\.(?:[cm]?[jt]sx?)$/i.test(value);
+  }
+
+  function pathsLikelyMatchForSourcePicker(left, right) {
+    if (!left || !right) {
+      return false;
+    }
+
+    return left === right || left.slice(-right.length) === right || right.slice(-left.length) === left;
+  }
+
+  function findBestReactStackFrame(stack, source) {
+    if (!Array.isArray(stack) || stack.length === 0) {
+      return null;
+    }
+
+    var sourcePath = normalizeSourcePickerComparisonKey(source && source.filePath);
+    var sourceLineNumber = source && typeof source.lineNumber === 'number'
+      ? source.lineNumber
+      : null;
+    var fallbackFrame = null;
+
+    for (var index = 0; index < stack.length; index += 1) {
+      var frame = stack[index];
+      if (!frame || typeof frame.fileName !== 'string') {
+        continue;
+      }
+
+      var framePath = normalizeSourcePickerComparisonKey(frame.fileName);
+      if (!framePath || !isLikelySourcePickerPath(framePath)) {
+        continue;
+      }
+
+      if (sourcePath && !pathsLikelyMatchForSourcePicker(framePath, sourcePath)) {
+        continue;
+      }
+
+      if (!fallbackFrame) {
+        fallbackFrame = frame;
+      }
+
+      if (
+        sourceLineNumber !== null &&
+        typeof frame.lineNumber === 'number' &&
+        frame.lineNumber === sourceLineNumber
+      ) {
+        return frame;
+      }
+    }
+
+    return fallbackFrame;
+  }
+
+  function resolveSourcePickerSource(api, element) {
+    return ensureElementSourceLoaded().then(function(elementSourceApi) {
+      return Promise.resolve(
+        typeof elementSourceApi.resolveSource === 'function'
+          ? elementSourceApi.resolveSource(element)
+          : null
+      ).then(function(source) {
+        if (!source || !source.filePath) {
+          return api.getSource(element);
+        }
+
+        if (
+          typeof source.columnNumber === 'number' &&
+          Number.isFinite(source.columnNumber) &&
+          source.columnNumber > 0
+        ) {
+          return source;
+        }
+
+        if (typeof elementSourceApi.getReactStack !== 'function') {
+          return source;
+        }
+
+        return Promise.resolve(elementSourceApi.getReactStack(element)).then(function(stack) {
+          var frame = findBestReactStackFrame(stack, source);
+          if (
+            !frame ||
+            typeof frame.columnNumber !== 'number' ||
+            !Number.isFinite(frame.columnNumber) ||
+            frame.columnNumber < 1
+          ) {
+            return source;
+          }
+
+          return {
+            filePath: source.filePath,
+            lineNumber: typeof frame.lineNumber === 'number' ? frame.lineNumber : source.lineNumber,
+            columnNumber: frame.columnNumber,
+            componentName: source.componentName
+          };
+        }).catch(function() {
+          return source;
+        });
+      });
+    }).catch(function() {
+      return api.getSource(element);
+    });
+  }
+
+  function registerReactGrabPlugin(api) {
+    if (reactGrabPluginRegistered) return;
+
+    api.registerPlugin({
+      name: 'almostnode-preview-source-picker',
+      theme: {
+        toolbar: { enabled: false },
+        grabbedBoxes: { enabled: false }
+      },
+      options: {
+        activationKey: function() { return false; }
+      },
+      hooks: {
+        onElementSelect: function(element) {
+          if (!reactGrabOpenMode) return;
+
+          return resolveSourcePickerSource(api, element).then(function(source) {
+            reactGrabOpenMode = false;
+            api.deactivate();
+
+            if (!source || !source.filePath) {
+              postSourcePickerMessage({
+                status: 'error',
+                reason: 'no-source'
+              });
+              return true;
+            }
+
+            postSourcePickerMessage({
+              status: 'selected',
+              filePath: source.filePath,
+              lineNumber: typeof source.lineNumber === 'number' ? source.lineNumber : null,
+              columnNumber: typeof source.columnNumber === 'number' ? source.columnNumber : null
+            });
+            return true;
+          }).catch(function(error) {
+            reactGrabOpenMode = false;
+            api.deactivate();
+            postSourcePickerMessage({
+              status: 'error',
+              reason: error && error.message ? error.message : String(error)
+            });
+            return true;
+          });
+        }
+      }
+    });
+
+    reactGrabPluginRegistered = true;
+  }
+
+  function activateSourcePicker() {
+    ensureReactGrabLoaded().then(function(api) {
+      return ensureElementSourceLoaded().catch(function() {
+        return null;
+      }).then(function() {
+        registerReactGrabPlugin(api);
+        reactGrabOpenMode = true;
+        api.activate();
+        postSourcePickerMessage({ status: 'armed' });
+      });
+    }).catch(function(error) {
+      reactGrabOpenMode = false;
+      postSourcePickerMessage({
+        status: 'error',
+        reason: error && error.message ? error.message : String(error)
+      });
+    });
+  }
+
+  function deactivateSourcePicker(notifyParent) {
+    reactGrabOpenMode = false;
+    var api = getReactGrabApi();
+    if (api) {
+      api.deactivate();
+    }
+    if (notifyParent) {
+      postSourcePickerMessage({ status: 'cancelled' });
+    }
+  }
+
+  window.addEventListener('keydown', function(e) {
+    if (!reactGrabOpenMode || e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    deactivateSourcePicker(true);
+  }, true);
+
+  window.addEventListener('message', function(e) {
+    if (!e.data || e.data.type !== 'almostnode-preview-source-picker') return;
+    if (e.data.action === 'activate-open') {
+      activateSourcePicker();
+      return;
+    }
+    if (e.data.action === 'deactivate') {
+      deactivateSourcePicker(false);
+    }
+  });
+
+  // ── Eruda devtools ──
+  var shouldLoadEruda = ${erudaEnabled ? "true" : "false"};
+  if (shouldLoadEruda) {
+    var script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/eruda@3.4.0/eruda.min.js';
+    script.onload = function() {
+      if (typeof eruda === 'undefined') return;
+      eruda.init({ useShadowDom: true, defaults: { theme: 'Dark' } });
+      eruda.hide();
+      // Eruda overrides console but omits some methods React 19 needs
+      if (typeof console.timeStamp !== 'function') {
+        console.timeStamp = function() {};
+      }
+    };
+    script.onerror = function() { /* CDN unavailable — console bridge still works */ };
+    document.head.appendChild(script);
+  }
 
   // ── DevTools toggle listener ──
   window.addEventListener('message', function(e) {
     if (!e.data || e.data.type !== 'almostnode-devtools') return;
-    if (typeof eruda === 'undefined') return;
+    if (!shouldLoadEruda || typeof eruda === 'undefined') return;
     var action = e.data.action;
     if (action === 'show') eruda.show();
     else if (action === 'hide') eruda.hide();
@@ -667,7 +1070,6 @@ function getErudaInjectionScript() {
  * Inject devtools script into an HTML response body if applicable
  */
 function maybeInjectEruda(bytes, contentType) {
-  if (!erudaEnabled) return bytes;
   if (!contentType || !contentType.includes('text/html')) return bytes;
 
   var html = new TextDecoder().decode(bytes);

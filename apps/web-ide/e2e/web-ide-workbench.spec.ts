@@ -74,6 +74,32 @@ async function expectPreviewApp(page: Page) {
   return previewFrame;
 }
 
+async function waitForPreviewSourcePickerReady(page: Page): Promise<void> {
+  await page.waitForFunction(
+    () => {
+      const iframe = document.getElementById("webidePreview") as HTMLIFrameElement | null;
+      return Boolean(
+        iframe?.contentWindow &&
+        (iframe.contentWindow as Window & {
+          __REACT_GRAB__?: unknown;
+        }).__REACT_GRAB__,
+      );
+    },
+    undefined,
+    { timeout: 30000 },
+  );
+}
+
+async function readVisibleEditorText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    return Array.from(
+      document.querySelectorAll(".monaco-editor .view-lines .view-line"),
+    )
+      .map((node) => node.textContent || "")
+      .join("\n");
+  });
+}
+
 async function waitForWorkbenchTheme(page: Page, theme: "light" | "dark") {
   await page.waitForFunction(
     (expectedTheme) => {
@@ -561,6 +587,192 @@ test.describe("web-ide workbench", () => {
     await expect(
       page.locator(".almostnode-preview-surface__toolbar"),
     ).toBeVisible();
+  });
+
+  test("adds a Select button to the preview toolbar and opens source for selected React elements", async ({
+    page,
+  }) => {
+    await loadWebIDE(page);
+    const previewFrame = await expectPreviewApp(page);
+
+    const selectButton = page
+      .locator(".almostnode-preview-surface__toolbar")
+      .getByRole("button", { name: "Select" });
+    await expect(selectButton).toBeVisible();
+
+    await selectButton.click();
+    await expect(selectButton).toHaveClass(/is-active/);
+    await waitForPreviewSourcePickerReady(page);
+
+    const target = await page.evaluate(async () => {
+      const iframe = document.getElementById("webidePreview") as HTMLIFrameElement | null;
+      const doc = iframe?.contentDocument;
+      const win = iframe?.contentWindow as (Window & {
+        __REACT_GRAB__?: {
+          getSource: (
+            element: Element,
+          ) => Promise<{ filePath?: string | null; lineNumber?: number | null } | null>;
+        };
+      }) | null;
+      const host = (
+        window as {
+          __almostnodeWebIDE?: {
+            normalizePreviewSourcePath?: (sourcePath: string) => string | null;
+            container: {
+              vfs: {
+                existsSync(path: string): boolean;
+                readFileSync(path: string, encoding: string): string;
+              };
+            };
+          };
+        }
+      ).__almostnodeWebIDE;
+
+      if (!doc?.body || !win?.__REACT_GRAB__ || !host) {
+        return null;
+      }
+
+      const candidates = Array.from(
+        doc.body.querySelectorAll("h1, h2, h3, button, a, p, span, div"),
+      );
+
+      for (const candidate of candidates) {
+        if (!(candidate instanceof HTMLElement)) {
+          continue;
+        }
+        if (candidate.closest("[data-react-grab-ignore-events]")) {
+          continue;
+        }
+
+        const text =
+          candidate.innerText?.trim() || candidate.textContent?.trim() || "";
+        if (text.length < 3) {
+          continue;
+        }
+
+        const source = await win.__REACT_GRAB__.getSource(candidate);
+        if (!source?.filePath) {
+          continue;
+        }
+
+        const normalizedPath =
+          typeof host.normalizePreviewSourcePath === "function"
+            ? host.normalizePreviewSourcePath(source.filePath)
+            : source.filePath;
+        if (!normalizedPath || !host.container.vfs.existsSync(normalizedPath)) {
+          continue;
+        }
+
+        const fileContent = host.container.vfs.readFileSync(
+          normalizedPath,
+          "utf8",
+        );
+        const snippet =
+          fileContent
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => line.length > 24 && !line.startsWith("import ")) ||
+          fileContent.trim();
+        if (!snippet) {
+          continue;
+        }
+
+        candidate.setAttribute("data-source-probe", "true");
+        return {
+          snippet: snippet.slice(0, 120),
+        };
+      }
+
+      return null;
+    });
+
+    expect(target).not.toBeNull();
+    if (!target) {
+      throw new Error("Could not find a source-mapped React element in preview");
+    }
+
+    await previewFrame.locator("[data-source-probe='true']").click();
+
+    await expect(selectButton).not.toHaveClass(/is-active/);
+    await expect
+      .poll(() => readVisibleEditorText(page), {
+        timeout: 30000,
+      })
+      .toContain(target.snippet);
+  });
+
+  test("cancels preview source picking with a second click and Escape", async ({
+    page,
+  }) => {
+    await loadWebIDE(page);
+    await expectPreviewApp(page);
+
+    const selectButton = page
+      .locator(".almostnode-preview-surface__toolbar")
+      .getByRole("button", { name: "Select" });
+
+    await selectButton.click();
+    await expect(selectButton).toHaveClass(/is-active/);
+    await selectButton.click();
+    await expect(selectButton).not.toHaveClass(/is-active/);
+
+    await selectButton.click();
+    await expect(selectButton).toHaveClass(/is-active/);
+    await waitForPreviewSourcePickerReady(page);
+
+    await page.evaluate(() => {
+      const iframe = document.getElementById("webidePreview") as HTMLIFrameElement | null;
+      iframe?.contentWindow?.focus();
+    });
+    await page.keyboard.press("Escape");
+
+    await expect(selectButton).not.toHaveClass(/is-active/);
+    await expect(page.locator("#webidePreview")).toBeVisible();
+  });
+
+  test("fails gracefully when preview source selection cannot be resolved", async ({
+    page,
+  }) => {
+    await loadWebIDE(page);
+    await expectPreviewApp(page);
+
+    await page.evaluate(() => {
+      const iframe = document.getElementById("webidePreview") as HTMLIFrameElement | null;
+      const doc = iframe?.contentDocument;
+      if (!doc?.body) {
+        throw new Error("Preview document is not ready");
+      }
+
+      const probe = doc.createElement("div");
+      probe.id = "plain-dom-source-probe";
+      probe.textContent = "No source mapping";
+      probe.style.position = "fixed";
+      probe.style.left = "16px";
+      probe.style.bottom = "16px";
+      probe.style.zIndex = "2147483647";
+      probe.style.padding = "8px 10px";
+      probe.style.background = "#ffffff";
+      probe.style.color = "#111111";
+      doc.body.appendChild(probe);
+    });
+
+    const selectButton = page
+      .locator(".almostnode-preview-surface__toolbar")
+      .getByRole("button", { name: "Select" });
+    await selectButton.click();
+    await expect(selectButton).toHaveClass(/is-active/);
+    await waitForPreviewSourcePickerReady(page);
+
+    await page
+      .frameLocator("#webidePreview")
+      .locator("#plain-dom-source-probe")
+      .click();
+
+    await expect(selectButton).not.toHaveClass(/is-active/);
+    await expect(page.locator("#webidePreviewStatus")).toContainText(
+      "Could not resolve source",
+    );
+    await expect(page.locator("#webidePreview")).toBeVisible();
   });
 
   test("executes workbench commands and manages mock marketplace extensions", async ({

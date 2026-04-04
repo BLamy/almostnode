@@ -27,12 +27,9 @@
   "breadcrumbs.enabled": true,
   "javascript.updateImportsOnFileMove.enabled": "always",
   "javascript.validate.enable": false,
-  "eslint.validate": [
-    "javascript",
-    "javascriptreact",
-    "typescript",
-    "typescriptreact"
-  ],
+  "javascript.format.enable": false,
+  "typescript.format.enable": false,
+  "eslint.validate": [],
   "typescript.reportStyleChecksAsWarnings": false,
   "editor.fontWeight": "500",
   "typescript.inlayHints.parameterNames.enabled": "literals",
@@ -40,7 +37,7 @@
   "javascript.inlayHints.parameterNames.enabled": "literals",
   "editor.formatOnSave": true,
   "editor.codeActionsOnSave": {
-    "source.fixAll.eslint": "explicit"
+    "source.fixAll.eslint": "never"
   },
   "editor.renderWhitespace": "all",
   "editor.suggest.preview": true,

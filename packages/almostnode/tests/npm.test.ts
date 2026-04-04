@@ -396,6 +396,158 @@ describe('npm', () => {
       expect(pkgJson.version).toBe('1.0.0');
     });
 
+    it('should install devDependencies from package.json by default', async () => {
+      vfs.writeFileSync(
+        '/package.json',
+        JSON.stringify({
+          name: 'demo-app',
+          dependencies: {
+            react: '^18.2.0',
+          },
+          devDependencies: {
+            '@types/react': '^18.2.0',
+          },
+        })
+      );
+
+      const reactManifest = {
+        name: 'react',
+        'dist-tags': { latest: '18.2.0' },
+        versions: {
+          '18.2.0': {
+            name: 'react',
+            version: '18.2.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/react/-/react-18.2.0.tgz',
+              shasum: 'react123',
+            },
+            dependencies: {},
+          },
+        },
+      };
+      const reactTypesManifest = {
+        name: '@types/react',
+        'dist-tags': { latest: '18.2.0' },
+        versions: {
+          '18.2.0': {
+            name: '@types/react',
+            version: '18.2.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/@types/react/-/react-18.2.0.tgz',
+              shasum: 'types123',
+            },
+            dependencies: {},
+          },
+        },
+      };
+
+      const reactTarball = pako.gzip(
+        createMinimalTarball({
+          'package/package.json': '{"name":"react","version":"18.2.0"}',
+          'package/index.js': 'export const version = "18.2.0";',
+        })
+      );
+      const reactTypesTarball = pako.gzip(
+        createMinimalTarball({
+          'package/package.json': '{"name":"@types/react","version":"18.2.0","types":"index.d.ts"}',
+          'package/index.d.ts': 'declare namespace React {}',
+        })
+      );
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+        const decodedUrl = decodeURIComponent(decodeURIComponent(urlStr)).toLowerCase();
+        if (decodedUrl.includes('registry.npmjs.org/react') && !decodedUrl.includes('.tgz')) {
+          return new Response(JSON.stringify(reactManifest), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (decodedUrl.includes('registry.npmjs.org/@types/react') && !decodedUrl.includes('.tgz')) {
+          return new Response(JSON.stringify(reactTypesManifest), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (decodedUrl.includes('react-18.2.0.tgz') && !decodedUrl.includes('@types')) {
+          return new Response(reactTarball, { status: 200 });
+        }
+        if (decodedUrl.includes('@types/react/-/react-18.2.0.tgz')) {
+          return new Response(reactTypesTarball, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const result = await pm.installFromPackageJson();
+
+      expect(result.installed.has('react')).toBe(true);
+      expect(result.installed.has('@types/react')).toBe(true);
+      expect(vfs.existsSync('/node_modules/react/package.json')).toBe(true);
+      expect(vfs.existsSync('/node_modules/@types/react/package.json')).toBe(true);
+    });
+
+    it('should allow opting out of devDependencies when installing from package.json', async () => {
+      vfs.writeFileSync(
+        '/package.json',
+        JSON.stringify({
+          name: 'demo-app',
+          dependencies: {
+            react: '^18.2.0',
+          },
+          devDependencies: {
+            '@types/react': '^18.2.0',
+          },
+        })
+      );
+
+      const reactManifest = {
+        name: 'react',
+        'dist-tags': { latest: '18.2.0' },
+        versions: {
+          '18.2.0': {
+            name: 'react',
+            version: '18.2.0',
+            dist: {
+              tarball: 'https://registry.npmjs.org/react/-/react-18.2.0.tgz',
+              shasum: 'react123',
+            },
+            dependencies: {},
+          },
+        },
+      };
+      const reactTarball = pako.gzip(
+        createMinimalTarball({
+          'package/package.json': '{"name":"react","version":"18.2.0"}',
+          'package/index.js': 'export const version = "18.2.0";',
+        })
+      );
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const urlStr = url.toString();
+        const decodedUrl = decodeURIComponent(decodeURIComponent(urlStr)).toLowerCase();
+        if (decodedUrl.includes('registry.npmjs.org/react') && !decodedUrl.includes('.tgz')) {
+          return new Response(JSON.stringify(reactManifest), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (decodedUrl.includes('registry.npmjs.org/@types/react')) {
+          return new Response('Dev dependency should not be fetched', { status: 500 });
+        }
+        if (decodedUrl.includes('react-18.2.0.tgz')) {
+          return new Response(reactTarball, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      });
+
+      const result = await pm.installFromPackageJson({ includeDev: false });
+
+      expect(result.installed.has('react')).toBe(true);
+      expect(result.installed.has('@types/react')).toBe(false);
+      expect(vfs.existsSync('/node_modules/react/package.json')).toBe(true);
+      expect(vfs.existsSync('/node_modules/@types/react/package.json')).toBe(false);
+    });
+
     it('should create bin stubs in /node_modules/.bin/ for packages with bin field', async () => {
       const mockManifest = {
         name: 'my-cli',

@@ -175,6 +175,7 @@ async function installFromPackageJson(
   options: InstallOptions = {},
 ): Promise<InstallResult> {
   const { onProgress } = options;
+  const includeDev = options.includeDev ?? true;
   const pkgJsonPath = path.join(cwd, 'package.json');
 
   if (!vfs.existsSync(pkgJsonPath)) {
@@ -187,7 +188,7 @@ async function installFromPackageJson(
 
   const resolved = await resolveFromPackageJson(pkgJson, {
     registry,
-    includeDev: options.includeDev,
+    includeDev,
     includeOptional: options.includeOptional,
     onProgress,
   });

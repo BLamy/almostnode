@@ -48,7 +48,7 @@ describe('network policy', () => {
     });
   });
 
-  it('keeps Anthropic public hosts on browser transport until an exit node is active', () => {
+  it('routes public hosts through tailscale as soon as exit-node mode is connected', () => {
     const baseOptions = normalizeNetworkOptions({
       provider: 'tailscale',
       tailscaleConnected: true,
@@ -76,21 +76,21 @@ describe('network policy', () => {
         baseOptions,
         { origin: 'https://app.example.com' },
       ),
-    ).toBe('browser');
+    ).toBe('tailscale');
     expect(
       selectNetworkRouteForUrl(
         'https://platform.claude.com/oauth/token',
         baseOptions,
         { origin: 'https://app.example.com' },
       ),
-    ).toBe('browser');
+    ).toBe('tailscale');
     expect(
       selectNetworkRouteForUrl(
         'https://chatgpt.com/backend-api/codex/responses',
         pendingExitNodeOptions,
         { origin: 'https://app.example.com' },
       ),
-    ).toBe('browser');
+    ).toBe('tailscale');
 
     const websocketPolicy = resolveNetworkPolicy(
       baseOptions,
@@ -102,7 +102,7 @@ describe('network policy', () => {
         websocketPolicy,
         { origin: 'https://app.example.com' },
       ),
-    ).toBe('browser');
+    ).toBe('tailscale');
 
     expect(
       selectNetworkRouteForUrl(
@@ -115,6 +115,34 @@ describe('network policy', () => {
       selectNetworkRouteForUrl(
         'https://chatgpt.com/backend-api/codex/responses',
         activeExitNodeOptions,
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('tailscale');
+  });
+
+  it('does not fall back to browser proxying for public hosts in connected exit-node mode', () => {
+    const options = normalizeNetworkOptions({
+      provider: 'tailscale',
+      tailscaleConnected: true,
+      useExitNode: true,
+      proxy: {
+        httpsUrl: 'http://proxy.internal:8443',
+      },
+      corsProxy: 'https://app.example.com/__api/cors-proxy?url=',
+    });
+
+    expect(
+      selectNetworkRouteForUrl(
+        'https://chatgpt.com/backend-api/codex/responses',
+        options,
+        { origin: 'https://app.example.com' },
+      ),
+    ).toBe('tailscale');
+
+    expect(
+      selectWebSocketRouteForUrl(
+        'wss://platform.claude.com/socket',
+        resolveNetworkPolicy(options, { origin: 'https://app.example.com' }),
         { origin: 'https://app.example.com' },
       ),
     ).toBe('tailscale');

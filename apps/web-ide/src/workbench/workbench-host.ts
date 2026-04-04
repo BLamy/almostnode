@@ -26,6 +26,7 @@ import {
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
 import { installHostConsoleBridge } from "../features/host-console-bridge";
+import { installOxcMonacoIntegration } from "../features/oxc-monaco";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
 import { HostTerminalSession } from "../desktop/host-terminal-session";
@@ -49,6 +50,21 @@ import {
 } from "../features/resumable-threads";
 import { readGhToken } from "../../../../packages/almostnode/src/shims/gh-auth";
 import {
+  AWS_AUTH_PATH,
+  AWS_CONFIG_PATH,
+  readAwsAuth,
+  readAwsConfig,
+  inspectAwsStoredState,
+  writeAwsConfig,
+} from "../../../../packages/almostnode/src/shims/aws-storage";
+import {
+  DEFAULT_AWS_REGION,
+  DEFAULT_AWS_SESSION_NAME,
+  normalizeAwsSetupDraft,
+  validateAwsSetupDraft,
+  type AwsSetupDraft,
+} from "../features/aws-setup";
+import {
   createExtensionServiceOverrides,
   type ExtensionServiceOverrideBundle,
 } from "../extensions/extension-services";
@@ -64,6 +80,7 @@ import {
   KeychainSidebarSurface,
   TestsSidebarSurface,
   registerWorkbenchSurfaces,
+  type KeychainSlotStatus,
   type RegisteredWorkbenchSurfaces,
 } from "./workbench-surfaces";
 import {
@@ -100,6 +117,15 @@ import {
   type OpenCodeBrowserShellState,
   restoreOpenCodeBrowserSnapshot,
 } from "../features/opencode-browser-session";
+import {
+  collectClipboardImageMimeTypes,
+  describeClaudeImagePasteBlocker,
+} from "../features/claude-image-paste";
+import {
+  type WebIdeOpenTarget,
+  parseWebIdeOpenTarget,
+  resolveWebIdeOpenPath,
+} from "../features/webide-open-command";
 import {
   initialize,
   getService,
@@ -227,6 +253,7 @@ export interface WebIDEHostOptions {
   desktopBridge?: DesktopBridge | null;
   hostProjectDirectory?: string | null;
   agentLaunchCommand?: string | null;
+  onRequestAwsSetup?: (draft: AwsSetupDraft) => void;
 }
 
 export interface BridgedCommandResult extends RunResult {
@@ -655,6 +682,7 @@ interface TerminalTabState {
   kind: "user" | "preview" | "agent";
   inputMode: "managed" | "passthrough";
   surface: "panel" | "sidebar";
+  agentHarness: "claude" | "opencode" | null;
 }
 
 interface OpenCodeTabState {
@@ -695,6 +723,24 @@ interface WorkbenchTerminalSession {
     running: boolean;
   };
 }
+
+interface PreviewSourcePickerSelectionMessage {
+  type: "almostnode-preview-source-picker";
+  status: "selected";
+  filePath?: string;
+  lineNumber?: number | null;
+  columnNumber?: number | null;
+}
+
+interface PreviewSourcePickerStatusMessage {
+  type: "almostnode-preview-source-picker";
+  status: "armed" | "cancelled" | "error";
+  reason?: string;
+}
+
+type PreviewSourcePickerMessage =
+  | PreviewSourcePickerSelectionMessage
+  | PreviewSourcePickerStatusMessage;
 
 function getWorkbenchCorsProxyUrl(): string | undefined {
   if (typeof window === "undefined") {
@@ -739,12 +785,14 @@ export class WebIDEHost {
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
+  private previewSourcePickerActive = false;
   private previewStartRetryTimeoutId = 0;
   private readonly consolePanel = new ConsolePanelElement();
   private readonly consoleTabId = "console-panel";
   private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
+  private readonly claudeImagePasteCleanup = new Map<string, () => void>();
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
   private tailscaleStatus: NetworkStatus | null = null;
   private tailscaleDiagnosticsHintPrinted = false;
@@ -864,6 +912,9 @@ export class WebIDEHost {
         void this.runPreviewCommand(this.getDefaults().runCommand);
       },
       refresh: () => this.refreshPreview(),
+      toggleSelect: () => {
+        void this.togglePreviewSourcePicker();
+      },
     });
     this.terminalSurface = new TerminalPanelSurface({
       onCreateTab: () => {
@@ -941,6 +992,15 @@ export class WebIDEHost {
         case "logout:github":
           void this.keychainAuthAction("gh auth logout");
           break;
+        case "login:aws":
+          void this.keychainAuthAction(this.buildAwsLoginCommand());
+          break;
+        case "logout:aws":
+          void this.keychainAuthAction(this.buildAwsLogoutCommand());
+          break;
+        case "setup:aws":
+          this.options.onRequestAwsSetup?.(this.getAwsSetupDraft());
+          break;
         case "login:replay":
           void this.keychainAuthAction("replayio login");
           break;
@@ -962,6 +1022,7 @@ export class WebIDEHost {
       CLAUDE_LEGACY_CONFIG_PATH,
     ]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
+    this.keychain.registerSlot("aws", [AWS_CONFIG_PATH, AWS_AUTH_PATH]);
     this.keychain.registerSlot("opencode", [
       OPENCODE_AUTH_PATH,
       OPENCODE_MCP_AUTH_PATH,
@@ -983,6 +1044,7 @@ export class WebIDEHost {
       this.updateKeychainSurface();
       this.updateAiLauncherSurface();
     });
+    this.registerWorkbenchShellCommands();
   }
 
   static async bootstrap(options: WebIDEHostOptions): Promise<WebIDEHost> {
@@ -1142,9 +1204,12 @@ export class WebIDEHost {
     }
 
     await this.revealOpenCodeSidebarView(true);
-    const tab = this.createAiSidebarTerminalTab(true, { title });
-    const command =
-      `CLAUDE_CODE_NO_FLICKER=1 npx @anthropic-ai/claude-code --resume ${thread.resumeToken}`;
+    const tab = this.createAiSidebarTerminalTab(true, {
+      id: `claude-sidebar-${crypto.randomUUID()}`,
+      title,
+      agentHarness: "claude",
+    });
+    const command = this.buildClaudeLaunchCommand({ resumeToken: thread.resumeToken });
     await this.runCommand(tab, command, { echoCommand: true, interceptAgentLaunch: false });
   }
 
@@ -1268,6 +1333,7 @@ export class WebIDEHost {
     this.previewPort = null;
     this.previewUrl = null;
     this.previewStartRequested = false;
+    this.setPreviewSourcePickerActive(false);
     this.previewSurface.setActiveDb(null);
     this.previewSurface.clear("Switching projects…");
     this.databaseSurface.update([], null);
@@ -1344,6 +1410,7 @@ export class WebIDEHost {
     this.previewPort = null;
     this.previewUrl = null;
     this.previewStartRequested = false;
+    this.setPreviewSourcePickerActive(false);
     this.previewSurface.setActiveDb(null);
     this.previewSurface.clear("Switching projects\u2026");
 
@@ -1419,6 +1486,100 @@ export class WebIDEHost {
 
   private normalizeHostPath(value: string): string {
     return value.replace(/\\/g, "/").replace(/\/+$/g, "");
+  }
+
+  private normalizePreviewSourcePath(
+    sourcePath: string | null | undefined,
+  ): string | null {
+    if (typeof sourcePath !== "string") {
+      return null;
+    }
+
+    let normalized = sourcePath.trim();
+    if (!normalized) {
+      return null;
+    }
+
+    try {
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) {
+        normalized = new URL(normalized).pathname || normalized;
+      }
+    } catch {
+      // Leave raw values untouched if they are not valid URLs.
+    }
+
+    normalized = normalized
+      .replace(/\\/g, "/")
+      .split(/[?#]/, 1)[0]
+      .trim();
+
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch {
+      // Ignore invalid escape sequences.
+    }
+
+    normalized = normalized.replace(/^\/?__virtual__\/\d+(?=\/)/, "");
+    normalized = normalized.replace(/^[^/]+:\d+(?=\/)/, "");
+    normalized = normalized.replace(/^\/?\d+(?=\/(src|app|pages|components|lib|routes|tests?|e2e|drizzle|public)\b)/, "");
+    if (normalized && !normalized.startsWith("/")) {
+      normalized = `/${normalized}`;
+    }
+
+    const projectMarker = `${WORKSPACE_ROOT}/`;
+    const projectMarkerIndex = normalized.indexOf(projectMarker);
+    if (projectMarkerIndex !== -1) {
+      normalized = normalized.slice(projectMarkerIndex);
+    } else if (!normalized.startsWith("/")) {
+      normalized = `${WORKSPACE_ROOT}/${normalized}`;
+    } else if (normalized !== WORKSPACE_ROOT) {
+      normalized = `${WORKSPACE_ROOT}${normalized}`;
+    }
+
+    const resolvedSegments: string[] = [];
+    for (const segment of normalized.split("/")) {
+      if (!segment || segment === ".") {
+        continue;
+      }
+      if (segment === "..") {
+        resolvedSegments.pop();
+        continue;
+      }
+      resolvedSegments.push(segment);
+    }
+
+    const resolvedPath = `/${resolvedSegments.join("/")}`;
+    if (
+      resolvedPath === WORKSPACE_ROOT ||
+      resolvedPath.startsWith(`${WORKSPACE_ROOT}/`)
+    ) {
+      return resolvedPath;
+    }
+
+    return null;
+  }
+
+  private postPreviewSourcePickerMessage(
+    action: "activate-open" | "deactivate",
+  ): boolean {
+    const iframeWindow = this.previewSurface.getIframe().contentWindow;
+    if (!iframeWindow) {
+      return false;
+    }
+
+    iframeWindow.postMessage(
+      {
+        type: "almostnode-preview-source-picker",
+        action,
+      },
+      "*",
+    );
+    return true;
+  }
+
+  private setPreviewSourcePickerActive(active: boolean): void {
+    this.previewSourcePickerActive = active;
+    this.previewSurface.setSelectActive(active);
   }
 
   private resolveBridgeWorkspaceCwd(
@@ -1647,6 +1808,7 @@ export class WebIDEHost {
       session?: WorkbenchTerminalSession;
       inputMode?: "managed" | "passthrough";
       surface?: "panel" | "sidebar";
+      agentHarness?: "claude" | "opencode" | null;
     },
   ): TerminalTabState {
     const id = options?.id ?? `${kind}-${crypto.randomUUID()}`;
@@ -1671,6 +1833,7 @@ export class WebIDEHost {
       kind,
       inputMode: options?.inputMode ?? "managed",
       surface,
+      agentHarness: options?.agentHarness ?? null,
     };
     if (surface === "sidebar") {
       this.openCodeSidebarTerminalTabs.set(id, tab);
@@ -1737,6 +1900,7 @@ export class WebIDEHost {
     if (!(kind === "agent" && tab.inputMode === "passthrough")) {
       this.printPrompt(tab);
     }
+    this.installClaudeImagePasteGuard(tab);
     return tab;
   }
 
@@ -1760,16 +1924,19 @@ export class WebIDEHost {
   private createAiSidebarTerminalTab(
     focus: boolean,
     options?: {
+      id?: string;
       title?: string;
+      agentHarness?: "claude" | "opencode" | null;
     },
   ): TerminalTabState {
-    const id = `ai-sidebar-${crypto.randomUUID()}`;
+    const id = options?.id ?? `ai-sidebar-${crypto.randomUUID()}`;
     const title =
       options?.title ?? `Terminal ${++this.openCodeSidebarTerminalCounter}`;
     return this.createTerminalTab("user", title, focus, true, {
       id,
       cwd: WORKSPACE_ROOT,
       surface: "sidebar",
+      agentHarness: options?.agentHarness ?? null,
     });
   }
 
@@ -1809,6 +1976,7 @@ export class WebIDEHost {
 
     const wasActive = this.activeTerminalTabId === id;
     tab.runningAbortController?.abort();
+    this.disposeClaudeImagePasteGuard(id);
     this.terminalTabs.delete(id);
     this.terminalSurface.removeTab(id);
     tab.terminal.dispose();
@@ -1909,6 +2077,7 @@ export class WebIDEHost {
 
     const wasActive = this.activeOpenCodeSidebarTabId === id;
     terminalTab.runningAbortController?.abort();
+    this.disposeClaudeImagePasteGuard(id);
     this.openCodeSidebarTerminalTabs.delete(id);
     this.openCodeSurface.removeTab(id);
     terminalTab.terminal.dispose();
@@ -1932,8 +2101,22 @@ export class WebIDEHost {
     kind: Exclude<AgentLaunchKind, "terminal">,
   ): string {
     return kind === "claude"
-      ? "CLAUDE_CODE_NO_FLICKER=1 npx @anthropic-ai/claude-code"
+      ? this.buildClaudeLaunchCommand()
       : "npx opencode-ai";
+  }
+
+  private buildClaudeLaunchCommand(options?: {
+    resumeToken?: string;
+  }): string {
+    const parts = [
+      "/usr/local/bin/claude-wrapper",
+      "--plugin-dir",
+      this.quoteShellArg(`${WORKSPACE_ROOT}/.claude-plugin`),
+    ];
+    if (options?.resumeToken) {
+      parts.push("--resume", this.quoteShellArg(options.resumeToken));
+    }
+    return parts.join(" ");
   }
 
   private async createOpenCodeSidebarTab(
@@ -2082,13 +2265,11 @@ export class WebIDEHost {
         id: `claude-sidebar-${crypto.randomUUID()}`,
         cwd: WORKSPACE_ROOT,
         surface: "sidebar",
+        agentHarness: "claude",
       },
     );
-    await this.runCommand(tab, command, { 
+    await this.runCommand(tab, command, {
       echoCommand: true,
-      env: {
-        CLAUDE_CODE_NO_FLICKER: "1",
-      },
     });
   }
 
@@ -2263,6 +2444,7 @@ export class WebIDEHost {
     if (!tab) {
       return;
     }
+    this.disposeClaudeImagePasteGuard(id);
     this.terminalTabs.delete(id);
     this.terminalSurface.removeTab(id);
     tab.runningAbortController?.abort();
@@ -2368,6 +2550,7 @@ export class WebIDEHost {
     const tailscaleAuthAction = this.getTailscaleSidebarAuthAction(
       tailscaleStatus,
     );
+    const requestedExitNodeId = this.getRequestedTailscaleExitNodeId();
     const exitNodeOptions = tailscaleStatus?.exitNodes.map((exitNode) => ({
       value: exitNode.id,
       label: exitNode.online ? exitNode.name : `${exitNode.name} (offline)`,
@@ -2385,13 +2568,22 @@ export class WebIDEHost {
             ? "select-exit-node:tailscale"
             : undefined,
         selectOptions: exitNodeOptions,
-        selectValue: tailscaleStatus?.selectedExitNodeId ?? undefined,
+        selectValue:
+          tailscaleStatus?.selectedExitNodeId
+          ?? requestedExitNodeId
+          ?? undefined,
       },
       {
         name: "github",
         label: "GitHub",
         active: this.keychain.hasSlotData("github"),
         canAuth: true,
+      },
+      {
+        name: "aws",
+        label: "AWS",
+        canAuth: true,
+        ...this.buildAwsSidebarSlotStatus(),
       },
       ...(this.keychain.hasSlotData("claude")
         ? [
@@ -2427,6 +2619,111 @@ export class WebIDEHost {
       && (status.canLogout || status.state === "running" || status.state === "starting")
       ? "logout:tailscale"
       : "login:tailscale";
+  }
+
+  private buildAwsSidebarSlotStatus(
+    summary = inspectAwsStoredState(this.container.vfs),
+    config = readAwsConfig(this.container.vfs),
+    auth = readAwsAuth(this.container.vfs),
+  ): Pick<KeychainSlotStatus, "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"> {
+    const hasStoredLoginState = Object.keys(auth.sessions).length > 0
+      || Object.keys(auth.roleCredentials).length > 0;
+    const activeContext = summary.defaultProfile
+      || (Object.keys(config.ssoSessions).length === 1 ? Object.keys(config.ssoSessions)[0] : null);
+
+    if (!summary.hasSsoSessions) {
+      return {
+        active: false,
+        authAction: "setup:aws",
+        authLabel: "Set up AWS",
+        statusText: "Setup required",
+        statusDetail: "Add your AWS access portal and region before signing in.",
+      };
+    }
+
+    if (summary.hasValidRoleCredentials || summary.hasValidAccessToken) {
+      return {
+        active: true,
+        authAction: "logout:aws",
+        authLabel: "Logout",
+        statusText: activeContext ? `Signed in via ${activeContext}` : "Signed in",
+      };
+    }
+
+    if (hasStoredLoginState) {
+      return {
+        active: false,
+        authAction: "login:aws",
+        authLabel: "Re-authenticate",
+        statusText: "Session expired",
+        statusDetail: "Sign in again to refresh your AWS session.",
+      };
+    }
+
+    return {
+      active: false,
+      authAction: "login:aws",
+      authLabel: "Login",
+      statusText: "Ready to sign in",
+    };
+  }
+
+  private getPreferredAwsSessionName(config = readAwsConfig(this.container.vfs)): string | null {
+    if (config.defaultProfile && config.profiles[config.defaultProfile]) {
+      const sessionName = config.profiles[config.defaultProfile].ssoSession;
+      if (config.ssoSessions[sessionName]) {
+        return sessionName;
+      }
+    }
+
+    const sessionNames = Object.keys(config.ssoSessions);
+    return sessionNames.length === 1 ? sessionNames[0] : null;
+  }
+
+  private buildAwsLoginCommand(): string {
+    const sessionName = this.getPreferredAwsSessionName();
+    return sessionName
+      ? `aws sso login --sso-session ${this.quoteShellArg(sessionName)}`
+      : "aws sso login";
+  }
+
+  private buildAwsLogoutCommand(): string {
+    const sessionName = this.getPreferredAwsSessionName();
+    return sessionName
+      ? `aws sso logout --sso-session ${this.quoteShellArg(sessionName)}`
+      : "aws sso logout";
+  }
+
+  private getAwsSetupDraft(): AwsSetupDraft {
+    const config = readAwsConfig(this.container.vfs);
+    const sessionNames = Object.keys(config.ssoSessions);
+    const sessionName = sessionNames[0] || DEFAULT_AWS_SESSION_NAME;
+    const session = config.ssoSessions[sessionName];
+
+    return normalizeAwsSetupDraft({
+      sessionName,
+      startUrl: session?.startUrl || "",
+      region: session?.region || DEFAULT_AWS_REGION,
+    });
+  }
+
+  async saveAwsSetup(draft: AwsSetupDraft): Promise<void> {
+    const normalized = normalizeAwsSetupDraft(draft);
+    const validationError = validateAwsSetupDraft(normalized);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
+    const config = readAwsConfig(this.container.vfs);
+    const existingSession = config.ssoSessions[normalized.sessionName];
+    config.ssoSessions[normalized.sessionName] = {
+      startUrl: normalized.startUrl,
+      region: normalized.region,
+      registrationScopes: existingSession?.registrationScopes || ["sso:account:access"],
+    };
+    writeAwsConfig(this.container.vfs, config);
+    this.keychain.notifyExternalStateChanged();
+    this.updateKeychainSurface();
   }
 
   private handleTailscaleKeychainTransition(): void {
@@ -2466,9 +2763,15 @@ export class WebIDEHost {
       return "Loading status";
     }
 
+    const requestedExitNodeId = this.getRequestedTailscaleExitNodeId();
     const selectedExitNodeName =
       status.selectedExitNodeId
         ? status.exitNodes.find((exitNode) => exitNode.id === status.selectedExitNodeId)?.name
+        : null;
+    const requestedExitNodeName =
+      !selectedExitNodeName && requestedExitNodeId
+        ? status.exitNodes.find((exitNode) => exitNode.id === requestedExitNodeId)?.name
+          ?? requestedExitNodeId
         : null;
 
     switch (status.state) {
@@ -2484,6 +2787,8 @@ export class WebIDEHost {
         }
         return selectedExitNodeName
           ? `Running via ${selectedExitNodeName}`
+          : requestedExitNodeName
+            ? `Running, selecting ${requestedExitNodeName}`
           : status.exitNodes.length > 0
             ? "Running, choose an exit node"
             : "Running, no exit nodes available";
@@ -2500,6 +2805,18 @@ export class WebIDEHost {
       case "stopped":
       default:
         return "Stopped";
+    }
+  }
+
+  private getRequestedTailscaleExitNodeId(): string | null {
+    try {
+      const config = this.container.network.getConfig();
+      if (config.provider !== "tailscale" || !config.useExitNode) {
+        return null;
+      }
+      return config.exitNodeId?.trim() || null;
+    } catch {
+      return null;
     }
   }
 
@@ -2671,6 +2988,64 @@ export class WebIDEHost {
     await this.runCommand(this.getPreviewTerminalTab(), command);
   }
 
+  private registerWorkbenchShellCommands(): void {
+    if (typeof this.container.registerShellCommand !== "function") {
+      return;
+    }
+
+    this.container.registerShellCommand({
+      name: "webide-open",
+      interceptShellParsing: true,
+      execute: async (args, context) => {
+        const rawTarget = args.join(" ").trim();
+
+        try {
+          const target = await this.runWebIdeOpenCommand(rawTarget, context.cwd);
+          const suffix =
+            typeof target.line === "number"
+              ? `:${target.line}${typeof target.column === "number" ? `:${target.column}` : ""}`
+              : "";
+          return {
+            stdout: `Opened ${target.path}${suffix}\n`,
+            stderr: "",
+            exitCode: 0,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            stdout: "",
+            stderr: `${message}\n`,
+            exitCode: 1,
+          };
+        }
+      },
+    });
+  }
+
+  private async runWebIdeOpenCommand(
+    rawTarget: string,
+    cwd: string,
+  ): Promise<WebIdeOpenTarget> {
+    const target = parseWebIdeOpenTarget(rawTarget);
+    const resolvedPath = resolveWebIdeOpenPath(target.path, cwd, WORKSPACE_ROOT);
+
+    if (!this.container.vfs.existsSync(resolvedPath)) {
+      throw new Error(`File not found: ${resolvedPath}`);
+    }
+
+    const stat = this.container.vfs.statSync(resolvedPath);
+    if (stat.isDirectory()) {
+      throw new Error(`webide-open only supports files, not directories: ${resolvedPath}`);
+    }
+
+    const resolvedTarget: WebIdeOpenTarget = {
+      ...target,
+      path: resolvedPath,
+    };
+    await this.openWorkspaceTargetInEditor(resolvedTarget);
+    return resolvedTarget;
+  }
+
   async unlockKeychain(): Promise<void> {
     await this.keychain.handlePrimaryAction();
   }
@@ -2707,16 +3082,84 @@ export class WebIDEHost {
     await this.openWorkspaceFileAsText(path);
   }
 
-  private async openWorkspaceFileAsText(path: string): Promise<void> {
+  private async openWorkspaceLocation(
+    sourcePath: string,
+    lineNumber?: number | null,
+    columnNumber?: number | null,
+  ): Promise<boolean> {
+    const normalizedPath = this.normalizePreviewSourcePath(sourcePath);
+    if (!normalizedPath) {
+      this.updatePreviewStatus("Could not resolve source for that element.");
+      return false;
+    }
+
+    if (!this.container.vfs.existsSync(normalizedPath)) {
+      this.updatePreviewStatus(
+        `Resolved source is missing: ${normalizedPath}`,
+      );
+      return false;
+    }
+
+    await this.openWorkspaceFileAsText(
+      normalizedPath,
+      lineNumber,
+      columnNumber,
+    );
+    return true;
+  }
+
+  private async openWorkspaceTargetInEditor(
+    target: WebIdeOpenTarget,
+  ): Promise<void> {
+    if (typeof target.line === "number") {
+      await this.openWorkspaceFileAsText(
+        target.path,
+        target.line,
+        target.column ?? 1,
+      );
+      return;
+    }
+
+    await this.openWorkspaceFile(target.path);
+  }
+
+  private async openWorkspaceFileAsText(
+    path: string,
+    lineNumber?: number | null,
+    columnNumber?: number | null,
+  ): Promise<void> {
     const editorService = await getService(IEditorService);
     const languageId = inferWorkbenchLanguageId(path);
+    const normalizedLineNumber =
+      typeof lineNumber === "number" &&
+      Number.isFinite(lineNumber) &&
+      lineNumber > 0
+        ? Math.trunc(lineNumber)
+        : null;
+    const normalizedColumnNumber =
+      typeof columnNumber === "number" &&
+      Number.isFinite(columnNumber) &&
+      columnNumber > 0
+        ? Math.trunc(columnNumber)
+        : 1;
+    const openOptions = {
+      pinned: true,
+      ...(normalizedLineNumber
+        ? {
+            selection: {
+              startLineNumber: normalizedLineNumber,
+              startColumn: normalizedColumnNumber,
+              endLineNumber: normalizedLineNumber,
+              endColumn: normalizedColumnNumber,
+            },
+          }
+        : {}),
+    };
 
     try {
       await editorService.openEditor({
         resource: URI.file(path),
-        options: {
-          pinned: true,
-        },
+        options: openOptions,
       });
     } catch {
       // Fallback: if instanceof URI fails due to Vite module identity mismatch,
@@ -2728,10 +3171,65 @@ export class WebIDEHost {
       );
       await editorService.openEditor({
         resource: InternalURI.file(path),
-        options: {
-          pinned: true,
-        },
+        options: openOptions,
       });
+    }
+
+    if (normalizedLineNumber) {
+      const activeControl = editorService.activeTextEditorControl as
+        | {
+            getModifiedEditor?: () => unknown;
+            getModel?: () => { uri?: { path?: string } } | null;
+            setSelection?: (
+              selection: {
+                startLineNumber: number;
+                startColumn: number;
+                endLineNumber: number;
+                endColumn: number;
+              },
+              source?: string,
+            ) => void;
+            revealPositionNearTop?: (position: {
+              lineNumber: number;
+              column: number;
+            }) => void;
+            revealRangeNearTop?: (range: {
+              startLineNumber: number;
+              startColumn: number;
+              endLineNumber: number;
+              endColumn: number;
+            }) => void;
+          }
+        | undefined;
+      const codeEditor =
+        activeControl &&
+        typeof activeControl.getModifiedEditor === "function" &&
+        activeControl.getModifiedEditor()
+          ? (activeControl.getModifiedEditor() as typeof activeControl)
+          : activeControl;
+      const selection = {
+        startLineNumber: normalizedLineNumber,
+        startColumn: normalizedColumnNumber,
+        endLineNumber: normalizedLineNumber,
+        endColumn: normalizedColumnNumber,
+      };
+      const activeModelPath = codeEditor?.getModel?.()?.uri?.path;
+
+      if (
+        codeEditor &&
+        typeof codeEditor.setSelection === "function" &&
+        (!activeModelPath || activeModelPath === path)
+      ) {
+        codeEditor.setSelection(selection, "almostnode.preview-source-picker");
+        if (typeof codeEditor.revealPositionNearTop === "function") {
+          codeEditor.revealPositionNearTop({
+            lineNumber: normalizedLineNumber,
+            column: normalizedColumnNumber,
+          });
+        } else if (typeof codeEditor.revealRangeNearTop === "function") {
+          codeEditor.revealRangeNearTop(selection);
+        }
+      }
     }
 
     if (!languageId) {
@@ -2749,6 +3247,57 @@ export class WebIDEHost {
     } finally {
       modelReference.dispose();
     }
+  }
+
+  private installClaudeImagePasteGuard(tab: TerminalTabState): void {
+    this.disposeClaudeImagePasteGuard(tab.id);
+
+    if (this.agentMode !== "browser" || tab.agentHarness !== "claude") {
+      return;
+    }
+
+    const terminalRoot = tab.terminal.element;
+    if (!terminalRoot) {
+      return;
+    }
+
+    const onPaste = (event: ClipboardEvent) => {
+      const mimeTypes = collectClipboardImageMimeTypes(event.clipboardData);
+      if (mimeTypes.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      console.warn("[claude-image-paste]", {
+        tabId: tab.id,
+        mimeTypes,
+        blocker: describeClaudeImagePasteBlocker(mimeTypes),
+      });
+      void this.showClaudeImagePasteUnsupportedError(mimeTypes);
+    };
+
+    terminalRoot.addEventListener("paste", onPaste, { capture: true });
+    this.claudeImagePasteCleanup.set(tab.id, () => {
+      terminalRoot.removeEventListener("paste", onPaste, { capture: true });
+    });
+  }
+
+  private disposeClaudeImagePasteGuard(id: string): void {
+    const cleanup = this.claudeImagePasteCleanup.get(id);
+    cleanup?.();
+    this.claudeImagePasteCleanup.delete(id);
+  }
+
+  private async showClaudeImagePasteUnsupportedError(
+    mimeTypes: readonly string[],
+  ): Promise<void> {
+    const { initToasts, showClaudeImagePasteUnsupportedToast } = await import(
+      "../features/toast"
+    );
+    const workbenchEl = this.options.elements.workbench;
+    initToasts(workbenchEl.parentElement ?? workbenchEl);
+    showClaudeImagePasteUnsupportedToast(mimeTypes);
   }
 
   private async revealPreviewEditor(): Promise<void> {
@@ -2851,6 +3400,26 @@ export class WebIDEHost {
 
   async focusTerminal(): Promise<void> {
     await this.revealTerminalPanel(true);
+  }
+
+  async togglePreviewSourcePicker(): Promise<void> {
+    if (this.previewSourcePickerActive) {
+      this.setPreviewSourcePickerActive(false);
+      this.postPreviewSourcePickerMessage("deactivate");
+      return;
+    }
+
+    if (!this.previewUrl) {
+      this.updatePreviewStatus("Preview source picker needs a running preview.");
+      return;
+    }
+
+    this.setPreviewSourcePickerActive(true);
+    if (!this.postPreviewSourcePickerMessage("activate-open")) {
+      this.updatePreviewStatus(
+        "Select mode will start once the preview finishes loading.",
+      );
+    }
   }
 
   async executeWorkbenchCommand(
@@ -3531,6 +4100,8 @@ export class WebIDEHost {
       },
     );
 
+    installOxcMonacoIntegration(this.container);
+
     await this.registerStatusbarEntries();
 
     const editorService = await getService(IEditorService);
@@ -4163,6 +4734,65 @@ export class WebIDEHost {
       this.addConsoleEntry(level, args, timestamp || Date.now());
     });
 
+    this.previewSurface.getIframe().addEventListener("load", () => {
+      if (this.previewSourcePickerActive) {
+        this.postPreviewSourcePickerMessage("activate-open");
+      }
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (!this.previewSourcePickerActive || event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      this.setPreviewSourcePickerActive(false);
+      this.postPreviewSourcePickerMessage("deactivate");
+    });
+
+    window.addEventListener("message", (event) => {
+      const iframeWindow = this.previewSurface.getIframe().contentWindow;
+      if (!iframeWindow || event.source !== iframeWindow) {
+        return;
+      }
+
+      const payload = event.data as PreviewSourcePickerMessage | undefined;
+      if (
+        !payload ||
+        payload.type !== "almostnode-preview-source-picker" ||
+        typeof payload.status !== "string"
+      ) {
+        return;
+      }
+
+      if (payload.status === "armed") {
+        return;
+      }
+
+      this.setPreviewSourcePickerActive(false);
+
+      if (
+        payload.status === "selected" &&
+        typeof payload.filePath === "string"
+      ) {
+        void this.openWorkspaceLocation(
+          payload.filePath,
+          payload.lineNumber,
+          payload.columnNumber,
+        );
+        return;
+      }
+
+      if (payload.status === "error") {
+        this.updatePreviewStatus(
+          payload.reason
+            ? `Could not resolve source: ${payload.reason}`
+            : "Could not resolve source for that element.",
+        );
+      }
+    });
+
     this.container.on("server-ready", (_port: unknown, url: unknown) => {
       if (typeof _port !== "number" || typeof url !== "string") {
         return;
@@ -4205,6 +4835,7 @@ export class WebIDEHost {
       this.previewPort = null;
       this.previewUrl = null;
       this.previewStartRequested = false;
+      this.setPreviewSourcePickerActive(false);
       this.clearScheduledPreviewStartRetry();
       this.previewSurface.clear(
         "Preview server stopped. Run the workspace to start it again.",

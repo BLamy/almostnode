@@ -54,6 +54,60 @@ declare module '*.pem?raw' {
   export default content;
 }
 
+declare module '@napi-rs/wasm-runtime' {
+  export class WASI {
+    constructor(options?: Record<string, unknown>);
+  }
+
+  export interface InstantiateNapiModuleOptions {
+    context?: unknown;
+    asyncWorkPoolSize?: number;
+    wasi?: WASI;
+    childThread?: boolean;
+    onCreateWorker?: () => Worker;
+    overwriteImports?: (
+      importObject: Record<string, Record<string, unknown>>,
+    ) => Record<string, Record<string, unknown>> | void;
+    beforeInit?: (context: {
+      instance: {
+        exports: Record<string, unknown>;
+      };
+    }) => void;
+  }
+
+  export function getDefaultContext(): unknown;
+
+  export function instantiateNapiModule(
+    wasm: ArrayBuffer | ArrayBufferView,
+    options?: InstantiateNapiModuleOptions,
+  ): Promise<{
+    napiModule: {
+      exports: Record<string, unknown>;
+    };
+  }>;
+
+  export function instantiateNapiModuleSync(
+    wasm: WebAssembly.Module,
+    options?: InstantiateNapiModuleOptions & {
+      childThread?: boolean;
+    },
+  ): {
+    napiModule: {
+      exports: Record<string, unknown>;
+    };
+  };
+
+  export class MessageHandler {
+    constructor(options: {
+      onLoad: (options: {
+        wasmModule: WebAssembly.Module;
+        wasmMemory: WebAssembly.Memory;
+      }) => unknown;
+    });
+    handle(event: MessageEvent<unknown>): void;
+  }
+}
+
 declare module '@tailscale/connect' {
   export interface TailscaleConnectFetchRequest {
     url: string;

@@ -186,7 +186,7 @@ describe('network controller', () => {
     ).toBe('tailscale');
   });
 
-  it('routes public URLs through tailscale only after the exit-node session is connected', () => {
+  it('routes public URLs through tailscale as soon as exit-node mode is connected', () => {
     const baseOptions = {
       provider: 'tailscale' as const,
       authMode: 'interactive' as const,
@@ -745,7 +745,7 @@ describe('network controller', () => {
     expect(controller.getConfig().tailscaleConnected).toBe(true);
   });
 
-  it('waits for runtime-selected exit-node confirmation before routing public fetches through tailscale', async () => {
+  it('routes public fetches through tailscale before runtime-selected exit-node confirmation arrives', async () => {
     const tailscaleFetches: NetworkFetchRequest[] = [];
     const configuredOptions: ResolvedNetworkOptions[] = [];
     let selectedExitNodeId: string | null = null;
@@ -814,9 +814,9 @@ describe('network controller', () => {
       bodyBase64: Buffer.from('{}').toString('base64'),
     });
 
-    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('browser-response');
-    expect(tailscaleFetches).toHaveLength(0);
-    expect(nativeFetch).toHaveBeenCalledTimes(1);
+    expect(Buffer.from(response.bodyBase64, 'base64').toString()).toBe('tailnet-response');
+    expect(tailscaleFetches).toHaveLength(1);
+    expect(nativeFetch).not.toHaveBeenCalled();
     expect(controller.getConfig().exitNodeId).toBe('node-self');
     expect(controller.getConfig().activeExitNodeId).toBeNull();
     expect(
@@ -825,7 +825,7 @@ describe('network controller', () => {
         controller.getConfig(),
         { origin: 'https://app.example.com' },
       ),
-    ).toBe('browser');
+    ).toBe('tailscale');
     await expect(controller.getStatus()).resolves.toMatchObject({
       selectedExitNodeId: 'node-self',
       exitNodes: [
@@ -847,13 +847,80 @@ describe('network controller', () => {
       bodyBase64: Buffer.from('{}').toString('base64'),
     });
     expect(Buffer.from(retriedResponse.bodyBase64, 'base64').toString()).toBe('tailnet-response');
-    expect(tailscaleFetches).toHaveLength(1);
-    expect(nativeFetch).toHaveBeenCalledTimes(1);
+    expect(tailscaleFetches).toHaveLength(2);
+    expect(nativeFetch).not.toHaveBeenCalled();
     expect(configuredOptions.at(-1)).toMatchObject({
       provider: 'tailscale',
       useExitNode: true,
       exitNodeId: 'node-self',
     });
+  });
+
+  it('auto-selects a preferred exit node when a running status event later exposes exit nodes', async () => {
+    const configuredOptions: ResolvedNetworkOptions[] = [];
+    let emitStatus: ((status: TailscaleAdapterStatus) => void) | null = null;
+
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      emitStatus = onStatus;
+      return {
+        async getStatus(): Promise<TailscaleAdapterStatus> {
+          return { state: 'starting' };
+        },
+        async login(): Promise<TailscaleAdapterStatus> {
+          return { state: 'starting' };
+        },
+        async logout(): Promise<TailscaleAdapterStatus> {
+          return { state: 'stopped' };
+        },
+        async configure(options: ResolvedNetworkOptions): Promise<void> {
+          configuredOptions.push({ ...options });
+        },
+        async fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse> {
+          return {
+            url: request.url,
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            bodyBase64: '',
+          };
+        },
+        async lookup(): Promise<NetworkLookupResult> {
+          return {
+            hostname: 'chatgpt.com',
+            addresses: [],
+          };
+        },
+      };
+    });
+
+    const controller = createNetworkController({
+      provider: 'tailscale',
+      useExitNode: true,
+      exitNodeId: null,
+    });
+
+    await controller.login();
+    emitStatus?.({
+      state: 'running',
+      selectedExitNodeId: null,
+      exitNodes: [
+        {
+          id: 'node-self',
+          name: 'bretts-macbook-air',
+          online: true,
+          selected: false,
+        },
+      ],
+    });
+
+    await vi.waitFor(() => {
+      expect(configuredOptions.at(-1)).toMatchObject({
+        provider: 'tailscale',
+        useExitNode: true,
+        exitNodeId: 'node-self',
+      });
+    });
+    expect(controller.getConfig().exitNodeId).toBe('node-self');
   });
 
   it('boots the tailscale adapter on getStatus when tailscale is already selected', async () => {

@@ -126,6 +126,77 @@ describe("KeychainSidebarSurface", () => {
     expect(actions).toEqual(["login:tailscale"]);
   });
 
+  it("can render an AWS login action when the slot is configured but unauthenticated", () => {
+    const surface = new KeychainSidebarSurface();
+    const actions: string[] = [];
+    surface.setActionHandler((action) => {
+      actions.push(action);
+    });
+
+    const container = document.createElement("div");
+    surface.attach(container);
+    surface.update(
+      [
+        {
+          name: "aws",
+          label: "AWS",
+          active: false,
+          canAuth: true,
+          authAction: "login:aws",
+          statusText: "Ready to sign in",
+        },
+      ],
+      { hasStoredVault: false, supported: true },
+    );
+
+    const button = Array.from(container.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent === "Login",
+    ) as HTMLButtonElement | undefined;
+
+    expect(button).toBeTruthy();
+    button?.click();
+
+    expect(actions).toEqual(["login:aws"]);
+  });
+
+  it("can render an AWS setup action with helper copy", () => {
+    const surface = new KeychainSidebarSurface();
+    const actions: string[] = [];
+    surface.setActionHandler((action) => {
+      actions.push(action);
+    });
+
+    const container = document.createElement("div");
+    surface.attach(container);
+    surface.update(
+      [
+        {
+          name: "aws",
+          label: "AWS",
+          active: false,
+          canAuth: true,
+          authAction: "setup:aws",
+          authLabel: "Set up AWS",
+          statusText: "Setup required",
+          statusDetail: "Add your AWS access portal and region before signing in.",
+        },
+      ],
+      { hasStoredVault: false, supported: true },
+    );
+
+    expect(container.textContent).toContain("Setup required");
+    expect(container.textContent).toContain("Add your AWS access portal and region before signing in.");
+
+    const button = Array.from(container.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent === "Set up AWS",
+    ) as HTMLButtonElement | undefined;
+
+    expect(button).toBeTruthy();
+    button?.click();
+
+    expect(actions).toEqual(["setup:aws"]);
+  });
+
   it("renders a placeholder when exit nodes exist but none is actually selected", () => {
     const surface = new KeychainSidebarSurface();
     const actions: string[] = [];

@@ -34,7 +34,10 @@ describe("webide workspace seed", () => {
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/AGENTS.md`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/CLAUDE.md`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/settings.json`)).toBe(true);
+    expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude-plugin/plugin.json`)).toBe(true);
+    expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude-plugin/.lsp.json`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/hooks/task-git.sh`)).toBe(true);
+    expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.opencode/opencode.jsonc`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.opencode/plugins/task-git.js`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`)).toBe(true);
     expect(container.vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)).toBe(true);
@@ -44,6 +47,7 @@ describe("webide workspace seed", () => {
     ) as {
       name?: string;
       scripts?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
     const componentsConfig = JSON.parse(
       container.vfs.readFileSync(`${WORKSPACE_ROOT}/components.json`, "utf8"),
@@ -74,7 +78,20 @@ describe("webide workspace seed", () => {
           }>;
         }>;
       };
+      permissions?: {
+        allow?: string[];
+      };
     };
+    const claudePlugin = JSON.parse(
+      container.vfs.readFileSync(
+        `${WORKSPACE_ROOT}/.claude-plugin/.lsp.json`,
+        "utf8",
+      ),
+    ) as Record<string, { command?: string; args?: string[] }>;
+    const opencodeConfig = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/.opencode/opencode.jsonc`,
+      "utf8",
+    );
     const appSource = container.vfs.readFileSync(DEFAULT_FILE, "utf8");
     const claudeGitHook = container.vfs.readFileSync(
       `${WORKSPACE_ROOT}/.claude/hooks/task-git.sh`,
@@ -114,15 +131,36 @@ describe("webide workspace seed", () => {
 
     expect(pkg.name).toBe("almostnode-webide-tailwind-starter");
     expect(pkg.scripts?.dev).toBe("vite --port 3000");
+    expect(pkg.scripts?.typecheck).toBe("tsc --noEmit && npx --yes tsgo-wasm --noEmit");
+    expect(pkg.scripts?.lint).toBe("oxlint .");
+    expect(pkg.scripts?.format).toBe("oxfmt .");
+    expect(pkg.devDependencies?.oxfmt).toBe("^0.43.0");
+    expect(pkg.devDependencies?.oxlint).toBe("^1.58.0");
+    expect(pkg.devDependencies?.["tsgo-wasm"]).toBe("^2026.4.2");
+    expect(pkg.devDependencies?.["@typescript/native-preview"]).toBe("^7.0.0-dev.20260401.1");
     expect(componentsConfig.tailwind?.config).toBe("tailwind.config.ts");
     expect(componentsConfig.tailwind?.css).toBe("src/index.css");
     expect(componentsConfig.aliases?.ui).toBe("@/components/ui");
     expect(settings["files.autoSave"]).toBe("onFocusChange");
     expect(settings["editor.minimap.enabled"]).toBe(false);
     expect(settings["workbench.colorTheme"]).toBe("Islands Dark");
+    expect(settings["javascript.format.enable"]).toBe(false);
+    expect(settings["typescript.format.enable"]).toBe(false);
+    expect(settings["eslint.validate"]).toEqual([]);
+    expect(settings["editor.codeActionsOnSave"]).toEqual({
+      "source.fixAll.eslint": "never",
+    });
     expect(
       claudeSettings.hooks?.TaskCompleted?.[0]?.hooks?.[0]?.command,
     ).toContain(".claude/hooks/task-git.sh");
+    expect(claudeSettings.permissions?.allow).toContain("Bash(almostnode-lsp-bridge *)");
+    expect(claudeSettings.permissions?.allow).toContain("Bash(oxfmt *)");
+    expect(claudePlugin.oxlint?.command).toBe("almostnode-lsp-bridge");
+    expect(claudePlugin.oxlint?.args).toEqual(["oxlint"]);
+    expect(claudePlugin.tsgo?.args).toEqual(["tsgo"]);
+    expect(opencodeConfig).toContain('"command": ["oxfmt", "$FILE"]');
+    expect(opencodeConfig).toContain('"command": ["almostnode-lsp-bridge", "oxlint"]');
+    expect(opencodeConfig).toContain('"command": ["almostnode-lsp-bridge", "tsgo"]');
     expect(claudeGitHook).toContain("git add .");
     expect(claudeGitHook).toContain('git commit -m "Complete task"');
     expect(claudeGitHook).toContain('git push -u origin "$BRANCH"');
@@ -139,6 +177,59 @@ describe("webide workspace seed", () => {
     expect(envDecl).not.toContain("declare module 'react'");
     expect(tsconfig.compilerOptions?.baseUrl).toBeUndefined();
   });
+
+  it("wires vite template npm lint and format scripts to the OXC shell commands", async () => {
+    const container = createContainer({ cwd: WORKSPACE_ROOT });
+
+    seedWorkspace(container, "vite");
+    container.vfs.writeFileSync(
+      `${WORKSPACE_ROOT}/src/App.tsx`,
+      'export    default   function App( ){return <div>hi</div>}\nasdf\n',
+    );
+
+    const formatResult = await container.run("npm run format", { cwd: WORKSPACE_ROOT });
+    const formattedSource = container.vfs.readFileSync(`${WORKSPACE_ROOT}/src/App.tsx`, "utf8");
+    const lintResult = await container.run("npm run lint", { cwd: WORKSPACE_ROOT });
+
+    expect(formatResult.exitCode).toBe(0);
+    expect(formattedSource).toContain("export default function App()");
+    expect(formattedSource).toContain("asdf;");
+    expect(lintResult.exitCode).toBe(1);
+    expect(lintResult.stdout).toContain("src/App.tsx:4:1:");
+  }, 60_000);
+
+  it("wires vite template npm typecheck to both tsc and tsgo-wasm", async () => {
+    const container = createContainer({ cwd: WORKSPACE_ROOT });
+
+    seedWorkspace(container, "vite");
+    container.vfs.mkdirSync(`${WORKSPACE_ROOT}/node_modules/typescript/bin`, { recursive: true });
+    container.vfs.mkdirSync(`${WORKSPACE_ROOT}/node_modules/tsgo-wasm`, { recursive: true });
+
+    container.vfs.writeFileSync(
+      `${WORKSPACE_ROOT}/node_modules/typescript/bin/tsc`,
+      `require("fs").writeFileSync("/project/.tsc-ran", process.argv.slice(2).join(" ") + "\\n");\n`,
+    );
+    container.vfs.writeFileSync(
+      `${WORKSPACE_ROOT}/node_modules/tsgo-wasm/package.json`,
+      JSON.stringify({
+        name: "tsgo-wasm",
+        version: "2026.4.2",
+        bin: {
+          "tsgo-wasm": "tsgo-wasm",
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      `${WORKSPACE_ROOT}/node_modules/tsgo-wasm/tsgo-wasm`,
+      `require("fs").writeFileSync("/project/.tsgo-wasm-ran", process.argv.slice(2).join(" ") + "\\n");\n`,
+    );
+
+    const typecheckResult = await container.run("npm run typecheck", { cwd: WORKSPACE_ROOT });
+
+    expect(typecheckResult.exitCode).toBe(0);
+    expect(container.vfs.readFileSync(`${WORKSPACE_ROOT}/.tsc-ran`, "utf8").trim()).toBe("--noEmit");
+    expect(container.vfs.readFileSync(`${WORKSPACE_ROOT}/.tsgo-wasm-ran`, "utf8").trim()).toBe("--noEmit");
+  }, 60_000);
 
   it("keeps template-only files out of git when seeded into /project", async () => {
     const container = createContainer({

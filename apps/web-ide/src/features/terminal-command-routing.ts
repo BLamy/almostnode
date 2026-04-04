@@ -160,6 +160,7 @@ export function parseOpenCodeLaunchCommand(command: string): OpenCodeLaunchArgs 
 export function matchesClaudeLaunchCommand(command: string): boolean {
   const patterns = [
     /^(?:\.\/)?(?:node_modules\/\.bin\/)?claude(?:\s|$)/,
+    /^(?:\.\/|\/usr\/local\/bin\/)?claude-wrapper(?:\s|$)/,
     /^npx(?:\s+[-\w=]+)*(?:\s+@anthropic-ai\/claude-code(?:\s+--dangerous-skip-permissions-check)?|\s+claude)(?:\s|$)/,
     /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/,
   ];

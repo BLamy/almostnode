@@ -37,6 +37,10 @@ import {
   writeStoredTailscaleSessionSnapshot,
   type TailscaleSessionSnapshot,
 } from '../src/features/network-session';
+import {
+  AWS_AUTH_PATH,
+  AWS_CONFIG_PATH,
+} from '../../../packages/almostnode/src/shims/aws-storage';
 
 const CLAUDE_SLOT_PATHS = [
   CLAUDE_AUTH_CREDENTIALS_PATH,
@@ -50,6 +54,7 @@ const OPENCODE_SLOT_PATHS = [
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
 ];
+const AWS_SLOT_PATHS = [AWS_CONFIG_PATH, AWS_AUTH_PATH];
 
 const GH_HOSTS_PATH = '/home/user/.config/gh/hosts.yml';
 
@@ -175,6 +180,7 @@ function createKeychain(vfs = new VirtualFS()): Keychain {
   kc.registerSlot('tailscale', [TAILSCALE_SESSION_KEYCHAIN_PATH]);
   kc.registerSlot('claude', CLAUDE_SLOT_PATHS);
   kc.registerSlot('github', [GH_HOSTS_PATH]);
+  kc.registerSlot('aws', AWS_SLOT_PATHS);
   kc.registerSlot('opencode', OPENCODE_SLOT_PATHS);
   return kc;
 }
@@ -214,6 +220,54 @@ function writeGhHosts(vfs: VirtualFS, token: string): string {
   vfs.mkdirSync('/home/user/.config/gh', { recursive: true });
   vfs.writeFileSync(GH_HOSTS_PATH, raw);
   return raw;
+}
+
+function writeAwsConfig(vfs: VirtualFS): string {
+  const raw = JSON.stringify({
+    version: 1,
+    defaultProfile: 'dev',
+    ssoSessions: {
+      dev: {
+        startUrl: 'https://example.awsapps.com/start',
+        region: 'us-east-1',
+        registrationScopes: ['sso:account:access'],
+      },
+    },
+    profiles: {
+      dev: {
+        ssoSession: 'dev',
+        accountId: '123456789012',
+        roleName: 'AdministratorAccess',
+        region: 'us-east-1',
+        output: 'json',
+      },
+    },
+  }, null, 2);
+  vfs.mkdirSync('/home/user/.config/almostnode/aws', { recursive: true });
+  vfs.writeFileSync(AWS_CONFIG_PATH, `${raw}\n`);
+  return `${raw}\n`;
+}
+
+function writeAwsAuth(vfs: VirtualFS): string {
+  const raw = JSON.stringify({
+    version: 1,
+    clients: {},
+    sessions: {
+      dev: {
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        issuedAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+        region: 'us-east-1',
+        startUrl: 'https://example.awsapps.com/start',
+        registrationScopes: ['sso:account:access'],
+      },
+    },
+    roleCredentials: {},
+  }, null, 2);
+  vfs.mkdirSync('/home/user/.config/almostnode/aws', { recursive: true });
+  vfs.writeFileSync(AWS_AUTH_PATH, `${raw}\n`);
+  return `${raw}\n`;
 }
 
 function writeOpenCodeAuth(vfs: VirtualFS, apiKey: string): string {
@@ -641,8 +695,10 @@ describe('Keychain', () => {
     await flushWatcher();
     await kc.handlePrimaryAction();
 
-    // Write GH hosts after keychain is unlocked
+    // Write GH hosts and AWS config after keychain is unlocked
     const ghContent = writeGhHosts(vfs, 'ghp_test123');
+    const awsConfigContent = writeAwsConfig(vfs);
+    const awsAuthContent = writeAwsAuth(vfs);
     await kc.persistCurrentState();
 
     const stored = parseStoredKeychain(localStorage.getItem(KEYCHAIN_STORAGE_KEY));
@@ -659,15 +715,21 @@ describe('Keychain', () => {
         name: 'github',
         paths: [GH_HOSTS_PATH],
       },
+      {
+        name: 'aws',
+        paths: AWS_SLOT_PATHS,
+      },
     ]);
 
-    // Verify restore includes GH hosts
+    // Verify restore includes GH hosts and AWS state
     const refreshedVfs = new VirtualFS();
     const refreshedKc = createKeychain(refreshedVfs);
     await refreshedKc.init();
     await refreshedKc.handlePrimaryAction();
 
     expect(refreshedVfs.readFileSync(GH_HOSTS_PATH, 'utf8')).toBe(ghContent);
+    expect(refreshedVfs.readFileSync(AWS_CONFIG_PATH, 'utf8')).toBe(awsConfigContent);
+    expect(refreshedVfs.readFileSync(AWS_AUTH_PATH, 'utf8')).toBe(awsAuthContent);
     expect(refreshedVfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, 'utf8')).toBeTruthy();
   });
 
@@ -685,6 +747,7 @@ describe('Keychain', () => {
     expect(kc.hasSlotData('tailscale')).toBe(false);
     expect(kc.hasSlotData('claude')).toBe(false);
     expect(kc.hasSlotData('github')).toBe(false);
+    expect(kc.hasSlotData('aws')).toBe(false);
 
     writeTailscaleSession({ control: 'tailscale' });
     expect(kc.hasSlotData('tailscale')).toBe(true);
@@ -695,6 +758,9 @@ describe('Keychain', () => {
 
     writeGhHosts(vfs, 'ghp_test');
     expect(kc.hasSlotData('github')).toBe(true);
+
+    writeAwsConfig(vfs);
+    expect(kc.hasSlotData('aws')).toBe(true);
   });
 
   it('migrates v1 vault to v2 on first access', async () => {
@@ -942,6 +1008,34 @@ describe('Keychain', () => {
     ).resolves.toBe(true);
 
     expect(freshVfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, 'utf8')).toBe(auth);
+    expect(freshKc.getState().hasLiveCredentials).toBe(true);
+  });
+
+  it('auto-restores saved AWS state before aws commands run', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    const config = writeAwsConfig(setupVfs);
+    const auth = writeAwsAuth(setupVfs);
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    expect(freshKc.getState().hasLiveCredentials).toBe(false);
+
+    await expect(
+      freshKc.prepareForCommand('aws sts get-caller-identity --profile dev'),
+    ).resolves.toBe(true);
+
+    expect(freshVfs.readFileSync(AWS_CONFIG_PATH, 'utf8')).toBe(config);
+    expect(freshVfs.readFileSync(AWS_AUTH_PATH, 'utf8')).toBe(auth);
     expect(freshKc.getState().hasLiveCredentials).toBe(true);
   });
 

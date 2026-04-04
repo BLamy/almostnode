@@ -11,6 +11,9 @@ const collectOpenCodeBrowserSnapshotMock = vi.fn();
 const listOpenCodeBrowserSessionsMock = vi.fn();
 const restoreOpenCodeBrowserSnapshotMock = vi.fn();
 const readGhTokenMock = vi.fn();
+const createModelReferenceMock = vi.fn();
+const getModelMock = vi.fn();
+const setModelLanguageMock = vi.fn();
 
 vi.mock("almostnode", () => ({
   createContainer: vi.fn(),
@@ -56,7 +59,9 @@ vi.mock("../src/extensions/extension-services", () => ({
 }));
 vi.mock("../src/workbench/workbench-surfaces", () => ({
   FilesSidebarSurface: class {},
-  PreviewSurface: class {},
+  PreviewSurface: class {
+    setSelectActive(): void {}
+  },
   TerminalPanelSurface: class {},
   OpenCodeTerminalSurface: class {},
   ConsolePanelElement: class {},
@@ -185,6 +190,11 @@ vi.mock("monaco-editor", () => ({
     register: vi.fn(),
     getLanguages: () => [],
   },
+  editor: {
+    createModelReference: createModelReferenceMock,
+    getModel: getModelMock,
+    setModelLanguage: setModelLanguageMock,
+  },
 }));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {},
@@ -260,7 +270,7 @@ beforeAll(async () => {
   });
 
   ({ WebIDEHost } = await import("../src/workbench/workbench-host"));
-});
+}, 60000);
 
 beforeEach(() => {
   getServiceMock?.mockReset();
@@ -272,6 +282,11 @@ beforeEach(() => {
   listOpenCodeBrowserSessionsMock.mockReset();
   restoreOpenCodeBrowserSnapshotMock.mockReset();
   readGhTokenMock.mockReset();
+  createModelReferenceMock.mockReset();
+  getModelMock.mockReset();
+  setModelLanguageMock.mockReset();
+  createModelReferenceMock.mockResolvedValue({ dispose: vi.fn() });
+  getModelMock.mockReturnValue(null);
   readGhTokenMock.mockReturnValue(null);
 });
 
@@ -331,6 +346,382 @@ describe("WebIDEHost AI launcher behavior", () => {
     });
 
     expect(openEditor).toHaveBeenCalledWith(previewInput, { pinned: true }, 7);
+  });
+
+  it("opens preview-selected source files in the text editor at the resolved line", async () => {
+    const openEditor = vi.fn().mockResolvedValue(undefined);
+    const setSelection = vi.fn();
+    const revealPositionNearTop = vi.fn();
+    getServiceMock.mockResolvedValue({
+      openEditor,
+      activeTextEditorControl: {
+        getModel: () => ({
+          uri: { path: "/project/src/pages/Home.tsx" },
+        }),
+        setSelection,
+        revealPositionNearTop,
+      },
+    });
+
+    await (WebIDEHost.prototype as unknown as {
+      openWorkspaceFileAsText: (
+        this: unknown,
+        path: string,
+        lineNumber?: number | null,
+      ) => Promise<void>;
+    }).openWorkspaceFileAsText.call({}, "/project/src/pages/Home.tsx", 42);
+
+    expect(openEditor).toHaveBeenCalledWith({
+      resource: expect.objectContaining({
+        path: "/project/src/pages/Home.tsx",
+      }),
+      options: {
+        pinned: true,
+        selection: {
+          startLineNumber: 42,
+          startColumn: 1,
+          endLineNumber: 42,
+          endColumn: 1,
+        },
+      },
+    });
+    expect(createModelReferenceMock).toHaveBeenCalled();
+    expect(setSelection).toHaveBeenCalledWith(
+      {
+        startLineNumber: 42,
+        startColumn: 1,
+        endLineNumber: 42,
+        endColumn: 1,
+      },
+      "almostnode.preview-source-picker",
+    );
+    expect(revealPositionNearTop).toHaveBeenCalledWith({
+      lineNumber: 42,
+      column: 1,
+    });
+  });
+
+  it("opens text editors at the requested line and column", async () => {
+    const openEditor = vi.fn().mockResolvedValue(undefined);
+    const setSelection = vi.fn();
+    const revealPositionNearTop = vi.fn();
+    getServiceMock.mockResolvedValue({
+      openEditor,
+      activeTextEditorControl: {
+        getModel: () => ({
+          uri: { path: "/project/src/pages/Home.tsx" },
+        }),
+        setSelection,
+        revealPositionNearTop,
+      },
+    });
+
+    await (WebIDEHost.prototype as unknown as {
+      openWorkspaceFileAsText: (
+        this: unknown,
+        path: string,
+        lineNumber?: number | null,
+        columnNumber?: number | null,
+      ) => Promise<void>;
+    }).openWorkspaceFileAsText.call({}, "/project/src/pages/Home.tsx", 42, 7);
+
+    expect(openEditor).toHaveBeenCalledWith({
+      resource: expect.objectContaining({
+        path: "/project/src/pages/Home.tsx",
+      }),
+      options: {
+        pinned: true,
+        selection: {
+          startLineNumber: 42,
+          startColumn: 7,
+          endLineNumber: 42,
+          endColumn: 7,
+        },
+      },
+    });
+    expect(setSelection).toHaveBeenCalledWith(
+      {
+        startLineNumber: 42,
+        startColumn: 7,
+        endLineNumber: 42,
+        endColumn: 7,
+      },
+      "almostnode.preview-source-picker",
+    );
+    expect(revealPositionNearTop).toHaveBeenCalledWith({
+      lineNumber: 42,
+      column: 7,
+    });
+  });
+
+  it("resolves and opens webide-open targets inside the workspace", async () => {
+    const openWorkspaceTargetInEditor = vi.fn().mockResolvedValue(undefined);
+    const host = {
+      container: {
+        vfs: {
+          existsSync: vi.fn(() => true),
+          statSync: vi.fn(() => ({
+            isDirectory: () => false,
+          })),
+        },
+      },
+      openWorkspaceTargetInEditor,
+    };
+
+    const target = await (
+      WebIDEHost.prototype as unknown as {
+        runWebIdeOpenCommand: (
+          this: unknown,
+          rawTarget: string,
+          cwd: string,
+        ) => Promise<{
+          path: string;
+          line?: number;
+          column?: number;
+        }>;
+      }
+    ).runWebIdeOpenCommand.call(host, "src/app.tsx:12:4", "/project");
+
+    expect(target).toEqual({
+      path: "/project/src/app.tsx",
+      line: 12,
+      column: 4,
+    });
+    expect(openWorkspaceTargetInEditor).toHaveBeenCalledWith(target);
+  });
+
+  it("rejects webide-open targets that resolve to directories", async () => {
+    const host = {
+      container: {
+        vfs: {
+          existsSync: vi.fn(() => true),
+          statSync: vi.fn(() => ({
+            isDirectory: () => true,
+          })),
+        },
+      },
+      openWorkspaceTargetInEditor: vi.fn(),
+    };
+
+    await expect(
+      (
+        WebIDEHost.prototype as unknown as {
+          runWebIdeOpenCommand: (
+            this: unknown,
+            rawTarget: string,
+            cwd: string,
+          ) => Promise<unknown>;
+        }
+      ).runWebIdeOpenCommand.call(host, "src", "/project"),
+    ).rejects.toThrow(
+      "webide-open only supports files, not directories: /project/src",
+    );
+  });
+
+  it("normalizes preview-selected source paths before opening them", async () => {
+    const openWorkspaceFileAsText = vi.fn().mockResolvedValue(undefined);
+    const updatePreviewStatus = vi.fn();
+    const host = {
+      container: {
+        vfs: {
+          existsSync: vi.fn(() => true),
+        },
+      },
+      normalizePreviewSourcePath: (
+        WebIDEHost.prototype as unknown as {
+          normalizePreviewSourcePath: (
+            this: unknown,
+            sourcePath: string,
+          ) => string | null;
+        }
+      ).normalizePreviewSourcePath,
+      openWorkspaceFileAsText,
+      updatePreviewStatus,
+    };
+
+    const opened = await (
+      WebIDEHost.prototype as unknown as {
+        openWorkspaceLocation: (
+          this: unknown,
+          sourcePath: string,
+          lineNumber?: number | null,
+          columnNumber?: number | null,
+        ) => Promise<boolean>;
+      }
+    ).openWorkspaceLocation.call(
+      host,
+      "http://localhost:3000/src/pages/Home.tsx?t=171234",
+      18,
+      6,
+    );
+
+    expect(opened).toBe(true);
+    expect(openWorkspaceFileAsText).toHaveBeenCalledWith(
+      "/project/src/pages/Home.tsx",
+      18,
+      6,
+    );
+    expect(updatePreviewStatus).not.toHaveBeenCalled();
+  });
+
+  it("strips dev-server port prefixes from preview-selected source paths", async () => {
+    const normalizePreviewSourcePath = (
+      WebIDEHost.prototype as unknown as {
+        normalizePreviewSourcePath: (
+          this: unknown,
+          sourcePath: string,
+        ) => string | null;
+      }
+    ).normalizePreviewSourcePath;
+
+    expect(
+      normalizePreviewSourcePath.call({}, "3000/src/pages/Home.tsx"),
+    ).toBe("/project/src/pages/Home.tsx");
+    expect(
+      normalizePreviewSourcePath.call(
+        {},
+        "localhost:3000/src/pages/Home.tsx",
+      ),
+    ).toBe("/project/src/pages/Home.tsx");
+    expect(
+      normalizePreviewSourcePath.call(
+        {},
+        "/__virtual__/3000/src/pages/Home.tsx",
+      ),
+    ).toBe("/project/src/pages/Home.tsx");
+  });
+
+  it("surfaces missing preview-selected source files without opening an editor", async () => {
+    const openWorkspaceFileAsText = vi.fn().mockResolvedValue(undefined);
+    const updatePreviewStatus = vi.fn();
+    const host = {
+      container: {
+        vfs: {
+          existsSync: vi.fn(() => false),
+        },
+      },
+      normalizePreviewSourcePath: (
+        WebIDEHost.prototype as unknown as {
+          normalizePreviewSourcePath: (
+            this: unknown,
+            sourcePath: string,
+          ) => string | null;
+        }
+      ).normalizePreviewSourcePath,
+      openWorkspaceFileAsText,
+      updatePreviewStatus,
+    };
+
+    const opened = await (
+      WebIDEHost.prototype as unknown as {
+        openWorkspaceLocation: (
+          this: unknown,
+          sourcePath: string,
+          lineNumber?: number | null,
+        ) => Promise<boolean>;
+      }
+    ).openWorkspaceLocation.call(host, "src/pages/Missing.tsx", 7);
+
+    expect(opened).toBe(false);
+    expect(openWorkspaceFileAsText).not.toHaveBeenCalled();
+    expect(updatePreviewStatus).toHaveBeenCalledWith(
+      "Resolved source is missing: /project/src/pages/Missing.tsx",
+    );
+  });
+
+  it("intercepts pasted image clipboard data in browser Claude terminals", async () => {
+    const terminalRoot = document.createElement("div");
+    const showClaudeImagePasteUnsupportedError = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    const host = {
+      agentMode: "browser",
+      claudeImagePasteCleanup: new Map<string, () => void>(),
+      showClaudeImagePasteUnsupportedError,
+      disposeClaudeImagePasteGuard(id: string): void {
+        (
+          WebIDEHost.prototype as unknown as {
+            disposeClaudeImagePasteGuard: (this: unknown, targetId: string) => void;
+          }
+        ).disposeClaudeImagePasteGuard.call(this, id);
+      },
+    };
+    const consoleWarn = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const tab = {
+      id: "claude-sidebar-1",
+      terminal: {
+        element: terminalRoot,
+      },
+      agentHarness: "claude",
+    };
+
+    try {
+      (
+        WebIDEHost.prototype as unknown as {
+          installClaudeImagePasteGuard: (
+            this: unknown,
+            tab: {
+              id: string;
+              terminal: { element: HTMLElement | null };
+              agentHarness: "claude" | "opencode" | null;
+            },
+          ) => void;
+        }
+      ).installClaudeImagePasteGuard.call(host, tab);
+
+      const pasteEvent = new window.Event("paste", {
+        bubbles: true,
+        cancelable: true,
+      }) as ClipboardEvent;
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        configurable: true,
+        value: {
+          items: [
+            { kind: "file", type: "image/png" },
+            { kind: "string", type: "text/plain" },
+          ],
+        },
+      });
+
+      terminalRoot.dispatchEvent(pasteEvent);
+
+      expect(pasteEvent.defaultPrevented).toBe(true);
+      expect(showClaudeImagePasteUnsupportedError).toHaveBeenCalledWith([
+        "image/png",
+      ]);
+      expect(consoleWarn).toHaveBeenCalledWith(
+        "[claude-image-paste]",
+        expect.objectContaining({
+          tabId: "claude-sidebar-1",
+          mimeTypes: ["image/png"],
+        }),
+      );
+
+      (
+        WebIDEHost.prototype as unknown as {
+          disposeClaudeImagePasteGuard: (this: unknown, id: string) => void;
+        }
+      ).disposeClaudeImagePasteGuard.call(host, "claude-sidebar-1");
+
+      const secondPasteEvent = new window.Event("paste", {
+        bubbles: true,
+        cancelable: true,
+      }) as ClipboardEvent;
+      Object.defineProperty(secondPasteEvent, "clipboardData", {
+        configurable: true,
+        value: {
+          items: [{ kind: "file", type: "image/png" }],
+        },
+      });
+
+      terminalRoot.dispatchEvent(secondPasteEvent);
+      expect(showClaudeImagePasteUnsupportedError).toHaveBeenCalledTimes(1);
+      expect(secondPasteEvent.defaultPrevented).toBe(false);
+    } finally {
+      consoleWarn.mockRestore();
+    }
   });
 
   it("reopens preview as the default editor when switching projects", async () => {
@@ -416,6 +807,7 @@ describe("WebIDEHost AI launcher behavior", () => {
     host.previewSurface = {
       setActiveDb: vi.fn(),
       clear: vi.fn(),
+      setSelectActive: vi.fn(),
     };
     host.databaseSurface = {
       update: vi.fn(),
@@ -786,6 +1178,10 @@ describe("WebIDEHost AI launcher behavior", () => {
     const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
     const createAiSidebarTerminalTab = vi.fn(() => ({ id: "ai-sidebar-1" }));
     const runCommand = vi.fn().mockResolvedValue(undefined);
+    const buildClaudeLaunchCommand = vi.fn(
+      () =>
+        "/usr/local/bin/claude-wrapper --plugin-dir '/project/.claude-plugin' --resume 'session-1'",
+    );
 
     await (WebIDEHost.prototype as unknown as {
       resumeResumableThread: (
@@ -804,6 +1200,7 @@ describe("WebIDEHost AI launcher behavior", () => {
       {
         revealOpenCodeSidebarView,
         createAiSidebarTerminalTab,
+        buildClaudeLaunchCommand,
         runCommand,
         claudeSidebarCounter: 0,
         openCodeSidebarTerminalCounter: 0,
@@ -821,11 +1218,16 @@ describe("WebIDEHost AI launcher behavior", () => {
 
     expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(true);
     expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(true, {
+      id: expect.stringMatching(/^claude-sidebar-/),
       title: "Fix Claude restore",
+      agentHarness: "claude",
+    });
+    expect(buildClaudeLaunchCommand).toHaveBeenCalledWith({
+      resumeToken: "session-1",
     });
     expect(runCommand).toHaveBeenCalledWith(
       { id: "ai-sidebar-1" },
-      "npx @anthropic-ai/claude-code --resume session-1",
+      "/usr/local/bin/claude-wrapper --plugin-dir '/project/.claude-plugin' --resume 'session-1'",
       {
         echoCommand: true,
         interceptAgentLaunch: false,
@@ -915,18 +1317,280 @@ describe("WebIDEHost AI launcher behavior", () => {
     };
 
     expect(
-      formatStatus.formatTailscaleStatus.call({}, {
-        state: "needs-login",
-        exitNodes: [],
-        selectedExitNodeId: null,
-      }),
+      formatStatus.formatTailscaleStatus.call(
+        {
+          getRequestedTailscaleExitNodeId: () => null,
+        },
+        {
+          state: "needs-login",
+          exitNodes: [],
+          selectedExitNodeId: null,
+        },
+      ),
     ).toBe("Needs login");
     expect(
-      formatStatus.formatTailscaleStatus.call({}, {
-        state: "needs-machine-auth",
-        exitNodes: [],
-        selectedExitNodeId: null,
-      }),
+      formatStatus.formatTailscaleStatus.call(
+        {
+          getRequestedTailscaleExitNodeId: () => null,
+        },
+        {
+          state: "needs-machine-auth",
+          exitNodes: [],
+          selectedExitNodeId: null,
+        },
+      ),
     ).toBe("Needs machine auth");
+  });
+
+  it("formats a requested tailscale exit node while runtime confirmation is pending", () => {
+    const formatStatus = WebIDEHost.prototype as unknown as {
+      formatTailscaleStatus: (
+        this: {
+          getRequestedTailscaleExitNodeId: () => string | null;
+        },
+        status: {
+          state: "running";
+          dnsEnabled: boolean;
+          dnsHealthy: boolean | null;
+          exitNodes: Array<{
+            id: string;
+            name: string;
+          }>;
+          selectedExitNodeId: string | null;
+        },
+      ) => string;
+    };
+
+    expect(
+      formatStatus.formatTailscaleStatus.call(
+        {
+          getRequestedTailscaleExitNodeId: () => "node-self",
+        },
+        {
+          state: "running",
+          dnsEnabled: true,
+          dnsHealthy: null,
+          exitNodes: [
+            {
+              id: "node-self",
+              name: "bretts-macbook-air",
+            },
+          ],
+          selectedExitNodeId: null,
+        },
+      ),
+    ).toBe("Running, selecting bretts-macbook-air");
+  });
+
+  it("treats unconfigured AWS as a setup action with helper copy", () => {
+    const buildSlot = WebIDEHost.prototype as unknown as {
+      buildAwsSidebarSlotStatus: (
+        this: unknown,
+        summary: {
+          hasConfig: boolean;
+          hasProfiles: boolean;
+          hasSsoSessions: boolean;
+          hasAuth: boolean;
+          hasValidAccessToken: boolean;
+          hasValidRoleCredentials: boolean;
+          defaultProfile: string | null;
+          profileNames: string[];
+          sessionNames: string[];
+        },
+        config: {
+          version: number;
+          defaultProfile: string | null;
+          ssoSessions: Record<string, unknown>;
+          profiles: Record<string, unknown>;
+        },
+        auth: {
+          version: number;
+          clients: Record<string, unknown>;
+          sessions: Record<string, unknown>;
+          roleCredentials: Record<string, unknown>;
+        },
+      ) => {
+        active: boolean;
+        authAction?: string;
+        authLabel?: string;
+        statusText?: string;
+        statusDetail?: string;
+      };
+    };
+
+    expect(
+      buildSlot.buildAwsSidebarSlotStatus.call(
+        {},
+        {
+          hasConfig: false,
+          hasProfiles: false,
+          hasSsoSessions: false,
+          hasAuth: false,
+          hasValidAccessToken: false,
+          hasValidRoleCredentials: false,
+          defaultProfile: null,
+          profileNames: [],
+          sessionNames: [],
+        },
+        {
+          version: 1,
+          defaultProfile: null,
+          ssoSessions: {},
+          profiles: {},
+        },
+        {
+          version: 1,
+          clients: {},
+          sessions: {},
+          roleCredentials: {},
+        },
+      ),
+    ).toMatchObject({
+      active: false,
+      authAction: "setup:aws",
+      authLabel: "Set up AWS",
+      statusText: "Setup required",
+      statusDetail: "Add your AWS access portal and region before signing in.",
+    });
+  });
+
+  it("distinguishes ready, expired, and signed-in AWS states", () => {
+    const buildSlot = WebIDEHost.prototype as unknown as {
+      buildAwsSidebarSlotStatus: (
+        this: unknown,
+        summary: {
+          hasConfig: boolean;
+          hasProfiles: boolean;
+          hasSsoSessions: boolean;
+          hasAuth: boolean;
+          hasValidAccessToken: boolean;
+          hasValidRoleCredentials: boolean;
+          defaultProfile: string | null;
+          profileNames: string[];
+          sessionNames: string[];
+        },
+        config: {
+          version: number;
+          defaultProfile: string | null;
+          ssoSessions: Record<string, unknown>;
+          profiles: Record<string, unknown>;
+        },
+        auth: {
+          version: number;
+          clients: Record<string, unknown>;
+          sessions: Record<string, unknown>;
+          roleCredentials: Record<string, unknown>;
+        },
+      ) => {
+        active: boolean;
+        authAction?: string;
+        authLabel?: string;
+        statusText?: string;
+      };
+    };
+
+    const config = {
+      version: 1,
+      defaultProfile: null,
+      ssoSessions: {
+        default: {
+          startUrl: "https://example.awsapps.com/start",
+          region: "us-east-1",
+          registrationScopes: ["sso:account:access"],
+        },
+      },
+      profiles: {},
+    };
+
+    expect(
+      buildSlot.buildAwsSidebarSlotStatus.call(
+        {},
+        {
+          hasConfig: true,
+          hasProfiles: false,
+          hasSsoSessions: true,
+          hasAuth: false,
+          hasValidAccessToken: false,
+          hasValidRoleCredentials: false,
+          defaultProfile: null,
+          profileNames: [],
+          sessionNames: ["default"],
+        },
+        config,
+        {
+          version: 1,
+          clients: {},
+          sessions: {},
+          roleCredentials: {},
+        },
+      ),
+    ).toMatchObject({
+      active: false,
+      authAction: "login:aws",
+      authLabel: "Login",
+      statusText: "Ready to sign in",
+    });
+
+    expect(
+      buildSlot.buildAwsSidebarSlotStatus.call(
+        {},
+        {
+          hasConfig: true,
+          hasProfiles: false,
+          hasSsoSessions: true,
+          hasAuth: true,
+          hasValidAccessToken: false,
+          hasValidRoleCredentials: false,
+          defaultProfile: null,
+          profileNames: [],
+          sessionNames: ["default"],
+        },
+        config,
+        {
+          version: 1,
+          clients: {},
+          sessions: {
+            default: { accessToken: "expired" },
+          },
+          roleCredentials: {},
+        },
+      ),
+    ).toMatchObject({
+      active: false,
+      authAction: "login:aws",
+      authLabel: "Re-authenticate",
+      statusText: "Session expired",
+    });
+
+    expect(
+      buildSlot.buildAwsSidebarSlotStatus.call(
+        {},
+        {
+          hasConfig: true,
+          hasProfiles: false,
+          hasSsoSessions: true,
+          hasAuth: true,
+          hasValidAccessToken: true,
+          hasValidRoleCredentials: false,
+          defaultProfile: null,
+          profileNames: [],
+          sessionNames: ["default"],
+        },
+        config,
+        {
+          version: 1,
+          clients: {},
+          sessions: {
+            default: { accessToken: "token" },
+          },
+          roleCredentials: {},
+        },
+      ),
+    ).toMatchObject({
+      active: true,
+      authAction: "logout:aws",
+      authLabel: "Logout",
+      statusText: "Signed in via default",
+    });
   });
 });

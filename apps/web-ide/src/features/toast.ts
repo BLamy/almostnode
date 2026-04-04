@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 // @ts-ignore — sonner types may not resolve without @types/react
 import { Toaster, toast } from 'sonner';
+import { describeClaudeImagePasteBlocker } from './claude-image-paste';
 
 let mounted = false;
 
@@ -64,4 +65,13 @@ export function showTestResultToast(name: string, passed: boolean, message?: str
       duration: 5000,
     });
   }
+}
+
+export function showClaudeImagePasteUnsupportedToast(
+  mimeTypes: readonly string[],
+): void {
+  toast.error("Image paste isn't supported here yet", {
+    description: describeClaudeImagePasteBlocker(mimeTypes),
+    duration: 6000,
+  });
 }

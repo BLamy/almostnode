@@ -111,25 +111,15 @@ function getResolvedOptions(
   return normalizeNetworkOptions(options);
 }
 
-function getActiveTailscaleExitNodeId(
-  options: Pick<ResolvedNetworkOptions, 'exitNodeId' | 'activeExitNodeId'>,
-): string | null {
-  if (Object.prototype.hasOwnProperty.call(options, 'activeExitNodeId')) {
-    return trimToNull(options.activeExitNodeId);
-  }
-  return trimToNull(options.exitNodeId);
-}
-
-function hasActiveTailscaleExitNode(
+function shouldRoutePublicTrafficThroughTailscale(
   options: Pick<
     ResolvedNetworkOptions,
-    'useExitNode' | 'tailscaleConnected' | 'exitNodeId' | 'activeExitNodeId'
+    'useExitNode' | 'tailscaleConnected'
   >,
 ): boolean {
   return Boolean(
     options.useExitNode
     && options.tailscaleConnected
-    && getActiveTailscaleExitNodeId(options),
   );
 }
 
@@ -435,11 +425,7 @@ export function selectNetworkRouteForUrl(
     return 'browser';
   }
 
-  if (hasConfiguredTransportProxy(resolvedOptions)) {
-    return 'browser';
-  }
-
-  return hasActiveTailscaleExitNode(resolvedOptions)
+  return shouldRoutePublicTrafficThroughTailscale(resolvedOptions)
     ? 'tailscale'
     : 'browser';
 }
@@ -465,11 +451,7 @@ export function selectNetworkRouteForHost(
     return 'browser';
   }
 
-  if (hasConfiguredTransportProxy(resolvedOptions)) {
-    return 'browser';
-  }
-
-  return hasActiveTailscaleExitNode(resolvedOptions)
+  return shouldRoutePublicTrafficThroughTailscale(resolvedOptions)
     ? 'tailscale'
     : 'browser';
 }
@@ -505,17 +487,15 @@ export function selectWebSocketRouteForUrl(
     return 'tailscale';
   }
 
+  if (shouldRoutePublicTrafficThroughTailscale(policy.options)) {
+    return 'tailscale';
+  }
+
   if (policy.browser.wsRelayUrl && !shouldBypassProxy(rawUrl, policy.proxy.noProxy)) {
     return 'browser';
   }
 
-  if (hasConfiguredTransportProxy(policy.options)) {
-    return 'browser';
-  }
-
-  return hasActiveTailscaleExitNode(policy.options)
-    ? 'tailscale'
-    : 'browser';
+  return 'browser';
 }
 
 function isExternalBrowserRequest(

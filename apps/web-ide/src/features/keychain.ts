@@ -744,7 +744,7 @@ export class Keychain {
     const normalized = command.trim().toLowerCase();
     const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
       || matchesClaudeLaunchCommand(command)
-      || /\b(gh|replayio|tailscale)\b/.test(normalized);
+      || /\b(gh|replayio|tailscale|aws)\b/.test(normalized);
     if (!shouldAutoRestore) {
       return true;
     }
@@ -916,8 +916,8 @@ export class Keychain {
 
   private scheduleCredentialsInspection(): void {
     window.clearTimeout(this.pendingHandle);
-    this.pendingHandle = window.setTimeout(() => {
-      void this.handleCredentialsChange();
+    this.pendingHandle = window.setTimeout(async () => {
+      await this.handleCredentialsChange();
     }, KEYCHAIN_WATCH_DEBOUNCE_MS);
   }
 
@@ -1033,13 +1033,38 @@ export class Keychain {
   }
 
   private async restoreSavedCredentials(): Promise<void> {
-    const stored = this.getStoredVault();
-    if (!stored) {
+    const initialStored = this.getStoredVault();
+    if (!initialStored) {
       throw new WebAuthnError('No saved credentials vault was found for this browser.');
     }
 
-    const key = this.unlockedKey ?? await unlockVaultKey(stored.credentialId, base64URLStringToBuffer(stored.prfSalt));
-    const decrypted = await decryptData(key, stored.ciphertext, stored.iv);
+    let key = this.unlockedKey;
+    if (!key) {
+      key = await unlockVaultKey(
+        initialStored.credentialId,
+        base64URLStringToBuffer(initialStored.prfSalt),
+      );
+    }
+
+    const latestStored = this.getStoredVault();
+    if (!latestStored) {
+      throw new WebAuthnError('No saved credentials vault was found for this browser.');
+    }
+
+    if (
+      !this.unlockedKey
+      && (
+        latestStored.credentialId !== initialStored.credentialId
+        || latestStored.prfSalt !== initialStored.prfSalt
+      )
+    ) {
+      key = await unlockVaultKey(
+        latestStored.credentialId,
+        base64URLStringToBuffer(latestStored.prfSalt),
+      );
+    }
+
+    const decrypted = await decryptData(key, latestStored.ciphertext, latestStored.iv);
     const snapshot = parseSnapshotPayload(decrypted, (p) => this.normalizeManagedPath(p));
     if (!snapshot.some((entry) => entry.path === CLAUDE_AUTH_CREDENTIALS_PATH)) {
       // Might be a keychain that only has non-Claude data — that's fine, just restore what's there

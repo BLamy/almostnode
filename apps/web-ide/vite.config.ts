@@ -11,6 +11,7 @@ import { defineConfig, type Plugin } from "vite";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
 import wasm from "vite-plugin-wasm";
 import tailwindcss from "@tailwindcss/vite";
+import { resolvePreferredPnpmPackagePath } from "../../scripts/resolve-pnpm-package-path.mjs";
 import { corsProxyPlugin } from "./src/plugins/vite-plugin-cors-proxy";
 import { workspaceTemplatesPlugin } from "./src/plugins/vite-plugin-workspace-templates";
 
@@ -37,6 +38,11 @@ const monacoVscodePackages = [
 
 const __dirname = new URL(".", import.meta.url).pathname;
 const workspaceRoot = resolve(__dirname, "../..");
+const napiWasmRuntimePath = resolvePreferredPnpmPackagePath(
+  workspaceRoot,
+  "@napi-rs/wasm-runtime",
+  "1.1.",
+);
 const opencodeRoot = resolve(workspaceRoot, "vendor/opencode");
 const opentuiRoot = resolve(workspaceRoot, "vendor/opentui");
 const isTest = process.env.VITEST === "true";
@@ -846,6 +852,10 @@ export default defineConfig(async ({ mode }) => {
           find: /^almostnode$/,
           replacement: resolve(__dirname, "../../packages/almostnode/src/browser.ts"),
         },
+        {
+          find: /^@napi-rs\/wasm-runtime$/,
+          replacement: napiWasmRuntimePath,
+        },
         ...(isTest ? [] : [
         {
           find: /^@codingame\/monaco-vscode-api\/vscode\/src\/(.*)$/,
@@ -1311,6 +1321,7 @@ export default defineConfig(async ({ mode }) => {
         "bun:sqlite",
         "convex",
         "@electric-sql/pglite",
+        "@napi-rs/wasm-runtime",
         "monaco-editor",
         "net",
         "node:net",

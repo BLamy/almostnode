@@ -6,3 +6,17 @@
 export { createNodeError } from './virtual-fs';
 export type { PlaywrightCommandListener, PlaywrightSelectorContext } from './shims/playwright-command';
 export type { RequestMiddleware } from './server-bridge';
+export type {
+  OxcDiagnostic,
+  OxcFileAccessor,
+  ResolvedOxcConfig,
+  RunOxcOnSourceOptions,
+  RunOxcOnSourceResult,
+} from './oxc/runtime';
+export {
+  formatOxcDiagnosticsForTerminal,
+  isSupportedOxcPath,
+  resolveOxcConfigForFile,
+  resolveOxcParserExtension,
+  runOxcOnSource,
+} from './oxc/runtime';

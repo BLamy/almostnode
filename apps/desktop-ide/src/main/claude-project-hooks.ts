@@ -28,6 +28,9 @@ const HOST_COMMAND_PREFIXES = [
   /^cursor-cli(?:\\s|$)/,
   /^brew(?:\\s|$)/,
   /^open(?:\\s|$)/,
+  /^almostnode-lsp-bridge(?:\\s|$)/,
+  /^oxfmt(?:\\s|$)/,
+  /^oxlint(?:\\s|$)/,
   /^pbcopy(?:\\s|$)/,
   /^pbpaste(?:\\s|$)/,
 ];

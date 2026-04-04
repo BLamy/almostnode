@@ -16,6 +16,23 @@ export interface BrowserProcessBridge {
     shell?: boolean | string;
     signal?: AbortSignal;
   }): Promise<{ stdout: string; stderr: string; code: number }>;
+  spawn?(input: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+    shell?: boolean | string;
+    signal?: AbortSignal;
+    onStdout: (data: string) => void;
+    onStderr: (data: string) => void;
+    onExit: (code: number, signal: string | null) => void;
+  }): BrowserSpawnHandle;
+}
+
+export interface BrowserSpawnHandle {
+  write(data: string): void;
+  end(): void;
+  kill(signal?: string | number): void;
 }
 
 interface BrowserExecOptions {
@@ -438,6 +455,56 @@ export async function runBrowserCommand(input: {
 
 export function spawn(command: string, argsOrOpts?: unknown, maybeOpts?: Record<string, unknown>): FakeChildProcess {
   const { args, opts } = normalizeSpawnInput(command, argsOrOpts as string[] | Record<string, unknown>, maybeOpts);
+  const bridge = scopedProcessBridge.getStore() ?? processBridge;
+  if (bridge?.spawn) {
+    const child = new FakeChildProcess();
+    const cwd = typeof opts.cwd === "string"
+      ? opts.cwd
+      : typeof globalThis.process?.cwd === "function"
+        ? globalThis.process.cwd()
+        : "/workspace";
+
+    const handle = bridge.spawn({
+      command,
+      args,
+      cwd,
+      env: typeof opts.env === "object" && opts.env ? (opts.env as Record<string, string>) : undefined,
+      shell: typeof opts.shell === "string" || typeof opts.shell === "boolean" ? opts.shell : undefined,
+      signal: opts.signal instanceof AbortSignal ? opts.signal : undefined,
+      onStdout: (data) => {
+        child.stdout.write(data);
+      },
+      onStderr: (data) => {
+        child.stderr.write(data);
+      },
+      onExit: (code, signal) => {
+        child.stdout.end();
+        child.stderr.end();
+        child.exitCode = code;
+        child.emit("exit", code, signal);
+        child.emit("close", code, signal);
+      },
+    });
+
+    child.stdin.on("data", (data: Buffer | string) => {
+      handle.write(data.toString());
+    });
+    child.stdin.on("end", () => {
+      handle.end();
+    });
+    child.kill = (signal?: string | number) => {
+      child.killed = true;
+      handle.kill(signal);
+      return true;
+    };
+
+    queueMicrotask(() => {
+      child.emit("spawn");
+    });
+
+    return child;
+  }
+
   const child = new FakeChildProcess();
 
   setTimeout(async () => {

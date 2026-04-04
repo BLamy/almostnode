@@ -53,6 +53,7 @@ import type { PackageJson } from '../types/package-json';
 import { almostnodeDebugError, almostnodeDebugLog } from '../utils/debug';
 import * as path from './path';
 import { extractTarball } from '../npm/tarball';
+import type { OxcFileAccessor } from '../oxc/runtime';
 import {
   DEFAULT_POSIX_SHELL,
   SYNTHETIC_SHELL_COMMAND_NAMES,
@@ -128,6 +129,9 @@ const DEFAULT_SHELL_ENV: Record<string, string> = {
   NODE_ENV: 'development',
   SHELL: DEFAULT_POSIX_SHELL,
 };
+
+const DEFAULT_CLAUDE_WRAPPER_PATH = '/usr/local/bin/claude-wrapper';
+const DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE = '@anthropic-ai/claude-code@2.1.52';
 
 interface ActiveProcessStdin {
   emit: (event: string, ...args: unknown[]) => void;
@@ -605,14 +609,22 @@ async function runCommandInController(
 
   execution.activeShellChildren++;
   try {
-    const result = await (
-      maybeRunCustomCommandDirect(controller, command, resolvedCwd, envWithContext)
-      ?? maybeRunSyntheticShellCommand(controller, command, resolvedCwd, envWithContext)
-      ?? controller.bashInstance.exec(stripQuotesForBash(normalizeQuotes(command)), {
-        cwd: resolvedCwd,
-        env: envWithContext,
-      })
+    let result = await maybeRunAlmostnodeLspBridgeCommand(
+      controller,
+      command,
+      resolvedCwd,
+      envWithContext,
     );
+    result ??= await maybeRunCustomCommandDirect(controller, command, resolvedCwd, envWithContext);
+    result ??= await maybeRunSyntheticShellCommand(controller, command, resolvedCwd, envWithContext);
+    result ??= await controller.bashInstance.exec(stripQuotesForBash(normalizeQuotes(command)), {
+      cwd: resolvedCwd,
+      env: envWithContext,
+    });
+
+    if (!result) {
+      throw new Error(`Command execution returned no result for: ${command}`);
+    }
 
     // Stream the result to callbacks for commands that don't handle their own
     // streaming (bash built-ins like ls, cat, echo, pwd, mkdir, etc.).
@@ -636,6 +648,89 @@ function shellQuote(value: string): string {
   return JSON.stringify(value);
 }
 
+function readTextFileFromVfs(vfs: VirtualFS, filePath: string): string | null {
+  if (!vfs.existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    const raw: unknown = vfs.readFileSync(filePath);
+    if (typeof raw === 'string') {
+      return raw;
+    }
+    if (raw instanceof Uint8Array) {
+      return new TextDecoder().decode(raw);
+    }
+    if (raw instanceof ArrayBuffer) {
+      return new TextDecoder().decode(new Uint8Array(raw));
+    }
+    if (raw && typeof raw === 'object' && ArrayBuffer.isView(raw)) {
+      const view = raw as ArrayBufferView;
+      return new TextDecoder().decode(
+        new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+      );
+    }
+    return String(raw);
+  } catch {
+    return null;
+  }
+}
+
+function createOxcFileAccessor(vfs: VirtualFS): OxcFileAccessor {
+  return {
+    exists(targetPath: string): boolean {
+      return vfs.existsSync(targetPath);
+    },
+    readText(targetPath: string): string | null {
+      return readTextFileFromVfs(vfs, targetPath);
+    },
+  };
+}
+
+function collectSupportedOxcFiles(
+  vfs: VirtualFS,
+  targetPath: string,
+  isSupportedOxcPath: (filePath: string) => boolean,
+  seen: Set<string>,
+): string[] {
+  const collected: string[] = [];
+
+  const visit = (candidatePath: string): void => {
+    let stat;
+    try {
+      stat = vfs.statSync(candidatePath);
+    } catch {
+      return;
+    }
+
+    if (stat.isDirectory()) {
+      const entries = vfs.readdirSync(candidatePath).slice().sort();
+      for (const entry of entries) {
+        if (entry === "." || entry === ".." || entry === "node_modules" || entry === ".git") {
+          continue;
+        }
+        visit(path.join(candidatePath, entry));
+      }
+      return;
+    }
+
+    if (!stat.isFile() || !isSupportedOxcPath(candidatePath) || seen.has(candidatePath)) {
+      return;
+    }
+
+    seen.add(candidatePath);
+    collected.push(candidatePath);
+  };
+
+  visit(targetPath);
+  return collected;
+}
+
+function formatOxcTargetPath(cwd: string, targetPath: string): string {
+  const relativePath = path.relative(cwd, targetPath);
+  return relativePath && relativePath !== "" ? relativePath : targetPath;
+}
+
 /**
  * Replace Unicode curly/smart quotes with ASCII equivalents.
  * AI-generated commands may use \u201C \u201D (double) or \u2018 \u2019 (single)
@@ -645,6 +740,66 @@ function normalizeQuotes(s: string): string {
   return s
     .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
     .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'");
+}
+
+async function maybeRunAlmostnodeLspBridgeCommand(
+  controller: ChildProcessController,
+  command: string,
+  cwd: string,
+  env: Record<string, string>
+): Promise<JustBashExecResult | null> {
+  const normalized = normalizeQuotes(command.trim());
+  const tokens = splitCommandArgs(normalized);
+  if (tokens[0] !== 'almostnode-lsp-bridge') {
+    return null;
+  }
+
+  const subcommand = tokens[1] || '';
+  const execution = getExecutionContextFromEnv(controller, env);
+
+  if (subcommand === 'oxlint') {
+    if (!execution?.interactive) {
+      return {
+        stdout: '',
+        stderr: 'almostnode-lsp-bridge oxlint requires an interactive stdio session\n',
+        exitCode: 1,
+        env: stripInternalChildProcessEnv(env),
+      };
+    }
+
+    const { runOxcLspSession } = await import('../oxc/lsp');
+    const result = await runOxcLspSession({
+      execution,
+      accessor: createOxcFileAccessor(controller.vfs),
+    });
+
+    return {
+      ...result,
+      env: stripInternalChildProcessEnv(env),
+    };
+  }
+
+  if (subcommand === 'tsgo') {
+    return runCommandInController(
+      controller,
+      'npx -y tsgo-wasm --lsp --stdio',
+      {
+        cwd,
+        env: {
+          ...env,
+          ALMOSTNODE_LONG_NODE_IDLE: '1',
+        },
+      },
+      env[EXECUTION_ID_ENV_KEY] ?? null,
+    );
+  }
+
+  return {
+    stdout: '',
+    stderr: 'Usage: almostnode-lsp-bridge <oxlint|tsgo>\n',
+    exitCode: 64,
+    env: stripInternalChildProcessEnv(env),
+  };
 }
 
 /**
@@ -1971,9 +2126,198 @@ module.exports = (async () => {
     return runTscCommand(args, ctx, controller.vfs);
   });
 
+  const claudeWrapperCommand = defineCommand('claude-wrapper', async (args, ctx) => {
+    if (!ctx.exec) {
+      return {
+        stdout: '',
+        stderr: 'claude-wrapper: command execution not available in this context\n',
+        exitCode: 1,
+      };
+    }
+
+    const env = envToRecord(ctx.env);
+    const packageSpec = env.ALMOSTNODE_CLAUDE_CODE_PACKAGE?.trim() || DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE;
+    const fullCommand = ['npx', '--yes', packageSpec, ...args].map((value) => shellQuote(value)).join(' ');
+
+    return ctx.exec(fullCommand, {
+      cwd: ctx.cwd,
+      env: {
+        ...env,
+        CLAUDE_CODE_NO_FLICKER: env.CLAUDE_CODE_NO_FLICKER || '1',
+      },
+    });
+  });
+
+  const oxfmtCommand = defineCommand('oxfmt', async (args, ctx) => {
+    if (args.length === 0) {
+      return { stdout: '', stderr: 'Usage: oxfmt <file-or-directory> [...targets]\n', exitCode: 1 };
+    }
+
+    const { isSupportedOxcPath, resolveOxcConfigForFile, runOxcOnSource } = await import('../oxc/runtime');
+    const accessor = createOxcFileAccessor(controller.vfs);
+    const seenTargets = new Set<string>();
+    const formatTargets: string[] = [];
+    const stderrLines: string[] = [];
+
+    for (const inputPath of args) {
+      const targetPath = resolveFromCwd(ctx.cwd, inputPath);
+      if (!controller.vfs.existsSync(targetPath)) {
+        stderrLines.push(`oxfmt: ${inputPath}: No such file or directory`);
+        continue;
+      }
+
+      let stat;
+      try {
+        stat = controller.vfs.statSync(targetPath);
+      } catch {
+        stderrLines.push(`oxfmt: ${inputPath}: Unable to stat path`);
+        continue;
+      }
+
+      if (stat.isFile() && !isSupportedOxcPath(targetPath)) {
+        stderrLines.push(`oxfmt: unsupported file type for ${inputPath}`);
+        continue;
+      }
+
+      formatTargets.push(...collectSupportedOxcFiles(
+        controller.vfs,
+        targetPath,
+        isSupportedOxcPath,
+        seenTargets,
+      ));
+    }
+
+    for (const targetPath of formatTargets) {
+      const sourceText = readTextFileFromVfs(controller.vfs, targetPath);
+      const displayPath = formatOxcTargetPath(ctx.cwd, targetPath);
+      if (sourceText == null) {
+        stderrLines.push(`oxfmt: ${displayPath}: Unable to read file`);
+        continue;
+      }
+
+      try {
+        const config = resolveOxcConfigForFile(accessor, targetPath);
+        const result = await runOxcOnSource({
+          filePath: targetPath,
+          sourceText,
+          format: true,
+          lint: false,
+          formatterConfigText: config.formatterConfigText,
+        });
+        const formattedText = result.formattedText ?? sourceText;
+        if (formattedText !== sourceText) {
+          controller.vfs.writeFileSync(targetPath, formattedText);
+        }
+      } catch (error) {
+        stderrLines.push(
+          `oxfmt: ${displayPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    return {
+      stdout: '',
+      stderr: stderrLines.length > 0 ? `${stderrLines.join('\n')}\n` : '',
+      exitCode: stderrLines.length > 0 ? 1 : 0,
+    };
+  });
+
+  const oxlintCommand = defineCommand('oxlint', async (args, ctx) => {
+    if (args.length === 0) {
+      return { stdout: '', stderr: 'Usage: oxlint <file-or-directory> [...targets]\n', exitCode: 1 };
+    }
+
+    const {
+      formatOxcDiagnosticsForTerminal,
+      isSupportedOxcPath,
+      resolveOxcConfigForFile,
+      runOxcOnSource,
+    } = await import('../oxc/runtime');
+    const accessor = createOxcFileAccessor(controller.vfs);
+    const seenTargets = new Set<string>();
+    const lintTargets: string[] = [];
+    const stdoutLines: string[] = [];
+    const stderrLines: string[] = [];
+    let hasDiagnostics = false;
+
+    for (const inputPath of args) {
+      const targetPath = resolveFromCwd(ctx.cwd, inputPath);
+      if (!controller.vfs.existsSync(targetPath)) {
+        stderrLines.push(`oxlint: ${inputPath}: No such file or directory`);
+        continue;
+      }
+
+      let stat;
+      try {
+        stat = controller.vfs.statSync(targetPath);
+      } catch {
+        stderrLines.push(`oxlint: ${inputPath}: Unable to stat path`);
+        continue;
+      }
+
+      if (stat.isFile() && !isSupportedOxcPath(targetPath)) {
+        stderrLines.push(`oxlint: unsupported file type for ${inputPath}`);
+        continue;
+      }
+
+      lintTargets.push(...collectSupportedOxcFiles(
+        controller.vfs,
+        targetPath,
+        isSupportedOxcPath,
+        seenTargets,
+      ));
+    }
+
+    for (const targetPath of lintTargets) {
+      const sourceText = readTextFileFromVfs(controller.vfs, targetPath);
+      const displayPath = formatOxcTargetPath(ctx.cwd, targetPath);
+      if (sourceText == null) {
+        stderrLines.push(`oxlint: ${displayPath}: Unable to read file`);
+        continue;
+      }
+
+      try {
+        const config = resolveOxcConfigForFile(accessor, targetPath);
+        const result = await runOxcOnSource({
+          filePath: targetPath,
+          sourceText,
+          format: false,
+          lint: true,
+          linterConfigText: config.linterConfigText,
+        });
+        if (result.diagnostics.length === 0) {
+          continue;
+        }
+        hasDiagnostics = true;
+        stdoutLines.push(formatOxcDiagnosticsForTerminal(displayPath, sourceText, result.diagnostics));
+      } catch (error) {
+        stderrLines.push(
+          `oxlint: ${displayPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    return {
+      stdout: stdoutLines.length > 0 ? `${stdoutLines.join('\n')}\n` : '',
+      stderr: stderrLines.length > 0 ? `${stderrLines.join('\n')}\n` : '',
+      exitCode: hasDiagnostics || stderrLines.length > 0 ? 1 : 0,
+    };
+  });
+
+  const almostnodeLspBridgeCommand = defineCommand('almostnode-lsp-bridge', async () => ({
+    stdout: '',
+    stderr: 'almostnode-lsp-bridge must be launched through child_process.spawn(..., { stdio: "pipe" }) or an interactive terminal session\n',
+    exitCode: 1,
+  }));
+
   const ghCommand = defineCommand('gh', async (args, ctx) => {
     const { runGhCommand } = await import('./gh-command');
     return runGhCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const awsCommand = defineCommand('aws', async (args, ctx) => {
+    const { runAwsCommand } = await import('./aws-command');
+    return runAwsCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
   const replayioCommand = defineCommand('replayio', async (args, ctx) => {
@@ -2166,7 +2510,12 @@ module.exports = (async () => {
     createRegisteredShellCommand(tailscaleCommand.name, tailscaleCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(drizzleKitCommand.name, drizzleKitCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(tscCommand.name, tscCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(claudeWrapperCommand.name, claudeWrapperCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(oxfmtCommand.name, oxfmtCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(oxlintCommand.name, oxlintCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(almostnodeLspBridgeCommand.name, almostnodeLspBridgeCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(ghCommand.name, ghCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(awsCommand.name, awsCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(replayioCommand.name, replayioCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(grepCommand.name, grepCommand),
     createRegisteredShellCommand(egrepCommand.name, egrepCommand),
@@ -2698,6 +3047,7 @@ function getCurrentProcessArch(): string {
 
 const SYNTHETIC_WHICH_TARGETS: Record<string, string> = {
   bash: '/bin/bash',
+  'claude-wrapper': DEFAULT_CLAUDE_WRAPPER_PATH,
   node: '/usr/bin/node',
   npm: '/usr/bin/npm',
   npx: '/usr/bin/npx',

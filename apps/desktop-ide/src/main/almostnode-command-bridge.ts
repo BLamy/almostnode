@@ -36,6 +36,9 @@ const SHELL_PROXY_BYPASS_PREFIXES = [
   'cursor-cli',
   'brew',
   'open',
+  'almostnode-lsp-bridge',
+  'oxfmt',
+  'oxlint',
   'pbcopy',
   'pbpaste',
 ] as const;

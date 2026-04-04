@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AWS Command Smoke</title>
+    <style>
+      body {
+        margin: 0;
+        font: 500 14px/1.4 "IBM Plex Mono", monospace;
+        background: #07111c;
+        color: #d9e3ee;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+      }
+
+      #status {
+        padding: 0.6rem 0.85rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">booting</div>
+    <script type="module" src="./aws-command-smoke-entry.ts"></script>
+  </body>
+</html>

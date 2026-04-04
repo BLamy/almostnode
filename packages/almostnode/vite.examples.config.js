@@ -1,8 +1,15 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import wasm from 'vite-plugin-wasm';
+import { resolvePreferredPnpmPackagePath } from '../../scripts/resolve-pnpm-package-path.mjs';
 
 const __dirname = new URL('.', import.meta.url).pathname;
+const workspaceRoot = resolve(__dirname, '../..');
+const napiWasmRuntimePath = resolvePreferredPnpmPackagePath(
+  workspaceRoot,
+  '@napi-rs/wasm-runtime',
+  '1.1.',
+);
 
 export default defineConfig({
   plugins: [
@@ -62,6 +69,10 @@ export default defineConfig({
         replacement: resolve(__dirname, 'src/shims/dns.ts'),
       },
       {
+        find: /^@napi-rs\/wasm-runtime$/,
+        replacement: napiWasmRuntimePath,
+      },
+      {
         find: 'buffer',
         replacement: 'buffer',
       },
@@ -73,7 +84,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: ['buffer', 'process', 'pako'],
-    exclude: ['brotli-wasm', 'convex'],
+    exclude: ['@napi-rs/wasm-runtime', 'brotli-wasm', 'convex'],
     esbuildOptions: { target: 'esnext' },
   },
   worker: {

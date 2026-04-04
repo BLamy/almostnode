@@ -6,6 +6,8 @@ import { NewProjectDialog } from '../sidebar/new-project-dialog';
 type IndexSearch = {
   template?: string;
   name?: string;
+  debug?: string;
+  marketplace?: string;
   corsProxy?: string;
 };
 
@@ -13,6 +15,8 @@ export const Route = createFileRoute('/')({
   validateSearch: (search: Record<string, unknown>): IndexSearch => ({
     template: typeof search.template === 'string' ? search.template : undefined,
     name: typeof search.name === 'string' ? search.name : undefined,
+    debug: typeof search.debug === 'string' ? search.debug : undefined,
+    marketplace: typeof search.marketplace === 'string' ? search.marketplace : undefined,
     corsProxy: typeof search.corsProxy === 'string' ? search.corsProxy : undefined,
   }),
   component: Homepage,
@@ -190,7 +194,13 @@ const DEMO_LINES = [
 
 function Homepage() {
   const navigate = useNavigate();
-  const { template, name, corsProxy } = Route.useSearch();
+  const {
+    template,
+    name,
+    debug,
+    marketplace,
+    corsProxy,
+  } = Route.useSearch();
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<TemplateId>('vite');
 
@@ -204,10 +214,12 @@ function Homepage() {
       search: {
         template: templateFromQuery,
         ...(name !== undefined ? { name } : {}),
+        ...(debug !== undefined ? { debug } : {}),
+        ...(marketplace !== undefined ? { marketplace } : {}),
         ...(corsProxy !== undefined ? { corsProxy } : {}),
       },
     });
-  }, [templateFromQuery, name, corsProxy, navigate]);
+  }, [templateFromQuery, name, debug, marketplace, corsProxy, navigate]);
 
   const openNewProjectDialog = (templateId: TemplateId) => {
     setSelectedTemplateId(templateId);

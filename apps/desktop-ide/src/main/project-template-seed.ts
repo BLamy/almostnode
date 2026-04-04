@@ -27,7 +27,11 @@ function walkFiles(directoryPath: string): string[] {
   return files;
 }
 
-function copyTreeIntoDirectory(sourceDirectory: string, targetDirectory: string): void {
+function copyTreeIntoDirectory(
+  sourceDirectory: string,
+  targetDirectory: string,
+  options?: { overwrite?: boolean },
+): void {
   if (!fs.existsSync(sourceDirectory)) {
     return;
   }
@@ -39,7 +43,7 @@ function copyTreeIntoDirectory(sourceDirectory: string, targetDirectory: string)
     }
 
     const absoluteTargetPath = path.join(targetDirectory, relativePath);
-    if (fs.existsSync(absoluteTargetPath)) {
+    if (fs.existsSync(absoluteTargetPath) && !options?.overwrite) {
       continue;
     }
 
@@ -56,7 +60,9 @@ export function seedProjectDirectoryFromTemplate(
   fs.mkdirSync(absoluteProjectDirectory, { recursive: true });
 
   copyTreeIntoDirectory(SHARED_TEMPLATE_DIRECTORY, absoluteProjectDirectory);
-  copyTreeIntoDirectory(path.join(TEMPLATES_ROOT, templateId), absoluteProjectDirectory);
+  copyTreeIntoDirectory(path.join(TEMPLATES_ROOT, templateId), absoluteProjectDirectory, {
+    overwrite: true,
+  });
 
   const metadataPath = path.join(absoluteProjectDirectory, PROJECT_METADATA_PATH);
   if (!fs.existsSync(metadataPath)) {

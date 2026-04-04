@@ -90,6 +90,13 @@
     "prepublishOnly": "npm run test && npm run build:publish"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1022.0",
+    "@aws-sdk/client-s3": "^3.1022.0",
+    "@aws-sdk/client-sso": "^3.1022.0",
+    "@aws-sdk/client-sso-oidc": "^3.1022.0",
+    "@aws-sdk/client-sts": "^3.1022.0",
+    "@napi-rs/wasm-runtime": "^1.1.2",
+    "@smithy/protocol-http": "^5.3.12",
     "@tailscale/connect": "workspace:*",
     "acorn": "^8.15.0",
     "acorn-jsx": "^5.3.2",

@@ -1,20 +1,23 @@
 import 'dotenv/config';
 import { defineConfig } from '@playwright/test';
 
+const e2ePort = Number(process.env.ALMOSTNODE_E2E_PORT || 5173);
+const e2eBaseUrl = `http://localhost:${e2ePort}`;
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 60000,
   retries: 0,
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: e2eBaseUrl,
     headless: true,
     screenshot: 'only-on-failure',
     trace: 'on-first-retry',
   },
   webServer: [
     {
-      command: 'pnpm run dev',
-      url: 'http://localhost:5173/examples/vite-demo.html',
+      command: `pnpm exec vite --config vite.examples.config.js --host localhost --port ${e2ePort} --strictPort`,
+      url: `${e2eBaseUrl}/examples/vite-demo.html`,
       reuseExistingServer: !process.env.CI,
       timeout: 30000,
     },

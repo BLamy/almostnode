@@ -11,3 +11,6 @@
 	url = https://github.com/BLamy/opentui.git
 	branch = main
 	ignore = untracked
+[submodule "vendor/oxc"]
+	path = vendor/oxc
+	url = https://github.com/BLamy/oxc.git

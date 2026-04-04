@@ -14,8 +14,12 @@
     "@tanstack/react-router": "^1.160.0"
   },
   "devDependencies": {
+    "@typescript/native-preview": "^7.0.0-dev.20260401.1",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "oxfmt": "^0.43.0",
+    "oxlint": "^1.58.0",
+    "tsgo-wasm": "^2026.4.2",
     "typescript": "^5.9.3",
     "vite": "^5.4.0"
   }

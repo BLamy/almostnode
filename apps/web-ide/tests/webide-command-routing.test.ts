@@ -27,6 +27,7 @@ describe('webide terminal command routing', () => {
 
   it('matches Claude launch commands across wrappers', () => {
     expect(matchesClaudeLaunchCommand('npx @anthropic-ai/claude-code')).toBe(true);
+    expect(matchesClaudeLaunchCommand('/usr/local/bin/claude-wrapper --plugin-dir /project/.claude-plugin')).toBe(true);
     expect(matchesClaudeLaunchCommand('env FOO=bar npm exec -- claude')).toBe(true);
     expect(matchesClaudeLaunchCommand('time ./node_modules/.bin/claude --help')).toBe(true);
   });
@@ -40,6 +41,7 @@ describe('webide terminal command routing', () => {
   it('treats shadcn and OpenCode as interactive in the regular workbench terminal', () => {
     expect(shouldRunWorkbenchCommandInteractively('npx shadcn@latest add dropdown-menu', 'user')).toBe(true);
     expect(shouldRunWorkbenchCommandInteractively('npx opencode-ai', 'user')).toBe(true);
+    expect(shouldRunWorkbenchCommandInteractively('/usr/local/bin/claude-wrapper --plugin-dir /project/.claude-plugin', 'user')).toBe(true);
     expect(shouldRunWorkbenchCommandInteractively('npm run dev', 'user')).toBe(false);
     expect(shouldRunWorkbenchCommandInteractively('npx shadcn@latest add dropdown-menu', 'preview')).toBe(false);
     expect(shouldRunWorkbenchCommandInteractively('printf "hello"', 'agent')).toBe(true);

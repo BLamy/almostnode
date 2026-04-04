@@ -1,0 +1,32 @@
+{
+  "oxlint": {
+    "command": "almostnode-lsp-bridge",
+    "args": ["oxlint"],
+    "extensionToLanguage": {
+      ".js": "javascript",
+      ".jsx": "javascriptreact",
+      ".mjs": "javascript",
+      ".cjs": "javascript",
+      ".ts": "typescript",
+      ".tsx": "typescriptreact",
+      ".mts": "typescript",
+      ".cts": "typescript"
+    },
+    "transport": "stdio"
+  },
+  "tsgo": {
+    "command": "almostnode-lsp-bridge",
+    "args": ["tsgo"],
+    "extensionToLanguage": {
+      ".js": "javascript",
+      ".jsx": "javascriptreact",
+      ".mjs": "javascript",
+      ".cjs": "javascript",
+      ".ts": "typescript",
+      ".tsx": "typescriptreact",
+      ".mts": "typescript",
+      ".cts": "typescript"
+    },
+    "transport": "stdio"
+  }
+}

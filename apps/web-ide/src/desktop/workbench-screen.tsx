@@ -3,6 +3,8 @@ import type { TemplateId } from '../features/workspace-seed';
 import { WebIDEHost } from '../workbench/workbench-host';
 import { ProjectManager } from '../features/project-manager';
 import { ProjectSidebar } from '../sidebar/project-sidebar';
+import { AwsSetupDialog } from '../sidebar/aws-setup-dialog';
+import type { AwsSetupDraft } from '../features/aws-setup';
 import type { DesktopBridge } from './bridge';
 import type { SerializedFile } from './project-snapshot';
 
@@ -129,9 +131,11 @@ export function WorkbenchScreen({
 }: WorkbenchScreenProps) {
   const workbenchRef = useRef<HTMLDivElement | null>(null);
   const bootstrappedRef = useRef(false);
+  const hostRef = useRef<WebIDEHost | null>(null);
   const managerRef = useRef<ProjectManager | null>(null);
   const [hostReady, setHostReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+  const [awsSetupDraft, setAwsSetupDraft] = useState<AwsSetupDraft | null>(null);
 
   // Lazily create the project manager singleton
   if (!managerRef.current) {
@@ -188,7 +192,11 @@ export function WorkbenchScreen({
       desktopBridge: desktopBridge ?? null,
       hostProjectDirectory: hostProjectDirectory ?? null,
       agentLaunchCommand: agentLaunchCommand ?? null,
+      onRequestAwsSetup: (draft) => {
+        setAwsSetupDraft(draft);
+      },
     }).then((host) => {
+      hostRef.current = host;
       // Wire project manager to host
       manager.setHost({
         getVfs: () => host.getVfs(),
@@ -240,6 +248,23 @@ export function WorkbenchScreen({
         )}
         <div id="webideWorkbench" ref={workbenchRef} />
       </main>
+      <AwsSetupDialog
+        open={awsSetupDraft !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setAwsSetupDraft(null);
+          }
+        }}
+        initialDraft={awsSetupDraft}
+        onSave={async (draft) => {
+          const host = hostRef.current;
+          if (!host) {
+            throw new Error('AWS setup is not ready yet.');
+          }
+          await host.saveAwsSetup(draft);
+          setAwsSetupDraft(null);
+        }}
+      />
     </div>
   );
 }

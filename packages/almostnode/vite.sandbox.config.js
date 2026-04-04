@@ -1,6 +1,14 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import wasm from 'vite-plugin-wasm';
+import { resolvePreferredPnpmPackagePath } from '../../scripts/resolve-pnpm-package-path.mjs';
+
+const workspaceRoot = resolve(__dirname, '../..');
+const napiWasmRuntimePath = resolvePreferredPnpmPackagePath(
+  workspaceRoot,
+  '@napi-rs/wasm-runtime',
+  '1.1.',
+);
 
 
 /**
@@ -51,13 +59,14 @@ export default defineConfig({
     alias: {
       'node:zlib': resolve(__dirname, 'src/shims/zlib.ts'),
       'zlib': resolve(__dirname, 'src/shims/zlib.ts'),
+      '@napi-rs/wasm-runtime': napiWasmRuntimePath,
       'buffer': 'buffer',
       'process': 'process/browser',
     },
   },
   optimizeDeps: {
     include: ['buffer', 'process', 'pako'],
-    exclude: ['brotli-wasm', 'convex'],
+    exclude: ['@napi-rs/wasm-runtime', 'brotli-wasm', 'convex'],
     esbuildOptions: { target: 'esnext' },
   },
   build: {

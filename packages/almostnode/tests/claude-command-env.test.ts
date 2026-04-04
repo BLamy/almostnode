@@ -112,6 +112,50 @@ describe('Claude command environment', () => {
     expect(parsed.found).toBe('/project/CLAUDE.md');
   });
 
+  it('routes claude-wrapper through the pinned browser-safe Claude package and forwards args', async () => {
+    const container = createContainer({ cwd: '/project' });
+
+    container.vfs.mkdirSync('/project/node_modules/@anthropic-ai/claude-code', { recursive: true });
+    container.vfs.writeFileSync(
+      '/project/node_modules/@anthropic-ai/claude-code/package.json',
+      JSON.stringify({
+        name: '@anthropic-ai/claude-code',
+        bin: {
+          'claude-code': './cli.js',
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      '/project/node_modules/@anthropic-ai/claude-code/cli.js',
+      [
+        'console.log(JSON.stringify({',
+        '  argv: process.argv.slice(2),',
+        '  cwd: process.cwd(),',
+        '  noFlicker: process.env.CLAUDE_CODE_NO_FLICKER || null,',
+        '}));',
+      ].join('\n'),
+    );
+
+    const result = await container.run(
+      '/usr/local/bin/claude-wrapper --plugin-dir "/project/.claude-plugin" --resume "session-1"',
+    );
+    const parsed = JSON.parse(result.stdout.trim()) as {
+      argv: string[];
+      cwd: string;
+      noFlicker: string | null;
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(parsed.argv).toEqual([
+      '--plugin-dir',
+      '/project/.claude-plugin',
+      '--resume',
+      'session-1',
+    ]);
+    expect(parsed.cwd).toBe('/project');
+    expect(parsed.noFlicker).toBe('1');
+  });
+
   it('reads Claude history transcripts one JSON line at a time', async () => {
     const container = createContainer();
 

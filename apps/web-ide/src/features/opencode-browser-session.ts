@@ -5,6 +5,7 @@ import { configureBrowserProcess } from "../shims/node-process";
 import "../../../../vendor/opencode/packages/browser/src/shims/bun.browser";
 import { createOpencodeClient } from "../../../../vendor/opencode/packages/browser/src/shims/opencode-sdk.browser";
 import {
+  type BrowserProcessBridge,
   withProcessBridgeScope,
 } from "../shims/opencode-child-process";
 import {
@@ -252,7 +253,42 @@ function createWorkspaceBridge(container: ReturnTypeOfCreateContainer) {
   };
 }
 
-function createProcessBridge(session: TerminalSession) {
+function buildBridgeCommandInput(
+  session: TerminalSession,
+  input: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    shell?: boolean | string;
+  },
+): { cwd: string; fullCommand: string } {
+  const nextCwd = input.cwd ? toContainerPath(input.cwd) : null;
+  const state = session.getState();
+  const shellCommand = getShellCommandFromInvocation(
+    input.command,
+    input.args,
+  );
+  const commandString =
+    shellCommand ??
+    (input.shell || input.args.length === 0
+      ? input.command
+      : [
+          quoteShellArg(input.command),
+          ...input.args.map(quoteShellArg),
+        ].join(" "));
+  return {
+    cwd: nextCwd ?? state.cwd,
+    fullCommand:
+      nextCwd && nextCwd !== state.cwd
+        ? `cd ${quoteShellArg(nextCwd)} && ${commandString}`
+        : commandString,
+  };
+}
+
+function createProcessBridge(
+  container: ReturnTypeOfCreateContainer,
+  session: TerminalSession,
+): BrowserProcessBridge {
   let pending = Promise.resolve<void>(undefined);
 
   return {
@@ -264,24 +300,7 @@ function createProcessBridge(session: TerminalSession) {
       shell?: boolean | string;
     }) {
       const run = async () => {
-        const nextCwd = input.cwd ? toContainerPath(input.cwd) : null;
-        const state = session.getState();
-        const shellCommand = getShellCommandFromInvocation(
-          input.command,
-          input.args,
-        );
-        const commandString =
-          shellCommand ??
-          (input.shell || input.args.length === 0
-            ? input.command
-            : [
-                quoteShellArg(input.command),
-                ...input.args.map(quoteShellArg),
-              ].join(" "));
-        const fullCommand =
-          nextCwd && nextCwd !== state.cwd
-            ? `cd ${quoteShellArg(nextCwd)} && ${commandString}`
-            : commandString;
+        const { fullCommand } = buildBridgeCommandInput(session, input);
 
         const result = await session.run(fullCommand, {
           signal: input.signal,
@@ -300,6 +319,60 @@ function createProcessBridge(session: TerminalSession) {
         () => undefined,
       );
       return resultPromise;
+    },
+    spawn(input) {
+      const { cwd, fullCommand } = buildBridgeCommandInput(session, input);
+      const spawnedSession = container.createTerminalSession({
+        cwd,
+        env: input.env,
+      });
+      let closed = false;
+
+      void spawnedSession.run(fullCommand, {
+        interactive: true,
+        signal: input.signal,
+        onStdout: input.onStdout,
+        onStderr: input.onStderr,
+      }).then((result) => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        input.onExit(result.exitCode, null);
+      }).catch((error) => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        input.onStderr(`${error instanceof Error ? error.message : String(error)}\n`);
+        input.onExit(1, null);
+      }).finally(() => {
+        spawnedSession.dispose();
+      });
+
+      return {
+        write(data: string) {
+          if (closed) {
+            return;
+          }
+          spawnedSession.sendInput(data);
+        },
+        end() {
+          if (closed) {
+            return;
+          }
+          spawnedSession.sendInput("\u0004");
+        },
+        kill() {
+          if (closed) {
+            return;
+          }
+          closed = true;
+          spawnedSession.abort();
+          input.onExit(130, "SIGTERM");
+          spawnedSession.dispose();
+        },
+      };
     },
   };
 }
@@ -368,7 +441,7 @@ async function withOpenCodeBrowserRuntime<T>(
     env: options.env,
   });
   const workspaceBridge = createWorkspaceBridge(options.container);
-  const processBridge = createProcessBridge(bridgeSession);
+  const processBridge = createProcessBridge(options.container, bridgeSession);
 
   ensureBrowserProcess(options.cwd, options.env);
   setWorkspaceRoot(options.cwd);
@@ -439,7 +512,7 @@ export async function mountOpenCodeBrowserSession(
     env: options.env,
   });
   const workspaceBridge = createWorkspaceBridge(options.container);
-  const processBridge = createProcessBridge(bridgeSession);
+  const processBridge = createProcessBridge(options.container, bridgeSession);
   let disposed = false;
 
   ensureBrowserProcess(options.cwd, options.env);

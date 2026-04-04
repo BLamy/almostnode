@@ -1,0 +1,6 @@
+{
+  "name": "almostnode-lsp",
+  "version": "0.1.0",
+  "description": "Workspace-local oxlint and tsgo LSP wiring for Claude Code.",
+  "lspServers": "./.lsp.json"
+}

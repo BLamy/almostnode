@@ -245,6 +245,7 @@ export class DefaultNetworkController implements NetworkController {
   private sessionHydrationPromise: Promise<void> | null = null;
   private shouldClearPersistedSession = false;
   private tailscaleRecoveryPromise: Promise<NetworkStatus> | null = null;
+  private pendingExitNodeSelectionSync: Promise<void> | null = null;
 
   constructor(
     options: NetworkOptions = {},
@@ -622,11 +623,42 @@ export class DefaultNetworkController implements NetworkController {
     }
   }
 
+  private maybeSyncExitNodeSelectionFromStatus(): void {
+    if (this.pendingExitNodeSelectionSync) {
+      return;
+    }
+
+    if (
+      this.options.provider !== 'tailscale'
+      || !this.options.useExitNode
+      || this.options.exitNodeId
+      || !this.getPreferredExitNodeId()
+    ) {
+      return;
+    }
+
+    this.pendingExitNodeSelectionSync = this.syncResolvedExitNodeSelection()
+      .then(async () => {
+        this.emit();
+        await this.persistSession();
+      })
+      .catch((error) => {
+        almostnodeDebugWarn(
+          'network',
+          `[network][tailscale] failed to auto-select exit node: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        this.pendingExitNodeSelectionSync = null;
+      });
+  }
+
   private async createAdapter(): Promise<TailscaleAdapter> {
     const adapterFactory = await ensureTailscaleAdapterFactory();
     if (adapterFactory) {
       const adapter = await adapterFactory(this.options, (status) => {
         this.adapterStatus = status;
+        this.maybeSyncExitNodeSelectionFromStatus();
         this.emit();
         void this.persistSession();
       });
@@ -638,6 +670,7 @@ export class DefaultNetworkController implements NetworkController {
       this.options,
       (status) => {
         this.adapterStatus = status;
+        this.maybeSyncExitNodeSelectionFromStatus();
         this.emit();
         void this.persistSession();
       },
