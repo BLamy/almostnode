@@ -16,7 +16,7 @@
       "executor": "nx:run-commands",
       "dependsOn": ["^build"],
       "options": {
-        "command": "vite build",
+        "command": "node --max-old-space-size=8192 ./node_modules/vite/bin/vite.js build",
         "cwd": "apps/web-ide"
       }
     },

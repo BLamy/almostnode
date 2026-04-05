@@ -1,9 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-import { WASI as NodeWASI } from "node:wasi";
-import { Worker } from "node:worker_threads";
+type NodeFs = typeof import("node:fs");
+type NodePath = typeof import("node:path");
+type NodeModule = typeof import("node:module");
+type NodeUrl = typeof import("node:url");
+type NodeWorkerThreads = typeof import("node:worker_threads");
+type NodeWasi = typeof import("node:wasi");
+type NodeWASI = InstanceType<NodeWasi["WASI"]>;
 
 type OxcExports = {
   Severity: {
@@ -25,7 +26,7 @@ type NodeBindingModule = {
 };
 
 type WasmRuntimeModule = {
-  createOnMessage: (nodeFs: typeof fs) => (data: unknown) => void;
+  createOnMessage: (nodeFs: NodeFs) => (data: unknown) => void;
   getDefaultContext: () => unknown;
   instantiateNapiModuleSync: (
     wasm: Uint8Array,
@@ -37,7 +38,7 @@ type WasmRuntimeModule = {
         };
       }) => void;
       context: unknown;
-      onCreateWorker: () => Worker;
+      onCreateWorker: () => NodeWorkerThreads["Worker"];
       overwriteImports: (
         importObject: Record<string, Record<string, unknown>>,
       ) => Record<string, Record<string, unknown>>;
@@ -53,6 +54,10 @@ type WasmRuntimeModule = {
 
 let nodeBindingPromise: Promise<NodeBindingModule> | null = null;
 
+async function importNodeModule<T>(specifier: string): Promise<T> {
+  return import(/* @vite-ignore */ specifier) as Promise<T>;
+}
+
 function getAsyncWorkPoolSize(): number {
   const raw = Number(
     process.env.NAPI_RS_ASYNC_WORK_POOL_SIZE ?? process.env.UV_THREADPOOL_SIZE,
@@ -60,7 +65,7 @@ function getAsyncWorkPoolSize(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 4;
 }
 
-function createNodeWasi(): NodeWASI {
+function createNodeWasi(path: NodePath, WASI: NodeWasi["WASI"]): NodeWASI {
   const rootDirectory = path.parse(process.cwd()).root;
   const env = Object.fromEntries(
     Object.entries(process.env).filter(
@@ -68,7 +73,7 @@ function createNodeWasi(): NodeWASI {
     ),
   );
 
-  return new NodeWASI({
+  return new WASI({
     version: "preview1",
     env,
     preopens: {
@@ -78,7 +83,15 @@ function createNodeWasi(): NodeWASI {
 }
 
 async function createNodeBinding(): Promise<NodeBindingModule> {
+  // Keep Node built-ins behind a runtime boundary so browser builds can bundle
+  // the OXC browser path without trying to statically resolve node:wasi.
+  const { createRequire } = await importNodeModule<NodeModule>("node:module");
   const require = createRequire(import.meta.url);
+  const fs = require("node:fs") as NodeFs;
+  const path = require("node:path") as NodePath;
+  const { fileURLToPath } = require("node:url") as NodeUrl;
+  const { Worker } = require("node:worker_threads") as NodeWorkerThreads;
+  const { WASI } = require("node:wasi") as NodeWasi;
   const wasmRuntime = require("@napi-rs/wasm-runtime") as WasmRuntimeModule;
   const emnapiContext = wasmRuntime.getDefaultContext();
   const sharedMemory = new WebAssembly.Memory({
@@ -127,7 +140,7 @@ async function createNodeBinding(): Promise<NodeBindingModule> {
         return importObject;
       },
       reuseWorker: true,
-      wasi: createNodeWasi(),
+      wasi: createNodeWasi(path, WASI),
     },
   );
 
