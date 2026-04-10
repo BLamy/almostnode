@@ -14,6 +14,17 @@ const readGhTokenMock = vi.fn();
 const createModelReferenceMock = vi.fn();
 const getModelMock = vi.fn();
 const setModelLanguageMock = vi.fn();
+const buildClaudeIdeMcpConfigMock = vi.fn((url: string) =>
+  JSON.stringify({
+    mcpServers: {
+      ide: {
+        type: "sse-ide",
+        url,
+        ideName: "almostnode Web IDE",
+      },
+    },
+  }),
+);
 
 vi.mock("almostnode", () => ({
   createContainer: vi.fn(),
@@ -96,6 +107,10 @@ vi.mock("../src/features/opencode-browser-session", () => ({
   collectOpenCodeBrowserSnapshot: collectOpenCodeBrowserSnapshotMock,
   listOpenCodeBrowserSessions: listOpenCodeBrowserSessionsMock,
   restoreOpenCodeBrowserSnapshot: restoreOpenCodeBrowserSnapshotMock,
+}));
+vi.mock("../src/features/claude-ide-bridge", () => ({
+  buildClaudeIdeMcpConfig: buildClaudeIdeMcpConfigMock,
+  ClaudeIdeBridge: class {},
 }));
 vi.mock("../../../packages/almostnode/src/shims/gh-auth", () => ({
   readGhToken: readGhTokenMock,
@@ -285,6 +300,7 @@ beforeEach(() => {
   createModelReferenceMock.mockReset();
   getModelMock.mockReset();
   setModelLanguageMock.mockReset();
+  buildClaudeIdeMcpConfigMock.mockClear();
   createModelReferenceMock.mockResolvedValue({ dispose: vi.fn() });
   getModelMock.mockReturnValue(null);
   readGhTokenMock.mockReturnValue(null);
@@ -346,6 +362,51 @@ describe("WebIDEHost AI launcher behavior", () => {
     });
 
     expect(openEditor).toHaveBeenCalledWith(previewInput, { pinned: true }, 7);
+  });
+
+  it("injects the Claude IDE MCP config into launcher and resume commands", () => {
+    const command = (
+      WebIDEHost.prototype as unknown as {
+        buildClaudeLaunchCommand: (
+          this: {
+            claudeIdeBridge: { getSseUrl(): string } | null;
+            quoteShellArg(value: string): string;
+            augmentClaudeLaunchCommand(command: string): string;
+          },
+          options?: { resumeToken?: string },
+        ) => string;
+      }
+    ).buildClaudeLaunchCommand.call({
+      claudeIdeBridge: {
+        getSseUrl: () => "http://localhost/__virtual__/43127/sse",
+      },
+      quoteShellArg(value: string): string {
+        return `'${value}'`;
+      },
+      augmentClaudeLaunchCommand:
+        (
+          WebIDEHost.prototype as unknown as {
+            augmentClaudeLaunchCommand: (
+              this: {
+                claudeIdeBridge: { getSseUrl(): string } | null;
+                quoteShellArg(value: string): string;
+              },
+              command: string,
+            ) => string;
+          }
+        ).augmentClaudeLaunchCommand,
+    }, {
+      resumeToken: "resume-123",
+    });
+
+    expect(buildClaudeIdeMcpConfigMock).toHaveBeenCalledWith(
+      "http://localhost/__virtual__/43127/sse",
+    );
+    expect(command).toContain(
+      "--mcp-config '{\"mcpServers\":{\"ide\":{\"type\":\"sse-ide\",\"url\":\"http://localhost/__virtual__/43127/sse\",\"ideName\":\"almostnode Web IDE\"}}}'",
+    );
+    expect(command).toContain("--resume 'resume-123'");
+    expect(command.match(/--mcp-config/g)).toHaveLength(1);
   });
 
   it("opens preview-selected source files in the text editor at the resolved line", async () => {
@@ -734,12 +795,16 @@ describe("WebIDEHost AI launcher behavior", () => {
         this: unknown,
         newTemplateId: "vite" | "nextjs" | "tanstack",
         dbPrefix?: string,
+        defaultDatabaseName?: string,
       ) => Promise<void>;
     }).reloadWorkbenchForNewProject.call(
       {
         templateId: "vite",
         normalizeProjectDatabaseNamespace: vi.fn(
           (dbPrefix?: string) => dbPrefix ?? "global",
+        ),
+        normalizeProjectDefaultDatabaseName: vi.fn(
+          (defaultDatabaseName?: string) => defaultDatabaseName ?? "default",
         ),
         container: {
           vfs: {
@@ -865,6 +930,7 @@ describe("WebIDEHost AI launcher behavior", () => {
         templateId: "vite" | "nextjs" | "tanstack",
         files: Array<{ path: string; contentBase64: string }>,
         dbPrefix?: string,
+        defaultDatabaseName?: string,
       ) => Promise<void>;
     }).switchProjectWorkspace("nextjs", files, "project-b");
 
@@ -908,6 +974,7 @@ describe("WebIDEHost AI launcher behavior", () => {
         },
         run,
       },
+      runRequiredCommand: WebIDEHost.prototype["runRequiredCommand"],
       runWorkspaceGitCommand: WebIDEHost.prototype["runWorkspaceGitCommand"],
       ensureProjectRemote: WebIDEHost.prototype["ensureProjectRemote"],
       quoteShellArg: WebIDEHost.prototype["quoteShellArg"],
@@ -965,6 +1032,7 @@ describe("WebIDEHost AI launcher behavior", () => {
     try {
       const host = {
         container: { vfs: {} },
+        getGitHubAuthToken: WebIDEHost.prototype["getGitHubAuthToken"],
         toGitHubRepositoryName: WebIDEHost.prototype["toGitHubRepositoryName"],
         fetchGitHubApi: WebIDEHost.prototype["fetchGitHubApi"],
         resolveGitHubCorsProxy: vi.fn(() => null),

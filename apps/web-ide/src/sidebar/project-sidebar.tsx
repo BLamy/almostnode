@@ -2,10 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 import { SidebarProvider, useSidebar } from './sidebar-context';
 import { ProjectList } from './project-list';
 import { NewProjectDialog } from './new-project-dialog';
+import { GitHubImportDialog } from './github-import-dialog';
 import { Button } from '../ui/button';
 import { TooltipProvider } from '../ui/tooltip';
 import { ProjectManager } from '../features/project-manager';
+import type { GitHubRepositorySummary } from '../features/github-repositories';
 import type { TemplateId } from '../features/workspace-seed';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import './sidebar.css';
 
 const EXPANDED_PROJECTS_KEY = 'almostnode-expanded-project-ids';
@@ -39,6 +47,7 @@ interface SidebarInnerProps {
 function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
   const { state, dispatch } = useSidebar();
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [gitHubImportOpen, setGitHubImportOpen] = useState(false);
   const [hasGitHubCredentials, setHasGitHubCredentials] = useState(() => manager.hasGitHubCredentials());
 
   useEffect(() => {
@@ -70,11 +79,11 @@ function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
   }, [state.expandedProjectIds]);
 
   useEffect(() => {
-    if (!newProjectOpen) {
+    if (!newProjectOpen && !gitHubImportOpen) {
       return;
     }
     setHasGitHubCredentials(manager.hasGitHubCredentials());
-  }, [manager, newProjectOpen]);
+  }, [gitHubImportOpen, manager, newProjectOpen]);
 
   const handleSelectProject = useCallback(
     (id: string) => {
@@ -130,21 +139,58 @@ function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
     [dispatch, manager],
   );
 
+  const handleGitHubLogin = useCallback(async () => {
+    await manager.requestGitHubLogin();
+    const nextHasGitHubCredentials = manager.hasGitHubCredentials();
+    setHasGitHubCredentials(nextHasGitHubCredentials);
+    if (!nextHasGitHubCredentials) {
+      throw new Error('GitHub login did not complete. Finish `gh auth login` in the terminal and try again.');
+    }
+  }, [manager]);
+
+  const handleLoadGitHubRepositories = useCallback(
+    () => manager.listGitHubRepositories(),
+    [manager],
+  );
+
+  const handleImportGitHubRepository = useCallback(
+    async (repository: GitHubRepositorySummary) => {
+      const project = await manager.importGitHubRepository(repository);
+      dispatch({
+        type: 'SET_EXPANDED_PROJECTS',
+        projectIds: Array.from(new Set([...state.expandedProjectIds, project.id])),
+      });
+    },
+    [dispatch, manager, state.expandedProjectIds],
+  );
+
   return (
     <div className={`almostnode-project-sidebar ${state.isCollapsed ? 'is-collapsed' : ''}`}>
       <div className="almostnode-sidebar__header">
         <span className="almostnode-sidebar__title">Threads</span>
         <div style={{ display: 'flex', gap: '0.25rem' }}>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setNewProjectOpen(true)}
-            style={{ width: '1.6rem', height: '1.6rem' }}
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                style={{ width: '1.6rem', height: '1.6rem' }}
+                aria-label="Create or import project"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setNewProjectOpen(true)}>
+                Create new project
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setGitHubImportOpen(true)}>
+                Import from GitHub
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <button className="almostnode-sidebar__toggle" onClick={onToggle} type="button">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M3 4h10M3 8h10M3 12h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -172,6 +218,14 @@ function SidebarInner({ manager, onToggle }: SidebarInnerProps) {
         onOpenChange={setNewProjectOpen}
         hasGitHubCredentials={hasGitHubCredentials}
         onCreate={handleCreateProject}
+      />
+      <GitHubImportDialog
+        open={gitHubImportOpen}
+        onOpenChange={setGitHubImportOpen}
+        hasGitHubCredentials={hasGitHubCredentials}
+        onLogin={handleGitHubLogin}
+        onLoadRepositories={handleLoadGitHubRepositories}
+        onImport={handleImportGitHubRepository}
       />
     </div>
   );

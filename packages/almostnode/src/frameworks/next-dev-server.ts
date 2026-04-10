@@ -1502,6 +1502,7 @@ export class NextDevServer extends DevServer {
       format: 'esm',
       target: 'esnext',
       jsx: 'automatic',
+      jsxDev: loader === 'jsx' || loader === 'tsx',
       jsxImportSource: 'react',
       sourcemap: 'inline',
       sourcefile: filename,

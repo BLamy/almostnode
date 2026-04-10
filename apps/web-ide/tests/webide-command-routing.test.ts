@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  augmentClaudeLaunchCommand,
   matchesClaudeLaunchCommand,
   matchesOpenCodeLaunchCommand,
   matchesShadcnLaunchCommand,
@@ -30,6 +31,29 @@ describe('webide terminal command routing', () => {
     expect(matchesClaudeLaunchCommand('/usr/local/bin/claude-wrapper --plugin-dir /project/.claude-plugin')).toBe(true);
     expect(matchesClaudeLaunchCommand('env FOO=bar npm exec -- claude')).toBe(true);
     expect(matchesClaudeLaunchCommand('time ./node_modules/.bin/claude --help')).toBe(true);
+  });
+
+  it('appends one Claude IDE MCP config to launcher commands', () => {
+    const augmented = augmentClaudeLaunchCommand(
+      '/usr/local/bin/claude-wrapper --plugin-dir /project/.claude-plugin',
+      '{"mcpServers":{"ide":{"type":"sse-ide","url":"http://localhost/__virtual__/43127/sse","ideName":"almostnode Web IDE"}}}',
+      (value) => `'${value}'`,
+    );
+
+    expect(augmented).toContain("--mcp-config '{\"mcpServers\":{\"ide\":{\"type\":\"sse-ide\",\"url\":\"http://localhost/__virtual__/43127/sse\",\"ideName\":\"almostnode Web IDE\"}}}'");
+    expect(augmentClaudeLaunchCommand(augmented, '{"ignored":true}', (value) => `'${value}'`)).toBe(augmented);
+  });
+
+  it('augments typed Claude commands without disturbing chained segments', () => {
+    expect(
+      augmentClaudeLaunchCommand(
+        'echo preflight && npx @anthropic-ai/claude-code --resume abc123',
+        '{"mcpServers":{"ide":{"type":"sse-ide","url":"http://localhost/__virtual__/43127/sse","ideName":"almostnode Web IDE"}}}',
+        (value) => `'${value}'`,
+      ),
+    ).toBe(
+      "echo preflight && npx @anthropic-ai/claude-code --resume abc123 --mcp-config '{\"mcpServers\":{\"ide\":{\"type\":\"sse-ide\",\"url\":\"http://localhost/__virtual__/43127/sse\",\"ideName\":\"almostnode Web IDE\"}}}'",
+    );
   });
 
   it('matches shadcn launch commands across wrappers', () => {

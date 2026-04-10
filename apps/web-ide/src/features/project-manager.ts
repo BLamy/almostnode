@@ -7,6 +7,7 @@
 
 import {
   ProjectDB,
+  type ProjectAgentStateRecord,
   type ProjectAgentStateSnapshot,
   type ProjectGitRemoteRecord,
   type ProjectRecord,
@@ -19,6 +20,7 @@ import {
 import { mergeDiscoveredThreads } from './resumable-threads';
 import { resolveProjectName } from './project-names';
 import { isTemplateId, type TemplateId } from './workspace-seed';
+import type { GitHubRepositorySummary } from './github-repositories';
 
 export interface ProjectManagerHost {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -27,11 +29,16 @@ export interface ProjectManagerHost {
   hasGitHubCredentials(): boolean;
   createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord>;
   syncProjectGit(project: ProjectRecord): Promise<void>;
-  attachProjectContext(templateId: TemplateId, dbPrefix?: string): Promise<void>;
+  attachProjectContext(
+    templateId: TemplateId,
+    dbPrefix?: string,
+    defaultDatabaseName?: string,
+  ): Promise<void>;
   switchProjectWorkspace(
     templateId: TemplateId,
     files: Awaited<ReturnType<ProjectDB['getProjectFiles']>>,
     dbPrefix?: string,
+    defaultDatabaseName?: string,
   ): Promise<void>;
   collectAgentStateSnapshot(): Promise<ProjectAgentStateSnapshot>;
   restoreAgentStateSnapshot(
@@ -42,6 +49,13 @@ export interface ProjectManagerHost {
     opencode: ResumableThreadRecord[];
   }>;
   resumeResumableThread(thread: ResumableThreadRecord): Promise<void>;
+  requestGitHubLogin?(): Promise<void>;
+  listGitHubRepositories?(): Promise<GitHubRepositorySummary[]>;
+  importGitHubRepository?(
+    repository: GitHubRepositorySummary,
+    dbPrefix?: string,
+    defaultDatabaseName?: string,
+  ): Promise<TemplateId>;
 }
 
 export interface ProjectManagerCallbacks {
@@ -91,6 +105,26 @@ export class ProjectManager {
 
   hasGitHubCredentials(): boolean {
     return this.host?.hasGitHubCredentials() ?? false;
+  }
+
+  async requestGitHubLogin(): Promise<void> {
+    const requestGitHubLogin = this.host?.requestGitHubLogin;
+    if (!requestGitHubLogin) {
+      throw new Error('GitHub login is unavailable in this session.');
+    }
+    await requestGitHubLogin();
+  }
+
+  async listGitHubRepositories(): Promise<GitHubRepositorySummary[]> {
+    const host = this.host;
+    const listGitHubRepositories = host?.listGitHubRepositories;
+    if (!host || !listGitHubRepositories) {
+      throw new Error('GitHub repository listing is unavailable in this session.');
+    }
+    if (!host.hasGitHubCredentials()) {
+      throw new Error('GitHub credentials are not available. Run `gh auth login` first.');
+    }
+    return listGitHubRepositories();
   }
 
   async init(): Promise<void> {
@@ -155,11 +189,13 @@ export class ProjectManager {
           activeProject.templateId,
           activeFiles,
           activeProject.dbPrefix,
+          getProjectDefaultDatabaseName(activeProject),
         );
       } else {
         await this.host.attachProjectContext(
           activeProject.templateId,
           activeProject.dbPrefix,
+          getProjectDefaultDatabaseName(activeProject),
         );
       }
 
@@ -198,12 +234,88 @@ export class ProjectManager {
     return project;
   }
 
+  async importGitHubRepository(
+    repository: GitHubRepositorySummary,
+  ): Promise<ProjectRecord> {
+    const host = this.host;
+    const importGitHubRepository = host?.importGitHubRepository;
+    if (!host || !importGitHubRepository) {
+      throw new Error('GitHub import is unavailable in this session.');
+    }
+    if (!host.hasGitHubCredentials()) {
+      throw new Error('GitHub credentials are not available. Run `gh auth login` first.');
+    }
+
+    const previousProject = this.activeProjectId
+      ? await this.db.getProject(this.activeProjectId)
+      : undefined;
+    const previousAgentState = previousProject
+      ? await this.db.getProjectAgentState(previousProject.id)
+      : undefined;
+
+    await this.saveCurrentProject();
+
+    const project = createProjectRecord(repository.fullName, 'vite');
+    project.gitRemote = {
+      name: 'origin',
+      url: repository.cloneUrl,
+      provider: 'github',
+      repositoryFullName: repository.fullName,
+      repositoryUrl: repository.htmlUrl,
+    };
+
+    this.callbacks?.onSwitchingStateChanged(true);
+
+    try {
+      project.templateId = await importGitHubRepository(
+        repository,
+        project.dbPrefix,
+        getProjectDefaultDatabaseName(project),
+      );
+
+      await this.db.putProject(project);
+
+      const files = collectProjectFilesBase64(host.getVfs(), { includeGit: true });
+      await this.db.saveProjectFiles(project.id, files);
+
+      const agentState = await host.collectAgentStateSnapshot();
+      await this.db.putProjectAgentState({
+        projectId: project.id,
+        ...agentState,
+        savedAt: Date.now(),
+      });
+
+      this.activeProjectId = project.id;
+      writeActiveProjectId(project.id);
+      writeUrlProjectId(project.id);
+
+      this.callbacks?.onActiveProjectChanged(project.id);
+      await this.notifyProjectsChanged();
+      await this.syncActiveProjectThreads();
+
+      return project;
+    } catch (error) {
+      await this.restoreWorkspaceAfterFailedImport(previousProject, previousAgentState);
+      throw error;
+    } finally {
+      this.callbacks?.onSwitchingStateChanged(false);
+    }
+  }
+
   async renameProject(id: string, name: string): Promise<void> {
     const project = await this.db.getProject(id);
     if (!project) return;
     project.name = name;
+    project.defaultDatabaseName = toProjectDefaultDatabaseName(name);
     project.lastModified = Date.now();
     await this.db.putProject(project);
+    if (id === this.activeProjectId && this.host) {
+      await this.host.attachProjectContext(
+        project.templateId,
+        project.dbPrefix,
+        getProjectDefaultDatabaseName(project),
+      );
+    }
     await this.notifyProjectsChanged();
   }
 
@@ -244,6 +356,7 @@ export class ProjectManager {
         targetProject.templateId,
         files,
         targetProject.dbPrefix,
+        getProjectDefaultDatabaseName(targetProject),
       );
       await this.host.syncProjectGit(targetProject);
       await this.host.restoreAgentStateSnapshot(agentState ?? null);
@@ -410,6 +523,25 @@ export class ProjectManager {
     const threads = await this.db.listAllResumableThreads();
     this.callbacks?.onResumableThreadsChanged(threads);
   }
+
+  private async restoreWorkspaceAfterFailedImport(
+    previousProject: ProjectRecord | undefined,
+    previousAgentState: ProjectAgentStateRecord | undefined,
+  ): Promise<void> {
+    if (!previousProject || !this.host) {
+      return;
+    }
+
+    const files = await this.db.getProjectFiles(previousProject.id);
+    await this.host.switchProjectWorkspace(
+      previousProject.templateId,
+      files,
+      previousProject.dbPrefix,
+      getProjectDefaultDatabaseName(previousProject),
+    );
+    await this.host.syncProjectGit(previousProject);
+    await this.host.restoreAgentStateSnapshot(previousAgentState ?? null);
+  }
 }
 
 function createProjectRecord(name: string, templateId: TemplateId): ProjectRecord {
@@ -422,7 +554,35 @@ function createProjectRecord(name: string, templateId: TemplateId): ProjectRecor
     createdAt: now,
     lastModified: now,
     dbPrefix: id.slice(0, 8),
+    defaultDatabaseName: toProjectDefaultDatabaseName(name),
   };
+}
+
+function getProjectDefaultDatabaseName(
+  project: Pick<ProjectRecord, 'name'> & Partial<Pick<ProjectRecord, 'defaultDatabaseName'>>,
+): string {
+  const stored = project.defaultDatabaseName?.trim();
+  if (
+    stored
+    && stored.length <= 50
+    && /^[a-zA-Z0-9_-]+$/.test(stored)
+  ) {
+    return stored;
+  }
+  return toProjectDefaultDatabaseName(project.name);
+}
+
+function toProjectDefaultDatabaseName(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 50)
+    .replace(/^-+|-+$/g, '');
+
+  return slug || 'project';
 }
 
 interface UrlProjectCreationIntent {

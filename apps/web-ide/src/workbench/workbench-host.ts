@@ -22,9 +22,14 @@ import { FixtureMarketplaceClient } from "../extensions/fixture-extensions";
 import { OpenVSXClient } from "../extensions/open-vsx";
 import { prunePersistedWorkbenchExtensions } from "../features/persisted-extensions";
 import {
+  augmentClaudeLaunchCommand as augmentClaudeLaunchCommandString,
   parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
+import {
+  buildClaudeIdeMcpConfig,
+  ClaudeIdeBridge,
+} from "../features/claude-ide-bridge";
 import { installHostConsoleBridge } from "../features/host-console-bridge";
 import { installOxcMonacoIntegration } from "../features/oxc-monaco";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
@@ -33,6 +38,7 @@ import { HostTerminalSession } from "../desktop/host-terminal-session";
 import {
   loadProjectFilesIntoVfs,
   replaceProjectFilesInVfs,
+  clearProjectVfs,
   collectScopedFilesBase64,
   replaceScopedFilesInVfs,
   type SerializedFile,
@@ -43,6 +49,7 @@ import type {
   ProjectRecord,
   ResumableThreadRecord,
 } from "../features/project-db";
+import type { GitHubRepositorySummary } from "../features/github-repositories";
 import {
   CLAUDE_PROJECTS_ROOT,
   discoverClaudeThreads,
@@ -742,6 +749,60 @@ type PreviewSourcePickerMessage =
   | PreviewSourcePickerSelectionMessage
   | PreviewSourcePickerStatusMessage;
 
+interface PreviewSourcePickerBridge {
+  activateOpen(): void;
+  deactivate(notifyParent?: boolean): void;
+}
+
+interface PreviewSourcePickerSourceInfo {
+  filePath?: string | null;
+  lineNumber?: number | null;
+  columnNumber?: number | null;
+  componentName?: string | null;
+}
+
+interface PreviewSourcePickerElementInfo {
+  tagName?: string | null;
+  componentName?: string | null;
+  source?: PreviewSourcePickerSourceInfo | null;
+  stack?: PreviewSourcePickerSourceInfo[] | null;
+  formattedStack?: string | null;
+}
+
+interface PreviewSourcePickerRuntime {
+  window: Window & {
+    __REACT_GRAB__?: {
+      activate(): void;
+      deactivate(): void;
+    };
+    ElementSource?: {
+      resolveSource?: (
+        element: Element,
+      ) => Promise<PreviewSourcePickerSourceInfo | null> | PreviewSourcePickerSourceInfo | null;
+      resolveStack?: (
+        element: Element,
+      ) => Promise<PreviewSourcePickerSourceInfo[]> | PreviewSourcePickerSourceInfo[];
+      resolveElementInfo?: (
+        element: Element,
+      ) => Promise<PreviewSourcePickerElementInfo | null> | PreviewSourcePickerElementInfo | null;
+      formatStack?: (
+        stack: PreviewSourcePickerSourceInfo[],
+        maxLines?: number,
+      ) => string;
+    };
+    __almostnodePreviewSourcePickerBridge__?: PreviewSourcePickerBridge;
+  };
+  document: Document;
+  bridgePromise: Promise<PreviewSourcePickerBridge> | null;
+}
+
+type EditorSelectionRange = {
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+};
+
 function getWorkbenchCorsProxyUrl(): string | undefined {
   if (typeof window === "undefined") {
     return undefined;
@@ -786,6 +847,7 @@ export class WebIDEHost {
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
   private previewSourcePickerActive = false;
+  private previewSourcePickerRuntime: PreviewSourcePickerRuntime | null = null;
   private previewStartRetryTimeoutId = 0;
   private readonly consolePanel = new ConsolePanelElement();
   private readonly consoleTabId = "console-panel";
@@ -817,9 +879,11 @@ export class WebIDEHost {
     | null = null;
   private databaseSidebarRegistered = false;
   private currentProjectDatabaseNamespace = "global";
+  private currentProjectDefaultDatabaseName = "default";
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
   private removeHostConsoleBridge: (() => void) | null = null;
+  private claudeIdeBridge: ClaudeIdeBridge | null = null;
   private testRecorder:
     | import("../features/test-recorder").TestRecorder
     | null = null;
@@ -830,6 +894,10 @@ export class WebIDEHost {
   // testStepsMap removed — pw-web.js reads spec files directly from VFS
   private removePlaywrightListener: (() => void) | null = null;
   private removeCursorOverlay: (() => void) | null = null;
+  private static readonly reactGrabScriptUrl =
+    "https://unpkg.com/react-grab@0.1.29/dist/index.global.js";
+  private static readonly elementSourceScriptUrl =
+    "https://unpkg.com/element-source@0.0.5/dist/index.global.js";
 
   constructor(private readonly options: WebIDEHostOptions) {
     this.container = createContainer({
@@ -1080,18 +1148,78 @@ export class WebIDEHost {
     return Boolean(readGhToken(this.container.vfs)?.oauth_token);
   }
 
-  async createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord> {
-    const auth = readGhToken(this.container.vfs);
-    if (!auth?.oauth_token) {
-      throw new Error("GitHub credentials are not available. Run `gh auth login` first.");
+  async requestGitHubLogin(): Promise<void> {
+    await this.keychainAuthAction("gh auth login");
+    this.keychain.notifyExternalStateChanged();
+  }
+
+  async listGitHubRepositories(): Promise<GitHubRepositorySummary[]> {
+    const token = this.getGitHubAuthToken();
+    const repositories: GitHubRepositorySummary[] = [];
+    let page = 1;
+
+    while (true) {
+      const response = await this.fetchGitHubApi(
+        `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`,
+        {
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+
+      const raw = await response.text();
+      let payload: unknown = [];
+      if (raw) {
+        try {
+          payload = JSON.parse(raw);
+        } catch {
+          payload = [];
+        }
+      }
+
+      if (!response.ok) {
+        const message = this.getGitHubApiErrorMessage(
+          payload,
+          `GitHub repository listing failed (${response.status}).`,
+        );
+        throw new Error(message);
+      }
+
+      const rawPageRepositories = Array.isArray(payload) ? payload : [];
+      const pageRepositories = rawPageRepositories
+          .map((entry) => this.toGitHubRepositorySummary(entry))
+          .filter((entry): entry is GitHubRepositorySummary => entry !== null);
+
+      repositories.push(...pageRepositories);
+
+      if (rawPageRepositories.length < 100) {
+        break;
+      }
+
+      page += 1;
     }
+
+    const deduped = new Map<number, GitHubRepositorySummary>();
+    for (const repository of repositories) {
+      deduped.set(repository.id, repository);
+    }
+
+    return Array.from(deduped.values()).sort((left, right) => (
+      right.updatedAt.localeCompare(left.updatedAt)
+    ));
+  }
+
+  async createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord> {
+    const token = this.getGitHubAuthToken();
 
     const repoName = this.toGitHubRepositoryName(projectName);
     const response = await this.fetchGitHubApi("https://api.github.com/user/repos", {
       method: "POST",
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${auth.oauth_token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -1129,6 +1257,65 @@ export class WebIDEHost {
       repositoryFullName: payload.full_name,
       repositoryUrl: payload.html_url,
     };
+  }
+
+  async importGitHubRepository(
+    repository: GitHubRepositorySummary,
+    dbPrefix?: string,
+    defaultDatabaseName?: string,
+  ): Promise<TemplateId> {
+    const previousPreviewPort = this.previewPort;
+    this.abortRunningTerminalCommands();
+    this.clearScheduledPreviewStartRetry();
+    this.resetPreviewTerminalTab();
+    await this.waitForPreviewServerShutdown(previousPreviewPort);
+    await this.closeCurrentProjectDatabase();
+
+    this.previewPort = null;
+    this.previewUrl = null;
+    this.previewStartRequested = false;
+    this.setPreviewSourcePickerActive(false);
+    this.previewSurface.setActiveDb(null);
+    this.previewSurface.clear("Switching projects…");
+    this.databaseSurface.update([], null);
+
+    clearProjectVfs(this.container.vfs);
+    await this.runRequiredCommand(
+      `git clone ${this.quoteShellArg(repository.cloneUrl)} ${this.quoteShellArg(WORKSPACE_ROOT)}`,
+      "/",
+    );
+
+    const templateId = this.inferWorkspaceTemplateId();
+    this.templateId = templateId;
+    this.currentProjectDatabaseNamespace =
+      this.normalizeProjectDatabaseNamespace(dbPrefix);
+    this.currentProjectDefaultDatabaseName =
+      this.normalizeProjectDefaultDatabaseName(defaultDatabaseName);
+
+    await this.ensureGitInitialized({
+      gitRemote: {
+        name: "origin",
+        url: repository.cloneUrl,
+        provider: "github",
+        repositoryFullName: repository.fullName,
+        repositoryUrl: repository.htmlUrl,
+      },
+    });
+
+    if (this.terminalTabs.size === 0) {
+      const initialTab = this.createUserTerminalTab(false);
+      this.updateTerminalStatus(initialTab, "Idle");
+    }
+
+    await this.revealPreviewEditor();
+    this.updatePreviewStatus("Waiting for a preview server");
+    this.ensurePreviewServerRunning();
+    this.schedulePreviewStartRetry();
+    void this.initPGliteIfNeeded();
+
+    window.dispatchEvent(new Event("resize"));
+
+    return templateId;
   }
 
   async syncProjectGit(project: ProjectRecord): Promise<void> {
@@ -1216,6 +1403,11 @@ export class WebIDEHost {
   private normalizeProjectDatabaseNamespace(dbPrefix?: string): string {
     const trimmed = dbPrefix?.trim();
     return trimmed ? trimmed : "global";
+  }
+
+  private normalizeProjectDefaultDatabaseName(defaultDatabaseName?: string): string {
+    const trimmed = defaultDatabaseName?.trim();
+    return trimmed ? trimmed : "default";
   }
 
   private abortRunningTerminalCommands(): void {
@@ -1308,13 +1500,20 @@ export class WebIDEHost {
   async attachProjectContext(
     templateId: TemplateId,
     dbPrefix?: string,
+    defaultDatabaseName?: string,
   ): Promise<void> {
     const nextNamespace = this.normalizeProjectDatabaseNamespace(dbPrefix);
-    if (this.currentProjectDatabaseNamespace !== nextNamespace) {
+    const nextDefaultDatabaseName =
+      this.normalizeProjectDefaultDatabaseName(defaultDatabaseName);
+    if (
+      this.currentProjectDatabaseNamespace !== nextNamespace
+      || this.currentProjectDefaultDatabaseName !== nextDefaultDatabaseName
+    ) {
       await this.closeCurrentProjectDatabase();
     }
     this.templateId = templateId;
     this.currentProjectDatabaseNamespace = nextNamespace;
+    this.currentProjectDefaultDatabaseName = nextDefaultDatabaseName;
     void this.initPGliteIfNeeded();
   }
 
@@ -1322,6 +1521,7 @@ export class WebIDEHost {
     newTemplateId: TemplateId,
     files: SerializedFile[],
     dbPrefix?: string,
+    defaultDatabaseName?: string,
   ): Promise<void> {
     const previousPreviewPort = this.previewPort;
     this.abortRunningTerminalCommands();
@@ -1348,6 +1548,8 @@ export class WebIDEHost {
 
     this.currentProjectDatabaseNamespace =
       this.normalizeProjectDatabaseNamespace(dbPrefix);
+    this.currentProjectDefaultDatabaseName =
+      this.normalizeProjectDefaultDatabaseName(defaultDatabaseName);
 
     await this.ensureGitInitialized();
 
@@ -1447,10 +1649,13 @@ export class WebIDEHost {
   async reloadWorkbenchForNewProject(
     newTemplateId: TemplateId,
     dbPrefix?: string,
+    defaultDatabaseName?: string,
   ): Promise<void> {
     this.templateId = newTemplateId;
     this.currentProjectDatabaseNamespace =
       this.normalizeProjectDatabaseNamespace(dbPrefix);
+    this.currentProjectDefaultDatabaseName =
+      this.normalizeProjectDefaultDatabaseName(defaultDatabaseName);
 
     // 1. Seed workspace if VFS is empty (new project with no saved files)
     const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
@@ -1580,6 +1785,534 @@ export class WebIDEHost {
   private setPreviewSourcePickerActive(active: boolean): void {
     this.previewSourcePickerActive = active;
     this.previewSurface.setSelectActive(active);
+  }
+
+  private getPreviewSourcePickerRuntime():
+    | PreviewSourcePickerRuntime
+    | null {
+    const iframe = this.previewSurface.getIframe();
+    const win = iframe.contentWindow as PreviewSourcePickerRuntime["window"] | null;
+    const doc = iframe.contentDocument;
+    if (!win || !doc) {
+      return null;
+    }
+
+    if (
+      !this.previewSourcePickerRuntime
+      || this.previewSourcePickerRuntime.window !== win
+    ) {
+      this.previewSourcePickerRuntime = {
+        window: win,
+        document: doc,
+        bridgePromise: null,
+      };
+    }
+
+    return this.previewSourcePickerRuntime;
+  }
+
+  private waitForPreviewWindowGlobal<T>(
+    runtime: PreviewSourcePickerRuntime,
+    readGlobal: () => T | null | undefined,
+    errorMessage: string,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const existing = readGlobal();
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+
+      let settled = false;
+      const timeoutId = runtime.window.setTimeout(() => {
+        cleanup();
+        reject(new Error(errorMessage));
+      }, 15000);
+      const intervalId = runtime.window.setInterval(() => {
+        const value = readGlobal();
+        if (!value) {
+          return;
+        }
+        cleanup();
+        resolve(value);
+      }, 50);
+
+      const cleanup = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        runtime.window.clearTimeout(timeoutId);
+        runtime.window.clearInterval(intervalId);
+      };
+    });
+  }
+
+  private getPreviewSourcePickerBridgeBootstrap(): string {
+    return String.raw`
+(() => {
+  const bridgeKey = "__almostnodePreviewSourcePickerBridge__";
+  const messageType = "almostnode-preview-source-picker";
+  const reactGrabScriptUrl = ${JSON.stringify(WebIDEHost.reactGrabScriptUrl)};
+  const elementSourceScriptUrl = ${JSON.stringify(WebIDEHost.elementSourceScriptUrl)};
+  if (window[bridgeKey]) {
+    return;
+  }
+
+  let openMode = false;
+  let pluginRegistered = false;
+  let reactGrabPromise = null;
+  let elementSourcePromise = null;
+
+  function postSourcePickerMessage(payload) {
+    try {
+      window.parent?.postMessage(
+        {
+          type: messageType,
+          ...payload,
+        },
+        "*",
+      );
+    } catch {
+      // Ignore postMessage failures.
+    }
+  }
+
+  function readReactGrab() {
+    return window.__REACT_GRAB__ || null;
+  }
+
+  function readElementSource() {
+    return window.ElementSource || null;
+  }
+
+  function waitForGlobal(readGlobal, errorMessage) {
+    return new Promise((resolve, reject) => {
+      const existing = readGlobal();
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+
+      let settled = false;
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error(errorMessage));
+      }, 15000);
+      const intervalId = window.setInterval(() => {
+        const value = readGlobal();
+        if (!value) {
+          return;
+        }
+        cleanup();
+        resolve(value);
+      }, 50);
+
+      function cleanup() {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timeoutId);
+        window.clearInterval(intervalId);
+      }
+    });
+  }
+
+  function injectScript(dataAttribute, src) {
+    const selector = "script[" + dataAttribute + "]";
+    const existingScript = document.querySelector(selector);
+    if (existingScript) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.crossOrigin = "anonymous";
+      script.setAttribute(dataAttribute, "true");
+
+      function cleanup() {
+        script.removeEventListener("load", onLoad);
+        script.removeEventListener("error", onError);
+      }
+
+      function onLoad() {
+        cleanup();
+        resolve();
+      }
+
+      function onError() {
+        cleanup();
+        reject(new Error("Failed to load " + src));
+      }
+
+      script.addEventListener("load", onLoad);
+      script.addEventListener("error", onError);
+      (document.head || document.documentElement).appendChild(script);
+    });
+  }
+
+  function ensureReactGrabLoaded() {
+    const existing = readReactGrab();
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+    if (reactGrabPromise) {
+      return reactGrabPromise;
+    }
+
+    reactGrabPromise = injectScript(
+      "data-almostnode-react-grab",
+      reactGrabScriptUrl,
+    )
+      .catch(() => undefined)
+      .then(() =>
+        waitForGlobal(readReactGrab, "Timed out loading react-grab."),
+      )
+      .catch((error) => {
+        reactGrabPromise = null;
+        throw error;
+      });
+
+    return reactGrabPromise;
+  }
+
+  function ensureElementSourceLoaded() {
+    const existing = readElementSource();
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+    if (elementSourcePromise) {
+      return elementSourcePromise;
+    }
+
+    elementSourcePromise = injectScript(
+      "data-almostnode-element-source",
+      elementSourceScriptUrl,
+    )
+      .catch(() => undefined)
+      .then(() =>
+        waitForGlobal(
+          readElementSource,
+          "Timed out loading element-source.",
+        ).catch(() => null),
+      )
+      .catch((error) => {
+        elementSourcePromise = null;
+        throw error;
+      });
+
+    return elementSourcePromise;
+  }
+
+  function normalizeSourceInfo(source) {
+    if (!source || typeof source !== "object") {
+      return null;
+    }
+
+    return {
+      filePath:
+        typeof source.filePath === "string" ? source.filePath : null,
+      lineNumber:
+        typeof source.lineNumber === "number" ? source.lineNumber : null,
+      columnNumber:
+        typeof source.columnNumber === "number" ? source.columnNumber : null,
+      componentName:
+        typeof source.componentName === "string"
+          ? source.componentName
+          : null,
+    };
+  }
+
+  function normalizeStack(stack) {
+    if (!Array.isArray(stack)) {
+      return [];
+    }
+
+    return stack
+      .map((frame) => normalizeSourceInfo(frame))
+      .filter((frame) => Boolean(frame?.filePath));
+  }
+
+  function resolveElementInfo(api, element) {
+    return ensureElementSourceLoaded()
+      .catch(() => null)
+      .then((elementSourceApi) => {
+        if (typeof elementSourceApi?.resolveElementInfo === "function") {
+          return Promise.resolve(elementSourceApi.resolveElementInfo(element))
+            .then((info) => {
+              const normalizedSource = normalizeSourceInfo(info?.source);
+              const normalizedStack = normalizeStack(info?.stack);
+
+              return {
+                tagName:
+                  typeof info?.tagName === "string"
+                    ? info.tagName
+                    : typeof element?.tagName === "string"
+                      ? element.tagName.toLowerCase()
+                      : "",
+                componentName:
+                  typeof info?.componentName === "string"
+                    ? info.componentName
+                    : normalizedSource?.componentName ?? null,
+                source:
+                  normalizedSource ??
+                  normalizedStack[0] ??
+                  null,
+                stack:
+                  normalizedStack,
+                formattedStack:
+                  typeof elementSourceApi?.formatStack === "function"
+                    ? elementSourceApi.formatStack(normalizedStack)
+                    : null,
+              };
+            })
+            .catch(() => null);
+        }
+
+        return Promise.resolve(
+          typeof elementSourceApi?.resolveSource === "function"
+            ? elementSourceApi.resolveSource(element)
+            : null,
+        )
+          .catch(() => null)
+          .then((source) => {
+            const normalizedSource = normalizeSourceInfo(source);
+            if (normalizedSource?.filePath) {
+              return {
+                tagName:
+                  typeof element?.tagName === "string"
+                    ? element.tagName.toLowerCase()
+                    : "",
+                componentName: normalizedSource.componentName ?? null,
+                source: normalizedSource,
+                stack: normalizedSource ? [normalizedSource] : [],
+                formattedStack: null,
+              };
+            }
+
+            return api.getSource(element).then((fallbackSource) => {
+              const normalizedFallbackSource = normalizeSourceInfo(
+                fallbackSource,
+              );
+              return {
+                tagName:
+                  typeof element?.tagName === "string"
+                    ? element.tagName.toLowerCase()
+                    : "",
+                componentName:
+                  normalizedFallbackSource?.componentName ?? null,
+                source: normalizedFallbackSource,
+                stack: normalizedFallbackSource
+                  ? [normalizedFallbackSource]
+                  : [],
+                formattedStack: null,
+              };
+            });
+          });
+      });
+  }
+
+  function registerPlugin(api) {
+    if (pluginRegistered) {
+      return;
+    }
+
+    api.registerPlugin({
+      name: "almostnode-preview-source-picker-direct",
+      theme: {
+        toolbar: { enabled: false },
+        grabbedBoxes: { enabled: false },
+      },
+      options: {
+        activationKey: function() {
+          return false;
+        },
+      },
+      hooks: {
+        onElementSelect: function(element) {
+          if (!openMode) {
+            return;
+          }
+
+          return resolveElementInfo(api, element)
+            .then((info) => {
+              openMode = false;
+              api.deactivate();
+              console.log("[almostnode] preview element info", info ?? null);
+
+              const source = info?.source ?? info?.stack?.[0] ?? null;
+              console.log("[almostnode] source", source ?? null);
+              if (!source?.filePath) {
+                postSourcePickerMessage({
+                  status: "error",
+                  reason: "no-source",
+                });
+                return true;
+              }
+
+              postSourcePickerMessage({
+                status: "selected",
+                filePath: source.filePath,
+                lineNumber:
+                  typeof source.lineNumber === "number"
+                    ? source.lineNumber
+                    : null,
+                columnNumber:
+                  typeof source.columnNumber === "number"
+                    ? source.columnNumber
+                    : null,
+              });
+              return true;
+            })
+            .catch((error) => {
+              openMode = false;
+              api.deactivate();
+              postSourcePickerMessage({
+                status: "error",
+                reason:
+                  error instanceof Error ? error.message : String(error),
+              });
+              return true;
+            });
+        },
+      },
+    });
+
+    pluginRegistered = true;
+  }
+
+  function activateOpen() {
+    return ensureReactGrabLoaded()
+      .then((api) =>
+        ensureElementSourceLoaded()
+          .catch(() => null)
+          .then(() => {
+            registerPlugin(api);
+            openMode = true;
+            api.activate();
+            if (typeof api.isActive === "function" && !api.isActive()) {
+              return new Promise((resolve) =>
+                window.requestAnimationFrame(resolve),
+              ).then(() => {
+                api.activate();
+              });
+            }
+          })
+          .then(() => {
+            postSourcePickerMessage({ status: "armed" });
+          }),
+      )
+      .catch((error) => {
+        openMode = false;
+        postSourcePickerMessage({
+          status: "error",
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
+  function deactivate(notifyParent) {
+    openMode = false;
+    readReactGrab()?.deactivate();
+    if (notifyParent) {
+      postSourcePickerMessage({ status: "cancelled" });
+    }
+  }
+
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      if (!openMode || event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      deactivate(true);
+    },
+    true,
+  );
+
+  window.addEventListener("message", (event) => {
+    const payload = event.data;
+    if (!payload || payload.type !== messageType) {
+      return;
+    }
+
+    if (payload.action === "activate-open") {
+      void activateOpen();
+      return;
+    }
+
+    if (payload.action === "deactivate") {
+      deactivate(false);
+    }
+  });
+
+  window[bridgeKey] = {
+    activateOpen: function() {
+      void activateOpen();
+    },
+    deactivate,
+  };
+})();
+`.trim();
+  }
+
+  private async ensurePreviewSourcePickerBridgeLoaded(
+    runtime: PreviewSourcePickerRuntime,
+  ): Promise<PreviewSourcePickerBridge> {
+    const existing = runtime.window.__almostnodePreviewSourcePickerBridge__;
+    if (existing) {
+      return existing;
+    }
+    if (runtime.bridgePromise) {
+      return runtime.bridgePromise;
+    }
+
+    runtime.bridgePromise = Promise.resolve()
+      .then(() => {
+        const existingScript = runtime.document.querySelector(
+          "script[data-almostnode-source-picker-bridge]",
+        ) as HTMLScriptElement | null;
+        if (!existingScript) {
+          const script = runtime.document.createElement("script");
+          script.setAttribute("data-almostnode-source-picker-bridge", "true");
+          script.textContent = this.getPreviewSourcePickerBridgeBootstrap();
+          (
+            runtime.document.head || runtime.document.documentElement
+          ).appendChild(script);
+        }
+
+        return this.waitForPreviewWindowGlobal(
+          runtime,
+          () => runtime.window.__almostnodePreviewSourcePickerBridge__,
+          "Timed out loading preview source picker bridge.",
+        );
+      })
+      .catch((error) => {
+        runtime.bridgePromise = null;
+        throw error;
+      });
+
+    return runtime.bridgePromise;
+  }
+
+  private async activatePreviewSourcePickerDirect(): Promise<boolean> {
+    const runtime = this.getPreviewSourcePickerRuntime();
+    if (!runtime) {
+      return false;
+    }
+
+    await this.ensurePreviewSourcePickerBridgeLoaded(runtime);
+    return this.postPreviewSourcePickerMessage("activate-open");
+  }
+
+  private deactivatePreviewSourcePickerDirect(): void {
+    this.postPreviewSourcePickerMessage("deactivate");
   }
 
   private resolveBridgeWorkspaceCwd(
@@ -2116,7 +2849,20 @@ export class WebIDEHost {
     if (options?.resumeToken) {
       parts.push("--resume", this.quoteShellArg(options.resumeToken));
     }
-    return parts.join(" ");
+    return this.augmentClaudeLaunchCommand(parts.join(" "));
+  }
+
+  private augmentClaudeLaunchCommand(command: string): string {
+    const sseUrl = this.claudeIdeBridge?.getSseUrl();
+    if (!sseUrl) {
+      return command;
+    }
+
+    return augmentClaudeLaunchCommandString(
+      command,
+      buildClaudeIdeMcpConfig(sseUrl),
+      (value) => this.quoteShellArg(value),
+    );
   }
 
   private async createOpenCodeSidebarTab(
@@ -2958,9 +3704,13 @@ export class WebIDEHost {
 
     tab.runningAbortController = new AbortController();
     this.updateTerminalStatus(tab, `Running: ${trimmed}`);
+    const executableCommand =
+      this.agentMode === "browser"
+        ? this.augmentClaudeLaunchCommand(trimmed)
+        : trimmed;
 
     try {
-      const result = await tab.session.run(trimmed, {
+      const result = await tab.session.run(executableCommand, {
         signal: tab.runningAbortController.signal,
         onStdout: (text) => this.writeTerminal(tab, text),
         onStderr: (text) => this.writeTerminal(tab, text),
@@ -3123,6 +3873,82 @@ export class WebIDEHost {
     await this.openWorkspaceFile(target.path);
   }
 
+  private async resolveWorkspaceJsxSelectionRange(
+    path: string,
+    model: monaco.editor.ITextModel,
+    lineNumber: number,
+    columnNumber: number,
+  ): Promise<EditorSelectionRange | null> {
+    const normalizedPath = path.trim().toLowerCase();
+    const isTsxFile = normalizedPath.endsWith(".tsx");
+    const isJsxLikeFile =
+      normalizedPath.endsWith(".jsx") ||
+      normalizedPath.endsWith(".js") ||
+      normalizedPath.endsWith(".mjs") ||
+      normalizedPath.endsWith(".cjs");
+    if (!isTsxFile && !isJsxLikeFile) {
+      return null;
+    }
+
+    const typescript = await import("typescript");
+    const scriptKind = isTsxFile
+      ? typescript.ScriptKind.TSX
+      : typescript.ScriptKind.JSX;
+    const sourceFile = typescript.createSourceFile(
+      path,
+      model.getValue(),
+      typescript.ScriptTarget.Latest,
+      true,
+      scriptKind,
+    );
+    const offset = model.getOffsetAt({
+      lineNumber,
+      column: columnNumber,
+    });
+
+    let bestRange:
+      | {
+          start: number;
+          end: number;
+        }
+      | null = null;
+
+    const visit = (node: import("typescript").Node): void => {
+      const start = node.getStart(sourceFile, false);
+      const end = node.getEnd();
+      if (offset < start || offset > end) {
+        return;
+      }
+
+      if (
+        typescript.isJsxElement(node) ||
+        typescript.isJsxSelfClosingElement(node) ||
+        typescript.isJsxFragment(node)
+      ) {
+        if (!bestRange || end - start < bestRange.end - bestRange.start) {
+          bestRange = { start, end };
+        }
+      }
+
+      typescript.forEachChild(node, visit);
+    };
+
+    visit(sourceFile);
+
+    if (!bestRange) {
+      return null;
+    }
+
+    const startPosition = model.getPositionAt(bestRange.start);
+    const endPosition = model.getPositionAt(bestRange.end);
+    return {
+      startLineNumber: startPosition.lineNumber,
+      startColumn: startPosition.column,
+      endLineNumber: endPosition.lineNumber,
+      endColumn: endPosition.column,
+    };
+  }
+
   private async openWorkspaceFileAsText(
     path: string,
     lineNumber?: number | null,
@@ -3142,19 +3968,33 @@ export class WebIDEHost {
       columnNumber > 0
         ? Math.trunc(columnNumber)
         : 1;
+    let selection: EditorSelectionRange | null = normalizedLineNumber
+      ? {
+          startLineNumber: normalizedLineNumber,
+          startColumn: normalizedColumnNumber,
+          endLineNumber: normalizedLineNumber,
+          endColumn: normalizedColumnNumber,
+        }
+      : null;
     const openOptions = {
       pinned: true,
-      ...(normalizedLineNumber
-        ? {
-            selection: {
-              startLineNumber: normalizedLineNumber,
-              startColumn: normalizedColumnNumber,
-              endLineNumber: normalizedLineNumber,
-              endColumn: normalizedColumnNumber,
-            },
-          }
-        : {}),
+      ...(selection ? { selection } : {}),
     };
+    let codeEditor:
+      | {
+          getModifiedEditor?: () => unknown;
+          getModel?: () => { uri?: { path?: string } } | null;
+          setSelection?: (
+            nextSelection: EditorSelectionRange,
+            source?: string,
+          ) => void;
+          revealPositionNearTop?: (position: {
+            lineNumber: number;
+            column: number;
+          }) => void;
+          revealRangeNearTop?: (range: EditorSelectionRange) => void;
+        }
+      | undefined;
 
     try {
       await editorService.openEditor({
@@ -3175,44 +4015,28 @@ export class WebIDEHost {
       });
     }
 
-    if (normalizedLineNumber) {
+    if (selection) {
       const activeControl = editorService.activeTextEditorControl as
         | {
             getModifiedEditor?: () => unknown;
             getModel?: () => { uri?: { path?: string } } | null;
             setSelection?: (
-              selection: {
-                startLineNumber: number;
-                startColumn: number;
-                endLineNumber: number;
-                endColumn: number;
-              },
+              nextSelection: EditorSelectionRange,
               source?: string,
             ) => void;
             revealPositionNearTop?: (position: {
               lineNumber: number;
               column: number;
             }) => void;
-            revealRangeNearTop?: (range: {
-              startLineNumber: number;
-              startColumn: number;
-              endLineNumber: number;
-              endColumn: number;
-            }) => void;
+            revealRangeNearTop?: (range: EditorSelectionRange) => void;
           }
         | undefined;
-      const codeEditor =
+      codeEditor =
         activeControl &&
         typeof activeControl.getModifiedEditor === "function" &&
         activeControl.getModifiedEditor()
           ? (activeControl.getModifiedEditor() as typeof activeControl)
           : activeControl;
-      const selection = {
-        startLineNumber: normalizedLineNumber,
-        startColumn: normalizedColumnNumber,
-        endLineNumber: normalizedLineNumber,
-        endColumn: normalizedColumnNumber,
-      };
       const activeModelPath = codeEditor?.getModel?.()?.uri?.path;
 
       if (
@@ -3223,8 +4047,8 @@ export class WebIDEHost {
         codeEditor.setSelection(selection, "almostnode.preview-source-picker");
         if (typeof codeEditor.revealPositionNearTop === "function") {
           codeEditor.revealPositionNearTop({
-            lineNumber: normalizedLineNumber,
-            column: normalizedColumnNumber,
+            lineNumber: selection.startLineNumber,
+            column: selection.startColumn,
           });
         } else if (typeof codeEditor.revealRangeNearTop === "function") {
           codeEditor.revealRangeNearTop(selection);
@@ -3241,7 +4065,52 @@ export class WebIDEHost {
     );
     try {
       const model = monaco.editor.getModel(URI.file(path));
-      if (model && model.getLanguageId() !== languageId) {
+      if (!model) {
+        return;
+      }
+
+      if (selection) {
+        const jsxSelection = await this.resolveWorkspaceJsxSelectionRange(
+          path,
+          model,
+          selection.startLineNumber,
+          selection.startColumn,
+        ).catch(() => null);
+        if (
+          jsxSelection &&
+          (
+            jsxSelection.startLineNumber !== selection.startLineNumber ||
+            jsxSelection.startColumn !== selection.startColumn ||
+            jsxSelection.endLineNumber !== selection.endLineNumber ||
+            jsxSelection.endColumn !== selection.endColumn
+          )
+        ) {
+          selection = jsxSelection;
+          const activeModelPath = codeEditor?.getModel?.()?.uri?.path;
+          if (
+            codeEditor &&
+            typeof codeEditor.setSelection === "function" &&
+            (!activeModelPath || activeModelPath === path)
+          ) {
+            codeEditor.setSelection(
+              selection,
+              "almostnode.preview-source-picker.jsx",
+            );
+            if (typeof codeEditor.revealRangeNearTop === "function") {
+              codeEditor.revealRangeNearTop(selection);
+            } else if (
+              typeof codeEditor.revealPositionNearTop === "function"
+            ) {
+              codeEditor.revealPositionNearTop({
+                lineNumber: selection.startLineNumber,
+                column: selection.startColumn,
+              });
+            }
+          }
+        }
+      }
+
+      if (model.getLanguageId() !== languageId) {
         monaco.editor.setModelLanguage(model, languageId);
       }
     } finally {
@@ -3405,7 +4274,7 @@ export class WebIDEHost {
   async togglePreviewSourcePicker(): Promise<void> {
     if (this.previewSourcePickerActive) {
       this.setPreviewSourcePickerActive(false);
-      this.postPreviewSourcePickerMessage("deactivate");
+      this.deactivatePreviewSourcePickerDirect();
       return;
     }
 
@@ -3415,6 +4284,10 @@ export class WebIDEHost {
     }
 
     this.setPreviewSourcePickerActive(true);
+    if (await this.activatePreviewSourcePickerDirect()) {
+      return;
+    }
+
     if (!this.postPreviewSourcePickerMessage("activate-open")) {
       this.updatePreviewStatus(
         "Select mode will start once the preview finishes loading.",
@@ -4351,7 +5224,10 @@ export class WebIDEHost {
         this.databaseSidebarRegistered = true;
       }
 
-      const activeName = ensureDefaultDatabase(namespace);
+      const activeName = ensureDefaultDatabase(
+        namespace,
+        this.currentProjectDefaultDatabaseName,
+      );
 
       // Load PGlite and init instance (with migration support)
       const { initAndMigrate } =
@@ -4472,7 +5348,10 @@ export class WebIDEHost {
             deleteDatabase(name, callbackNamespace);
             let active = getActiveDatabase(callbackNamespace);
             if (!active) {
-              const newActive = ensureDefaultDatabase(callbackNamespace);
+              const newActive = ensureDefaultDatabase(
+                callbackNamespace,
+                this.currentProjectDefaultDatabaseName,
+              );
               const { initAndMigrate: initMigrate } =
                 await import("../../../../packages/almostnode/src/pglite/pglite-database");
               await initMigrate(
@@ -4531,7 +5410,11 @@ export class WebIDEHost {
   }
 
   private async runWorkspaceGitCommand(command: string): Promise<RunResult> {
-    const result = await this.container.run(command, { cwd: WORKSPACE_ROOT });
+    return this.runRequiredCommand(command, WORKSPACE_ROOT);
+  }
+
+  private async runRequiredCommand(command: string, cwd: string): Promise<RunResult> {
+    const result = await this.container.run(command, { cwd });
     if (result.exitCode !== 0) {
       throw new Error(
         (result.stderr || result.stdout || `${command} failed`).trim(),
@@ -4542,6 +5425,77 @@ export class WebIDEHost {
 
   private quoteShellArg(value: string): string {
     return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+  }
+
+  private getGitHubAuthToken(): string {
+    const auth = readGhToken(this.container.vfs);
+    if (!auth?.oauth_token) {
+      throw new Error("GitHub credentials are not available. Run `gh auth login` first.");
+    }
+    return auth.oauth_token;
+  }
+
+  private getGitHubApiErrorMessage(payload: unknown, fallback: string): string {
+    if (
+      payload
+      && typeof payload === "object"
+      && "message" in payload
+      && typeof payload.message === "string"
+      && payload.message.trim().length > 0
+    ) {
+      return payload.message;
+    }
+    return fallback;
+  }
+
+  private toGitHubRepositorySummary(payload: unknown): GitHubRepositorySummary | null {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+
+    const repository = payload as Record<string, unknown>;
+    const owner = (
+      repository.owner
+      && typeof repository.owner === "object"
+    )
+      ? repository.owner as Record<string, unknown>
+      : null;
+    const id = typeof repository.id === "number" ? repository.id : null;
+    const name = typeof repository.name === "string" ? repository.name : null;
+    const fullName = typeof repository.full_name === "string" ? repository.full_name : null;
+    const cloneUrl = typeof repository.clone_url === "string" ? repository.clone_url : null;
+    const htmlUrl = typeof repository.html_url === "string" ? repository.html_url : null;
+    const ownerLogin = typeof owner?.login === "string" ? owner.login : null;
+
+    if (
+      id === null
+      || !name
+      || !fullName
+      || !cloneUrl
+      || !htmlUrl
+      || !ownerLogin
+    ) {
+      return null;
+    }
+
+    return {
+      id,
+      name,
+      fullName,
+      description: typeof repository.description === "string"
+        ? repository.description
+        : null,
+      private: Boolean(repository.private),
+      updatedAt: typeof repository.updated_at === "string"
+        ? repository.updated_at
+        : new Date(0).toISOString(),
+      defaultBranch: typeof repository.default_branch === "string"
+        ? repository.default_branch
+        : "main",
+      cloneUrl,
+      htmlUrl,
+      ownerLogin,
+    };
   }
 
   private toGitHubRepositoryName(projectName: string): string {
@@ -4735,8 +5689,11 @@ export class WebIDEHost {
     });
 
     this.previewSurface.getIframe().addEventListener("load", () => {
+      this.previewSourcePickerRuntime = null;
       if (this.previewSourcePickerActive) {
-        this.postPreviewSourcePickerMessage("activate-open");
+        void this.activatePreviewSourcePickerDirect().catch(() => {
+          this.postPreviewSourcePickerMessage("activate-open");
+        });
       }
     });
 
@@ -4748,7 +5705,7 @@ export class WebIDEHost {
       event.preventDefault();
       event.stopPropagation();
       this.setPreviewSourcePickerActive(false);
-      this.postPreviewSourcePickerMessage("deactivate");
+      this.deactivatePreviewSourcePickerDirect();
     });
 
     window.addEventListener("message", (event) => {
@@ -4835,6 +5792,7 @@ export class WebIDEHost {
       this.previewPort = null;
       this.previewUrl = null;
       this.previewStartRequested = false;
+      this.previewSourcePickerRuntime = null;
       this.setPreviewSourcePickerActive(false);
       this.clearScheduledPreviewStartRetry();
       this.previewSurface.clear(
@@ -4862,6 +5820,16 @@ export class WebIDEHost {
     logMemory("before workbench init");
     await this.initWorkbench();
     logMemory("after workbench init");
+
+    if (this.agentMode === "browser") {
+      try {
+        this.claudeIdeBridge = await ClaudeIdeBridge.create({
+          container: this.container,
+        });
+      } catch (error) {
+        console.error("[claude-ide] failed to initialize IDE bridge", error);
+      }
+    }
 
     // ── PGlite database initialization (after workbench is ready) ──
     void this.initPGliteIfNeeded();
@@ -4909,6 +5877,57 @@ export class WebIDEHost {
     } catch {
       return null;
     }
+  }
+
+  private inferWorkspaceTemplateId(): TemplateId {
+    const packageJsonPath = `${WORKSPACE_ROOT}/package.json`;
+    const rawPackageJson = this.readWorkspaceFileText(packageJsonPath);
+
+    if (rawPackageJson) {
+      try {
+        const parsed = JSON.parse(rawPackageJson) as {
+          dependencies?: Record<string, unknown>;
+          devDependencies?: Record<string, unknown>;
+        };
+        const dependencyNames = new Set<string>([
+          ...Object.keys(parsed.dependencies ?? {}),
+          ...Object.keys(parsed.devDependencies ?? {}),
+        ]);
+
+        if (dependencyNames.has("next")) {
+          return "nextjs";
+        }
+        if (
+          dependencyNames.has("@tanstack/start")
+          || dependencyNames.has("@tanstack/react-start")
+        ) {
+          return "tanstack";
+        }
+      } catch {
+        // Fall back to file heuristics below.
+      }
+    }
+
+    for (const path of [
+      `${WORKSPACE_ROOT}/next.config.js`,
+      `${WORKSPACE_ROOT}/next.config.mjs`,
+      `${WORKSPACE_ROOT}/next.config.ts`,
+    ]) {
+      if (this.container.vfs.existsSync(path)) {
+        return "nextjs";
+      }
+    }
+
+    for (const path of [
+      `${WORKSPACE_ROOT}/app.config.ts`,
+      `${WORKSPACE_ROOT}/app.config.js`,
+    ]) {
+      if (this.container.vfs.existsSync(path)) {
+        return "tanstack";
+      }
+    }
+
+    return "vite";
   }
 
   private getWorkspaceDependencyInstallKey(): string | null {

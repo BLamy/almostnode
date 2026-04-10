@@ -12,6 +12,7 @@ let currentNamespace = DEFAULT_NAMESPACE;
 export interface DatabaseEntry {
   name: string;
   createdAt: string;
+  storageKey?: string;
 }
 
 function normalizeNamespace(namespace: string | null | undefined): string {
@@ -41,10 +42,48 @@ function getIndexedDbName(name: string, namespace = currentNamespace): string {
     : `almostnode-db-${normalizedNamespace}-${name}`;
 }
 
+function isValidDatabaseName(name: string | null | undefined): name is string {
+  return Boolean(name)
+    && name.length <= 50
+    && /^[a-zA-Z0-9_-]+$/.test(name);
+}
+
+function getValidatedDatabaseName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Database name cannot be empty');
+  if (trimmed.length > 50) throw new Error('Database name must be 50 characters or less');
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    throw new Error('Database name can only contain letters, numbers, hyphens, and underscores');
+  }
+  return trimmed;
+}
+
+function resolveStorageKey(name: string, namespace = currentNamespace): string {
+  const entry = loadRegistry(namespace).find((candidate) => candidate.name === name);
+  return entry?.storageKey || name;
+}
+
 function loadRegistry(namespace = currentNamespace): DatabaseEntry[] {
   try {
     const raw = localStorage.getItem(getRegistryKey(namespace));
-    return raw ? JSON.parse(raw) : [];
+    const entries = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+    return entries
+      .filter((entry): entry is DatabaseEntry => (
+        Boolean(entry)
+        && typeof entry === 'object'
+        && typeof entry.name === 'string'
+        && typeof entry.createdAt === 'string'
+      ))
+      .map((entry) => ({
+        name: entry.name,
+        createdAt: entry.createdAt,
+        storageKey: typeof entry.storageKey === 'string' && entry.storageKey
+          ? entry.storageKey
+          : undefined,
+      }));
   } catch {
     return [];
   }
@@ -68,12 +107,7 @@ export function listDatabases(namespace = currentNamespace): DatabaseEntry[] {
 }
 
 export function createDatabase(name: string, namespace = currentNamespace): DatabaseEntry {
-  const trimmed = name.trim();
-  if (!trimmed) throw new Error('Database name cannot be empty');
-  if (trimmed.length > 50) throw new Error('Database name must be 50 characters or less');
-  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
-    throw new Error('Database name can only contain letters, numbers, hyphens, and underscores');
-  }
+  const trimmed = getValidatedDatabaseName(name);
 
   const entries = loadRegistry(namespace);
   if (entries.some((e) => e.name === trimmed)) {
@@ -88,6 +122,8 @@ export function createDatabase(name: string, namespace = currentNamespace): Data
 
 export function deleteDatabase(name: string, namespace = currentNamespace): void {
   const entries = loadRegistry(namespace);
+  const entry = entries.find((candidate) => candidate.name === name);
+  const storageKey = entry?.storageKey || name;
   const filtered = entries.filter((e) => e.name !== name);
   if (filtered.length === entries.length) {
     throw new Error(`Database "${name}" not found`);
@@ -100,7 +136,7 @@ export function deleteDatabase(name: string, namespace = currentNamespace): void
   }
 
   // Delete the IndexedDB database. PGlite prepends /pglite/ internally.
-  indexedDB.deleteDatabase(`/pglite/${getIndexedDbName(name, namespace)}`);
+  indexedDB.deleteDatabase(`/pglite/${getIndexedDbName(storageKey, namespace)}`);
 }
 
 export function getActiveDatabase(namespace = currentNamespace): string | null {
@@ -115,24 +151,46 @@ export function setActiveDatabase(name: string, namespace = currentNamespace): v
  * Ensure a default database exists. Called on first launch.
  * Returns the name of the active database.
  */
-export function ensureDefaultDatabase(namespace = currentNamespace): string {
-  const entries = loadRegistry(namespace);
+export function ensureDefaultDatabase(
+  namespace = currentNamespace,
+  preferredName?: string,
+): string {
+  const preferred = isValidDatabaseName(preferredName?.trim())
+    ? preferredName!.trim()
+    : null;
+  let entries = loadRegistry(namespace);
+
+  if (preferred && preferred !== 'default') {
+    const legacyDefault = entries.find((entry) => entry.name === 'default');
+    const preferredEntry = entries.find((entry) => entry.name === preferred);
+    if (legacyDefault && !preferredEntry) {
+      legacyDefault.name = preferred;
+      legacyDefault.storageKey = legacyDefault.storageKey || 'default';
+      saveRegistry(entries, namespace);
+      entries = loadRegistry(namespace);
+    }
+  }
+
   if (entries.length === 0) {
-    createDatabase('default', namespace);
+    createDatabase(preferred || 'default', namespace);
+    entries = loadRegistry(namespace);
   }
 
   const active = getActiveDatabase(namespace);
-  if (active && loadRegistry(namespace).some((e) => e.name === active)) {
+  if (active && entries.some((e) => e.name === active)) {
     return active;
   }
 
-  // Fall back to first entry
-  const first = loadRegistry(namespace)[0].name;
-  setActiveDatabase(first, namespace);
-  return first;
+  const nextActive = (
+    preferred && entries.some((entry) => entry.name === preferred)
+      ? preferred
+      : entries[0]!.name
+  );
+  setActiveDatabase(nextActive, namespace);
+  return nextActive;
 }
 
 /** Returns the idb:// path for PGlite to use for IndexedDB persistence */
 export function getIdbPath(name: string, namespace = currentNamespace): string {
-  return `idb://${getIndexedDbName(name, namespace)}`;
+  return `idb://${getIndexedDbName(resolveStorageKey(name, namespace), namespace)}`;
 }

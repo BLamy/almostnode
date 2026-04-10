@@ -165,6 +165,11 @@
   flex: none;
 }
 
+.almostnode-project-item__badge.is-github {
+  color: #d6e4ff;
+  background: rgba(214, 228, 255, 0.12);
+}
+
 .almostnode-project-item__menu-trigger {
   appearance: none;
   border: 0;

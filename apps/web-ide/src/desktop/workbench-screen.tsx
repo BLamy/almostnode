@@ -202,12 +202,16 @@ export function WorkbenchScreen({
         getVfs: () => host.getVfs(),
         getTemplateId: () => host.getTemplateId(),
         hasGitHubCredentials: () => host.hasGitHubCredentials(),
+        requestGitHubLogin: () => host.requestGitHubLogin(),
+        listGitHubRepositories: () => host.listGitHubRepositories(),
         createGitHubRemote: (projectName) => host.createGitHubRemote(projectName),
+        importGitHubRepository: (repository, dbPrefix, defaultDatabaseName) =>
+          host.importGitHubRepository(repository, dbPrefix, defaultDatabaseName),
         syncProjectGit: (project) => host.syncProjectGit(project),
-        attachProjectContext: (tid, dbPrefix) =>
-          host.attachProjectContext(tid, dbPrefix),
-        switchProjectWorkspace: (tid, files, dbPrefix) =>
-          host.switchProjectWorkspace(tid, files, dbPrefix),
+        attachProjectContext: (tid, dbPrefix, defaultDatabaseName) =>
+          host.attachProjectContext(tid, dbPrefix, defaultDatabaseName),
+        switchProjectWorkspace: (tid, files, dbPrefix, defaultDatabaseName) =>
+          host.switchProjectWorkspace(tid, files, dbPrefix, defaultDatabaseName),
         collectAgentStateSnapshot: () => host.collectAgentStateSnapshot(),
         restoreAgentStateSnapshot: (snapshot) =>
           host.restoreAgentStateSnapshot(snapshot),

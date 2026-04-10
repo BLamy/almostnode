@@ -13,6 +13,13 @@ const OPEN_CODE_LAUNCH_PATTERNS = [
   /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+opencode-ai|\s+opencode)(?:\s|$)/,
 ];
 
+const CLAUDE_LAUNCH_PATTERNS = [
+  /^(?:\.\/)?(?:node_modules\/\.bin\/)?claude(?:\s|$)/,
+  /^(?:\.\/|\/usr\/local\/bin\/)?claude-wrapper(?:\s|$)/,
+  /^npx(?:\s+[-\w=]+)*(?:\s+@anthropic-ai\/claude-code(?:\s+--dangerous-skip-permissions-check)?|\s+claude)(?:\s|$)/,
+  /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/,
+];
+
 function normalizeCommandSegment(segment: string): string {
   let normalized = segment.trim();
 
@@ -158,16 +165,9 @@ export function parseOpenCodeLaunchCommand(command: string): OpenCodeLaunchArgs 
 }
 
 export function matchesClaudeLaunchCommand(command: string): boolean {
-  const patterns = [
-    /^(?:\.\/)?(?:node_modules\/\.bin\/)?claude(?:\s|$)/,
-    /^(?:\.\/|\/usr\/local\/bin\/)?claude-wrapper(?:\s|$)/,
-    /^npx(?:\s+[-\w=]+)*(?:\s+@anthropic-ai\/claude-code(?:\s+--dangerous-skip-permissions-check)?|\s+claude)(?:\s|$)/,
-    /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@anthropic-ai\/claude-code|\s+claude)(?:\s|$)/,
-  ];
-
   return command
     .split(/\s*(?:&&|\|\||;)\s*/)
-    .some((segment) => matchesSegment(segment, patterns));
+    .some((segment) => matchesSegment(segment, CLAUDE_LAUNCH_PATTERNS));
 }
 
 export function matchesOpenCodeLaunchCommand(command: string): boolean {
@@ -184,6 +184,51 @@ export function matchesShadcnLaunchCommand(command: string): boolean {
   return command
     .split(/\s*(?:&&|\|\||;)\s*/)
     .some((segment) => matchesSegment(segment, patterns));
+}
+
+function hasClaudeMcpConfigArg(tokens: string[]): boolean {
+  return tokens.some(
+    (token) => token === '--mcp-config' || token.startsWith('--mcp-config='),
+  );
+}
+
+export function augmentClaudeLaunchCommand(
+  command: string,
+  mcpConfigJson: string,
+  quoteShellArg: (value: string) => string,
+): string {
+  if (!command.trim()) {
+    return command;
+  }
+
+  const parts = command.split(/(\s*(?:&&|\|\||;)\s*)/);
+  let changed = false;
+
+  for (let index = 0; index < parts.length; index += 2) {
+    const segment = parts[index];
+    if (!segment) {
+      continue;
+    }
+
+    const normalized = normalizeCommandSegment(segment);
+    if (
+      !normalized ||
+      !CLAUDE_LAUNCH_PATTERNS.some((pattern) => pattern.test(normalized))
+    ) {
+      continue;
+    }
+
+    const tokens = tokenizeCommand(segment);
+    const commandIndex = findLaunchCommandIndex(tokens);
+    if (commandIndex === -1 || hasClaudeMcpConfigArg(tokens)) {
+      continue;
+    }
+
+    parts[index] = `${segment}${segment.endsWith(' ') ? '' : ' '}--mcp-config ${quoteShellArg(mcpConfigJson)}`;
+    changed = true;
+  }
+
+  return changed ? parts.join('') : command;
 }
 
 export function shouldRunWorkbenchCommandInteractively(

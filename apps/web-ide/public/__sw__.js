@@ -522,7 +522,7 @@ async function handleModuleRequest(request, url) {
  * The console bridge always runs; Eruda init is guarded in case the CDN fails.
  */
 function getErudaInjectionScript() {
-  return `<script data-almostnode-devtools>
+  return String.raw`<script data-almostnode-devtools>
 (function() {
   // ── Console bridge (always active) ──
   var origLog = console.log, origWarn = console.warn,
@@ -881,52 +881,103 @@ function getErudaInjectionScript() {
     return fallbackFrame;
   }
 
+  function normalizeSourcePickerInfo(source) {
+    if (!source || typeof source !== 'object') {
+      return null;
+    }
+
+    return {
+      filePath: typeof source.filePath === 'string' ? source.filePath : null,
+      lineNumber: typeof source.lineNumber === 'number' ? source.lineNumber : null,
+      columnNumber: typeof source.columnNumber === 'number' ? source.columnNumber : null,
+      componentName: typeof source.componentName === 'string' ? source.componentName : null
+    };
+  }
+
+  function normalizeSourcePickerStack(stack) {
+    if (!Array.isArray(stack)) {
+      return [];
+    }
+
+    return stack.map(function(frame) {
+      return normalizeSourcePickerInfo(frame);
+    }).filter(function(frame) {
+      return !!(frame && frame.filePath);
+    });
+  }
+
   function resolveSourcePickerSource(api, element) {
     return ensureElementSourceLoaded().then(function(elementSourceApi) {
+      if (typeof elementSourceApi.resolveElementInfo === 'function') {
+        return Promise.resolve(elementSourceApi.resolveElementInfo(element)).then(function(info) {
+          var normalizedSource = normalizeSourcePickerInfo(info && info.source);
+          var normalizedStack = normalizeSourcePickerStack(info && info.stack);
+          return {
+            tagName: info && typeof info.tagName === 'string'
+              ? info.tagName
+              : typeof element.tagName === 'string'
+                ? element.tagName.toLowerCase()
+                : '',
+            componentName: info && typeof info.componentName === 'string'
+              ? info.componentName
+              : normalizedSource && normalizedSource.componentName || null,
+            source: normalizedSource || normalizedStack[0] || null,
+            stack: normalizedStack,
+            formattedStack: typeof elementSourceApi.formatStack === 'function'
+              ? elementSourceApi.formatStack(normalizedStack)
+              : null
+          };
+        }).catch(function() {
+          return null;
+        });
+      }
+
       return Promise.resolve(
         typeof elementSourceApi.resolveSource === 'function'
           ? elementSourceApi.resolveSource(element)
           : null
-      ).then(function(source) {
-        if (!source || !source.filePath) {
-          return api.getSource(element);
-        }
-
-        if (
-          typeof source.columnNumber === 'number' &&
-          Number.isFinite(source.columnNumber) &&
-          source.columnNumber > 0
-        ) {
-          return source;
-        }
-
-        if (typeof elementSourceApi.getReactStack !== 'function') {
-          return source;
-        }
-
-        return Promise.resolve(elementSourceApi.getReactStack(element)).then(function(stack) {
-          var frame = findBestReactStackFrame(stack, source);
-          if (
-            !frame ||
-            typeof frame.columnNumber !== 'number' ||
-            !Number.isFinite(frame.columnNumber) ||
-            frame.columnNumber < 1
-          ) {
-            return source;
-          }
-
+      ).catch(function() {
+        return null;
+      }).then(function(source) {
+        var normalizedSource = normalizeSourcePickerInfo(source);
+        if (normalizedSource && normalizedSource.filePath) {
           return {
-            filePath: source.filePath,
-            lineNumber: typeof frame.lineNumber === 'number' ? frame.lineNumber : source.lineNumber,
-            columnNumber: frame.columnNumber,
-            componentName: source.componentName
+            tagName: typeof element.tagName === 'string'
+              ? element.tagName.toLowerCase()
+              : '',
+            componentName: normalizedSource.componentName || null,
+            source: normalizedSource,
+            stack: [normalizedSource],
+            formattedStack: null
           };
-        }).catch(function() {
-          return source;
+        }
+
+        return api.getSource(element).then(function(fallbackSource) {
+          var normalizedFallbackSource = normalizeSourcePickerInfo(fallbackSource);
+          return {
+            tagName: typeof element.tagName === 'string'
+              ? element.tagName.toLowerCase()
+              : '',
+            componentName: normalizedFallbackSource && normalizedFallbackSource.componentName || null,
+            source: normalizedFallbackSource,
+            stack: normalizedFallbackSource ? [normalizedFallbackSource] : [],
+            formattedStack: null
+          };
         });
       });
     }).catch(function() {
-      return api.getSource(element);
+      return api.getSource(element).then(function(source) {
+        var normalizedSource = normalizeSourcePickerInfo(source);
+        return {
+          tagName: typeof element.tagName === 'string'
+            ? element.tagName.toLowerCase()
+            : '',
+          componentName: normalizedSource && normalizedSource.componentName || null,
+          source: normalizedSource,
+          stack: normalizedSource ? [normalizedSource] : [],
+          formattedStack: null
+        };
+      });
     });
   }
 
@@ -946,10 +997,13 @@ function getErudaInjectionScript() {
         onElementSelect: function(element) {
           if (!reactGrabOpenMode) return;
 
-          return resolveSourcePickerSource(api, element).then(function(source) {
+          return resolveSourcePickerSource(api, element).then(function(info) {
             reactGrabOpenMode = false;
             api.deactivate();
 
+            console.log('[almostnode] preview element info', info || null);
+
+            var source = info && (info.source || info.stack && info.stack[0]) || null;
             if (!source || !source.filePath) {
               postSourcePickerMessage({
                 status: 'error',

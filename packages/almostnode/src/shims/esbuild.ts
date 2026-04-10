@@ -90,9 +90,12 @@ export interface TransformOptions {
   target?: string | string[];
   minify?: boolean;
   sourcemap?: boolean | 'inline' | 'external';
-  jsx?: 'transform' | 'preserve';
+  jsx?: 'transform' | 'preserve' | 'automatic';
+  jsxDev?: boolean;
+  jsxImportSource?: string;
   jsxFactory?: string;
   jsxFragment?: string;
+  sourcefile?: string;
 }
 
 export interface TransformResult {

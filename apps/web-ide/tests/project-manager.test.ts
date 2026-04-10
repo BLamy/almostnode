@@ -16,6 +16,10 @@ import {
   withWorkspaceBridgeScope,
 } from '../../../vendor/opencode/packages/browser/src/shims/fs.browser';
 
+vi.mock('../src/features/workspace-seed', () => ({
+  isTemplateId: (value: string) => ['vite', 'nextjs', 'tanstack'].includes(value),
+}));
+
 describe('ProjectManager init', () => {
   afterEach(() => {
     detachWorkspaceBridge();
@@ -107,6 +111,7 @@ describe('ProjectManager init', () => {
       'nextjs',
       savedFiles,
       'next-db',
+      'next-project',
     );
     expect(attachProjectContext).not.toHaveBeenCalled();
     expect(syncProjectGit).toHaveBeenCalledWith(project);
@@ -206,6 +211,7 @@ describe('ProjectManager init', () => {
       name: 'reponame',
       templateId: 'nextjs',
       dbPrefix: 'project-',
+      defaultDatabaseName: 'reponame',
     }));
     expect(filesByProject.get('project-created')).toEqual([
       {
@@ -218,7 +224,11 @@ describe('ProjectManager init', () => {
     ]);
     expect(collectAgentStateSnapshot).toHaveBeenCalled();
     expect(switchProjectWorkspace).not.toHaveBeenCalled();
-    expect(attachProjectContext).toHaveBeenCalledWith('nextjs', 'project-');
+    expect(attachProjectContext).toHaveBeenCalledWith(
+      'nextjs',
+      'project-',
+      'reponame',
+    );
     expect(syncProjectGit).toHaveBeenCalledWith(createdProject);
     expect(restoreAgentStateSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -750,5 +760,224 @@ describe('ProjectManager init', () => {
     });
     expect(putProject).toHaveBeenCalledWith(project);
     expect(notifyProjectsChanged).toHaveBeenCalled();
+  });
+
+  it('imports a GitHub repository as a new active project', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('project-imported');
+
+    const manager = new ProjectManager();
+    const container = createContainer();
+    const currentProject: ProjectRecord = {
+      id: 'project-current',
+      name: 'Current project',
+      templateId: 'vite',
+      createdAt: Date.now() - 1_000,
+      lastModified: Date.now() - 1_000,
+      dbPrefix: 'currentdb',
+    };
+
+    const putProject = vi.fn(async () => undefined);
+    const saveProjectFiles = vi.fn(async () => undefined);
+    const putProjectAgentState = vi.fn(async () => undefined);
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        getProject: vi.fn(async (projectId: string) => (
+          projectId === currentProject.id ? currentProject : undefined
+        )),
+        getProjectAgentState: vi.fn(async () => undefined),
+        getProjectFiles: vi.fn(async () => []),
+        putProject,
+        saveProjectFiles,
+        putProjectAgentState,
+      },
+    });
+
+    Object.defineProperty(manager, 'activeProjectId', {
+      configurable: true,
+      writable: true,
+      value: currentProject.id,
+    });
+    Object.defineProperty(manager, 'saveCurrentProject', {
+      configurable: true,
+      value: vi.fn(async () => undefined),
+    });
+    Object.defineProperty(manager, 'notifyProjectsChanged', {
+      configurable: true,
+      value: vi.fn(async () => undefined),
+    });
+    Object.defineProperty(manager, 'syncActiveProjectThreads', {
+      configurable: true,
+      value: vi.fn(async () => []),
+    });
+
+    const importGitHubRepository = vi.fn(async () => {
+      container.vfs.mkdirSync(PROJECT_ROOT, { recursive: true });
+      container.vfs.writeFileSync(
+        `${PROJECT_ROOT}/package.json`,
+        JSON.stringify({ name: 'imported-next', dependencies: { next: '15.0.0' } }, null, 2),
+      );
+      return 'nextjs' as const;
+    });
+
+    manager.setHost({
+      getVfs: () => container.vfs,
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => true,
+      requestGitHubLogin: vi.fn(async () => undefined),
+      listGitHubRepositories: vi.fn(async () => []),
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      importGitHubRepository,
+      syncProjectGit: vi.fn(async () => undefined),
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace: vi.fn(async () => undefined),
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    const project = await manager.importGitHubRepository({
+      id: 1,
+      name: 'web-ide',
+      fullName: 'octocat/web-ide',
+      description: 'Imported repo',
+      private: true,
+      updatedAt: '2026-04-08T12:00:00.000Z',
+      defaultBranch: 'main',
+      cloneUrl: 'https://github.com/octocat/web-ide.git',
+      htmlUrl: 'https://github.com/octocat/web-ide',
+      ownerLogin: 'octocat',
+    });
+
+    expect(importGitHubRepository).toHaveBeenCalledWith(
+      expect.objectContaining({ fullName: 'octocat/web-ide' }),
+      'project-',
+      'octocat-web-ide',
+    );
+    expect(project).toEqual(expect.objectContaining({
+      id: 'project-imported',
+      name: 'octocat/web-ide',
+      templateId: 'nextjs',
+      defaultDatabaseName: 'octocat-web-ide',
+      gitRemote: {
+        name: 'origin',
+        url: 'https://github.com/octocat/web-ide.git',
+        provider: 'github',
+        repositoryFullName: 'octocat/web-ide',
+        repositoryUrl: 'https://github.com/octocat/web-ide',
+      },
+    }));
+    expect(putProject).toHaveBeenCalledWith(project);
+    expect(saveProjectFiles).toHaveBeenCalledWith(
+      'project-imported',
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: `${PROJECT_ROOT}/package.json`,
+        }),
+      ]),
+    );
+    expect(putProjectAgentState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'project-imported',
+      }),
+    );
+    expect(manager.getActiveProjectId()).toBe('project-imported');
+  });
+
+  it('restores the previous workspace when GitHub import fails', async () => {
+    const manager = new ProjectManager();
+    const currentProject: ProjectRecord = {
+      id: 'project-current',
+      name: 'Current project',
+      templateId: 'vite',
+      createdAt: Date.now() - 1_000,
+      lastModified: Date.now() - 1_000,
+      dbPrefix: 'currentdb',
+    };
+    const previousAgentState: ProjectAgentStateRecord = {
+      projectId: currentProject.id,
+      claudeFiles: [],
+      openCodeDb: null,
+      savedAt: Date.now() - 500,
+    };
+    const previousFiles: SerializedFile[] = [
+      {
+        path: `${PROJECT_ROOT}/README.md`,
+        contentBase64: Buffer.from('# current\n', 'utf8').toString('base64'),
+      },
+    ];
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        getProject: vi.fn(async (projectId: string) => (
+          projectId === currentProject.id ? currentProject : undefined
+        )),
+        getProjectAgentState: vi.fn(async () => previousAgentState),
+        getProjectFiles: vi.fn(async () => previousFiles),
+      },
+    });
+
+    Object.defineProperty(manager, 'activeProjectId', {
+      configurable: true,
+      writable: true,
+      value: currentProject.id,
+    });
+    Object.defineProperty(manager, 'saveCurrentProject', {
+      configurable: true,
+      value: vi.fn(async () => undefined),
+    });
+
+    const switchProjectWorkspace = vi.fn(async () => undefined);
+    const syncProjectGit = vi.fn(async () => undefined);
+    const restoreAgentStateSnapshot = vi.fn(async () => undefined);
+
+    manager.setHost({
+      getVfs: () => ({}),
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => true,
+      requestGitHubLogin: vi.fn(async () => undefined),
+      listGitHubRepositories: vi.fn(async () => []),
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      importGitHubRepository: vi.fn(async () => {
+        throw new Error('clone failed');
+      }),
+      syncProjectGit,
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace,
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot,
+      discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    await expect(manager.importGitHubRepository({
+      id: 1,
+      name: 'broken-repo',
+      fullName: 'octocat/broken-repo',
+      description: null,
+      private: true,
+      updatedAt: '2026-04-08T12:00:00.000Z',
+      defaultBranch: 'main',
+      cloneUrl: 'https://github.com/octocat/broken-repo.git',
+      htmlUrl: 'https://github.com/octocat/broken-repo',
+      ownerLogin: 'octocat',
+    })).rejects.toThrow('clone failed');
+
+    expect(switchProjectWorkspace).toHaveBeenCalledWith(
+      'vite',
+      previousFiles,
+      'currentdb',
+      'current-project',
+    );
+    expect(syncProjectGit).toHaveBeenCalledWith(currentProject);
+    expect(restoreAgentStateSnapshot).toHaveBeenCalledWith(previousAgentState);
+    expect(manager.getActiveProjectId()).toBe('project-current');
   });
 });

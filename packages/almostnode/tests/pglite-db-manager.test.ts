@@ -54,25 +54,45 @@ beforeEach(() => {
 describe('pglite db manager namespaces', () => {
   it('isolates database registries and active selections per namespace', () => {
     setDatabaseNamespace('project-a');
-    ensureDefaultDatabase();
+    ensureDefaultDatabase(undefined, 'project-a');
     createDatabase('analytics');
     setActiveDatabase('analytics');
 
-    expect(listDatabases().map((entry) => entry.name)).toEqual(['default', 'analytics']);
+    expect(listDatabases().map((entry) => entry.name)).toEqual(['project-a', 'analytics']);
     expect(getActiveDatabase()).toBe('analytics');
     expect(getIdbPath('analytics')).toBe('idb://almostnode-db-project-a-analytics');
+    expect(getIdbPath('project-a')).toBe('idb://almostnode-db-project-a-project-a');
 
     setDatabaseNamespace('project-b');
 
     expect(listDatabases()).toEqual([]);
     expect(getActiveDatabase()).toBeNull();
-    expect(ensureDefaultDatabase()).toBe('default');
-    expect(listDatabases().map((entry) => entry.name)).toEqual(['default']);
-    expect(getActiveDatabase()).toBe('default');
-    expect(getIdbPath('default')).toBe('idb://almostnode-db-project-b-default');
+    expect(ensureDefaultDatabase(undefined, 'project-b')).toBe('project-b');
+    expect(listDatabases().map((entry) => entry.name)).toEqual(['project-b']);
+    expect(getActiveDatabase()).toBe('project-b');
+    expect(getIdbPath('project-b')).toBe('idb://almostnode-db-project-b-project-b');
 
     setDatabaseNamespace('project-a');
-    expect(listDatabases().map((entry) => entry.name)).toEqual(['default', 'analytics']);
+    expect(listDatabases().map((entry) => entry.name)).toEqual(['project-a', 'analytics']);
     expect(getActiveDatabase()).toBe('analytics');
+  });
+
+  it('renames a legacy default database without changing its storage path', () => {
+    setDatabaseNamespace('project-a');
+    ensureDefaultDatabase();
+
+    expect(listDatabases().map((entry) => entry.name)).toEqual(['default']);
+    expect(getIdbPath('default')).toBe('idb://almostnode-db-project-a-default');
+
+    expect(ensureDefaultDatabase(undefined, 'project-a')).toBe('project-a');
+    expect(listDatabases()).toEqual([
+      {
+        name: 'project-a',
+        createdAt: expect.any(String),
+        storageKey: 'default',
+      },
+    ]);
+    expect(getActiveDatabase()).toBe('project-a');
+    expect(getIdbPath('project-a')).toBe('idb://almostnode-db-project-a-default');
   });
 });

@@ -17,6 +17,7 @@ export interface ProjectRecord {
   createdAt: number;
   lastModified: number;
   dbPrefix: string;
+  defaultDatabaseName?: string;
   gitRemote?: ProjectGitRemoteRecord;
 }
 

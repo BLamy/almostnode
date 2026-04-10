@@ -976,6 +976,7 @@ export class ViteDevServer extends DevServer {
       format: 'esm', // Keep as ES modules for browser
       target: 'esnext',
       jsx: 'automatic', // Use React 17+ automatic runtime
+      jsxDev: loader === 'jsx' || loader === 'tsx',
       jsxImportSource: 'react',
       sourcemap: 'inline',
       sourcefile: filename,
