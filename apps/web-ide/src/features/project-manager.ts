@@ -44,6 +44,7 @@ export interface ProjectManagerHost {
   restoreAgentStateSnapshot(
     snapshot: ProjectAgentStateSnapshot | null | undefined,
   ): Promise<void>;
+  teardownActiveProject?(): Promise<void>;
   discoverActiveProjectThreads(projectId: string): Promise<{
     claude: ResumableThreadRecord[];
     opencode: ResumableThreadRecord[];
@@ -143,39 +144,37 @@ export class ProjectManager {
       }
     }
 
-    if (projects.length === 0) {
-      const templateId = this.host?.getTemplateId() ?? 'vite';
-      const project = createProjectRecord('My Project', templateId);
-      await this.db.putProject(project);
-
-      if (this.host) {
-        const files = collectProjectFilesBase64(this.host.getVfs(), { includeGit: true });
-        await this.db.saveProjectFiles(project.id, files);
-        const agentState = await this.host.collectAgentStateSnapshot();
-        await this.db.putProjectAgentState({
-          projectId: project.id,
-          ...agentState,
-          savedAt: Date.now(),
-        });
-      }
-
-      projects = [project];
-    }
-
     const storedActiveId = urlProjectId ?? createdProject?.id ?? readActiveProjectId();
     const matchingProject = storedActiveId
       ? projects.find((project) => project.id === storedActiveId)
       : null;
 
-    this.activeProjectId = matchingProject?.id ?? projects[0]!.id;
+    const activeProject = matchingProject ?? projects[0] ?? null;
+    this.activeProjectId = activeProject?.id ?? null;
     writeActiveProjectId(this.activeProjectId);
     writeUrlProjectId(this.activeProjectId);
 
     this.callbacks?.onProjectsChanged(projects);
     this.callbacks?.onActiveProjectChanged(this.activeProjectId);
 
+    if (!activeProject) {
+      if (this.host?.teardownActiveProject) {
+        await this.host.teardownActiveProject();
+      }
+      await this.syncActiveProjectThreads();
+      this.startAutoSave();
+      window.addEventListener(
+        AI_SIDEBAR_TAB_CLOSED_EVENT,
+        this.handleAiSidebarTabClosed,
+      );
+
+      window.addEventListener('beforeunload', () => {
+        void this.saveCurrentProject();
+      });
+      return;
+    }
+
     if (this.host) {
-      const activeProject = matchingProject ?? projects[0]!;
       const activeFiles = await this.db.getProjectFiles(activeProject.id);
       const currentFiles = collectProjectFilesBase64(this.host.getVfs(), { includeGit: true });
       const shouldRestoreWorkspace = (
@@ -324,6 +323,16 @@ export class ProjectManager {
       const projects = await this.db.listProjects();
       const otherProject = projects.find((project) => project.id !== id);
       if (!otherProject) {
+        await this.db.deleteProject(id);
+        this.activeProjectId = null;
+        writeActiveProjectId(null);
+        writeUrlProjectId(null);
+        this.callbacks?.onActiveProjectChanged(null);
+        if (this.host?.teardownActiveProject) {
+          await this.host.teardownActiveProject();
+        }
+        await this.notifyProjectsChanged();
+        await this.refreshResumableThreads();
         return;
       }
       await this.switchProject(otherProject.id);
@@ -598,9 +607,13 @@ function readActiveProjectId(): string | null {
   }
 }
 
-function writeActiveProjectId(id: string): void {
+function writeActiveProjectId(id: string | null): void {
   try {
-    localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+    if (id) {
+      localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+    } else {
+      localStorage.removeItem(ACTIVE_PROJECT_KEY);
+    }
   } catch {
     // Ignore storage failures.
   }
@@ -632,10 +645,14 @@ function readUrlProjectCreationIntent(): UrlProjectCreationIntent | null {
   }
 }
 
-function writeUrlProjectId(id: string): void {
+function writeUrlProjectId(id: string | null): void {
   try {
     const url = new URL(window.location.href);
-    url.searchParams.set(URL_PROJECT_PARAM, id);
+    if (id) {
+      url.searchParams.set(URL_PROJECT_PARAM, id);
+    } else {
+      url.searchParams.delete(URL_PROJECT_PARAM);
+    }
     url.searchParams.delete(URL_TEMPLATE_PARAM);
     url.searchParams.delete(URL_NAME_PARAM);
     window.history.replaceState(null, '', url.toString());

@@ -22,8 +22,11 @@ export function ProjectList({
 
   if (state.projects.length === 0) {
     return (
-      <div style={{ padding: '0.75rem', fontSize: '0.78rem', color: 'var(--muted)' }}>
-        No projects yet.
+      <div className="almostnode-project-list__empty">
+        <span className="almostnode-project-list__empty-title">No projects yet</span>
+        <span className="almostnode-project-list__empty-copy">
+          Start a sandbox or import a repository to see it here.
+        </span>
       </div>
     );
   }

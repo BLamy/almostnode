@@ -471,6 +471,11 @@ const LAYOUT_OVERRIDES = `
   flex-direction: column !important;
 }
 
+/* Panel must fill its split-view-view container */
+.part.panel.bottom {
+  height: 100% !important;
+}
+
 /* Hide panel composite title and pane headers */
 .part.panel.bottom .composite.title {
   display: none !important;
@@ -481,6 +486,36 @@ const LAYOUT_OVERRIDES = `
 .part.panel.bottom .content {
   padding: 0 !important;
   margin: 0 !important;
+}
+.part.panel.bottom .content,
+.part.panel.bottom .composite,
+.part.panel.bottom .split-view-container,
+.part.panel.bottom .split-view-view,
+.part.panel.bottom .pane-body,
+.part.panel.bottom .pane-body > .monaco-scrollable-element,
+.part.panel.bottom .almostnode-terminal-panel-host {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+}
+.part.panel.bottom .content,
+.part.panel.bottom .composite,
+.part.panel.bottom .split-view-container,
+.part.panel.bottom .split-view-view,
+.part.panel.bottom .pane-body,
+.part.panel.bottom .pane-body > .monaco-scrollable-element,
+.part.panel.bottom .almostnode-terminal-panel-host {
+  display: flex !important;
+  flex-direction: column !important;
+}
+.part.panel.bottom .pane-body > .monaco-scrollable-element,
+.part.panel.bottom .almostnode-terminal-panel-host {
+  overflow: hidden !important;
+}
+
+[id="almostnode.panel.terminal"] .pane-body.wide > .monaco-scrollable-element > div {
+  min-height: 100% !important;
 }
 `;
 
@@ -621,9 +656,6 @@ const LIGHT_MODE_OVERRIDES = `
 }
 .monaco-workbench.vs .letterpress {
   filter: brightness(1) drop-shadow(2px 2px 1px rgba(0,0,0,0.06)) drop-shadow(-2px -2px 1px rgba(255,255,255,0.4)) !important;
-}
-.monaco-workbench.vs * {
-  border-color: transparent !important;
 }
 `;
 
@@ -863,6 +895,7 @@ export class WebIDEHost {
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
   private workspaceDependencyInstallKey: string | null = null;
   private workspaceDependencyInstallRequestKey: string | null = null;
+  private pendingProjectLaunch = false;
   private templateId: TemplateId;
   private readonly initialProjectFiles: SerializedFile[] | null;
   private readonly skipWorkspaceSeed: boolean;
@@ -951,6 +984,7 @@ export class WebIDEHost {
     this.initialProjectFiles = options.initialProjectFiles ?? null;
     this.skipWorkspaceSeed = options.skipWorkspaceSeed === true;
     this.deferPreviewStart = options.deferPreviewStart === true;
+    this.pendingProjectLaunch = this.skipWorkspaceSeed || this.deferPreviewStart;
     this.desktopBridge = options.desktopBridge ?? null;
     this.hostProjectDirectory = options.hostProjectDirectory ?? null;
     this.agentMode = this.desktopBridge ? "host" : "browser";
@@ -1021,8 +1055,10 @@ export class WebIDEHost {
       openCodeSurface: this.openCodeSurface,
       previewSurface: this.previewSurface,
       terminalSurface: this.terminalSurface,
+      databaseSurface: this.databaseSurface,
       databaseBrowserSurface: this.databaseBrowserSurface,
       keychainSurface: this.keychainSurface,
+      testsSurface: this.testsSurface,
       vfs: this.container.vfs,
       openFileAsText: (path: string) => void this.openWorkspaceFileAsText(path),
     });
@@ -1312,6 +1348,7 @@ export class WebIDEHost {
     this.ensurePreviewServerRunning();
     this.schedulePreviewStartRetry();
     void this.initPGliteIfNeeded();
+    await this.resumePendingProjectLaunch({ previewRevealed: true });
 
     window.dispatchEvent(new Event("resize"));
 
@@ -1515,6 +1552,7 @@ export class WebIDEHost {
     this.currentProjectDatabaseNamespace = nextNamespace;
     this.currentProjectDefaultDatabaseName = nextDefaultDatabaseName;
     void this.initPGliteIfNeeded();
+    await this.resumePendingProjectLaunch();
   }
 
   async switchProjectWorkspace(
@@ -1563,6 +1601,7 @@ export class WebIDEHost {
     this.ensurePreviewServerRunning();
     this.schedulePreviewStartRetry();
     void this.initPGliteIfNeeded();
+    await this.resumePendingProjectLaunch({ previewRevealed: true });
 
     window.dispatchEvent(new Event("resize"));
   }
@@ -1612,6 +1651,7 @@ export class WebIDEHost {
     this.previewPort = null;
     this.previewUrl = null;
     this.previewStartRequested = false;
+    this.pendingProjectLaunch = true;
     this.setPreviewSourcePickerActive(false);
     this.previewSurface.setActiveDb(null);
     this.previewSurface.clear("Switching projects\u2026");
@@ -1680,6 +1720,7 @@ export class WebIDEHost {
 
     // 6. Init PGlite if needed
     void this.initPGliteIfNeeded();
+    await this.resumePendingProjectLaunch({ previewRevealed: true });
 
     // 7. Trigger Monaco layout refresh
     window.dispatchEvent(new Event("resize"));
@@ -2488,6 +2529,41 @@ export class WebIDEHost {
 
   private updatePreviewStatus(text: string): void {
     this.previewSurface.setStatus(text);
+  }
+
+  private shouldAutoLaunchOpenCode(): boolean {
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      return !(
+        searchParams.has("no-opencode") || searchParams.has("no-claude")
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private async resumePendingProjectLaunch(options?: {
+    previewRevealed?: boolean;
+  }): Promise<void> {
+    if (!this.pendingProjectLaunch) {
+      return;
+    }
+
+    this.pendingProjectLaunch = false;
+
+    if (!options?.previewRevealed) {
+      await this.revealPreviewEditor();
+    }
+
+    if (!this.previewUrl && !this.previewStartRequested) {
+      this.updatePreviewStatus("Waiting for a preview server");
+      this.ensurePreviewServerRunning();
+      this.schedulePreviewStartRetry();
+    }
+
+    if (this.shouldAutoLaunchOpenCode()) {
+      void this.revealOpenCodePanel(false);
+    }
   }
 
   private clearScheduledPreviewStartRetry(): void {
@@ -4225,12 +4301,28 @@ export class WebIDEHost {
 
   private async revealTerminalPanel(focus: boolean): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
+    const layoutService = await getService(IWorkbenchLayoutService);
     setPartVisibility(Parts.PANEL_PART, true);
+
+    // Restore panel height if collapsed (setPartVisibility(false) can shrink it)
+    const panelSize = layoutService.getSize(Parts.PANEL_PART);
+    if (panelSize.height < 48) {
+      const defaultPanelHeight = Math.max(
+        220,
+        Math.min(Math.round(window.innerHeight * 0.26), 320),
+      );
+      layoutService.setSize(Parts.PANEL_PART, {
+        width: panelSize.width,
+        height: defaultPanelHeight,
+      });
+    }
+
     await paneCompositeService.openPaneComposite(
       this.workbenchSurfaces.terminalViewId,
       ViewContainerLocation.Panel,
       focus,
     );
+    window.dispatchEvent(new Event("resize"));
     if (focus) {
       this.terminalSurface.focus();
     }
@@ -4986,10 +5078,21 @@ export class WebIDEHost {
     });
 
     // Keep terminal collapsed by default
+    const layoutService = await getService(IWorkbenchLayoutService);
+    const defaultPanelHeight = Math.max(
+      220,
+      Math.min(Math.round(window.innerHeight * 0.26), 320),
+    );
+    const panelSize = layoutService.getSize(Parts.PANEL_PART);
+    if (panelSize.height < 48) {
+      layoutService.setSize(Parts.PANEL_PART, {
+        width: panelSize.width,
+        height: defaultPanelHeight,
+      });
+    }
     setPartVisibility(Parts.PANEL_PART, false);
 
     // Set sidebar to 600px initial width
-    const layoutService = await getService(IWorkbenchLayoutService);
     const currentSize = layoutService.getSize(Parts.SIDEBAR_PART);
     layoutService.setSize(Parts.SIDEBAR_PART, {
       width: 600,
@@ -5200,29 +5303,20 @@ export class WebIDEHost {
     const hasExistingDbs = listDatabases(namespace).length > 0;
 
     if (!hasSchema && !hasDrizzleDir && !hasExistingDbs) {
+      this.workbenchSurfaces.setActivation(
+        this.workbenchSurfaces.databaseViewId,
+        false,
+      );
       this.previewSurface.setActiveDb(null);
       this.databaseSurface.update([], null);
       return;
     }
 
     try {
-      if (!this.databaseSidebarRegistered) {
-        const { registerCustomView } =
-          await import("@codingame/monaco-vscode-workbench-service-override");
-        registerCustomView({
-          id: "almostnode.sidebar.database",
-          name: "Database",
-          location: ViewContainerLocation.Sidebar,
-          order: 1,
-          icon:
-            "data:image/svg+xml," +
-            encodeURIComponent(
-              '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>',
-            ),
-          renderBody: (container) => this.databaseSurface.attach(container),
-        });
-        this.databaseSidebarRegistered = true;
-      }
+      this.workbenchSurfaces.setActivation(
+        this.workbenchSurfaces.databaseViewId,
+        true,
+      );
 
       const activeName = ensureDefaultDatabase(
         namespace,
@@ -5843,10 +5937,7 @@ export class WebIDEHost {
     window.__almostnodeWebIDE = this;
 
     logMemory("before opencode boot");
-    const searchParams = new URLSearchParams(window.location.search);
-    const skipOpenCode =
-      searchParams.has("no-opencode") || searchParams.has("no-claude");
-    if (!skipOpenCode) {
+    if (!this.pendingProjectLaunch && this.shouldAutoLaunchOpenCode()) {
       void this.revealOpenCodePanel(false);
     }
   }
@@ -6055,22 +6146,6 @@ export class WebIDEHost {
       this.previewSurface.getBody(),
       onPlaywrightCommand,
     );
-
-    // Register tests sidebar view (workbench is already initialized)
-    const { registerCustomView } =
-      await import("@codingame/monaco-vscode-workbench-service-override");
-    registerCustomView({
-      id: "almostnode.sidebar.tests",
-      name: "Tests",
-      location: ViewContainerLocation.Sidebar,
-      order: 2,
-      icon:
-        "data:image/svg+xml," +
-        encodeURIComponent(
-          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>',
-        ),
-      renderBody: (container) => this.testsSurface.attach(container),
-    });
 
     // Wire sidebar callbacks
     this.testsSurface.setCallbacks({

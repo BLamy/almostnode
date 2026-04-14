@@ -22,15 +22,28 @@
   color: var(--text);
   font-family: "Instrument Sans", system-ui, sans-serif;
   overflow: hidden;
-  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease;
+  transition:
+    flex-basis 0.2s ease,
+    width 0.2s ease,
+    max-width 0.2s ease,
+    min-width 0.2s ease,
+    opacity 0.2s ease;
 }
 
 .almostnode-project-sidebar.is-collapsed {
+  flex-basis: 0;
   width: 0;
+  max-width: 0;
   min-width: 0;
   border-right: 0;
   opacity: 0;
   pointer-events: none;
+}
+
+html[data-almostnode-theme="light"] .almostnode-project-sidebar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(255, 255, 255, 0)),
+    var(--panel-alt, #eef1f4);
 }
 
 /* Sidebar header */
@@ -86,6 +99,31 @@
   display: flex;
   flex-direction: column;
   padding: 0.35rem 0;
+}
+
+.almostnode-project-list__empty {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.almostnode-project-list__empty-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.almostnode-project-list__empty-copy {
+  max-width: 15rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 .almostnode-project-group {
@@ -328,4 +366,503 @@
   font-size: 0.82rem;
   padding: 0.08rem 0.35rem;
   outline: none;
+}
+
+.almostnode-project-launch-dialog {
+  width: min(calc(100vw - 2rem), 48rem);
+  max-height: min(calc(100vh - 2rem), 52rem);
+  padding: 1rem;
+  background: var(--launch-shell-bg);
+}
+
+html[data-almostnode-theme="dark"] .almostnode-project-launch-dialog,
+.almostnode-project-launch-dialog {
+  --launch-shell-bg:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.08), transparent 48%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015)),
+    #0d141d;
+  --launch-shell-border: rgba(255, 255, 255, 0.08);
+  --launch-tabs-bg: rgba(255, 255, 255, 0.03);
+  --launch-tabs-border: rgba(255, 255, 255, 0.08);
+  --launch-tab-hover-bg: rgba(255, 255, 255, 0.05);
+  --launch-tab-active-bg: rgba(255, 255, 255, 0.09);
+  --launch-tab-active-ring: rgba(255, 255, 255, 0.06);
+  --launch-panel-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.01)),
+    rgba(8, 13, 19, 0.68);
+  --launch-panel-border: rgba(255, 255, 255, 0.08);
+  --launch-eyebrow-color: rgba(255, 255, 255, 0.64);
+  --launch-card-bg: rgba(255, 255, 255, 0.03);
+  --launch-card-border: rgba(255, 255, 255, 0.08);
+  --launch-card-hover-bg: rgba(255, 255, 255, 0.05);
+  --launch-card-hover-border: rgba(255, 255, 255, 0.14);
+  --launch-summary-bg: rgba(255, 255, 255, 0.035);
+  --launch-summary-border: rgba(255, 255, 255, 0.06);
+  --launch-summary-label: rgba(255, 255, 255, 0.55);
+  --launch-connect-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(255, 255, 255, 0.01);
+  --launch-list-bg: rgba(255, 255, 255, 0.02);
+  --launch-list-item-border: rgba(255, 255, 255, 0.05);
+  --launch-list-item-hover: rgba(255, 255, 255, 0.04);
+  --launch-list-item-selected: rgba(255, 122, 89, 0.11);
+}
+
+html[data-almostnode-theme="light"] .almostnode-project-launch-dialog {
+  --launch-shell-bg:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.82), transparent 54%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.82)),
+    var(--panel-bg);
+  --launch-shell-border: rgba(15, 23, 42, 0.08);
+  --launch-tabs-bg: rgba(15, 23, 42, 0.04);
+  --launch-tabs-border: rgba(15, 23, 42, 0.08);
+  --launch-tab-hover-bg: rgba(15, 23, 42, 0.05);
+  --launch-tab-active-bg: rgba(255, 255, 255, 0.86);
+  --launch-tab-active-ring: rgba(15, 23, 42, 0.08);
+  --launch-panel-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(250, 251, 252, 0.92)),
+    color-mix(in srgb, var(--panel-alt) 72%, white);
+  --launch-panel-border: rgba(15, 23, 42, 0.08);
+  --launch-eyebrow-color: rgba(36, 41, 47, 0.62);
+  --launch-card-bg: rgba(255, 255, 255, 0.8);
+  --launch-card-border: rgba(15, 23, 42, 0.08);
+  --launch-card-hover-bg: rgba(255, 255, 255, 0.96);
+  --launch-card-hover-border: rgba(15, 23, 42, 0.12);
+  --launch-summary-bg: rgba(255, 255, 255, 0.8);
+  --launch-summary-border: rgba(15, 23, 42, 0.08);
+  --launch-summary-label: rgba(36, 41, 47, 0.58);
+  --launch-connect-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 249, 250, 0.88)),
+    rgba(255, 255, 255, 0.82);
+  --launch-list-bg: rgba(255, 255, 255, 0.78);
+  --launch-list-item-border: rgba(15, 23, 42, 0.06);
+  --launch-list-item-hover: rgba(15, 23, 42, 0.045);
+  --launch-list-item-selected: rgba(209, 72, 10, 0.1);
+}
+
+.almostnode-project-launch-dialog__frame {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+}
+
+.almostnode-project-launch-dialog__header {
+  gap: 0.35rem;
+  margin-bottom: 0;
+}
+
+.almostnode-project-launch-dialog__tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+  padding: 0.35rem;
+  border: 1px solid var(--launch-tabs-border);
+  border-radius: 1rem;
+  background: var(--launch-tabs-bg);
+}
+
+.almostnode-project-launch-dialog__tab {
+  appearance: none;
+  border: 0;
+  border-radius: 0.85rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.94rem;
+  font-weight: 600;
+  padding: 0.92rem 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.almostnode-project-launch-dialog__tab:hover {
+  color: var(--text);
+  background: var(--launch-tab-hover-bg);
+}
+
+.almostnode-project-launch-dialog__tab.is-active {
+  color: var(--text);
+  background: var(--launch-tab-active-bg);
+  box-shadow: inset 0 0 0 1px var(--launch-tab-active-ring);
+}
+
+.almostnode-project-launch-dialog__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.1rem;
+  border: 1px solid var(--launch-panel-border);
+  border-radius: 1.2rem;
+  background: var(--launch-panel-bg);
+}
+
+.almostnode-project-launch-dialog__panel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.almostnode-project-launch-dialog__panel-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.24rem;
+}
+
+.almostnode-project-launch-dialog__eyebrow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--launch-eyebrow-color);
+}
+
+.almostnode-project-launch-dialog__helper {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__template-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.almostnode-project-launch-dialog__template-card {
+  appearance: none;
+  border: 1px solid var(--launch-card-border);
+  border-radius: 1rem;
+  background: var(--launch-card-bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  padding: 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  cursor: pointer;
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.almostnode-project-launch-dialog__template-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--launch-card-hover-border);
+  background: var(--launch-card-hover-bg);
+}
+
+.almostnode-project-launch-dialog__template-card.is-active {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 122, 89, 0.14), rgba(255, 122, 89, 0.05)),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 122, 89, 0.16);
+}
+
+.almostnode-project-launch-dialog__template-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.almostnode-project-launch-dialog__template-description {
+  font-size: 0.77rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__summary-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.almostnode-project-launch-dialog__summary-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: 0.95rem;
+  background: var(--launch-summary-bg);
+  border: 1px solid var(--launch-summary-border);
+}
+
+.almostnode-project-launch-dialog__summary-label {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--launch-summary-label);
+}
+
+.almostnode-project-launch-dialog__summary-value {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.almostnode-project-launch-dialog__toggle-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.9rem 0.95rem;
+  border-radius: 1rem;
+  border: 1px solid var(--launch-card-border);
+  background: var(--launch-card-bg);
+  cursor: pointer;
+}
+
+.almostnode-project-launch-dialog__toggle-card input {
+  margin-top: 0.2rem;
+}
+
+.almostnode-project-launch-dialog__toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+}
+
+.almostnode-project-launch-dialog__toggle-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.almostnode-project-launch-dialog__toggle-description {
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__connect-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 1.1rem;
+  border-radius: 1rem;
+  border: 1px solid var(--launch-card-border);
+  background: var(--launch-connect-bg);
+}
+
+.almostnode-project-launch-dialog__connect-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+}
+
+.almostnode-project-launch-dialog__connect-title {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.almostnode-project-launch-dialog__repo-toolbar {
+  display: flex;
+  gap: 0.65rem;
+}
+
+.almostnode-project-launch-dialog__repo-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__repo-list {
+  border-radius: 1rem;
+  border: 1px solid var(--launch-card-border);
+  background: var(--launch-list-bg);
+  overflow: hidden;
+}
+
+.almostnode-project-launch-dialog__repo-items {
+  display: flex;
+  flex-direction: column;
+}
+
+.almostnode-project-launch-dialog__repo-item {
+  appearance: none;
+  border: 0;
+  border-bottom: 1px solid var(--launch-list-item-border);
+  background: transparent;
+  color: inherit;
+  padding: 0.95rem 1rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.16s ease;
+}
+
+.almostnode-project-launch-dialog__repo-item:last-child {
+  border-bottom: 0;
+}
+
+.almostnode-project-launch-dialog__repo-item:hover {
+  background: var(--launch-list-item-hover);
+}
+
+.almostnode-project-launch-dialog__repo-item.is-selected {
+  background: var(--launch-list-item-selected);
+}
+
+.almostnode-project-launch-dialog__repo-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+}
+
+.almostnode-project-launch-dialog__repo-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.almostnode-project-launch-dialog__repo-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.almostnode-project-launch-dialog__repo-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__repo-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0.35rem;
+  flex: none;
+}
+
+.almostnode-project-launch-dialog__repo-badge {
+  padding: 0.2rem 0.48rem;
+  border-radius: 999px;
+  background: rgba(108, 182, 255, 0.12);
+  color: #8ed3ff;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.almostnode-project-launch-dialog__repo-badge.is-private {
+  background: rgba(255, 122, 89, 0.12);
+  color: var(--accent);
+}
+
+html[data-almostnode-theme="light"] .almostnode-project-launch-dialog__repo-badge {
+  background: rgba(43, 107, 214, 0.12);
+  color: #2353a6;
+}
+
+html[data-almostnode-theme="light"] .almostnode-project-launch-dialog__repo-badge.is-private {
+  background: rgba(209, 72, 10, 0.12);
+  color: var(--accent);
+}
+
+.almostnode-project-launch-dialog__repo-action {
+  font-size: 0.72rem;
+  color: var(--text);
+}
+
+.almostnode-project-launch-dialog__repo-empty {
+  padding: 1.25rem 1rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__error {
+  border-radius: 0.85rem;
+  border: 1px solid rgba(255, 98, 98, 0.35);
+  background: rgba(255, 98, 98, 0.08);
+  color: #ffb4b4;
+  font-size: 0.8rem;
+  padding: 0.72rem 0.85rem;
+}
+
+.almostnode-project-launch-dialog__footer {
+  margin-top: 0;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.almostnode-project-launch-dialog__footer-note {
+  max-width: 18rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.almostnode-project-launch-dialog__footer-actions {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .almostnode-project-launch-dialog__template-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .almostnode-project-launch-dialog {
+    padding: 0.85rem;
+  }
+
+  .almostnode-project-launch-dialog__panel {
+    padding: 0.9rem;
+  }
+
+  .almostnode-project-launch-dialog__repo-toolbar,
+  .almostnode-project-launch-dialog__summary-strip,
+  .almostnode-project-launch-dialog__footer,
+  .almostnode-project-launch-dialog__footer-actions {
+    flex-direction: column;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .almostnode-project-launch-dialog__repo-item {
+    grid-template-columns: 1fr;
+  }
+
+  .almostnode-project-launch-dialog__repo-status {
+    align-items: flex-start;
+  }
+
+  .almostnode-project-launch-dialog__footer-note {
+    max-width: none;
+  }
 }

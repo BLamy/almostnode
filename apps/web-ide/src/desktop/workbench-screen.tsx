@@ -7,6 +7,7 @@ import { AwsSetupDialog } from '../sidebar/aws-setup-dialog';
 import type { AwsSetupDraft } from '../features/aws-setup';
 import type { DesktopBridge } from './bridge';
 import type { SerializedFile } from './project-snapshot';
+import { Button } from '../ui/button';
 
 const DEBUG_STORAGE_KEY = '__almostnodeDebug';
 const CORS_PROXY_STORAGE_KEY = '__corsProxyUrl';
@@ -102,6 +103,15 @@ function hasProjectQueryParam(): boolean {
   }
 }
 
+function hasProjectCreationIntentQueryParam(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.has('template') || params.has('name');
+  } catch {
+    return false;
+  }
+}
+
 export interface WorkbenchScreenProps {
   template: TemplateId;
   debug?: string;
@@ -136,6 +146,8 @@ export function WorkbenchScreen({
   const [hostReady, setHostReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const [awsSetupDraft, setAwsSetupDraft] = useState<AwsSetupDraft | null>(null);
+  const [projectLaunchDialogOpen, setProjectLaunchDialogOpen] = useState(false);
+  const [activeProjectId, setActiveProjectId] = useState<string | null | undefined>(undefined);
 
   // Lazily create the project manager singleton
   if (!managerRef.current) {
@@ -147,10 +159,13 @@ export function WorkbenchScreen({
     setSidebarCollapsed((prev) => {
       const next = !prev;
       writeSidebarCollapsed(next);
-      // Trigger Monaco layout reflow after sidebar animation
+      // Trigger Monaco layout reflow both immediately and after the sidebar transition completes.
       requestAnimationFrame(() => {
         window.dispatchEvent(new Event('resize'));
       });
+      window.setTimeout(() => {
+        window.dispatchEvent(new Event('resize'));
+      }, 220);
       return next;
     });
   }, []);
@@ -168,6 +183,11 @@ export function WorkbenchScreen({
   }, [handleToggleSidebar]);
 
   const shouldRestoreProjectFromUrl = !initialProjectFiles && hasProjectQueryParam();
+  const shouldStartWithoutProjectSeed = (
+    !initialProjectFiles
+    && !shouldRestoreProjectFromUrl
+    && !hasProjectCreationIntentQueryParam()
+  );
 
   useEffect(() => {
     if (bootstrappedRef.current) return;
@@ -187,8 +207,8 @@ export function WorkbenchScreen({
       marketplaceMode,
       template,
       initialProjectFiles,
-      skipWorkspaceSeed: skipWorkspaceSeed || shouldRestoreProjectFromUrl,
-      deferPreviewStart: deferPreviewStart || shouldRestoreProjectFromUrl,
+      skipWorkspaceSeed: skipWorkspaceSeed || shouldRestoreProjectFromUrl || shouldStartWithoutProjectSeed,
+      deferPreviewStart: deferPreviewStart || shouldRestoreProjectFromUrl || shouldStartWithoutProjectSeed,
       desktopBridge: desktopBridge ?? null,
       hostProjectDirectory: hostProjectDirectory ?? null,
       agentLaunchCommand: agentLaunchCommand ?? null,
@@ -215,6 +235,7 @@ export function WorkbenchScreen({
         collectAgentStateSnapshot: () => host.collectAgentStateSnapshot(),
         restoreAgentStateSnapshot: (snapshot) =>
           host.restoreAgentStateSnapshot(snapshot),
+        teardownActiveProject: () => host.teardownActiveProject(),
         discoverActiveProjectThreads: (projectId) =>
           host.discoverActiveProjectThreads(projectId),
         resumeResumableThread: (thread) => host.resumeResumableThread(thread),
@@ -233,6 +254,7 @@ export function WorkbenchScreen({
     skipWorkspaceSeed,
     deferPreviewStart,
     shouldRestoreProjectFromUrl,
+    shouldStartWithoutProjectSeed,
     marketplace,
     onHostReady,
     template,
@@ -248,9 +270,21 @@ export function WorkbenchScreen({
             manager={manager}
             isCollapsed={sidebarCollapsed}
             onToggle={handleToggleSidebar}
+            projectLaunchDialogOpen={projectLaunchDialogOpen}
+            onProjectLaunchDialogOpenChange={setProjectLaunchDialogOpen}
+            onActiveProjectChange={setActiveProjectId}
           />
         )}
-        <div id="webideWorkbench" ref={workbenchRef} />
+        <div className="webide-workbench-shell">
+          <div
+            id="webideWorkbench"
+            ref={workbenchRef}
+            className={hostReady && activeProjectId === null ? 'is-background-hidden' : ''}
+          />
+          {hostReady && activeProjectId === null ? (
+            <IDEEmptyState onOpenProjectLauncher={() => setProjectLaunchDialogOpen(true)} />
+          ) : null}
+        </div>
       </main>
       <AwsSetupDialog
         open={awsSetupDraft !== null}
@@ -269,6 +303,48 @@ export function WorkbenchScreen({
           setAwsSetupDraft(null);
         }}
       />
+    </div>
+  );
+}
+
+function IDEEmptyState({
+  onOpenProjectLauncher,
+}: {
+  onOpenProjectLauncher: () => void;
+}) {
+  return (
+    <div className="webide-empty-state">
+      <div className="webide-empty-state__card">
+        <div className="webide-empty-state__icon" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+            <path
+              d="M7 7.25h4.15c.34 0 .67.14.9.38l1.32 1.4c.23.24.56.37.89.37H17A2.75 2.75 0 0 1 19.75 12v5A2.75 2.75 0 0 1 17 19.75H7A2.75 2.75 0 0 1 4.25 17V10A2.75 2.75 0 0 1 7 7.25Z"
+              stroke="currentColor"
+              strokeWidth="1.35"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M12 3.75v3.5M10.25 5.5h3.5"
+              stroke="currentColor"
+              strokeWidth="1.35"
+              strokeLinecap="round"
+            />
+          </svg>
+        </div>
+        <div className="webide-empty-state__copy">
+          <p className="webide-empty-state__eyebrow">Workspace ready</p>
+          <h2 className="webide-empty-state__title">No project selected</h2>
+          <p className="webide-empty-state__description">
+            Choose a project from the sidebar or start a new sandbox from scratch.
+          </p>
+        </div>
+        <Button className="webide-empty-state__primary" onClick={onOpenProjectLauncher}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+          New project
+        </Button>
+      </div>
     </div>
   );
 }

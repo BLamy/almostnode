@@ -1,17 +1,5 @@
-import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-import {
-  DisposableStore,
-  type IDisposable,
-} from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
-import {
-  EditorInputCapabilities,
-  SimpleEditorInput,
-  SimpleEditorPane,
-  ViewContainerLocation,
-  registerCustomView,
-  registerEditorPane,
-} from "@codingame/monaco-vscode-workbench-service-override";
-import type { IEditorGroup } from "@codingame/monaco-vscode-api/services";
+import type { IDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
+import { SimpleEditorInput } from "@codingame/monaco-vscode-workbench-service-override";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { strToU8, zipSync } from "fflate";
@@ -20,21 +8,39 @@ import {
   registerRenderedEditors,
   type RenderedEditorFactories,
 } from "../features/rendered-editors";
+import { createDomSlot } from "./framework/dom-slot";
+import {
+  MutableSurfaceModel,
+  createStaticSurfaceModel,
+  type SurfaceModel,
+} from "./framework/model";
+import { mountWorkbenchSurface } from "./framework/mount";
+import {
+  getWorkbenchEntrypoint,
+  registerWorkbenchEntrypoints,
+} from "./framework/registry";
+import {
+  DATABASE_EDITOR_TYPE_ID,
+  DATABASE_VIEW_ID,
+  FILES_VIEW_ID,
+  KEYCHAIN_VIEW_ID,
+  OPEN_CODE_VIEW_ID,
+  PREVIEW_EDITOR_TYPE_ID,
+  TERMINAL_VIEW_ID,
+  TESTS_VIEW_ID,
+} from "./surface-constants";
+import type {
+  DatabaseSidebarActions,
+  DatabaseSidebarState,
+  KeychainSidebarActions,
+  KeychainSidebarSlotStatus,
+  KeychainSidebarState,
+  SlotSurfaceActions,
+  SlotSurfaceState,
+  TestsSidebarActions,
+  TestsSidebarState,
+} from "./surface-model-types";
 
-const PREVIEW_EDITOR_TYPE_ID = "almostnode.editor.preview";
-const PREVIEW_EDITOR_RESOURCE = URI.from({
-  scheme: "almostnode-preview",
-  path: "/workspace",
-});
-const DATABASE_EDITOR_TYPE_ID = "almostnode.editor.database";
-const DATABASE_EDITOR_RESOURCE = URI.from({
-  scheme: "almostnode-database",
-  path: "/browser",
-});
-const FILES_VIEW_ID = "almostnode.sidebar.files";
-const OPEN_CODE_VIEW_ID = "almostnode.sidebar.opencode";
-const TERMINAL_VIEW_ID = "almostnode.panel.terminal";
-const DATABASE_VIEW_ID = "almostnode.sidebar.database";
 const NODE_MODULES_REFRESH_DELAY_MS = 48;
 
 function scheduleUiFrame(callback: () => void): { cancel: () => void } {
@@ -111,6 +117,19 @@ interface PreviewSurfaceCommands {
   toggleSelect(): void;
 }
 
+function mountStaticSlotSurface<TState, TActions>(
+  container: HTMLElement,
+  entrypointId: string,
+  model: SurfaceModel<TState, TActions>,
+): IDisposable {
+  const entrypoint = getWorkbenchEntrypoint(entrypointId);
+  if (!entrypoint) {
+    throw new Error(`Workbench entrypoint "${entrypointId}" was not found.`);
+  }
+
+  return mountWorkbenchSurface(container, entrypoint, model);
+}
+
 export interface RegisteredWorkbenchSurfaces {
   previewInput: SimpleEditorInput;
   databaseInput: SimpleEditorInput;
@@ -120,11 +139,18 @@ export interface RegisteredWorkbenchSurfaces {
   terminalViewId: string;
   databaseViewId: string;
   keychainViewId: string;
+  testsViewId: string;
+  setActivation(id: string, active: boolean): void;
   dispose(): void;
 }
 
 export class FilesSidebarSurface {
   private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root) },
+      {},
+    );
   private readonly directoryOpenState = new Map<string, boolean>();
   private selectedPath: string | null = null;
   private contextMenu: HTMLDivElement | null = null;
@@ -281,15 +307,7 @@ export class FilesSidebarSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add("almostnode-files-tree-host");
-    container.appendChild(this.root);
-    return {
-      dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
-      },
-    };
+    return mountStaticSlotSurface(container, FILES_VIEW_ID, this.model);
   }
 
   private render(): void {
@@ -1009,6 +1027,13 @@ export class FilesSidebarSurface {
 
 export class PreviewSurface {
   private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root) },
+      {
+        focus: () => this.focus(),
+      },
+    );
   private readonly toolbar = document.createElement("div");
   private readonly status = document.createElement("div");
   private readonly actions = document.createElement("div");
@@ -1089,15 +1114,7 @@ export class PreviewSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.classList.add("almostnode-preview-editor-host");
-    container.appendChild(this.root);
-    return {
-      dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
-      },
-    };
+    return mountStaticSlotSurface(container, PREVIEW_EDITOR_TYPE_ID, this.model);
   }
 
   setStatus(text: string): void {
@@ -1255,6 +1272,15 @@ export class ConsolePanelElement {
 
 export class TerminalPanelSurface {
   private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root, {
+        onAttach: () => this.handleSlotAttach(),
+      }) },
+      {
+        focus: () => this.focus(),
+      },
+    );
   private readonly statusRow = document.createElement("div");
   private readonly tabs = document.createElement("div");
   private readonly status = document.createElement("div");
@@ -1311,10 +1337,7 @@ export class TerminalPanelSurface {
     this.resizeObserver.observe(this.body);
   }
 
-  attach(container: HTMLElement): IDisposable {
-    container.classList.add("almostnode-terminal-panel-host");
-    container.appendChild(this.root);
-
+  private handleSlotAttach(): void {
     if (!this.opened) {
       for (const [tabId, { terminal }] of this.terminals.entries()) {
         const body = this.tabBodies.get(tabId);
@@ -1327,12 +1350,13 @@ export class TerminalPanelSurface {
 
     this.fit();
     queueTerminalFit(() => this.fit());
+  }
 
+  attach(container: HTMLElement): IDisposable {
+    const mount = mountStaticSlotSurface(container, TERMINAL_VIEW_ID, this.model);
     return {
       dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
+        mount.dispose();
       },
     };
   }
@@ -1505,7 +1529,7 @@ export class TerminalPanelSurface {
     for (const [tabId, body] of this.tabBodies.entries()) {
       const isActive = tabId === id;
       body.hidden = !isActive;
-      body.style.display = isActive ? "block" : "none";
+      body.style.display = isActive ? "" : "none";
       // Only assign webideTerminal id to non-custom tabs
       if (!this.customTabs.has(tabId)) {
         if (isActive) {
@@ -1551,6 +1575,15 @@ export type AgentLaunchKind = "opencode" | "terminal" | "claude";
 
 export class OpenCodeTerminalSurface {
   private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root, {
+        onAttach: () => this.handleSlotAttach(),
+      }) },
+      {
+        focus: () => this.focus(),
+      },
+    );
   private readonly statusRow = document.createElement("div");
   private readonly tabs = document.createElement("div");
   private readonly launcher = document.createElement("div");
@@ -1648,10 +1681,7 @@ export class OpenCodeTerminalSurface {
     document.addEventListener("keydown", this.handleDocumentKeydown);
   }
 
-  attach(container: HTMLElement): IDisposable {
-    container.classList.add("almostnode-opencode-panel-host");
-    container.appendChild(this.root);
-
+  private handleSlotAttach(): void {
     if (!this.opened) {
       for (const [tabId, { terminal }] of this.terminals.entries()) {
         const body = this.tabBodies.get(tabId);
@@ -1664,13 +1694,14 @@ export class OpenCodeTerminalSurface {
 
     this.fit();
     queueTerminalFit(() => this.fit());
+  }
 
+  attach(container: HTMLElement): IDisposable {
+    const mount = mountStaticSlotSurface(container, OPEN_CODE_VIEW_ID, this.model);
     return {
       dispose: () => {
         this.dismissMenu();
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
+        mount.dispose();
       },
     };
   }
@@ -1998,50 +2029,21 @@ export interface DatabaseSidebarCallbacks {
 }
 
 export class DatabaseSidebarSurface {
-  private readonly root = document.createElement("div");
-  private readonly listEl = document.createElement("div");
-  private readonly formEl = document.createElement("div");
-  private readonly input = document.createElement("input");
-  private activeName: string | null = null;
-  private databases: { name: string; createdAt: string }[] = [];
+  readonly model = new MutableSurfaceModel<
+    DatabaseSidebarState,
+    DatabaseSidebarActions
+  >(
+    {
+      databases: [],
+      activeName: null,
+    },
+    {
+      create: (name) => this.callbacks?.onCreate(name),
+      open: (name) => this.callbacks?.onOpen(name),
+      delete: (name) => this.callbacks?.onDelete(name),
+    },
+  );
   private callbacks: DatabaseSidebarCallbacks | null = null;
-
-  constructor() {
-    this.root.className = "almostnode-db-sidebar";
-    this.root.style.cssText =
-      "display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:var(--text);font-size:13px;background:var(--almostnode-surface-alt-bg);";
-
-    const header = document.createElement("div");
-    header.style.cssText = "font-weight:600;margin-bottom:4px;";
-    header.textContent = "Databases";
-
-    this.listEl.style.cssText =
-      "flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;";
-
-    this.formEl.style.cssText = "display:flex;gap:4px;";
-    this.input.type = "text";
-    this.input.placeholder = "New database name";
-    this.input.style.cssText =
-      "flex:1;background:var(--almostnode-input-bg);border:1px solid var(--almostnode-input-border);color:var(--almostnode-input-fg);padding:4px 8px;border-radius:3px;font-size:12px;";
-
-    const createBtn = document.createElement("button");
-    createBtn.textContent = "Create";
-    createBtn.style.cssText =
-      "background:var(--almostnode-primary-button-bg);color:var(--almostnode-primary-button-fg);border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;";
-    createBtn.addEventListener("click", () => {
-      const name = this.input.value.trim();
-      if (name && this.callbacks) {
-        this.callbacks.onCreate(name);
-        this.input.value = "";
-      }
-    });
-    this.input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") createBtn.click();
-    });
-
-    this.formEl.append(this.input, createBtn);
-    this.root.append(header, this.listEl, this.formEl);
-  }
 
   setCallbacks(callbacks: DatabaseSidebarCallbacks): void {
     this.callbacks = callbacks;
@@ -2051,78 +2053,14 @@ export class DatabaseSidebarSurface {
     databases: { name: string; createdAt: string }[],
     activeName: string | null,
   ): void {
-    this.databases = databases;
-    this.activeName = activeName;
-    this.render();
+    this.model.setSnapshot({
+      databases: [...databases],
+      activeName,
+    });
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.appendChild(this.root);
-    return {
-      dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
-      },
-    };
-  }
-
-  private render(): void {
-    this.listEl.innerHTML = "";
-    for (const db of this.databases) {
-      const row = document.createElement("div");
-      row.style.cssText =
-        "display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;color:var(--text);";
-      const isActive = db.name === this.activeName;
-      if (isActive) {
-        row.style.background = "var(--almostnode-list-active-bg)";
-        row.style.color = "var(--almostnode-list-active-fg)";
-      }
-      row.addEventListener("mouseenter", () => {
-        if (!isActive) row.style.background = "var(--almostnode-list-hover-bg)";
-      });
-      row.addEventListener("mouseleave", () => {
-        if (!isActive) row.style.background = "transparent";
-      });
-
-      const indicator = document.createElement("span");
-      indicator.style.cssText = `width:6px;height:6px;border-radius:50%;flex-shrink:0;background:${isActive ? "var(--almostnode-success)" : "var(--almostnode-quiet)"};`;
-
-      const label = document.createElement("span");
-      label.style.cssText =
-        "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-      label.textContent = db.name;
-
-      row.addEventListener("click", () => {
-        if (this.callbacks) {
-          this.callbacks.onOpen(db.name);
-        }
-      });
-
-      row.append(indicator, label);
-
-      // Delete button (disabled when only 1 database)
-      if (this.databases.length > 1) {
-        const delBtn = document.createElement("button");
-        delBtn.textContent = "\u00d7";
-        delBtn.title = `Delete ${db.name}`;
-        delBtn.style.cssText =
-          "background:none;border:none;color:var(--almostnode-quiet);cursor:pointer;font-size:16px;padding:0 2px;line-height:1;";
-        delBtn.addEventListener("mouseenter", () => {
-          delBtn.style.color = "var(--almostnode-danger)";
-        });
-        delBtn.addEventListener("mouseleave", () => {
-          delBtn.style.color = "var(--almostnode-quiet)";
-        });
-        delBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (this.callbacks) this.callbacks.onDelete(db.name);
-        });
-        row.append(delBtn);
-      }
-
-      this.listEl.appendChild(row);
-    }
+    return mountStaticSlotSurface(container, DATABASE_VIEW_ID, this.model);
   }
 }
 
@@ -2134,6 +2072,13 @@ export type DatabaseQueryHandler = (
 
 export class DatabaseBrowserSurface {
   private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root) },
+      {
+        focus: () => this.focus(),
+      },
+    );
   private readonly tableList = document.createElement("div");
   private readonly sqlTextarea = document.createElement("textarea");
   private readonly resultsArea = document.createElement("div");
@@ -2237,14 +2182,11 @@ export class DatabaseBrowserSurface {
 
   attach(container: HTMLElement): IDisposable {
     container.style.overflow = "hidden";
-    container.appendChild(this.root);
-    return {
-      dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
-      },
-    };
+    return mountStaticSlotSurface(
+      container,
+      DATABASE_EDITOR_TYPE_ID,
+      this.model,
+    );
   }
 
   private async refreshTables(): Promise<void> {
@@ -2388,89 +2330,25 @@ export class DatabaseBrowserSurface {
 
 // ── Keychain Sidebar ────────────────────────────────────────────────────────
 
-const KEYCHAIN_VIEW_ID = "almostnode.sidebar.keychain";
-
-export interface KeychainSlotStatus {
-  name: string;
-  label: string;
-  active: boolean;
-  /** Whether this slot supports login/logout buttons in the sidebar */
-  canAuth?: boolean;
-  authAction?: string;
-  authLabel?: string;
-  authDisabled?: boolean;
-  statusText?: string;
-  statusDetail?: string;
-  selectActionPrefix?: string;
-  selectOptions?: Array<{ label: string; value: string }>;
-  selectValue?: string;
-}
-
-// ── SVG icons for services ──────────────────────────────────────────────────
-
-const ICON_GITHUB = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
-const ICON_REPLAY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM6.5 4.5l5 3.5-5 3.5v-7z"/></svg>`;
-const ICON_CLAUDE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7 5a1 1 0 112 0 1 1 0 01-2 0zm-.25 2.5h2.5v4.25h-2.5V7.5z"/></svg>`;
-const ICON_KEY = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 1a4.5 4.5 0 00-3.83 6.84L2 13.5V16h2.5l.5-.5v-1.5H6.5l.5-.5v-1.5H8.5l1.17-1.17A4.5 4.5 0 1011.5 1zm1 3a1 1 0 110-2 1 1 0 010 2z"/></svg>`;
-
-function getSlotIcon(name: string): string {
-  switch (name) {
-    case "github":
-      return ICON_GITHUB;
-    case "replay":
-      return ICON_REPLAY;
-    case "claude":
-      return ICON_CLAUDE;
-    default:
-      return ICON_KEY;
-  }
-}
+export type KeychainSlotStatus = KeychainSidebarSlotStatus;
 
 export class KeychainSidebarSurface {
-  private readonly root = document.createElement("div");
-  private readonly listEl = document.createElement("div");
-  private readonly footerEl = document.createElement("div");
-  private slots: KeychainSlotStatus[] = [];
+  readonly model = new MutableSurfaceModel<
+    KeychainSidebarState,
+    KeychainSidebarActions
+  >(
+    {
+      slots: [],
+      hasStoredVault: false,
+      supported: false,
+    },
+    {
+      dispatch: (action) => {
+        this.onAction?.(action);
+      },
+    },
+  );
   private onAction: ((action: string) => void) | null = null;
-
-  constructor() {
-    this.root.className = "almostnode-keychain-sidebar";
-    this.root.style.cssText = `
-      display: flex; flex-direction: column; height: 100%;
-      padding: 12px; gap: 0; color: var(--text); font-size: 13px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: var(--almostnode-surface-alt-bg);
-    `.replace(/\n\s*/g, "");
-
-    const headerRow = document.createElement("div");
-    headerRow.style.cssText = `
-      display: flex; align-items: center; gap: 8px;
-      margin-bottom: 16px; padding-bottom: 10px;
-      border-bottom: 1px solid var(--almostnode-toolbar-border);
-    `.replace(/\n\s*/g, "");
-
-    const headerIcon = document.createElement("span");
-    headerIcon.innerHTML = ICON_KEY;
-    headerIcon.style.cssText =
-      "color: var(--accent); display: flex; align-items: center;";
-
-    const headerText = document.createElement("span");
-    headerText.style.cssText =
-      "font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);";
-    headerText.textContent = "Credentials";
-
-    headerRow.append(headerIcon, headerText);
-
-    this.listEl.style.cssText =
-      "flex: 1; display: flex; flex-direction: column; gap: 6px;";
-
-    this.footerEl.style.cssText = `
-      display: flex; gap: 6px; padding-top: 12px; margin-top: 8px;
-      border-top: 1px solid var(--almostnode-toolbar-border);
-    `.replace(/\n\s*/g, "");
-
-    this.root.append(headerRow, this.listEl, this.footerEl);
-  }
 
   setActionHandler(handler: (action: string) => void): void {
     this.onAction = handler;
@@ -2480,244 +2358,19 @@ export class KeychainSidebarSurface {
     slots: KeychainSlotStatus[],
     options?: { hasStoredVault: boolean; supported: boolean },
   ): void {
-    this.slots = slots;
-    this.render();
-    this.renderFooter(options);
+    this.model.setSnapshot({
+      slots,
+      hasStoredVault: options?.hasStoredVault ?? false,
+      supported: options?.supported ?? false,
+    });
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.appendChild(this.root);
-    return {
-      dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
-      },
-    };
-  }
-
-  private render(): void {
-    this.listEl.innerHTML = "";
-    for (const slot of this.slots) {
-      const card = document.createElement("div");
-      card.style.cssText = `
-        display: flex; align-items: center; gap: 10px;
-        padding: 8px 10px; border-radius: 6px;
-        background: var(--almostnode-card-bg);
-        border: 1px solid var(--almostnode-border-subtle);
-        transition: background 0.15s;
-      `.replace(/\n\s*/g, "");
-      card.addEventListener("mouseenter", () => {
-        card.style.background = "var(--almostnode-card-hover-bg)";
-      });
-      card.addEventListener("mouseleave", () => {
-        card.style.background = "var(--almostnode-card-bg)";
-      });
-
-      const iconWrap = document.createElement("span");
-      iconWrap.innerHTML = getSlotIcon(slot.name);
-      iconWrap.style.cssText = `
-        display: flex; align-items: center; justify-content: center;
-        width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
-        background: ${slot.active ? "color-mix(in srgb, var(--almostnode-success) 18%, transparent)" : "var(--almostnode-button-bg)"};
-        color: ${slot.active ? "var(--almostnode-success)" : "var(--almostnode-quiet)"};
-      `.replace(/\n\s*/g, "");
-
-      const info = document.createElement("div");
-      info.style.cssText = "flex: 1; min-width: 0;";
-
-      const label = document.createElement("div");
-      label.style.cssText =
-        "font-size: 13px; font-weight: 500; color: var(--text); line-height: 1.3;";
-      label.textContent = slot.label;
-
-      const statusText = document.createElement("div");
-      statusText.style.cssText = `font-size: 11px; color: ${slot.active ? "var(--almostnode-success)" : "var(--almostnode-quiet)"}; line-height: 1.3;`;
-      statusText.textContent =
-        slot.statusText ?? (slot.active ? "Connected" : "Not connected");
-
-      info.append(label, statusText);
-
-      if (slot.statusDetail) {
-        const statusDetail = document.createElement("div");
-        statusDetail.style.cssText =
-          "font-size: 10px; color: var(--almostnode-quiet); line-height: 1.35; margin-top: 2px;";
-        statusDetail.textContent = slot.statusDetail;
-        info.appendChild(statusDetail);
-      }
-
-      if (slot.selectOptions?.length && slot.selectActionPrefix) {
-        const selectWrap = document.createElement("div");
-        selectWrap.style.cssText =
-          "display:flex;align-items:center;gap:6px;margin-top:6px;";
-
-        const selectLabel = document.createElement("span");
-        selectLabel.style.cssText =
-          "font-size:10px;color:var(--almostnode-quiet);text-transform:uppercase;letter-spacing:0.4px;";
-        selectLabel.textContent = "Exit Node";
-
-        const select = document.createElement("select");
-        select.style.cssText = `
-          min-width: 0;
-          max-width: 160px;
-          background: var(--almostnode-button-bg);
-          color: var(--text);
-          border: 1px solid var(--almostnode-border-subtle);
-          border-radius: 4px;
-          padding: 3px 6px;
-          font-size: 11px;
-        `.replace(/\n\s*/g, "");
-        if (!slot.selectValue) {
-          const placeholder = document.createElement("option");
-          placeholder.value = "";
-          placeholder.textContent = "Choose…";
-          placeholder.disabled = true;
-          placeholder.selected = true;
-          select.appendChild(placeholder);
-        }
-        for (const option of slot.selectOptions) {
-          const optionEl = document.createElement("option");
-          optionEl.value = option.value;
-          optionEl.textContent = option.label;
-          optionEl.selected = option.value === slot.selectValue;
-          select.appendChild(optionEl);
-        }
-        select.value = slot.selectValue ?? "";
-        select.addEventListener("change", (event) => {
-          event.stopPropagation();
-          if (!select.value) {
-            return;
-          }
-          this.onAction?.(`${slot.selectActionPrefix}:${select.value}`);
-        });
-
-        selectWrap.append(selectLabel, select);
-        info.appendChild(selectWrap);
-      }
-
-      card.append(iconWrap, info);
-
-      // Add login/logout button for services that support direct auth actions.
-      if (slot.canAuth) {
-        const action = slot.authAction
-          ?? (slot.active ? `logout:${slot.name}` : `login:${slot.name}`);
-        const isLogout = action.startsWith("logout:");
-        const authBtn = document.createElement("button");
-        authBtn.textContent = slot.authLabel ?? (isLogout ? "Logout" : "Login");
-        const isDisabled = Boolean(slot.authDisabled);
-        authBtn.style.cssText = `
-          background: ${isDisabled ? "var(--almostnode-button-bg)" : isLogout ? "var(--almostnode-button-bg)" : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)"};
-          color: ${isDisabled ? "var(--almostnode-quiet)" : isLogout ? "var(--muted)" : "var(--almostnode-success)"};
-          border: 1px solid ${isDisabled ? "var(--almostnode-border-subtle)" : isLogout ? "var(--almostnode-border-subtle)" : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)"};
-          padding: 3px 10px; border-radius: 4px; cursor: ${isDisabled ? "not-allowed" : "pointer"};
-          font-size: 11px; font-weight: 500; flex-shrink: 0;
-          transition: all 0.15s;
-          opacity: ${isDisabled ? "0.7" : "1"};
-        `.replace(/\n\s*/g, "");
-        authBtn.disabled = isDisabled;
-        const hoverBg = isLogout
-          ? "color-mix(in srgb, var(--almostnode-danger) 16%, transparent)"
-          : "color-mix(in srgb, var(--almostnode-success) 25%, transparent)";
-        const hoverColor = isLogout
-          ? "var(--almostnode-danger)"
-          : "var(--almostnode-success)";
-        const hoverBorder = isLogout
-          ? "color-mix(in srgb, var(--almostnode-danger) 35%, transparent)"
-          : "color-mix(in srgb, var(--almostnode-success) 40%, transparent)";
-        if (!isDisabled) {
-          authBtn.addEventListener("mouseenter", () => {
-            authBtn.style.background = hoverBg;
-            authBtn.style.color = hoverColor;
-            authBtn.style.borderColor = hoverBorder;
-          });
-          authBtn.addEventListener("mouseleave", () => {
-            authBtn.style.background = isLogout
-              ? "var(--almostnode-button-bg)"
-              : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)";
-            authBtn.style.color = isLogout
-              ? "var(--muted)"
-              : "var(--almostnode-success)";
-            authBtn.style.borderColor = isLogout
-              ? "var(--almostnode-border-subtle)"
-              : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)";
-          });
-          authBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            this.onAction?.(action);
-          });
-        }
-        card.appendChild(authBtn);
-      }
-
-      this.listEl.appendChild(card);
-    }
-  }
-
-  private renderFooter(options?: {
-    hasStoredVault: boolean;
-    supported: boolean;
-  }): void {
-    this.footerEl.innerHTML = "";
-    if (!options?.supported) {
-      const note = document.createElement("span");
-      note.style.cssText = "font-size: 11px; color: var(--almostnode-quiet);";
-      note.textContent = "Passkey not supported in this browser";
-      this.footerEl.appendChild(note);
-      return;
-    }
-
-    if (options.hasStoredVault) {
-      const unlockBtn = this.createFooterButton("Unlock Vault", "unlock", true);
-      const forgetBtn = this.createFooterButton("Forget", "forget", false);
-      this.footerEl.append(unlockBtn, forgetBtn);
-    } else {
-      const saveBtn = this.createFooterButton(
-        "Save with Passkey",
-        "save",
-        true,
-      );
-      this.footerEl.appendChild(saveBtn);
-    }
-  }
-
-  private createFooterButton(
-    text: string,
-    action: string,
-    primary: boolean,
-  ): HTMLButtonElement {
-    const btn = document.createElement("button");
-    btn.textContent = text;
-    const bg = primary
-      ? "var(--almostnode-primary-button-bg)"
-      : "var(--almostnode-button-bg)";
-    const hoverBg = primary
-      ? "var(--almostnode-primary-button-hover-bg)"
-      : "var(--almostnode-button-hover-bg)";
-    const color = primary
-      ? "var(--almostnode-primary-button-fg)"
-      : "var(--muted)";
-    btn.style.cssText = `
-      background: ${bg}; color: ${color};
-      border: 1px solid ${primary ? "transparent" : "var(--almostnode-border-subtle)"};
-      padding: 5px 12px; border-radius: 4px; cursor: pointer;
-      font-size: 12px; font-weight: 500; transition: all 0.15s;
-    `.replace(/\n\s*/g, "");
-    btn.addEventListener("mouseenter", () => {
-      btn.style.background = hoverBg;
-    });
-    btn.addEventListener("mouseleave", () => {
-      btn.style.background = bg;
-    });
-    btn.addEventListener("click", () => {
-      this.onAction?.(action);
-    });
-    return btn;
+    return mountStaticSlotSurface(container, KEYCHAIN_VIEW_ID, this.model);
   }
 }
 
 // ── Tests Sidebar ────────────────────────────────────────────────────────────
-
-const TESTS_VIEW_ID = "almostnode.sidebar.tests";
 
 export interface TestEntry {
   id: string;
@@ -2733,158 +2386,39 @@ export interface TestsSidebarCallbacks {
 }
 
 export class TestsSidebarSurface {
-  private readonly root = document.createElement("div");
-  private readonly listEl = document.createElement("div");
-  private readonly actionsEl = document.createElement("div");
-  private tests: TestEntry[] = [];
+  readonly model = new MutableSurfaceModel<TestsSidebarState, TestsSidebarActions>(
+    {
+      tests: [],
+    },
+    {
+      open: (id) => this.callbacks?.onOpen(id),
+      run: (id) => this.callbacks?.onRun(id),
+      runAll: () => this.callbacks?.onRunAll(),
+      delete: (id) => this.callbacks?.onDelete(id),
+    },
+  );
   private callbacks: TestsSidebarCallbacks | null = null;
-
-  constructor() {
-    this.root.className = "almostnode-tests-sidebar";
-    this.root.style.cssText =
-      "display:flex;flex-direction:column;height:100%;padding:8px;gap:8px;color:var(--text);font-size:13px;background:var(--almostnode-surface-alt-bg);";
-
-    const header = document.createElement("div");
-    header.style.cssText = "font-weight:600;margin-bottom:4px;";
-    header.textContent = "Tests";
-
-    this.listEl.style.cssText =
-      "flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;";
-
-    this.actionsEl.style.cssText =
-      "display:flex;gap:4px;padding-top:8px;border-top:1px solid var(--almostnode-toolbar-border);";
-
-    const runAllBtn = document.createElement("button");
-    runAllBtn.textContent = "Run All";
-    runAllBtn.style.cssText =
-      "flex:1;background:var(--almostnode-primary-button-bg);color:var(--almostnode-primary-button-fg);border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:12px;";
-    runAllBtn.addEventListener("click", () => {
-      this.callbacks?.onRunAll();
-    });
-    this.actionsEl.appendChild(runAllBtn);
-
-    this.root.append(header, this.listEl, this.actionsEl);
-  }
 
   setCallbacks(callbacks: TestsSidebarCallbacks): void {
     this.callbacks = callbacks;
   }
 
   update(tests: TestEntry[]): void {
-    this.tests = tests;
-    this.render();
+    this.model.setSnapshot({
+      tests: [...tests],
+    });
   }
 
   updateTestStatus(testId: string, status: TestEntry["status"]): void {
-    const test = this.tests.find((t) => t.id === testId);
-    if (test) {
-      test.status = status;
-      this.render();
-    }
+    this.model.updateSnapshot((state) => ({
+      tests: state.tests.map((test) =>
+        test.id === testId ? { ...test, status } : test,
+      ),
+    }));
   }
 
   attach(container: HTMLElement): IDisposable {
-    container.appendChild(this.root);
-    return {
-      dispose: () => {
-        if (this.root.parentElement === container) {
-          container.removeChild(this.root);
-        }
-      },
-    };
-  }
-
-  private statusColor(status: TestEntry["status"]): string {
-    switch (status) {
-      case "passed":
-        return "var(--almostnode-success)";
-      case "failed":
-        return "var(--almostnode-danger)";
-      case "running":
-        return "var(--almostnode-warning)";
-      default:
-        return "var(--almostnode-quiet)";
-    }
-  }
-
-  private render(): void {
-    this.listEl.innerHTML = "";
-
-    if (this.tests.length === 0) {
-      const empty = document.createElement("div");
-      empty.style.cssText =
-        "color:var(--almostnode-quiet);font-style:italic;padding:4px 8px;font-size:12px;";
-      empty.textContent =
-        "No tests recorded yet. Use OpenCode to interact with the preview and tests will be auto-detected.";
-      this.listEl.appendChild(empty);
-      return;
-    }
-
-    for (const test of this.tests) {
-      const row = document.createElement("div");
-      row.style.cssText =
-        "display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:3px;cursor:pointer;color:var(--text);";
-      row.addEventListener("mouseenter", () => {
-        row.style.background = "var(--almostnode-list-hover-bg)";
-      });
-      row.addEventListener("mouseleave", () => {
-        row.style.background = "transparent";
-      });
-
-      // Status dot
-      const indicator = document.createElement("span");
-      indicator.style.cssText = `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${this.statusColor(test.status)};`;
-      if (test.status === "running") {
-        indicator.style.animation =
-          "almostnode-test-pulse 1s ease-in-out infinite";
-      }
-
-      // Test name
-      const label = document.createElement("span");
-      label.style.cssText =
-        "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;";
-      label.textContent = test.name;
-      label.addEventListener("click", () => {
-        this.callbacks?.onOpen(test.id);
-      });
-
-      // Play button
-      const playBtn = document.createElement("button");
-      playBtn.textContent = "\u25b6";
-      playBtn.title = `Run ${test.name}`;
-      playBtn.style.cssText =
-        "background:none;border:none;color:var(--almostnode-success);cursor:pointer;font-size:12px;padding:0 2px;line-height:1;";
-      playBtn.addEventListener("mouseenter", () => {
-        playBtn.style.color = "var(--almostnode-success)";
-      });
-      playBtn.addEventListener("mouseleave", () => {
-        playBtn.style.color = "var(--almostnode-success)";
-      });
-      playBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.callbacks?.onRun(test.id);
-      });
-
-      // Delete button
-      const delBtn = document.createElement("button");
-      delBtn.textContent = "\u00d7";
-      delBtn.title = `Delete ${test.name}`;
-      delBtn.style.cssText =
-        "background:none;border:none;color:var(--almostnode-quiet);cursor:pointer;font-size:16px;padding:0 2px;line-height:1;";
-      delBtn.addEventListener("mouseenter", () => {
-        delBtn.style.color = "var(--almostnode-danger)";
-      });
-      delBtn.addEventListener("mouseleave", () => {
-        delBtn.style.color = "var(--almostnode-quiet)";
-      });
-      delBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.callbacks?.onDelete(test.id);
-      });
-
-      row.append(indicator, label, playBtn, delBtn);
-      this.listEl.appendChild(row);
-    }
+    return mountStaticSlotSurface(container, TESTS_VIEW_ID, this.model);
   }
 }
 
@@ -2893,161 +2427,36 @@ export function registerWorkbenchSurfaces(options: {
   openCodeSurface: OpenCodeTerminalSurface;
   previewSurface: PreviewSurface;
   terminalSurface: TerminalPanelSurface;
+  databaseSurface: DatabaseSidebarSurface;
   databaseBrowserSurface: DatabaseBrowserSurface;
   keychainSurface: KeychainSidebarSurface;
+  testsSurface: TestsSidebarSurface;
   vfs: VirtualFS;
   openFileAsText: (path: string) => void;
 }): RegisteredWorkbenchSurfaces {
-  class PreviewEditorInput extends SimpleEditorInput {
-    readonly typeId = PREVIEW_EDITOR_TYPE_ID;
-
-    constructor() {
-      super(PREVIEW_EDITOR_RESOURCE);
-      this.setName("Preview");
-      this.setTitle({
-        short: "Preview",
-        medium: "Preview",
-        long: "Almostnode Preview",
-      });
-      this.setDescription("Live workspace preview");
-      this.addCapability(EditorInputCapabilities.Singleton);
-    }
-  }
-
-  class PreviewEditorPane extends SimpleEditorPane {
-    constructor(group: IEditorGroup) {
-      super(PREVIEW_EDITOR_TYPE_ID, group);
-    }
-
-    initialize(): HTMLElement {
-      const element = document.createElement("div");
-      element.className = "almostnode-preview-editor-pane";
-      return element;
-    }
-
-    override focus(): void {
-      options.previewSurface.focus();
-    }
-
-    async renderInput(): Promise<IDisposable> {
-      return options.previewSurface.attach(this.container);
-    }
-  }
-
-  class DatabaseEditorInput extends SimpleEditorInput {
-    readonly typeId = DATABASE_EDITOR_TYPE_ID;
-
-    constructor() {
-      super(DATABASE_EDITOR_RESOURCE);
-      this.setName("Database");
-      this.setTitle({
-        short: "Database",
-        medium: "Database Browser",
-        long: "Database Browser",
-      });
-      this.setDescription("Browse and query PGlite databases");
-      this.addCapability(EditorInputCapabilities.Singleton);
-    }
-  }
-
-  class DatabaseEditorPane extends SimpleEditorPane {
-    constructor(group: IEditorGroup) {
-      super(DATABASE_EDITOR_TYPE_ID, group);
-    }
-
-    initialize(): HTMLElement {
-      const el = document.createElement("div");
-      el.className = "almostnode-database-editor-pane";
-      return el;
-    }
-
-    override focus(): void {
-      options.databaseBrowserSurface.focus();
-    }
-
-    async renderInput(): Promise<IDisposable> {
-      return options.databaseBrowserSurface.attach(this.container);
-    }
-  }
-
-  const disposables = new DisposableStore();
-
-  disposables.add(
-    registerEditorPane(PREVIEW_EDITOR_TYPE_ID, "Preview", PreviewEditorPane, [
-      PreviewEditorInput,
-    ]),
-  );
-  disposables.add(
-    registerEditorPane(
-      DATABASE_EDITOR_TYPE_ID,
-      "Database",
-      DatabaseEditorPane,
-      [DatabaseEditorInput],
-    ),
-  );
-
   const rendered = registerRenderedEditors({
     vfs: options.vfs,
     openFileAsText: options.openFileAsText,
   });
-  disposables.add(rendered);
-  disposables.add(
-    registerCustomView({
-      id: FILES_VIEW_ID,
-      name: "Files",
-      location: ViewContainerLocation.Sidebar,
-      default: true,
-      order: -1,
-      icon:
-        "data:image/svg+xml," +
-        encodeURIComponent(
-          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></svg>',
-        ),
-      renderBody: (container) => options.filesSurface.attach(container),
-    }),
-  );
-  disposables.add(
-    registerCustomView({
-      id: OPEN_CODE_VIEW_ID,
-      name: "OpenCode",
-      location: ViewContainerLocation.Sidebar,
-      order: 0,
-      icon:
-        "data:image/svg+xml," +
-        encodeURIComponent(
-          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>',
-        ),
-      renderBody: (container) => options.openCodeSurface.attach(container),
-    }),
-  );
-  disposables.add(
-    registerCustomView({
-      id: TERMINAL_VIEW_ID,
-      name: "Terminal",
-      location: ViewContainerLocation.Panel,
-      renderBody: (container) => options.terminalSurface.attach(container),
-    }),
-  );
-  disposables.add(
-    registerCustomView({
-      id: KEYCHAIN_VIEW_ID,
-      name: "Keychain",
-      location: ViewContainerLocation.AuxiliaryBar,
-      order: 2,
-      icon:
-        "data:image/svg+xml," +
-        encodeURIComponent(
-          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
-        ),
-      renderBody: (container) => options.keychainSurface.attach(container),
-    }),
-  );
+  const entrypoints = registerWorkbenchEntrypoints({
+    surfaces: {
+      filesSurface: options.filesSurface,
+      openCodeSurface: options.openCodeSurface,
+      previewSurface: options.previewSurface,
+      terminalSurface: options.terminalSurface,
+      databaseSurface: options.databaseSurface,
+      databaseBrowserSurface: options.databaseBrowserSurface,
+      keychainSurface: options.keychainSurface,
+      testsSurface: options.testsSurface,
+    },
+  });
+
   return {
     get previewInput() {
-      return new PreviewEditorInput();
+      return entrypoints.createEditorInput(PREVIEW_EDITOR_TYPE_ID);
     },
     get databaseInput() {
-      return new DatabaseEditorInput();
+      return entrypoints.createEditorInput(DATABASE_EDITOR_TYPE_ID);
     },
     renderedEditors: rendered.factories,
     filesViewId: FILES_VIEW_ID,
@@ -3055,6 +2464,13 @@ export function registerWorkbenchSurfaces(options: {
     terminalViewId: TERMINAL_VIEW_ID,
     databaseViewId: DATABASE_VIEW_ID,
     keychainViewId: KEYCHAIN_VIEW_ID,
-    dispose: () => disposables.dispose(),
+    testsViewId: TESTS_VIEW_ID,
+    setActivation: (id, active) => {
+      entrypoints.setActivation(id, active);
+    },
+    dispose: () => {
+      entrypoints.dispose();
+      rendered.dispose();
+    },
   };
 }

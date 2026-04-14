@@ -13,6 +13,7 @@ import wasm from "vite-plugin-wasm";
 import tailwindcss from "@tailwindcss/vite";
 import { resolvePreferredPnpmPackagePath } from "../../scripts/resolve-pnpm-package-path.mjs";
 import { corsProxyPlugin } from "./src/plugins/vite-plugin-cors-proxy";
+import { workbenchEntrypointsPlugin } from "./src/plugins/vite-plugin-workbench-entrypoints";
 import { workspaceTemplatesPlugin } from "./src/plugins/vite-plugin-workspace-templates";
 
 const monacoVscodePackages = [
@@ -559,6 +560,9 @@ export default defineConfig(async ({ mode }) => {
     },
     plugins: [
       corsProxyPlugin(),
+      workbenchEntrypointsPlugin({
+        entrypointsDir: resolve(__dirname, "src/workbench/entrypoints"),
+      }),
       workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, "src/templates/content") }),
       opentuiWasmAsset(),
       opentuiSolidTransform(),

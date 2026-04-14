@@ -48,3 +48,5 @@ packages/almostnode/examples/macaly-demo.html
 
 /.playwright-cli
 .collaborator
+/.playwright-mcp
+/output

@@ -304,6 +304,63 @@ describe('ProjectManager init', () => {
     manager.dispose();
   });
 
+  it('allows the IDE to remain empty when no saved projects exist', async () => {
+    window.history.replaceState({}, '', 'http://localhost:5173/ide');
+
+    const manager = new ProjectManager();
+    const container = createContainer();
+    const teardownActiveProject = vi.fn(async () => undefined);
+    const attachProjectContext = vi.fn(async () => undefined);
+    const switchProjectWorkspace = vi.fn(async () => undefined);
+    const syncProjectGit = vi.fn(async () => undefined);
+    const discoverActiveProjectThreads = vi.fn(async () => ({ claude: [], opencode: [] }));
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        listProjects: vi.fn(async () => []),
+        listAllResumableThreads: vi.fn(async () => []),
+      },
+    });
+
+    manager.setCallbacks({
+      onProjectsChanged: vi.fn(),
+      onActiveProjectChanged: vi.fn(),
+      onResumableThreadsChanged: vi.fn(),
+      onSwitchingStateChanged: vi.fn(),
+    });
+
+    manager.setHost({
+      getVfs: () => container.vfs,
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit,
+      attachProjectContext,
+      switchProjectWorkspace,
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      teardownActiveProject,
+      discoverActiveProjectThreads,
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    await manager.init();
+
+    expect(manager.getActiveProjectId()).toBeNull();
+    expect(teardownActiveProject).toHaveBeenCalled();
+    expect(attachProjectContext).not.toHaveBeenCalled();
+    expect(switchProjectWorkspace).not.toHaveBeenCalled();
+    expect(syncProjectGit).not.toHaveBeenCalled();
+    expect(discoverActiveProjectThreads).not.toHaveBeenCalled();
+    expect(localStorage.getItem('almostnode-active-project-id')).toBeNull();
+    expect(new URL(window.location.href).searchParams.has('project')).toBe(false);
+
+    manager.dispose();
+  });
+
   it('keeps the mounted OpenCode workspace bridge readable after thread sync runs', async () => {
     window.history.replaceState({}, '', 'http://localhost:5173/ide?project=project-open');
 
@@ -979,5 +1036,74 @@ describe('ProjectManager init', () => {
     expect(syncProjectGit).toHaveBeenCalledWith(currentProject);
     expect(restoreAgentStateSnapshot).toHaveBeenCalledWith(previousAgentState);
     expect(manager.getActiveProjectId()).toBe('project-current');
+  });
+
+  it('deletes the last active project and clears the selection', async () => {
+    window.history.replaceState({}, '', 'http://localhost:5173/ide?project=project-last');
+
+    const manager = new ProjectManager();
+    const project: ProjectRecord = {
+      id: 'project-last',
+      name: 'Last project',
+      templateId: 'vite',
+      createdAt: Date.now(),
+      lastModified: Date.now(),
+      dbPrefix: 'last-db',
+    };
+
+    let projects: ProjectRecord[] = [project];
+    const teardownActiveProject = vi.fn(async () => undefined);
+    const onProjectsChanged = vi.fn();
+    const onActiveProjectChanged = vi.fn();
+
+    Object.defineProperty(manager, 'db', {
+      configurable: true,
+      value: {
+        listProjects: vi.fn(async () => projects),
+        deleteProject: vi.fn(async (id: string) => {
+          projects = projects.filter((entry) => entry.id !== id);
+        }),
+        listAllResumableThreads: vi.fn(async () => []),
+      },
+    });
+
+    manager.setCallbacks({
+      onProjectsChanged,
+      onActiveProjectChanged,
+      onResumableThreadsChanged: vi.fn(),
+      onSwitchingStateChanged: vi.fn(),
+    });
+
+    manager.setHost({
+      getVfs: () => ({}),
+      getTemplateId: () => 'vite',
+      hasGitHubCredentials: () => false,
+      createGitHubRemote: vi.fn(async () => {
+        throw new Error('unexpected');
+      }),
+      syncProjectGit: vi.fn(async () => undefined),
+      attachProjectContext: vi.fn(async () => undefined),
+      switchProjectWorkspace: vi.fn(async () => undefined),
+      collectAgentStateSnapshot: vi.fn(async () => ({ claudeFiles: [], openCodeDb: null })),
+      restoreAgentStateSnapshot: vi.fn(async () => undefined),
+      teardownActiveProject,
+      discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
+      resumeResumableThread: vi.fn(async () => undefined),
+    });
+
+    Object.defineProperty(manager, 'activeProjectId', {
+      configurable: true,
+      writable: true,
+      value: project.id,
+    });
+
+    await manager.deleteProject(project.id);
+
+    expect(manager.getActiveProjectId()).toBeNull();
+    expect(teardownActiveProject).toHaveBeenCalled();
+    expect(onActiveProjectChanged).toHaveBeenCalledWith(null);
+    expect(onProjectsChanged).toHaveBeenLastCalledWith([]);
+    expect(localStorage.getItem('almostnode-active-project-id')).toBeNull();
+    expect(new URL(window.location.href).searchParams.has('project')).toBe(false);
   });
 });

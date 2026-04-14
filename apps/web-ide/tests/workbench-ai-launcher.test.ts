@@ -839,6 +839,9 @@ describe("WebIDEHost AI launcher behavior", () => {
           order.push("pglite");
           return Promise.resolve();
         }),
+        resumePendingProjectLaunch: vi.fn(() => {
+          order.push("resume-project-launch");
+        }),
         openWorkspaceFile,
       },
       "nextjs",
@@ -853,6 +856,7 @@ describe("WebIDEHost AI launcher behavior", () => {
       "preview-start",
       "preview-retry",
       "pglite",
+      "resume-project-launch",
     ]);
     expect(openWorkspaceFile).not.toHaveBeenCalled();
   });
@@ -953,6 +957,135 @@ describe("WebIDEHost AI launcher behavior", () => {
     expect(host.templateId).toBe("nextjs");
     expect(host.currentProjectDatabaseNamespace).toBe("project-b");
     expect(host.createUserTerminalTab).not.toHaveBeenCalled();
+  });
+
+  it("starts deferred project launch when restoring a project context", async () => {
+    const order: string[] = [];
+    const host = Object.create(WebIDEHost.prototype) as Record<string, unknown>;
+    host.templateId = "vite";
+    host.pendingProjectLaunch = true;
+    host.previewUrl = null;
+    host.previewStartRequested = false;
+    host.currentProjectDatabaseNamespace = "global";
+    host.currentProjectDefaultDatabaseName = "default";
+    host.closeCurrentProjectDatabase = vi.fn(async () => {
+      order.push("close-db");
+    });
+    host.initPGliteIfNeeded = vi.fn(() => {
+      order.push("pglite");
+      return Promise.resolve();
+    });
+    host.revealPreviewEditor = vi.fn(async () => {
+      order.push("preview");
+    });
+    host.updatePreviewStatus = vi.fn((text: string) => {
+      order.push(`preview-status:${text}`);
+    });
+    host.ensurePreviewServerRunning = vi.fn(() => {
+      order.push("preview-start");
+      host.previewStartRequested = true;
+    });
+    host.schedulePreviewStartRetry = vi.fn(() => {
+      order.push("preview-retry");
+    });
+    host.revealOpenCodePanel = vi.fn(async (focus: boolean) => {
+      order.push(`opencode:${String(focus)}`);
+    });
+
+    await (host as unknown as {
+      attachProjectContext: (
+        templateId: "vite" | "nextjs" | "tanstack",
+        dbPrefix?: string,
+        defaultDatabaseName?: string,
+      ) => Promise<void>;
+    }).attachProjectContext("nextjs", "project-b", "project-b");
+
+    expect(order).toEqual([
+      "close-db",
+      "pglite",
+      "preview",
+      "preview-status:Waiting for a preview server",
+      "preview-start",
+      "preview-retry",
+      "opencode:false",
+    ]);
+    expect(host.templateId).toBe("nextjs");
+    expect(host.currentProjectDatabaseNamespace).toBe("project-b");
+    expect(host.currentProjectDefaultDatabaseName).toBe("project-b");
+    expect(host.pendingProjectLaunch).toBe(false);
+  });
+
+  it("reopens OpenCode when switching into the first project after an empty state", async () => {
+    const order: string[] = [];
+    const vfs = {
+      existsSync: vi.fn(() => true),
+    };
+    const host = Object.create(WebIDEHost.prototype) as Record<string, unknown>;
+    host.templateId = "vite";
+    host.pendingProjectLaunch = true;
+    host.currentProjectDatabaseNamespace = "global";
+    host.previewPort = null;
+    host.previewUrl = null;
+    host.previewStartRequested = false;
+    host.container = {
+      vfs,
+    };
+    host.previewSurface = {
+      setActiveDb: vi.fn(),
+      clear: vi.fn(),
+      setSelectActive: vi.fn(),
+    };
+    host.databaseSurface = {
+      update: vi.fn(),
+    };
+    host.terminalTabs = new Map([["terminal-1", {}]]);
+    host.abortRunningTerminalCommands = vi.fn();
+    host.clearScheduledPreviewStartRetry = vi.fn();
+    host.resetPreviewTerminalTab = vi.fn();
+    host.waitForPreviewServerShutdown = vi.fn(async () => undefined);
+    host.closeCurrentProjectDatabase = vi.fn(async () => undefined);
+    host.ensureGitInitialized = vi.fn(async () => undefined);
+    host.createUserTerminalTab = vi.fn();
+    host.updateTerminalStatus = vi.fn();
+    host.revealPreviewEditor = vi.fn(async () => {
+      order.push("preview");
+    });
+    host.updatePreviewStatus = vi.fn((text: string) => {
+      order.push(`preview-status:${text}`);
+    });
+    host.ensurePreviewServerRunning = vi.fn(() => {
+      order.push("preview-start");
+      host.previewStartRequested = true;
+    });
+    host.schedulePreviewStartRetry = vi.fn(() => {
+      order.push("preview-retry");
+    });
+    host.initPGliteIfNeeded = vi.fn(() => {
+      order.push("pglite");
+      return Promise.resolve();
+    });
+    host.revealOpenCodePanel = vi.fn(async (focus: boolean) => {
+      order.push(`opencode:${String(focus)}`);
+    });
+
+    await (host as unknown as {
+      switchProjectWorkspace: (
+        templateId: "vite" | "nextjs" | "tanstack",
+        files: Array<{ path: string; contentBase64: string }>,
+        dbPrefix?: string,
+        defaultDatabaseName?: string,
+      ) => Promise<void>;
+    }).switchProjectWorkspace("nextjs", [], "project-b");
+
+    expect(order).toEqual([
+      "preview",
+      "preview-status:Waiting for a preview server",
+      "preview-start",
+      "preview-retry",
+      "pglite",
+      "opencode:false",
+    ]);
+    expect(host.pendingProjectLaunch).toBe(false);
   });
 
   it("initializes project git with git add . and restores the configured origin", async () => {
