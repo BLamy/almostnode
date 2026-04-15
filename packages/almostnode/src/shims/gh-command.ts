@@ -1,12 +1,12 @@
 import type { CommandContext, ExecResult as JustBashExecResult } from 'just-bash';
 import type { VirtualFS } from '../virtual-fs';
 import { getDefaultNetworkController, networkFetch } from '../network';
-import { readGhToken, writeGhToken, deleteGhToken, hasGhToken } from './gh-auth';
+import { readGhToken, writeGhToken, deleteGhToken } from './gh-auth';
 import * as path from './path';
 import { runGitCommand } from './git-command';
 
 const GH_CLIENT_ID = 'Ov23li3di39s0mmKf6HE';
-const GH_SCOPES = 'repo,read:org,gist';
+const DEFAULT_GH_SCOPES = ['repo', 'read:org', 'gist', 'codespace'];
 
 function ok(stdout: string): JustBashExecResult {
   return { stdout, stderr: '', exitCode: 0 };
@@ -54,7 +54,56 @@ interface TokenResponse {
   error?: string;
 }
 
-async function requestDeviceCode(): Promise<DeviceCodeResponse> {
+function parseScopeList(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function mergeScopes(...groups: Array<readonly string[] | null | undefined>): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups) {
+    if (!group) continue;
+    for (const entry of group) {
+      const normalized = entry.trim();
+      if (!normalized || seen.has(normalized)) {
+        continue;
+      }
+      seen.add(normalized);
+      merged.push(normalized);
+    }
+  }
+
+  return merged;
+}
+
+function formatScopeRequest(scopes: readonly string[]): string {
+  return scopes.join(' ');
+}
+
+function formatScopeDisplay(scopes: readonly string[]): string {
+  return scopes.join(', ');
+}
+
+function readRequestedScopes(args: string[]): string[] {
+  const requested: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if ((arg === '--scopes' || arg === '-s') && index + 1 < args.length) {
+      requested.push(...parseScopeList(args[index + 1]));
+      index += 1;
+    }
+  }
+
+  return requested;
+}
+
+async function requestDeviceCode(scope: string): Promise<DeviceCodeResponse> {
   const res = await fetchViaProxy('https://github.com/login/device/code', {
     method: 'POST',
     headers: {
@@ -63,7 +112,7 @@ async function requestDeviceCode(): Promise<DeviceCodeResponse> {
     },
     body: JSON.stringify({
       client_id: GH_CLIENT_ID,
-      scope: GH_SCOPES,
+      scope,
     }),
   });
 
@@ -79,7 +128,7 @@ async function pollForToken(
   interval: number,
   expiresIn: number,
   onTick?: (msg: string) => void
-): Promise<string> {
+): Promise<{ accessToken: string; scopes: string[] }> {
   const deadline = Date.now() + expiresIn * 1000;
   let pollInterval = interval * 1000;
 
@@ -106,7 +155,10 @@ async function pollForToken(
     const data: TokenResponse = await res.json();
 
     if (data.access_token) {
-      return data.access_token;
+      return {
+        accessToken: data.access_token,
+        scopes: parseScopeList(data.scope),
+      };
     }
 
     if (data.error === 'slow_down') {
@@ -134,7 +186,7 @@ async function pollForToken(
   throw new Error('Device code expired (timeout). Please try again.');
 }
 
-async function fetchGitHubUser(token: string): Promise<{ login: string }> {
+async function fetchGitHubAuthSession(token: string): Promise<{ login: string; scopes: string[] }> {
   const res = await fetchViaProxy('https://api.github.com/user', {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -146,43 +198,70 @@ async function fetchGitHubUser(token: string): Promise<{ login: string }> {
     throw new Error(`Failed to fetch GitHub user: ${res.status}`);
   }
 
-  return res.json();
+  const payload = await res.json();
+
+  return {
+    login: String(payload.login || ''),
+    scopes: parseScopeList(res.headers.get('x-oauth-scopes')),
+  };
 }
 
-// ── Auth subcommands ────────────────────────────────────────────────────────
-
-async function authLogin(
-  _args: string[],
-  _ctx: CommandContext,
+async function authenticateWithDeviceFlow(
+  args: string[],
   vfs: VirtualFS,
-  keychain?: { persistCurrentState(): Promise<void> } | null,
+  keychain: { persistCurrentState(): Promise<void> } | null | undefined,
+  options?: {
+    allowExistingToken?: boolean;
+    mode?: 'login' | 'refresh';
+  },
 ): Promise<JustBashExecResult> {
   const host = 'github.com';
+  const requestedScopes = mergeScopes(
+    DEFAULT_GH_SCOPES,
+    readRequestedScopes(args),
+  );
+  const existing = readGhToken(vfs, host);
 
-  if (hasGhToken(vfs, host)) {
-    const existing = readGhToken(vfs, host)!;
+  if (options?.allowExistingToken !== false && existing?.oauth_token) {
     return ok(
       `\u2713 Already logged in to ${host} as ${existing.user}\n` +
-        `  To re-authenticate, run: gh auth logout && gh auth login\n`
+        `  To re-authenticate, run: gh auth logout && gh auth login\n` +
+        `  To request more scopes, run: gh auth refresh --scopes codespace\n`
     );
+  }
+
+  let effectiveScopes = requestedScopes;
+  if (options?.mode === 'refresh' && existing?.oauth_token) {
+    try {
+      const currentSession = await fetchGitHubAuthSession(existing.oauth_token);
+      effectiveScopes = mergeScopes(
+        DEFAULT_GH_SCOPES,
+        parseScopeList(existing.oauth_scopes),
+        currentSession.scopes,
+        readRequestedScopes(args),
+      );
+    } catch {
+      effectiveScopes = mergeScopes(
+        DEFAULT_GH_SCOPES,
+        parseScopeList(existing.oauth_scopes),
+        readRequestedScopes(args),
+      );
+    }
   }
 
   let deviceData: DeviceCodeResponse;
   try {
-    deviceData = await requestDeviceCode();
+    deviceData = await requestDeviceCode(formatScopeRequest(effectiveScopes));
   } catch (e) {
     return err(`Failed to initiate device flow: ${e instanceof Error ? e.message : String(e)}\n`);
   }
 
-  // Copy code to clipboard and show it to the user before opening browser
   try {
     await navigator.clipboard.writeText(deviceData.user_code);
   } catch {
     // clipboard may not be available
   }
 
-  // Show the code in a browser dialog so the user can see it immediately
-  // (terminal output won't appear until the command completes)
   try {
     if (typeof window !== 'undefined' && typeof window.alert === 'function') {
       window.alert(
@@ -199,45 +278,81 @@ async function authLogin(
     `! First copy your one-time code: ${deviceData.user_code}\n` +
     `- Waiting for authentication...\n`;
 
-  // Open the verification URI
   try {
     window.open(deviceData.verification_uri, '_blank');
   } catch {
-    // ignore — may fail in non-browser env
+    // ignore
   }
 
-  let token: string;
+  let tokenData: { accessToken: string; scopes: string[] };
   try {
-    token = await pollForToken(deviceData.device_code, deviceData.interval, deviceData.expires_in);
+    tokenData = await pollForToken(
+      deviceData.device_code,
+      deviceData.interval,
+      deviceData.expires_in,
+    );
   } catch (e) {
     return err(
       output + `\u2717 ${e instanceof Error ? e.message : String(e)}\n`
     );
   }
 
-  let username: string;
+  let authSession: { login: string; scopes: string[] };
   try {
-    const user = await fetchGitHubUser(token);
-    username = user.login;
+    authSession = await fetchGitHubAuthSession(tokenData.accessToken);
   } catch (e) {
     return err(
       output + `\u2717 Authentication succeeded but failed to fetch user info: ${e instanceof Error ? e.message : String(e)}\n`
     );
   }
 
+  const resolvedScopes = mergeScopes(
+    effectiveScopes,
+    tokenData.scopes,
+    authSession.scopes,
+  );
+
   writeGhToken(vfs, {
-    oauth_token: token,
-    user: username,
+    oauth_token: tokenData.accessToken,
+    user: authSession.login,
     git_protocol: 'https',
+    oauth_scopes: formatScopeRequest(resolvedScopes),
   }, host);
 
   await keychain?.persistCurrentState().catch(() => {});
 
   return ok(
     output +
-      `\u2713 Authentication complete.\n` +
-      `\u2713 Logged in as ${username}\n`
+      `\u2713 ${options?.mode === 'refresh' ? 'Authentication refreshed.' : 'Authentication complete.'}\n` +
+      `\u2713 Logged in as ${authSession.login}\n` +
+      `\u2713 Token scopes: ${formatScopeDisplay(resolvedScopes)}\n`
   );
+}
+
+// ── Auth subcommands ────────────────────────────────────────────────────────
+
+async function authLogin(
+  args: string[],
+  _ctx: CommandContext,
+  vfs: VirtualFS,
+  keychain?: { persistCurrentState(): Promise<void> } | null,
+): Promise<JustBashExecResult> {
+  return authenticateWithDeviceFlow(args, vfs, keychain, {
+    allowExistingToken: true,
+    mode: 'login',
+  });
+}
+
+async function authRefresh(
+  args: string[],
+  _ctx: CommandContext,
+  vfs: VirtualFS,
+  keychain?: { persistCurrentState(): Promise<void> } | null,
+): Promise<JustBashExecResult> {
+  return authenticateWithDeviceFlow(args, vfs, keychain, {
+    allowExistingToken: false,
+    mode: 'refresh',
+  });
 }
 
 async function authStatus(
@@ -257,9 +372,11 @@ async function authStatus(
 
   // Verify token is still valid
   let username = config.user;
+  let scopes = parseScopeList(config.oauth_scopes);
   try {
-    const user = await fetchGitHubUser(config.oauth_token);
-    username = user.login;
+    const session = await fetchGitHubAuthSession(config.oauth_token);
+    username = session.login;
+    scopes = mergeScopes(scopes, session.scopes);
   } catch {
     return err(
       `${host}\n` +
@@ -268,11 +385,11 @@ async function authStatus(
   }
 
   return ok(
-    `${host}\n` +
+      `${host}\n` +
       `  \u2713 Logged in to ${host} account ${username} (oauth_token)\n` +
       `  - Active account: true\n` +
       `  - Git operations protocol: ${config.git_protocol}\n` +
-      `  - Token scopes: ${GH_SCOPES}\n`
+      `  - Token scopes: ${scopes.length > 0 ? formatScopeDisplay(scopes) : 'unknown'}\n`
   );
 }
 
@@ -327,6 +444,8 @@ async function runAuth(
       return authStatus(args.slice(1), ctx, vfs);
     case 'logout':
       return authLogout(args.slice(1), ctx, vfs, keychain);
+    case 'refresh':
+      return authRefresh(args.slice(1), ctx, vfs, keychain);
     case 'token':
       return authToken(args.slice(1), ctx, vfs);
     default:
@@ -335,6 +454,7 @@ async function runAuth(
           `Available commands:\n` +
           `  login       Authenticate with a GitHub host\n` +
           `  logout      Log out of a GitHub host\n` +
+          `  refresh     Refresh authentication and request additional scopes\n` +
           `  status      View authentication status\n` +
           `  token       Print the auth token\n`
       );

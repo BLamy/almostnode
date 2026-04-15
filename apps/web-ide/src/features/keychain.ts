@@ -12,6 +12,8 @@ import {
 export const CLAUDE_AUTH_CREDENTIALS_PATH = '/home/user/.claude/.credentials.json';
 export const CLAUDE_AUTH_CONFIG_PATH = '/home/user/.claude/.config.json';
 export const CLAUDE_LEGACY_CONFIG_PATH = '/home/user/.claude.json';
+export const FLY_CONFIG_PATH = '/home/user/.fly/config.yml';
+export const SPRITES_CONFIG_PATH = '/home/user/.sprites/sprites.json';
 export const TAILSCALE_SESSION_KEYCHAIN_PATH = '/__almostnode/keychain/tailscale-session.json';
 const OPENCODE_DATA_ROOT = '/opencode/data/opencode';
 const OPENCODE_CONFIG_ROOT = '/opencode/config/opencode';
@@ -67,6 +69,11 @@ export interface StoredKeychain {
 }
 
 interface SnapshotEntry {
+  path: string;
+  rawText: string;
+}
+
+export interface KeychainSnapshotEntry {
   path: string;
   rawText: string;
 }
@@ -637,6 +644,35 @@ export class Keychain {
     return paths.some((path) => this.hasManagedPathData(path));
   }
 
+  listActiveSlots(): string[] {
+    return Array.from(this.slots.entries())
+      .filter(([, paths]) => paths.some((path) => this.hasManagedPathData(path)))
+      .map(([name]) => name);
+  }
+
+  readSlotSnapshot(slotNames?: string[]): KeychainSnapshotEntry[] {
+    const requested = slotNames?.length
+      ? new Set(slotNames)
+      : null;
+    const allowedPaths = new Set<string>();
+
+    for (const [name, paths] of this.slots.entries()) {
+      if (requested && !requested.has(name)) {
+        continue;
+      }
+      for (const path of paths) {
+        allowedPaths.add(path);
+      }
+    }
+
+    return this.readManagedSnapshot()
+      .filter((entry) => allowedPaths.has(entry.path))
+      .map((entry) => ({
+        path: entry.path,
+        rawText: entry.rawText,
+      }));
+  }
+
   private get managedPaths(): string[] {
     const all: string[] = [];
     for (const paths of this.slots.values()) {
@@ -744,7 +780,7 @@ export class Keychain {
     const normalized = command.trim().toLowerCase();
     const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
       || matchesClaudeLaunchCommand(command)
-      || /\b(gh|replayio|tailscale|aws)\b/.test(normalized);
+      || /\b(gh|replayio|tailscale|aws|sprite|fly)\b/.test(normalized);
     if (!shouldAutoRestore) {
       return true;
     }

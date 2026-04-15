@@ -26,12 +26,15 @@ import {
   parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
+import { isFlyLoginCommand } from "../features/fly-command-routing";
+import { parseSpriteConsoleCommand } from "../features/sprite-command-routing";
 import {
   buildClaudeIdeMcpConfig,
   ClaudeIdeBridge,
 } from "../features/claude-ide-bridge";
 import { installHostConsoleBridge } from "../features/host-console-bridge";
 import { installOxcMonacoIntegration } from "../features/oxc-monaco";
+import { SpriteTerminalSession } from "../features/sprite-terminal-session";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
 import { HostTerminalSession } from "../desktop/host-terminal-session";
@@ -45,17 +48,46 @@ import {
 } from "../desktop/project-snapshot";
 import type {
   ProjectAgentStateSnapshot,
+  ProjectCodespaceRecord,
+  ProjectRepoRef,
   ProjectGitRemoteRecord,
   ProjectRecord,
   ResumableThreadRecord,
 } from "../features/project-db";
+import type { ProjectEnvironmentController } from "../features/project-manager";
 import type { GitHubRepositorySummary } from "../features/github-repositories";
+import {
+  connectGitHubAccessTokenSession,
+  ensureProjectCodespace,
+  getProjectCodespace,
+  rebuildProjectCodespace,
+  startProjectCodespace,
+  stopProjectCodespace,
+  syncProjectCodespaceCredentials,
+} from "../features/codespaces-api";
+import {
+  CODESPACE_BOOTSTRAP_SCRIPT_PATH,
+  CODESPACE_DEVCONTAINER_PATH,
+  CODESPACE_SECRET_NAME,
+  createCodespaceUpgradeBranchName,
+  deriveProjectEnvironmentMenuState,
+  formatCodespaceLabel,
+  inferProjectRepoRef,
+  mergeCodespaceRecord,
+  normalizeCodespaceState,
+  toProjectRepoRef,
+} from "../features/project-environments";
 import {
   CLAUDE_PROJECTS_ROOT,
   discoverClaudeThreads,
   toOpenCodeThreads,
 } from "../features/resumable-threads";
 import { readGhToken } from "../../../../packages/almostnode/src/shims/gh-auth";
+import {
+  cancelPreparedFlyAuthPopup,
+  prepareFlyAuthPopup,
+  readFlyConfig,
+} from "../../../../packages/almostnode/src/shims/fly-auth";
 import {
   AWS_AUTH_PATH,
   AWS_CONFIG_PATH,
@@ -64,6 +96,10 @@ import {
   inspectAwsStoredState,
   writeAwsConfig,
 } from "../../../../packages/almostnode/src/shims/aws-storage";
+import {
+  readSpriteConfig,
+  resolveSpriteSelection,
+} from "../../../../packages/almostnode/src/shims/sprite-storage";
 import {
   DEFAULT_AWS_REGION,
   DEFAULT_AWS_SESSION_NAME,
@@ -78,6 +114,7 @@ import {
 import {
   FilesSidebarSurface,
   PreviewSurface,
+  CodespaceSurface,
   TerminalPanelSurface,
   OpenCodeTerminalSurface,
   type AgentLaunchKind,
@@ -98,12 +135,14 @@ import {
   CLAUDE_AUTH_CONFIG_PATH,
   CLAUDE_AUTH_CREDENTIALS_PATH,
   CLAUDE_LEGACY_CONFIG_PATH,
+  FLY_CONFIG_PATH,
   Keychain,
   OPENCODE_AUTH_PATH,
   OPENCODE_CONFIG_JSONC_PATH,
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
   OPENCODE_MCP_AUTH_PATH,
+  SPRITES_CONFIG_PATH,
   TAILSCALE_SESSION_KEYCHAIN_PATH,
   type KeychainState,
 } from "../features/keychain";
@@ -143,6 +182,7 @@ import {
 import {
   IEditorService,
   IPaneCompositePartService,
+  IQuickInputService,
   IStatusbarService,
   IWorkbenchLayoutService,
   IWorkbenchThemeService,
@@ -855,6 +895,7 @@ export class WebIDEHost {
   private readonly filesSurface: FilesSidebarSurface;
   private readonly openCodeSurface: OpenCodeTerminalSurface;
   private readonly previewSurface: PreviewSurface;
+  private readonly codespaceSurface: CodespaceSurface;
   private readonly terminalSurface: TerminalPanelSurface;
   private readonly workbenchSurfaces: RegisteredWorkbenchSurfaces;
   private readonly terminalTabs = new Map<string, TerminalTabState>();
@@ -887,6 +928,7 @@ export class WebIDEHost {
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
   private readonly claudeImagePasteCleanup = new Map<string, () => void>();
+  private codespaceStatusEntry: IStatusbarEntryAccessor | null = null;
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
   private tailscaleStatus: NetworkStatus | null = null;
   private tailscaleDiagnosticsHintPrinted = false;
@@ -915,6 +957,9 @@ export class WebIDEHost {
   private currentProjectDefaultDatabaseName = "default";
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
+  private activeProject: ProjectRecord | null = null;
+  private projectEnvironmentController: ProjectEnvironmentController | null =
+    null;
   private removeHostConsoleBridge: (() => void) | null = null;
   private claudeIdeBridge: ClaudeIdeBridge | null = null;
   private testRecorder:
@@ -956,6 +1001,7 @@ export class WebIDEHost {
           if (!session) {
             clearStoredWorkbenchNetworkConfig();
             clearStoredTailscaleSessionSnapshot();
+            this.handlePersistedTailscaleSessionChange();
             return;
           }
 
@@ -971,6 +1017,8 @@ export class WebIDEHost {
           } else {
             clearStoredTailscaleSessionSnapshot();
           }
+
+          this.handlePersistedTailscaleSessionChange();
         },
         onAuthUrl: (url) => {
           if (!url) {
@@ -1048,12 +1096,14 @@ export class WebIDEHost {
       },
     });
     this.databaseSurface = new DatabaseSidebarSurface();
+    this.codespaceSurface = new CodespaceSurface();
     this.databaseBrowserSurface = new DatabaseBrowserSurface();
     this.keychainSurface = new KeychainSidebarSurface();
     this.workbenchSurfaces = registerWorkbenchSurfaces({
       filesSurface: this.filesSurface,
       openCodeSurface: this.openCodeSurface,
       previewSurface: this.previewSurface,
+      codespaceSurface: this.codespaceSurface,
       terminalSurface: this.terminalSurface,
       databaseSurface: this.databaseSurface,
       databaseBrowserSurface: this.databaseBrowserSurface,
@@ -1061,6 +1111,15 @@ export class WebIDEHost {
       testsSurface: this.testsSurface,
       vfs: this.container.vfs,
       openFileAsText: (path: string) => void this.openWorkspaceFileAsText(path),
+    });
+    this.codespaceSurface.setCallbacks({
+      onOpenExternal: (url) => {
+        globalThis.open?.(url, "_blank", "noopener,noreferrer");
+      },
+      onEmbedUnavailable: (url, reason) => {
+        console.warn("[codespace-embed]", reason, url);
+        globalThis.open?.(url, "_blank", "noopener,noreferrer");
+      },
     });
     this.keychain = new Keychain({
       vfs: this.container.vfs,
@@ -1102,6 +1161,18 @@ export class WebIDEHost {
         case "logout:aws":
           void this.keychainAuthAction(this.buildAwsLogoutCommand());
           break;
+        case "login:fly":
+          void this.flyAuthAction("login");
+          break;
+        case "logout:fly":
+          void this.flyAuthAction("logout");
+          break;
+        case "login:sprites":
+          void this.spritesAuthAction("login");
+          break;
+        case "logout:sprites":
+          void this.spritesAuthAction("logout");
+          break;
         case "setup:aws":
           this.options.onRequestAwsSetup?.(this.getAwsSetupDraft());
           break;
@@ -1127,6 +1198,8 @@ export class WebIDEHost {
     ]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
     this.keychain.registerSlot("aws", [AWS_CONFIG_PATH, AWS_AUTH_PATH]);
+    this.keychain.registerSlot("fly", [FLY_CONFIG_PATH]);
+    this.keychain.registerSlot("sprites", [SPRITES_CONFIG_PATH]);
     this.keychain.registerSlot("opencode", [
       OPENCODE_AUTH_PATH,
       OPENCODE_MCP_AUTH_PATH,
@@ -1180,6 +1253,26 @@ export class WebIDEHost {
     return this.templateId;
   }
 
+  setProjectEnvironmentController(
+    controller: ProjectEnvironmentController | null,
+  ): void {
+    this.projectEnvironmentController = controller;
+    if (!controller) {
+      this.setActiveProject(null);
+      return;
+    }
+
+    void controller.getActiveProject().then((project) => {
+      this.setActiveProject(project);
+    });
+  }
+
+  setActiveProject(project: ProjectRecord | null): void {
+    this.activeProject = project;
+    this.updateEnvironmentStatusEntry();
+    this.syncCodespaceSurfaceForProject(project);
+  }
+
   hasGitHubCredentials(): boolean {
     return Boolean(readGhToken(this.container.vfs)?.oauth_token);
   }
@@ -1190,7 +1283,7 @@ export class WebIDEHost {
   }
 
   async listGitHubRepositories(): Promise<GitHubRepositorySummary[]> {
-    const token = this.getGitHubAuthToken();
+    const token = await this.getGitHubAuthToken();
     const repositories: GitHubRepositorySummary[] = [];
     let page = 1;
 
@@ -1248,7 +1341,7 @@ export class WebIDEHost {
   }
 
   async createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord> {
-    const token = this.getGitHubAuthToken();
+    const token = await this.getGitHubAuthToken();
 
     const repoName = this.toGitHubRepositoryName(projectName);
     const response = await this.fetchGitHubApi("https://api.github.com/user/repos", {
@@ -2706,7 +2799,7 @@ export class WebIDEHost {
     if (kind === "agent") {
       terminal.write("almostnode opencode terminal");
     }
-    if (!(kind === "agent" && tab.inputMode === "passthrough")) {
+    if (tab.inputMode !== "passthrough") {
       this.printPrompt(tab);
     }
     this.installClaudeImagePasteGuard(tab);
@@ -3407,6 +3500,18 @@ export class WebIDEHost {
         canAuth: true,
         ...this.buildAwsSidebarSlotStatus(),
       },
+      {
+        name: "fly",
+        label: "Fly.io",
+        canAuth: true,
+        ...this.buildFlySidebarSlotStatus(),
+      },
+      {
+        name: "sprites",
+        label: "Fly.io Sprites",
+        canAuth: true,
+        ...this.buildSpritesSidebarSlotStatus(),
+      },
       ...(this.keychain.hasSlotData("claude")
         ? [
             {
@@ -3487,6 +3592,79 @@ export class WebIDEHost {
       authAction: "login:aws",
       authLabel: "Login",
       statusText: "Ready to sign in",
+    };
+  }
+
+  private buildFlySidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"
+  > {
+    const config = readFlyConfig(this.container.vfs);
+    if (!config.accessToken) {
+      return {
+        active: false,
+        authAction: "login:fly",
+        authLabel: "Login",
+        statusText: "Ready to sign in",
+        statusDetail:
+          "Uses Fly.io's browser login flow and stores the short-lived auth token in this workspace.",
+      };
+    }
+
+    const lastLoginLabel = config.lastLogin
+      ? new Date(config.lastLogin).toLocaleString()
+      : null;
+
+    return {
+      active: true,
+      authAction: "logout:fly",
+      authLabel: "Logout",
+      statusText: "Signed in",
+      statusDetail: lastLoginLabel ? `Last login: ${lastLoginLabel}` : undefined,
+    };
+  }
+
+  private buildSpritesSidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"
+  > {
+    const config = readSpriteConfig(this.container.vfs);
+    const configuredOrgs = Object.entries(config.urls).flatMap(
+      ([apiUrl, urlConfig]) =>
+        Object.entries(urlConfig.orgs).map(([org, orgConfig]) => ({
+          apiUrl,
+          org,
+          hasToken: Boolean(orgConfig.api_token),
+        })),
+    );
+    const authenticatedOrgs = configuredOrgs.filter((entry) => entry.hasToken);
+
+    if (authenticatedOrgs.length === 0) {
+      return {
+        active: false,
+        authAction: "login:sprites",
+        authLabel: "Login",
+        statusText: "Ready to sign in",
+        statusDetail:
+          "Sign in with Fly.io, then save a Sprites token for this browser workspace.",
+      };
+    }
+
+    const activeOrg =
+      authenticatedOrgs.find(
+        (entry) =>
+          entry.apiUrl === config.current_selection.url
+          && entry.org === config.current_selection.org,
+      ) ?? authenticatedOrgs[0];
+    const totalConfigured = authenticatedOrgs.length;
+
+    return {
+      active: true,
+      authAction: "logout:sprites",
+      authLabel: "Logout",
+      statusText: activeOrg ? `Signed in to ${activeOrg.org}` : "Signed in",
+      statusDetail:
+        totalConfigured > 1 ? `${totalConfigured} Sprites orgs are configured.` : undefined,
     };
   }
 
@@ -3574,6 +3752,17 @@ export class WebIDEHost {
     }
   }
 
+  private handlePersistedTailscaleSessionChange(): void {
+    queueMicrotask(() => {
+      if (!(this as { keychain?: Keychain }).keychain) {
+        return;
+      }
+      this.handleTailscaleKeychainTransition();
+      this.updateKeychainSurface();
+      this.updateAiLauncherSurface();
+    });
+  }
+
   private isTailscaleSessionReadyForKeychain(
     status: NetworkStatus | null,
   ): boolean {
@@ -3645,7 +3834,58 @@ export class WebIDEHost {
   private async keychainAuthAction(command: string): Promise<void> {
     await this.revealTerminalPanel(true);
     const tab = this.createUserTerminalTab(true);
-    await this.runCommand(tab, command, { echoCommand: true });
+    try {
+      await this.runCommand(tab, command, { echoCommand: true });
+    } finally {
+      this.keychain.notifyExternalStateChanged();
+      this.updateKeychainStatusEntry();
+      this.updateKeychainSurface();
+    }
+  }
+
+  private async flyAuthAction(
+    action: "login" | "logout",
+  ): Promise<void> {
+    if (action === "logout") {
+      await this.keychainAuthAction("fly auth logout");
+      return;
+    }
+
+    prepareFlyAuthPopup();
+    await this.keychainAuthAction("fly auth login");
+  }
+
+  private async spritesAuthAction(
+    action: "login" | "logout",
+  ): Promise<void> {
+    if (action === "logout") {
+      await this.keychainAuthAction("sprite logout");
+      return;
+    }
+
+    const authUrl = "https://sprites.dev/account";
+    try {
+      globalThis.open?.(authUrl, "_blank", "noopener,noreferrer");
+    } catch {
+      // Ignore popup failures and continue with the guided token prompt.
+    }
+
+    const token = window.prompt(
+      `Create a Sprites API token at ${authUrl}, then paste the full token here.`,
+      "",
+    )?.trim();
+
+    if (!token) {
+      await this.revealTerminalPanel(true);
+      const tab = this.createUserTerminalTab(true);
+      tab.terminal.write("Sprites login cancelled.\r\n");
+      this.printPrompt(tab);
+      return;
+    }
+
+    await this.keychainAuthAction(
+      `sprite auth setup --token ${this.quoteShellArg(token)}`,
+    );
   }
 
   private async tailscaleAuthAction(
@@ -3739,6 +3979,14 @@ export class WebIDEHost {
       tab.terminal.write("\r\n");
     }
 
+    const shouldPrepareFlyAuthPopup =
+      this.agentMode === "browser"
+      && tab.kind === "user"
+      && isFlyLoginCommand(trimmed);
+    if (shouldPrepareFlyAuthPopup) {
+      prepareFlyAuthPopup();
+    }
+
     if (
       this.agentMode === "browser"
       && tab.kind === "user"
@@ -3757,11 +4005,31 @@ export class WebIDEHost {
     }
 
     if (!(await this.keychain.prepareForCommand(trimmed))) {
+      if (shouldPrepareFlyAuthPopup) {
+        cancelPreparedFlyAuthPopup();
+      }
       this.updateTerminalStatus(tab, "Keychain unlock required");
       this.writeTerminal(
         tab,
         "Keychain unlock is required before running this command.\n",
       );
+      this.printPrompt(tab);
+      return;
+    }
+
+    const spriteConsoleCommand = parseSpriteConsoleCommand(trimmed);
+    if (spriteConsoleCommand) {
+      if (spriteConsoleCommand.error) {
+        this.updateTerminalStatus(tab, "Sprite console parse error");
+        this.writeTerminal(
+          tab,
+          `sprite console: ${spriteConsoleCommand.error}\n`,
+        );
+        this.printPrompt(tab);
+        return;
+      }
+
+      await this.openSpriteConsoleTab(tab, spriteConsoleCommand.args);
       this.printPrompt(tab);
       return;
     }
@@ -3794,6 +4062,9 @@ export class WebIDEHost {
       });
       this.updateTerminalStatus(tab, `Exited ${result.exitCode}`);
     } finally {
+      if (shouldPrepareFlyAuthPopup) {
+        cancelPreparedFlyAuthPopup();
+      }
       tab.runningAbortController = null;
       this.printPrompt(tab);
     }
@@ -4299,6 +4570,554 @@ export class WebIDEHost {
     });
   }
 
+  private async revealCodespaceEditor(): Promise<void> {
+    const editorService = await getService(IEditorService);
+    const codespaceInput = this.workbenchSurfaces.codespaceInput;
+    const existing = codespaceInput.resource
+      ? editorService
+          .findEditors(codespaceInput.resource)
+          .find((identifier) => {
+            return identifier.editor.typeId === codespaceInput.typeId;
+          })
+      : undefined;
+
+    if (existing?.groupId !== undefined) {
+      await editorService.openEditor(
+        codespaceInput,
+        {
+          pinned: true,
+        },
+        existing.groupId,
+      );
+      return;
+    }
+
+    await editorService.openEditor(codespaceInput, {
+      pinned: true,
+    });
+  }
+
+  private async showEnvironmentQuickPick(): Promise<void> {
+    const project = this.requireActiveProject();
+    const quickInputService = await getService(IQuickInputService);
+    const menuState = deriveProjectEnvironmentMenuState(project);
+    const items: Array<{
+      label: string;
+      description?: string;
+      detail?: string;
+      run: () => Promise<void>;
+    }> = [
+      {
+        label: `${project.activeEnvironment !== "codespace" ? "✓ " : ""}Local project`,
+        description: "AlmostNode",
+        detail: "Keep running entirely in the browser runtime.",
+        run: async () => {
+          const controller = this.getProjectEnvironmentController();
+          const next = await controller.updateActiveProject((current) => ({
+            ...current,
+            activeEnvironment: "local",
+          }));
+          this.setActiveProject(next);
+          await this.showEnvironmentSuccess(
+            "Switched to Local",
+            `${project.name} is back on the AlmostNode runtime.`,
+          );
+        },
+      },
+      {
+        label: `${project.activeEnvironment === "codespace" ? "✓ " : ""}Codespace`,
+        description: menuState.label,
+        detail: menuState.detail,
+        run: async () => {
+          await this.switchActiveProjectToCodespace();
+        },
+      },
+    ];
+
+    if (project.codespace?.webUrl) {
+      items.push(
+        {
+          label: "Open Codespace in Browser",
+          detail: project.codespace.webUrl,
+          run: async () => {
+            await this.openActiveProjectCodespaceInBrowser();
+          },
+        },
+        {
+          label: "Stop Codespace",
+          detail: "Shut down the remote environment and return to local mode.",
+          run: async () => {
+            await this.stopActiveProjectCodespace();
+          },
+        },
+        {
+          label: "Rebuild Codespace",
+          detail: "Recreate the environment from the latest pushed branch.",
+          run: async () => {
+            await this.rebuildActiveProjectCodespace();
+          },
+        },
+        {
+          label: menuState.canSyncCredentials
+            ? "Sync Credentials"
+            : "Sync Credentials (Unavailable)",
+          detail: menuState.canSyncCredentials
+            ? "Push live keychain material into the Codespace bootstrap secret."
+            : menuState.syncDisabledReason,
+          run: async () => {
+            if (!menuState.canSyncCredentials) {
+              throw new Error(menuState.syncDisabledReason);
+            }
+            await this.syncActiveProjectCodespaceCredentials();
+          },
+        },
+      );
+    }
+
+    const picked = await quickInputService.pick(items, {
+      placeHolder: `Continue in ${project.name}`,
+    });
+    if (!picked) {
+      return;
+    }
+
+    try {
+      await picked.run();
+    } catch (error) {
+      await this.showEnvironmentError(
+        "Environment action failed",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async switchActiveProjectToCodespace(): Promise<void> {
+    const controller = this.getProjectEnvironmentController();
+    const project = this.requireActiveProject();
+    await this.ensureCodespacesSession();
+    const prepared = await this.prepareActiveProjectForCodespace(project);
+    const response = await ensureProjectCodespace({
+      projectId: prepared.project.id,
+      projectName: prepared.project.name,
+      repoRef: prepared.repoRef,
+      displayName: prepared.project.codespace?.displayName || prepared.project.name,
+      machine: prepared.project.codespace?.machine || null,
+      idleTimeoutMinutes: prepared.project.codespace?.idleTimeoutMinutes ?? 30,
+      retentionHours: prepared.project.codespace?.retentionHours ?? 24,
+      supportsBridge: prepared.supportsBridge,
+    });
+    const next = await controller.updateActiveProject((current) => ({
+      ...current,
+      activeEnvironment: "codespace",
+      repoRef: response.repoRef ?? prepared.repoRef,
+      codespace: mergeCodespaceRecord(current.codespace, response.codespace ?? {
+        supportsBridge: prepared.supportsBridge,
+        state: "starting",
+      }),
+    }));
+    this.setActiveProject(next);
+    await this.revealCodespaceEditor();
+    await this.showEnvironmentSuccess(
+      "Codespace ready",
+      next.codespace?.displayName || next.name,
+    );
+  }
+
+  private async openActiveProjectCodespaceInBrowser(): Promise<void> {
+    const project = this.requireActiveProject();
+    if (!project.codespace?.webUrl) {
+      await this.switchActiveProjectToCodespace();
+    }
+    const nextProject = this.requireActiveProject();
+    if (!nextProject.codespace?.webUrl) {
+      throw new Error("Codespace URL is unavailable for this project.");
+    }
+    globalThis.open?.(
+      nextProject.codespace.webUrl,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  }
+
+  private async stopActiveProjectCodespace(): Promise<void> {
+    const controller = this.getProjectEnvironmentController();
+    const project = this.requireActiveProject();
+    if (!project.codespace?.name) {
+      throw new Error("This project does not have a Codespace yet.");
+    }
+    await this.ensureCodespacesSession();
+    const response = await stopProjectCodespace(project.id);
+    const next = await controller.updateActiveProject((current) => ({
+      ...current,
+      activeEnvironment: current.activeEnvironment === "codespace"
+        ? "local"
+        : current.activeEnvironment,
+      codespace: mergeCodespaceRecord(current.codespace, response.codespace ?? {
+        state: "stopped",
+      }),
+    }));
+    this.setActiveProject(next);
+    await this.showEnvironmentSuccess(
+      "Codespace stopped",
+      next.codespace?.displayName || next.name,
+    );
+  }
+
+  private async rebuildActiveProjectCodespace(): Promise<void> {
+    const controller = this.getProjectEnvironmentController();
+    const project = this.requireActiveProject();
+    if (!project.codespace?.name) {
+      await this.switchActiveProjectToCodespace();
+      return;
+    }
+    await this.ensureCodespacesSession();
+    const prepared = await this.prepareActiveProjectForCodespace(project);
+    await ensureProjectCodespace({
+      projectId: prepared.project.id,
+      projectName: prepared.project.name,
+      repoRef: prepared.repoRef,
+      displayName: prepared.project.codespace?.displayName || prepared.project.name,
+      machine: prepared.project.codespace?.machine || null,
+      idleTimeoutMinutes: prepared.project.codespace?.idleTimeoutMinutes ?? 30,
+      retentionHours: prepared.project.codespace?.retentionHours ?? 24,
+      supportsBridge: prepared.supportsBridge,
+    });
+    const response = await rebuildProjectCodespace(project.id);
+    const next = await controller.updateActiveProject((current) => ({
+      ...current,
+      activeEnvironment: "codespace",
+      repoRef: response.repoRef ?? prepared.repoRef,
+      codespace: mergeCodespaceRecord(current.codespace, response.codespace ?? {
+        state: "starting",
+      }),
+    }));
+    this.setActiveProject(next);
+    await this.revealCodespaceEditor();
+    await this.showEnvironmentSuccess(
+      "Codespace rebuilding",
+      next.codespace?.displayName || next.name,
+    );
+  }
+
+  private async syncActiveProjectCodespaceCredentials(): Promise<void> {
+    const controller = this.getProjectEnvironmentController();
+    const project = this.requireActiveProject();
+    if (!project.codespace?.name || !project.repoRef) {
+      throw new Error("Create a Codespace before syncing credentials.");
+    }
+    if (!project.codespace.supportsBridge) {
+      throw new Error(
+        "Credential sync requires an almostnode Codespace bootstrap.",
+      );
+    }
+    await this.ensureCodespacesSession();
+    const payload = this.buildCodespaceCredentialPayload();
+    const response = await syncProjectCodespaceCredentials({
+      projectId: project.id,
+      codespaceName: project.codespace.name,
+      repoRef: project.repoRef,
+      payload,
+    });
+    const next = await controller.updateActiveProject((current) => ({
+      ...current,
+      codespace: mergeCodespaceRecord(current.codespace, response.codespace ?? {
+        lastSyncedAt: Date.now(),
+        supportsBridge: true,
+      }),
+    }));
+    this.setActiveProject(next);
+    await this.showEnvironmentSuccess(
+      "Credentials synced",
+      `${CODESPACE_SECRET_NAME} updated for ${project.repoRef.owner}/${project.repoRef.repo}.`,
+    );
+  }
+
+  private async ensureCodespacesSession(): Promise<void> {
+    try {
+      await getProjectCodespace("__auth-check__");
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/session/i.test(message) && !/auth/i.test(message)) {
+        return;
+      }
+    }
+
+    let token = await this.tryGetGitHubAuthTokenFromCli();
+    if (!token) {
+      await this.runRequiredGitHubAuthCommand("gh auth login");
+      token = await this.getGitHubAuthToken();
+    }
+
+    try {
+      const imported = await connectGitHubAccessTokenSession(token);
+      await this.showEnvironmentSuccess(
+        "GitHub connected",
+        imported.user?.login || "Codespaces session is ready.",
+      );
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/does not have Codespaces access/i.test(message)) {
+        throw error;
+      }
+    }
+
+    await this.runRequiredGitHubAuthCommand("gh auth refresh --scopes codespace");
+    const refreshedToken = await this.getGitHubAuthToken();
+    const imported = await connectGitHubAccessTokenSession(refreshedToken);
+    await this.showEnvironmentSuccess(
+      "GitHub connected",
+      imported.user?.login || "Codespaces session is ready.",
+    );
+  }
+
+  private async prepareActiveProjectForCodespace(
+    project: ProjectRecord,
+  ): Promise<{
+    project: ProjectRecord;
+    repoRef: ProjectRepoRef;
+    supportsBridge: boolean;
+  }> {
+    const controller = this.getProjectEnvironmentController();
+    await controller.saveCurrentProject();
+
+    let currentProject = project;
+    let createdRemote = false;
+
+    if (!currentProject.gitRemote) {
+      const gitRemote = await this.createGitHubRemote(currentProject.name);
+      currentProject = await controller.updateActiveProject((record) => ({
+        ...record,
+        gitRemote,
+      }));
+      createdRemote = true;
+    }
+
+    const supportsBridge = currentProject.codespace?.supportsBridge
+      || this.ensureCodespaceBootstrapFiles(createdRemote);
+    await this.ensureGitInitialized(currentProject);
+
+    let branch = await this.getWorkspaceGitBranch();
+    if (!branch || branch === "HEAD") {
+      branch = currentProject.repoRef?.branch || "main";
+    }
+
+    if (await this.workspaceHasDirtyGitState()) {
+      branch = createCodespaceUpgradeBranchName();
+      await this.runWorkspaceGitCommand(
+        `git checkout -B ${this.quoteShellArg(branch)}`,
+      );
+      await this.runWorkspaceGitCommand("git add .");
+      await this.runWorkspaceGitCommand(
+        'git commit -m "Prepare Codespace snapshot"',
+      );
+    }
+
+    await this.runWorkspaceGitCommand(
+      `git push -u origin ${this.quoteShellArg(branch)}`,
+    );
+
+    const repoRef = inferProjectRepoRef(currentProject, branch)
+      || (currentProject.gitRemote
+        ? toProjectRepoRef(currentProject.gitRemote, branch)
+        : null);
+    if (!repoRef) {
+      throw new Error(
+        "Could not determine the GitHub repository for this project.",
+      );
+    }
+
+    currentProject = await controller.updateActiveProject((record) => ({
+      ...record,
+      repoRef,
+      codespace: mergeCodespaceRecord(record.codespace, {
+        supportsBridge,
+      }),
+    }));
+
+    return {
+      project: currentProject,
+      repoRef,
+      supportsBridge,
+    };
+  }
+
+  private ensureCodespaceBootstrapFiles(allowCreate: boolean): boolean {
+    let hasBootstrap = this.workspaceHasCodespaceBootstrapFiles();
+    if (!hasBootstrap && allowCreate) {
+      const containerDir = `${WORKSPACE_ROOT}/.devcontainer`;
+      this.container.vfs.mkdirSync(containerDir, { recursive: true });
+      this.container.vfs.writeFileSync(
+        CODESPACE_BOOTSTRAP_SCRIPT_PATH,
+        this.getCodespaceBootstrapScript(),
+      );
+      this.writeCodespaceDevcontainerConfig();
+      hasBootstrap = true;
+    }
+
+    return hasBootstrap;
+  }
+
+  private workspaceHasCodespaceBootstrapFiles(): boolean {
+    return this.container.vfs.existsSync(CODESPACE_BOOTSTRAP_SCRIPT_PATH)
+      && this.container.vfs.existsSync(CODESPACE_DEVCONTAINER_PATH);
+  }
+
+  private writeCodespaceDevcontainerConfig(): void {
+    const bootstrapCommand = "node .devcontainer/almostnode-keychain-bootstrap.mjs";
+    let config: Record<string, unknown> = {};
+
+    if (this.container.vfs.existsSync(CODESPACE_DEVCONTAINER_PATH)) {
+      try {
+        const existing = this.container.vfs.readFileSync(
+          CODESPACE_DEVCONTAINER_PATH,
+          "utf8",
+        ) as string;
+        const parsed = JSON.parse(existing);
+        if (parsed && typeof parsed === "object") {
+          config = parsed as Record<string, unknown>;
+        }
+      } catch {
+        return;
+      }
+    }
+
+    const postStartCommand =
+      typeof config.postStartCommand === "string"
+        ? config.postStartCommand.trim()
+        : "";
+    if (!postStartCommand) {
+      config.postStartCommand = bootstrapCommand;
+    } else if (!postStartCommand.includes(bootstrapCommand)) {
+      config.postStartCommand = `${postStartCommand} && ${bootstrapCommand}`;
+    }
+
+    if (typeof config.name !== "string" || !config.name.trim()) {
+      config.name = "almostnode Codespace";
+    }
+
+    this.container.vfs.writeFileSync(
+      CODESPACE_DEVCONTAINER_PATH,
+      `${JSON.stringify(config, null, 2)}\n`,
+    );
+  }
+
+  private getCodespaceBootstrapScript(): string {
+    return [
+      "import { mkdir, writeFile } from 'node:fs/promises';",
+      "import { dirname } from 'node:path';",
+      "",
+      `const secretName = ${JSON.stringify(CODESPACE_SECRET_NAME)};`,
+      "const encoded = process.env[secretName];",
+      "if (!encoded) process.exit(0);",
+      "",
+      "let payload;",
+      "try {",
+      "  payload = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));",
+      "} catch (error) {",
+      "  console.warn('[almostnode-codespace] Invalid keychain payload:', error instanceof Error ? error.message : String(error));",
+      "  process.exit(0);",
+      "}",
+      "",
+      "if (!payload || !Array.isArray(payload.files)) process.exit(0);",
+      "",
+      "for (const entry of payload.files) {",
+      "  if (!entry || typeof entry.path !== 'string' || typeof entry.contents !== 'string') continue;",
+      "  await mkdir(dirname(entry.path), { recursive: true });",
+      "  await writeFile(entry.path, entry.contents, 'utf8');",
+      "}",
+      "",
+      "console.log(`[almostnode-codespace] Restored ${payload.files.length} credential file(s).`);",
+      "",
+    ].join("\n");
+  }
+
+  private async workspaceHasDirtyGitState(): Promise<boolean> {
+    const result = await this.container.run("git status --porcelain", {
+      cwd: WORKSPACE_ROOT,
+    });
+    return result.exitCode === 0 && result.stdout.trim().length > 0;
+  }
+
+  private async getWorkspaceGitBranch(): Promise<string | null> {
+    const result = await this.container.run(
+      "git rev-parse --abbrev-ref HEAD",
+      {
+        cwd: WORKSPACE_ROOT,
+      },
+    );
+    return result.exitCode === 0 ? result.stdout.trim() || null : null;
+  }
+
+  private buildCodespaceCredentialPayload(): string {
+    const slotNames = this.keychain
+      .listActiveSlots()
+      .filter((name) => name !== "tailscale");
+    const files = this.keychain.readSlotSnapshot(slotNames);
+    if (files.length === 0) {
+      throw new Error("No live keychain credentials are available to sync.");
+    }
+
+    const payload = JSON.stringify({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      files: files.map((entry) => ({
+        path: entry.path,
+        contents: entry.rawText,
+      })),
+    });
+
+    return this.encodeBase64Utf8(payload);
+  }
+
+  private encodeBase64Utf8(value: string): string {
+    const bytes = new TextEncoder().encode(value);
+    let binary = "";
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    return btoa(binary);
+  }
+
+  private requireActiveProject(): ProjectRecord {
+    if (!this.activeProject) {
+      throw new Error("No active project is selected.");
+    }
+    return this.activeProject;
+  }
+
+  private getProjectEnvironmentController(): ProjectEnvironmentController {
+    if (!this.projectEnvironmentController) {
+      throw new Error("Project environment controller is not attached.");
+    }
+    return this.projectEnvironmentController;
+  }
+
+  private async showEnvironmentSuccess(
+    title: string,
+    description?: string,
+  ): Promise<void> {
+    const { initToasts, showWorkbenchSuccessToast } = await import(
+      "../features/toast"
+    );
+    const workbenchEl = this.options.elements.workbench;
+    initToasts(workbenchEl.parentElement ?? workbenchEl);
+    showWorkbenchSuccessToast(title, description);
+  }
+
+  private async showEnvironmentError(
+    title: string,
+    description?: string,
+  ): Promise<void> {
+    const { initToasts, showWorkbenchErrorToast } = await import(
+      "../features/toast"
+    );
+    const workbenchEl = this.options.elements.workbench;
+    initToasts(workbenchEl.parentElement ?? workbenchEl);
+    showWorkbenchErrorToast(title, description);
+  }
+
   private async revealTerminalPanel(focus: boolean): Promise<void> {
     const paneCompositeService = await getService(IPaneCompositePartService);
     const layoutService = await getService(IWorkbenchLayoutService);
@@ -4771,6 +5590,107 @@ export class WebIDEHost {
     });
   }
 
+  private async openSpriteConsoleTab(
+    sourceTab: TerminalTabState,
+    args: {
+      org?: string;
+      sprite?: string;
+      apiUrl?: string;
+      cwd?: string;
+    },
+  ): Promise<void> {
+    const sourceState = sourceTab.session.getState();
+    const selection = resolveSpriteSelection(
+      this.container.vfs,
+      sourceState.cwd,
+      sourceState.env,
+      {
+        apiUrl: args.apiUrl,
+        org: args.org,
+        sprite: args.sprite,
+      },
+    );
+
+    if (!selection.token) {
+      this.updateTerminalStatus(sourceTab, "Sprites login required");
+      this.writeTerminal(
+        sourceTab,
+        "Sprites authentication is required. Use the Keychain sidebar or run `sprite login` first.\n",
+      );
+      return;
+    }
+
+    if (!selection.org) {
+      this.updateTerminalStatus(sourceTab, "Sprite org required");
+      this.writeTerminal(
+        sourceTab,
+        "No Sprites organization is selected. Run `sprite login` or `sprite use --org <org> <sprite>` first.\n",
+      );
+      return;
+    }
+
+    const spriteName = args.sprite?.trim() || selection.sprite;
+    if (!spriteName) {
+      this.updateTerminalStatus(sourceTab, "Sprite selection required");
+      this.writeTerminal(
+        sourceTab,
+        "No sprite is selected. Run `sprite console -s <sprite>` or set a local default with `sprite use <sprite>`.\n",
+      );
+      return;
+    }
+
+    const session = new SpriteTerminalSession({
+      cwd: sourceState.cwd,
+      env: sourceState.env,
+    });
+    const tab = this.createTerminalTab(
+      "user",
+      `Sprite ${spriteName}`,
+      true,
+      true,
+      {
+        session,
+        inputMode: "passthrough",
+      },
+    );
+
+    session.onData((data) => {
+      tab.terminal.write(normalizeTerminalOutput(data));
+    });
+    session.onExit(({ exitCode }) => {
+      tab.terminal.write(
+        `\r\n[Sprite console exited with code ${exitCode}. Close this tab to return to the shell.]\r\n`,
+      );
+      this.updateTerminalStatus(tab, `Exited ${exitCode}`);
+    });
+
+    tab.terminal.write(
+      `\r\nConnecting to sprite ${spriteName} (${selection.org})...\r\n`,
+    );
+    this.updateTerminalStatus(tab, `Connecting to ${spriteName}...`);
+    this.writeTerminal(
+      sourceTab,
+      `Opening sprite console for ${spriteName} in a dedicated terminal tab.\n`,
+    );
+
+    try {
+      await session.init({
+        apiUrl: selection.apiUrl,
+        token: selection.token,
+        spriteName,
+        cols: tab.terminal.cols,
+        rows: tab.terminal.rows,
+        cwd: args.cwd,
+        env: sourceState.env,
+      });
+      this.updateTerminalStatus(tab, `Sprite console: ${spriteName}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      tab.terminal.write(`Sprite console failed: ${message}\r\n`);
+      this.updateTerminalStatus(tab, "Sprite console failed");
+    }
+  }
+
   private replaceTerminalLine(tab: TerminalTabState, nextValue: string): void {
     while (tab.currentLine.length > 0) {
       tab.terminal.write("\b \b");
@@ -4853,6 +5773,72 @@ export class WebIDEHost {
     };
   }
 
+  private buildEnvironmentStatusEntry(
+    project = this.activeProject,
+  ): IStatusbarEntry {
+    const menuState = project
+      ? deriveProjectEnvironmentMenuState(project)
+      : {
+          activeEnvironment: "local" as const,
+          label: "Local",
+          detail: "No active project is selected.",
+          canSyncCredentials: false,
+        };
+    const codespaceState = normalizeCodespaceState(project?.codespace?.state);
+    const icon = menuState.activeEnvironment === "codespace"
+      ? codespaceState === "error"
+        ? "$(warning)"
+        : "$(cloud)"
+      : "$(desktop-download)";
+
+    return {
+      name: "Environment",
+      text: `${icon} ${menuState.label}`,
+      ariaLabel: `Project environment: ${menuState.label}`,
+      tooltip: menuState.detail,
+      command: "almostnode.environment.switch",
+    };
+  }
+
+  private updateEnvironmentStatusEntry(project = this.activeProject): void {
+    this.codespaceStatusEntry?.update(this.buildEnvironmentStatusEntry(project));
+  }
+
+  private syncCodespaceSurfaceForProject(project: ProjectRecord | null): void {
+    if (!project) {
+      this.codespaceSurface.setEmptyState(
+        "No project selected",
+        "Choose a project to create or reopen its Codespace.",
+      );
+      return;
+    }
+
+    if (!project.codespace?.webUrl) {
+      this.codespaceSurface.setEmptyState(
+        "Codespace not connected",
+        "Use the environment switcher in the status bar to upgrade this project to GitHub Codespaces.",
+      );
+      return;
+    }
+
+    const codespaceLabel = formatCodespaceLabel(project.codespace.state);
+    if (project.activeEnvironment === "codespace") {
+      this.codespaceSurface.open(project.codespace.webUrl, {
+        title: project.codespace.displayName,
+        detail: `Connected to ${project.codespace.name}.`,
+        badge: codespaceLabel.replace(/^Codespace:\s*/, ""),
+      });
+      void this.revealCodespaceEditor();
+      return;
+    }
+
+    this.codespaceSurface.setEmptyState(
+      "Codespace ready",
+      `${project.codespace.displayName} is available. Switch environments to continue there.`,
+      codespaceLabel.replace(/^Codespace:\s*/, ""),
+    );
+  }
+
   private updateKeychainStatusEntry(state = this.keychain.getState()): void {
     this.keychainStatusEntry?.update(this.buildKeychainStatusEntry(state));
   }
@@ -4899,6 +5885,13 @@ export class WebIDEHost {
       { primary: 998, secondary: 998 },
     );
 
+    this.codespaceStatusEntry = statusbarService.addEntry(
+      this.buildEnvironmentStatusEntry(),
+      "almostnode.status.environment",
+      StatusbarAlignment.LEFT,
+      { primary: 997, secondary: 997 },
+    );
+
     statusbarService.addEntry(
       {
         name: agentLabel,
@@ -4912,7 +5905,7 @@ export class WebIDEHost {
       },
       "almostnode.status.opencode",
       StatusbarAlignment.LEFT,
-      { primary: 997, secondary: 997 },
+      { primary: 996, secondary: 996 },
     );
 
     if (this.agentMode === "browser") {
@@ -4920,7 +5913,7 @@ export class WebIDEHost {
         this.buildKeychainStatusEntry(),
         "almostnode.status.keychain",
         StatusbarAlignment.LEFT,
-        { primary: 996, secondary: 996 },
+        { primary: 995, secondary: 995 },
       );
     }
   }
@@ -5025,6 +6018,36 @@ export class WebIDEHost {
             label: "Almostnode: Refresh Preview",
             menu: Menu.CommandPalette,
             handler: () => this.refreshPreview(),
+          },
+          {
+            id: "almostnode.environment.switch",
+            label: "Almostnode: Switch Environment",
+            menu: Menu.CommandPalette,
+            handler: () => this.showEnvironmentQuickPick(),
+          },
+          {
+            id: "almostnode.environment.openCodespace",
+            label: "Almostnode: Open Codespace in Browser",
+            menu: Menu.CommandPalette,
+            handler: () => this.openActiveProjectCodespaceInBrowser(),
+          },
+          {
+            id: "almostnode.environment.stopCodespace",
+            label: "Almostnode: Stop Codespace",
+            menu: Menu.CommandPalette,
+            handler: () => this.stopActiveProjectCodespace(),
+          },
+          {
+            id: "almostnode.environment.rebuildCodespace",
+            label: "Almostnode: Rebuild Codespace",
+            menu: Menu.CommandPalette,
+            handler: () => this.rebuildActiveProjectCodespace(),
+          },
+          {
+            id: "almostnode.environment.syncCredentials",
+            label: "Almostnode: Sync Codespace Credentials",
+            menu: Menu.CommandPalette,
+            handler: () => this.syncActiveProjectCodespaceCredentials(),
           },
           {
             id: "almostnode.terminal.focus",
@@ -5521,12 +6544,35 @@ export class WebIDEHost {
     return `'${value.replace(/'/g, `'\"'\"'`)}'`;
   }
 
-  private getGitHubAuthToken(): string {
-    const auth = readGhToken(this.container.vfs);
-    if (!auth?.oauth_token) {
+  private async tryGetGitHubAuthTokenFromCli(): Promise<string | null> {
+    const result = await this.container.run("gh auth token", {
+      cwd: WORKSPACE_ROOT,
+    });
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    const token = result.stdout.trim();
+    return token || null;
+  }
+
+  private async getGitHubAuthToken(): Promise<string> {
+    const token = await this.tryGetGitHubAuthTokenFromCli();
+    if (!token) {
       throw new Error("GitHub credentials are not available. Run `gh auth login` first.");
     }
-    return auth.oauth_token;
+    return token;
+  }
+
+  private async runRequiredGitHubAuthCommand(command: string): Promise<void> {
+    const result = await this.container.run(command, {
+      cwd: WORKSPACE_ROOT,
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(
+        (result.stderr || result.stdout || `${command} failed`).trim(),
+      );
+    }
+    this.keychain.notifyExternalStateChanged();
   }
 
   private getGitHubApiErrorMessage(payload: unknown, fallback: string): string {

@@ -19,6 +19,9 @@ export interface ProjectRecord {
   dbPrefix: string;
   defaultDatabaseName?: string;
   gitRemote?: ProjectGitRemoteRecord;
+  activeEnvironment?: ProjectEnvironmentKind;
+  repoRef?: ProjectRepoRef | null;
+  codespace?: ProjectCodespaceRecord | null;
 }
 
 export interface ProjectGitRemoteRecord {
@@ -27,6 +30,27 @@ export interface ProjectGitRemoteRecord {
   provider?: 'github';
   repositoryFullName?: string;
   repositoryUrl?: string;
+}
+
+export type ProjectEnvironmentKind = 'local' | 'codespace';
+
+export interface ProjectRepoRef {
+  owner: string;
+  repo: string;
+  branch: string;
+  remoteUrl: string;
+}
+
+export interface ProjectCodespaceRecord {
+  name: string;
+  displayName: string;
+  webUrl: string;
+  state: string;
+  machine: string | null;
+  idleTimeoutMinutes: number | null;
+  retentionHours: number | null;
+  supportsBridge: boolean;
+  lastSyncedAt: number | null;
 }
 
 export interface ProjectFilesRecord {
@@ -60,7 +84,7 @@ export interface ResumableThreadRecord {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DB_NAME = 'almostnode-webide';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_PROJECTS = 'projects';
 const STORE_PROJECT_FILES = 'project-files';
@@ -174,6 +198,78 @@ function txDeleteByIndex(
   });
 }
 
+function normalizeProjectRecord(project: ProjectRecord): ProjectRecord {
+  return {
+    ...project,
+    activeEnvironment: project.activeEnvironment === 'codespace'
+      ? 'codespace'
+      : 'local',
+    repoRef: normalizeProjectRepoRef(project.repoRef),
+    codespace: normalizeProjectCodespaceRecord(project.codespace),
+  };
+}
+
+function normalizeProjectRepoRef(
+  repoRef: ProjectRecord['repoRef'],
+): ProjectRepoRef | null {
+  if (!repoRef) {
+    return null;
+  }
+
+  const owner = repoRef.owner?.trim();
+  const repo = repoRef.repo?.trim();
+  const branch = repoRef.branch?.trim();
+  const remoteUrl = repoRef.remoteUrl?.trim();
+
+  if (!owner || !repo || !branch || !remoteUrl) {
+    return null;
+  }
+
+  return {
+    owner,
+    repo,
+    branch,
+    remoteUrl,
+  };
+}
+
+function normalizeProjectCodespaceRecord(
+  codespace: ProjectRecord['codespace'],
+): ProjectCodespaceRecord | null {
+  if (!codespace) {
+    return null;
+  }
+
+  const name = codespace.name?.trim();
+  const displayName = codespace.displayName?.trim() || name;
+  const webUrl = codespace.webUrl?.trim();
+
+  if (!name || !displayName || !webUrl) {
+    return null;
+  }
+
+  return {
+    name,
+    displayName,
+    webUrl,
+    state: codespace.state?.trim() || 'unknown',
+    machine: codespace.machine?.trim() || null,
+    idleTimeoutMinutes:
+      typeof codespace.idleTimeoutMinutes === 'number'
+        ? codespace.idleTimeoutMinutes
+        : null,
+    retentionHours:
+      typeof codespace.retentionHours === 'number'
+        ? codespace.retentionHours
+        : null,
+    supportsBridge: codespace.supportsBridge === true,
+    lastSyncedAt:
+      typeof codespace.lastSyncedAt === 'number'
+        ? codespace.lastSyncedAt
+        : null,
+  };
+}
+
 // ── ProjectDB ─────────────────────────────────────────────────────────────────
 
 export class ProjectDB {
@@ -190,18 +286,20 @@ export class ProjectDB {
 
   async listProjects(): Promise<ProjectRecord[]> {
     const db = await this.getDb();
-    const projects = await txGetAll<ProjectRecord>(db, STORE_PROJECTS);
+    const projects = (await txGetAll<ProjectRecord>(db, STORE_PROJECTS))
+      .map((project) => normalizeProjectRecord(project));
     return projects.sort((a, b) => b.lastModified - a.lastModified);
   }
 
   async getProject(id: string): Promise<ProjectRecord | undefined> {
     const db = await this.getDb();
-    return txGet<ProjectRecord>(db, STORE_PROJECTS, id);
+    const project = await txGet<ProjectRecord>(db, STORE_PROJECTS, id);
+    return project ? normalizeProjectRecord(project) : undefined;
   }
 
   async putProject(project: ProjectRecord): Promise<void> {
     const db = await this.getDb();
-    await txPut(db, STORE_PROJECTS, project);
+    await txPut(db, STORE_PROJECTS, normalizeProjectRecord(project));
   }
 
   async deleteProject(id: string): Promise<void> {

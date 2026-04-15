@@ -164,7 +164,7 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
     try {
       if (this.hasPersistedSessionSnapshot()) {
         const currentStatus = await this.refreshStatus();
-        if (currentStatus.state === 'running') {
+        if (currentStatus.state === 'running' || currentStatus.state === 'starting') {
           return currentStatus;
         }
         if (this.shouldResetSessionBeforeLogin(currentStatus)) {

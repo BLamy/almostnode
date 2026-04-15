@@ -2339,6 +2339,16 @@ module.exports = (async () => {
     return runReplayioCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
+  const flyCommand = defineCommand('fly', async (args, ctx) => {
+    const { runFlyCommand } = await import('./fly-command');
+    return runFlyCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const spriteCommand = defineCommand('sprite', async (args, ctx) => {
+    const { runSpriteCommand } = await import('./sprite-command');
+    return runSpriteCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
   // --- grep / egrep / fgrep / rg commands (delegate to search provider) ---
 
   const grepCommand = defineCommand('grep', async (args, ctx) => {
@@ -2531,6 +2541,8 @@ module.exports = (async () => {
     createRegisteredShellCommand(ghCommand.name, ghCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(awsCommand.name, awsCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(replayioCommand.name, replayioCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(flyCommand.name, flyCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(spriteCommand.name, spriteCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(grepCommand.name, grepCommand),
     createRegisteredShellCommand(egrepCommand.name, egrepCommand),
     createRegisteredShellCommand(fgrepCommand.name, fgrepCommand),

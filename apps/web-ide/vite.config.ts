@@ -48,6 +48,8 @@ const opencodeRoot = resolve(workspaceRoot, "vendor/opencode");
 const opentuiRoot = resolve(workspaceRoot, "vendor/opentui");
 const isTest = process.env.VITEST === "true";
 const appBase = process.env.GITHUB_PAGES ? "/almostnode/" : "/";
+const codespacesApiTarget =
+  process.env.CODESPACES_API_ORIGIN || "http://127.0.0.1:4167";
 
 const opencodeSrc = resolve(opencodeRoot, "packages/opencode/src");
 const opencodeTuiSrc = resolve(opencodeSrc, "cli/cmd/tui");
@@ -833,6 +835,12 @@ export default defineConfig(async ({ mode }) => {
       headers: {
         "Cross-Origin-Embedder-Policy": "credentialless",
         "Cross-Origin-Opener-Policy": "same-origin",
+      },
+      proxy: {
+        "/__api/codespaces": {
+          target: codespacesApiTarget,
+          changeOrigin: true,
+        },
       },
       fs: {
         allow: [

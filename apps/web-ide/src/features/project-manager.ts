@@ -66,6 +66,14 @@ export interface ProjectManagerCallbacks {
   onSwitchingStateChanged: (isSwitching: boolean) => void;
 }
 
+export interface ProjectEnvironmentController {
+  getActiveProject(): Promise<ProjectRecord | null>;
+  updateActiveProject(
+    updater: (project: ProjectRecord) => ProjectRecord,
+  ): Promise<ProjectRecord>;
+  saveCurrentProject(): Promise<void>;
+}
+
 export interface CreateProjectOptions {
   createGitHubRepo?: boolean;
 }
@@ -102,6 +110,14 @@ export class ProjectManager {
 
   getActiveProjectId(): string | null {
     return this.activeProjectId;
+  }
+
+  async getActiveProject(): Promise<ProjectRecord | null> {
+    if (!this.activeProjectId) {
+      return null;
+    }
+
+    return (await this.db.getProject(this.activeProjectId)) ?? null;
   }
 
   hasGitHubCredentials(): boolean {
@@ -227,6 +243,7 @@ export class ProjectManager {
         throw new Error('GitHub credentials are not available. Run `gh auth login` first.');
       }
       project.gitRemote = await this.host.createGitHubRemote(name);
+      project.repoRef = toRepoRef(project.gitRemote, 'main');
     }
     await this.db.putProject(project);
     await this.notifyProjectsChanged();
@@ -262,6 +279,7 @@ export class ProjectManager {
       repositoryFullName: repository.fullName,
       repositoryUrl: repository.htmlUrl,
     };
+    project.repoRef = toRepoRef(project.gitRemote, repository.defaultBranch);
 
     this.callbacks?.onSwitchingStateChanged(true);
 
@@ -407,6 +425,27 @@ export class ProjectManager {
       project.lastModified = Date.now();
       await this.db.putProject(project);
     }
+  }
+
+  async updateActiveProject(
+    updater: (project: ProjectRecord) => ProjectRecord,
+  ): Promise<ProjectRecord> {
+    if (!this.activeProjectId) {
+      throw new Error('There is no active project.');
+    }
+
+    const project = await this.db.getProject(this.activeProjectId);
+    if (!project) {
+      throw new Error(`Active project "${this.activeProjectId}" was not found.`);
+    }
+
+    const nextProject = updater({
+      ...project,
+    });
+    nextProject.lastModified = Date.now();
+    await this.db.putProject(nextProject);
+    await this.notifyProjectsChanged();
+    return nextProject;
   }
 
   async resumeThread(threadId: string): Promise<void> {
@@ -564,6 +603,9 @@ function createProjectRecord(name: string, templateId: TemplateId): ProjectRecor
     lastModified: now,
     dbPrefix: id.slice(0, 8),
     defaultDatabaseName: toProjectDefaultDatabaseName(name),
+    activeEnvironment: 'local',
+    repoRef: null,
+    codespace: null,
   };
 }
 
@@ -592,6 +634,27 @@ function toProjectDefaultDatabaseName(name: string): string {
     .replace(/^-+|-+$/g, '');
 
   return slug || 'project';
+}
+
+function toRepoRef(
+  gitRemote: ProjectGitRemoteRecord | undefined,
+  branch: string,
+): ProjectRecord['repoRef'] {
+  if (!gitRemote?.repositoryFullName) {
+    return null;
+  }
+
+  const [owner, repo] = gitRemote.repositoryFullName.split('/');
+  if (!owner || !repo) {
+    return null;
+  }
+
+  return {
+    owner,
+    repo,
+    branch: branch.trim() || 'main',
+    remoteUrl: gitRemote.url,
+  };
 }
 
 interface UrlProjectCreationIntent {

@@ -307,6 +307,34 @@ beforeEach(() => {
 });
 
 describe("WebIDEHost AI launcher behavior", () => {
+  it("rechecks Tailscale keychain state after persisted session writes", async () => {
+    const handleTailscaleKeychainTransition = vi.fn();
+    const updateKeychainSurface = vi.fn();
+    const updateAiLauncherSurface = vi.fn();
+
+    (
+      WebIDEHost.prototype as unknown as {
+        handlePersistedTailscaleSessionChange: (this: {
+          keychain?: object;
+          handleTailscaleKeychainTransition: () => void;
+          updateKeychainSurface: () => void;
+          updateAiLauncherSurface: () => void;
+        }) => void;
+      }
+    ).handlePersistedTailscaleSessionChange.call({
+      keychain: {},
+      handleTailscaleKeychainTransition,
+      updateKeychainSurface,
+      updateAiLauncherSurface,
+    });
+
+    await Promise.resolve();
+
+    expect(handleTailscaleKeychainTransition).toHaveBeenCalledTimes(1);
+    expect(updateKeychainSurface).toHaveBeenCalledTimes(1);
+    expect(updateAiLauncherSurface).toHaveBeenCalledTimes(1);
+  });
+
   it("reopens preview in the active group instead of forcing a side group", async () => {
     const openEditor = vi.fn().mockResolvedValue(undefined);
     const findEditors = vi.fn(() => []);

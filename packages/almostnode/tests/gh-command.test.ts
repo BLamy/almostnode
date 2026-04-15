@@ -2,13 +2,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import git from 'isomorphic-git';
 import { createContainer } from '../src/index';
 import * as network from '../src/network';
-import { writeGhToken } from '../src/shims/gh-auth';
+import { readGhToken, writeGhToken } from '../src/shims/gh-auth';
 
-function createJsonResponse(body: unknown, status = 201): Response {
+function createJsonResponse(
+  body: unknown,
+  status = 201,
+  headers?: Record<string, string>,
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       'content-type': 'application/json',
+      ...headers,
     },
   });
 }
@@ -337,6 +342,57 @@ describe('gh command', () => {
       has_wiki: false,
       allow_forking: false,
       default_branch: 'trunk',
+    });
+  });
+
+  it('refreshes auth scopes and persists the updated gh token', async () => {
+    const container = createContainer();
+
+    writeGhToken(container.vfs, {
+      oauth_token: 'gho_old',
+      user: 'octocat',
+      git_protocol: 'https',
+      oauth_scopes: 'repo read:org gist',
+    });
+
+    const fetchSpy = vi.spyOn(network, 'networkFetch')
+      .mockResolvedValueOnce(createJsonResponse(
+        { login: 'octocat' },
+        200,
+        { 'x-oauth-scopes': 'repo, read:org, gist' },
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        device_code: 'device-1',
+        user_code: 'ABCD-EFGH',
+        verification_uri: 'https://github.com/login/device',
+        expires_in: 600,
+        interval: 0,
+      }, 200))
+      .mockResolvedValueOnce(createJsonResponse({
+        access_token: 'gho_new',
+        scope: 'repo read:org gist codespace',
+        token_type: 'bearer',
+      }, 200))
+      .mockResolvedValueOnce(createJsonResponse(
+        { login: 'octocat' },
+        200,
+        { 'x-oauth-scopes': 'repo, read:org, gist, codespace' },
+      ));
+
+    const result = await container.run('gh auth refresh --scopes codespace');
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Authentication refreshed.');
+    expect(result.stdout).toContain('codespace');
+
+    const refreshed = readGhToken(container.vfs);
+    expect(refreshed?.oauth_token).toBe('gho_new');
+    expect(refreshed?.oauth_scopes).toBe('repo read:org gist codespace');
+
+    const requestInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    expect(JSON.parse(String(requestInit.body))).toMatchObject({
+      client_id: expect.any(String),
+      scope: 'repo read:org gist codespace',
     });
   });
 });

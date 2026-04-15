@@ -240,6 +240,7 @@ export function WorkbenchScreen({
           host.discoverActiveProjectThreads(projectId),
         resumeResumableThread: (thread) => host.resumeResumableThread(thread),
       });
+      host.setProjectEnvironmentController(manager);
       void manager.init();
       setHostReady(true);
       onHostReady?.(host);
@@ -260,6 +261,22 @@ export function WorkbenchScreen({
     template,
     manager,
   ]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !hostReady) {
+      return;
+    }
+
+    if (!activeProjectId) {
+      host.setActiveProject(null);
+      return;
+    }
+
+    void manager.getActiveProject().then((project) => {
+      host.setActiveProject(project);
+    });
+  }, [activeProjectId, hostReady, manager]);
 
   return (
     <div className="webide-shell">

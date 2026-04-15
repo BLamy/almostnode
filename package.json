@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "pnpm nx serve-examples almostnode",
     "dev:web-ide": "pnpm nx dev web-ide",
+    "dev:codespaces-api": "pnpm nx dev codespaces-api",
     "dev:sdk-showcase": "pnpm vendor:install:opencode && pnpm nx dev sdk-showcase",
     "dev:mobile-ide": "pnpm nx dev mobile-ide",
     "vendor:install:opencode": "node scripts/vendor-install-opencode.js",

@@ -75,3 +75,23 @@ export function showClaudeImagePasteUnsupportedToast(
     duration: 6000,
   });
 }
+
+export function showWorkbenchSuccessToast(
+  title: string,
+  description?: string,
+): void {
+  toast.success(title, {
+    description,
+    duration: 4000,
+  });
+}
+
+export function showWorkbenchErrorToast(
+  title: string,
+  description?: string,
+): void {
+  toast.error(title, {
+    description,
+    duration: 6000,
+  });
+}

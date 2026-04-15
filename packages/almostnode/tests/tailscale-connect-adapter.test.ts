@@ -323,6 +323,51 @@ describe('tailscale connect adapter', () => {
     });
   });
 
+  it('does not clear a hydrated session while the worker is still resuming it', async () => {
+    const storage = new MemorySessionStorage();
+    storage.setItem(
+      TAILSCALE_SESSION_STORAGE_KEY,
+      JSON.stringify({ profile: 'alpha' }),
+    );
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: storage,
+      configurable: true,
+    });
+    FakeWorker.getStatusValue = {
+      state: 'starting',
+    };
+
+    const adapterFactory = createTailscaleConnectAdapterFactory();
+    const adapter = await adapterFactory(
+      {
+        provider: 'tailscale',
+        authMode: 'interactive',
+        useExitNode: true,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        tailscaleConnected: false,
+      },
+      () => {},
+    );
+
+    const status = await adapter.login();
+    const worker = FakeWorker.lastInstance;
+
+    expect(status.state).toBe('starting');
+    expect(worker?.messages).toHaveLength(3);
+    expect(worker?.messages[0]).toMatchObject({
+      type: 'hydrateStorage',
+      snapshot: { profile: 'alpha' },
+    });
+    expect(worker?.messages[1]).toMatchObject({
+      type: 'configure',
+    });
+    expect(worker?.messages[2]).toMatchObject({
+      type: 'getStatus',
+    });
+  });
+
   it('logs out stale hydrated sessions before requesting a new login', async () => {
     const storage = new MemorySessionStorage();
     storage.setItem(

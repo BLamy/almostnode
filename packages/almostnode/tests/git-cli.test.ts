@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import git from 'isomorphic-git';
 import { createContainer } from '../src/index';
+import { writeGhToken } from '../src/shims/gh-auth';
+import { shouldRetryDirectGitHttp } from '../src/shims/git-command';
 import type { VirtualFS } from '../src/virtual-fs';
 
 function normalizePath(input: string): string {
@@ -1058,5 +1060,39 @@ describe('git CLI command', () => {
     expect(result.exitCode).toBe(0);
     fetchArgs = fetchSpy.mock.calls[2][0] as any;
     expect(fetchArgs.onAuth()).toEqual({ username: 'token', password: 'run-token' });
+  });
+
+  it('uses stored gh username when falling back to the keychain token for git auth', async () => {
+    const container = createContainer();
+
+    writeGhToken(container.vfs, {
+      oauth_token: 'gho_test',
+      user: 'octocat',
+      git_protocol: 'https',
+    });
+
+    container.vfs.mkdirSync('/repo', { recursive: true });
+    container.vfs.writeFileSync('/repo/file.txt', 'x\n');
+
+    let result = await container.run('git init', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git remote add origin https://github.com/octocat/demo.git', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    const fetchSpy = vi.spyOn(git, 'fetch').mockResolvedValue(undefined as never);
+
+    result = await container.run('git fetch origin main', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    const fetchArgs = fetchSpy.mock.calls[0][0] as any;
+    expect(fetchArgs.onAuth()).toEqual({ username: 'octocat', password: 'gho_test' });
+  });
+
+  it('does not bypass auth failures when proxying git http requests', () => {
+    expect(shouldRetryDirectGitHttp(401)).toBe(false);
+    expect(shouldRetryDirectGitHttp(403)).toBe(false);
+    expect(shouldRetryDirectGitHttp(404)).toBe(true);
+    expect(shouldRetryDirectGitHttp(502)).toBe(true);
   });
 });

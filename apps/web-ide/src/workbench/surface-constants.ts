@@ -12,6 +12,12 @@ export const DATABASE_EDITOR_RESOURCE = URI.from({
   path: "/browser",
 });
 
+export const CODESPACE_EDITOR_TYPE_ID = "almostnode.editor.codespace";
+export const CODESPACE_EDITOR_RESOURCE = URI.from({
+  scheme: "almostnode-codespace",
+  path: "/workspace",
+});
+
 export const FILES_VIEW_ID = "almostnode.sidebar.files";
 export const OPEN_CODE_VIEW_ID = "almostnode.sidebar.opencode";
 export const TERMINAL_VIEW_ID = "almostnode.panel.terminal";

@@ -181,6 +181,41 @@ describe('tailscale connect worker', () => {
     expect(getResponseMessages(workerScope).filter((message) => !message.ok)).toHaveLength(0);
   });
 
+  it('reports starting while a hydrated session is resuming', async () => {
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    await workerScope.dispatch({
+      id: 1,
+      type: 'hydrateStorage',
+      snapshot: {
+        profile: 'alpha',
+      },
+    });
+
+    await workerScope.dispatch({
+      id: 2,
+      type: 'getStatus',
+    });
+
+    expect(getResponseMessages(workerScope)).toContainEqual(
+      expect.objectContaining({
+        id: 2,
+        ok: true,
+        value: expect.objectContaining({
+          state: 'starting',
+        }),
+      }),
+    );
+  });
+
   it('uses string fetch for simple GET requests on the minimal runtime', async () => {
     const ipn = {
       run: vi.fn(),

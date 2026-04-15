@@ -20,6 +20,7 @@ import {
   registerWorkbenchEntrypoints,
 } from "./framework/registry";
 import {
+  CODESPACE_EDITOR_TYPE_ID,
   DATABASE_EDITOR_TYPE_ID,
   DATABASE_VIEW_ID,
   FILES_VIEW_ID,
@@ -132,6 +133,7 @@ function mountStaticSlotSurface<TState, TActions>(
 
 export interface RegisteredWorkbenchSurfaces {
   previewInput: SimpleEditorInput;
+  codespaceInput: SimpleEditorInput;
   databaseInput: SimpleEditorInput;
   renderedEditors: RenderedEditorFactories;
   filesViewId: string;
@@ -2064,6 +2066,213 @@ export class DatabaseSidebarSurface {
   }
 }
 
+export interface CodespaceSurfaceCallbacks {
+  onOpenExternal(url: string): void;
+  onEmbedUnavailable(url: string, reason: string): void;
+}
+
+export class CodespaceSurface {
+  private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root) },
+      {
+        focus: () => this.iframe.focus(),
+      },
+    );
+  private readonly heading = document.createElement("div");
+  private readonly detail = document.createElement("div");
+  private readonly badge = document.createElement("span");
+  private readonly iframe = document.createElement("iframe");
+  private readonly emptyState = document.createElement("div");
+  private readonly emptyTitle = document.createElement("div");
+  private readonly emptyBody = document.createElement("div");
+  private readonly emptyActions = document.createElement("div");
+  private readonly openExternalButton = document.createElement("button");
+  private readonly reloadButton = document.createElement("button");
+  private callbacks: CodespaceSurfaceCallbacks | null = null;
+  private currentUrl: string | null = null;
+  private embedWatchdogId = 0;
+  private loaded = false;
+
+  constructor() {
+    this.root.className = "almostnode-codespace-surface";
+    this.root.style.cssText = [
+      "display:flex",
+      "flex-direction:column",
+      "height:100%",
+      "background:linear-gradient(180deg, rgba(17,20,26,0.96), rgba(10,12,17,0.98))",
+      "color:#edf3ff",
+      "font-family:'Instrument Sans', system-ui, sans-serif",
+    ].join(";");
+
+    const header = document.createElement("div");
+    header.style.cssText = [
+      "display:flex",
+      "align-items:center",
+      "justify-content:space-between",
+      "gap:16px",
+      "padding:14px 18px",
+      "border-bottom:1px solid rgba(255,255,255,0.08)",
+      "background:rgba(11,14,21,0.78)",
+      "backdrop-filter:blur(14px)",
+      "flex-shrink:0",
+    ].join(";");
+
+    const titleGroup = document.createElement("div");
+    titleGroup.style.cssText = "display:flex;flex-direction:column;gap:4px;min-width:0;";
+    this.heading.style.cssText = "font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+    this.heading.textContent = "Codespace";
+    this.detail.style.cssText = "font-size:12px;color:rgba(237,243,255,0.68);";
+    this.detail.textContent = "Upgrade this project to keep working in GitHub Codespaces.";
+    titleGroup.append(this.heading, this.detail);
+
+    this.badge.style.cssText = [
+      "display:inline-flex",
+      "align-items:center",
+      "justify-content:center",
+      "padding:5px 10px",
+      "border-radius:999px",
+      "font-size:11px",
+      "font-weight:700",
+      "letter-spacing:0.04em",
+      "text-transform:uppercase",
+      "background:rgba(255,255,255,0.08)",
+      "color:#f9fcff",
+    ].join(";");
+    this.badge.textContent = "Idle";
+
+    header.append(titleGroup, this.badge);
+
+    const body = document.createElement("div");
+    body.style.cssText = "position:relative;display:flex;flex:1;min-height:0;";
+
+    this.iframe.style.cssText = "border:0;width:100%;height:100%;display:none;background:#0b0f17;";
+    this.iframe.setAttribute("title", "GitHub Codespace");
+    this.iframe.setAttribute("allow", "clipboard-read; clipboard-write; fullscreen");
+    this.iframe.addEventListener("load", () => {
+      this.loaded = true;
+      this.clearWatchdog();
+      this.badge.textContent = "Connected";
+      this.emptyState.style.display = "none";
+      this.iframe.style.display = "block";
+    });
+    this.iframe.addEventListener("error", () => {
+      this.handleEmbedUnavailable("The embedded Codespace editor could not be loaded.");
+    });
+
+    this.emptyState.style.cssText = [
+      "position:absolute",
+      "inset:0",
+      "display:flex",
+      "flex-direction:column",
+      "align-items:flex-start",
+      "justify-content:center",
+      "padding:32px",
+      "gap:10px",
+      "background:radial-gradient(circle at top left, rgba(78,130,255,0.2), transparent 38%), linear-gradient(180deg, rgba(12,16,24,0.94), rgba(9,11,16,0.98))",
+    ].join(";");
+    this.emptyTitle.style.cssText = "font-size:22px;font-weight:700;max-width:32rem;";
+    this.emptyTitle.textContent = "Codespace not connected";
+    this.emptyBody.style.cssText = "font-size:13px;line-height:1.5;color:rgba(237,243,255,0.72);max-width:34rem;";
+    this.emptyBody.textContent = "Create or open a Codespace from the status bar to continue in a full GitHub environment.";
+    this.emptyActions.style.cssText = "display:flex;gap:10px;margin-top:6px;";
+
+    const buttonBase = [
+      "border-radius:999px",
+      "padding:8px 14px",
+      "font:inherit",
+      "font-size:12px",
+      "font-weight:600",
+      "cursor:pointer",
+    ].join(";");
+    this.openExternalButton.type = "button";
+    this.openExternalButton.style.cssText = `${buttonBase};border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#f6fbff;`;
+    this.openExternalButton.textContent = "Open in Browser";
+    this.openExternalButton.addEventListener("click", () => {
+      if (this.currentUrl) {
+        this.callbacks?.onOpenExternal(this.currentUrl);
+      }
+    });
+    this.reloadButton.type = "button";
+    this.reloadButton.style.cssText = `${buttonBase};border:1px solid rgba(91,163,255,0.28);background:linear-gradient(135deg, #5ea0ff, #2f64f5);color:white;`;
+    this.reloadButton.textContent = "Reload Embed";
+    this.reloadButton.addEventListener("click", () => {
+      if (this.currentUrl) {
+        this.open(this.currentUrl, {
+          title: this.heading.textContent || "Codespace",
+          detail: this.detail.textContent || "",
+          badge: "Connecting",
+        });
+      }
+    });
+    this.emptyActions.append(this.reloadButton, this.openExternalButton);
+    this.emptyState.append(this.emptyTitle, this.emptyBody, this.emptyActions);
+
+    body.append(this.iframe, this.emptyState);
+    this.root.append(header, body);
+  }
+
+  setCallbacks(callbacks: CodespaceSurfaceCallbacks): void {
+    this.callbacks = callbacks;
+  }
+
+  setEmptyState(title: string, detail: string, badge = "Idle"): void {
+    this.currentUrl = null;
+    this.loaded = false;
+    this.clearWatchdog();
+    this.heading.textContent = "Codespace";
+    this.detail.textContent = detail;
+    this.badge.textContent = badge;
+    this.emptyTitle.textContent = title;
+    this.emptyBody.textContent = detail;
+    this.emptyState.style.display = "flex";
+    this.iframe.style.display = "none";
+    this.iframe.src = "about:blank";
+  }
+
+  open(
+    url: string,
+    options: { title: string; detail: string; badge?: string },
+  ): void {
+    this.currentUrl = url;
+    this.loaded = false;
+    this.heading.textContent = options.title;
+    this.detail.textContent = options.detail;
+    this.badge.textContent = options.badge ?? "Connecting";
+    this.emptyTitle.textContent = "Connecting to Codespace";
+    this.emptyBody.textContent = "Waiting for GitHub to load the remote editor. If embedding is blocked, almostnode will open it in a new tab automatically.";
+    this.emptyState.style.display = "flex";
+    this.iframe.style.display = "none";
+    this.iframe.src = url;
+    this.clearWatchdog();
+    this.embedWatchdogId = window.setTimeout(() => {
+      if (!this.loaded) {
+        this.handleEmbedUnavailable("GitHub did not allow the Codespace editor to finish loading in this frame.");
+      }
+    }, 9000);
+  }
+
+  private handleEmbedUnavailable(reason: string): void {
+    this.clearWatchdog();
+    this.badge.textContent = "External";
+    this.emptyTitle.textContent = "Embedded editor unavailable";
+    this.emptyBody.textContent = reason;
+    this.emptyState.style.display = "flex";
+    this.iframe.style.display = "none";
+    if (this.currentUrl) {
+      this.callbacks?.onEmbedUnavailable(this.currentUrl, reason);
+    }
+  }
+
+  private clearWatchdog(): void {
+    if (this.embedWatchdogId) {
+      window.clearTimeout(this.embedWatchdogId);
+      this.embedWatchdogId = 0;
+    }
+  }
+}
+
 export type DatabaseQueryHandler = (
   operation: string,
   body: any,
@@ -2426,6 +2635,7 @@ export function registerWorkbenchSurfaces(options: {
   filesSurface: FilesSidebarSurface;
   openCodeSurface: OpenCodeTerminalSurface;
   previewSurface: PreviewSurface;
+  codespaceSurface: CodespaceSurface;
   terminalSurface: TerminalPanelSurface;
   databaseSurface: DatabaseSidebarSurface;
   databaseBrowserSurface: DatabaseBrowserSurface;
@@ -2443,6 +2653,7 @@ export function registerWorkbenchSurfaces(options: {
       filesSurface: options.filesSurface,
       openCodeSurface: options.openCodeSurface,
       previewSurface: options.previewSurface,
+      codespaceSurface: options.codespaceSurface,
       terminalSurface: options.terminalSurface,
       databaseSurface: options.databaseSurface,
       databaseBrowserSurface: options.databaseBrowserSurface,
@@ -2454,6 +2665,9 @@ export function registerWorkbenchSurfaces(options: {
   return {
     get previewInput() {
       return entrypoints.createEditorInput(PREVIEW_EDITOR_TYPE_ID);
+    },
+    get codespaceInput() {
+      return entrypoints.createEditorInput(CODESPACE_EDITOR_TYPE_ID);
     },
     get databaseInput() {
       return entrypoints.createEditorInput(DATABASE_EDITOR_TYPE_ID);

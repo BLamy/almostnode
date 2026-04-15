@@ -108,12 +108,7 @@ function writeResponse(
   }
 
   for (const [key, value] of upstream.headers.entries()) {
-    const lower = key.toLowerCase();
-    if (
-      HOP_BY_HOP_HEADERS.has(lower)
-      || lower === 'content-encoding'
-      || lower === 'content-length'
-    ) {
+    if (!shouldForwardUpstreamHeader(key)) {
       continue;
     }
     res.setHeader(key, value);
@@ -121,6 +116,16 @@ function writeResponse(
 
   res.setHeader('Cache-Control', 'no-store');
   res.end(body);
+}
+
+export function shouldForwardUpstreamHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return !(
+    HOP_BY_HOP_HEADERS.has(lower)
+    || lower === 'content-encoding'
+    || lower === 'content-length'
+    || lower === 'www-authenticate'
+  );
 }
 
 function decodeRelayJson<T>(raw: string | null): T | null {

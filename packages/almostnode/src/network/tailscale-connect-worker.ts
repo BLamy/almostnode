@@ -207,6 +207,11 @@ const tailscaleStateStorage = {
   },
 };
 
+function hasHydratedStateStorageSnapshot(): boolean {
+  const snapshot = tailscaleStateStorage.snapshot();
+  return Boolean(snapshot && Object.keys(snapshot).length > 0);
+}
+
 function getEffectiveAcceptDns(
   nextOptions: Pick<NetworkOptions, 'acceptDns' | 'useExitNode'>,
 ): boolean {
@@ -1879,6 +1884,9 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
         resetCount: ipnResetCount,
       });
       recoveringFromRuntimeFailure = true;
+      state = 'Starting';
+      emitStatus();
+    } else if (state === 'NoState' && hasHydratedStateStorageSnapshot()) {
       state = 'Starting';
       emitStatus();
     }

@@ -29,7 +29,7 @@ function createProxiedHttp(corsProxy: string) {
           if (
             index < attempts.length - 1 &&
             typeof response.statusCode === 'number' &&
-            response.statusCode >= 400
+            shouldRetryDirectGitHttp(response.statusCode)
           ) {
             continue;
           }
@@ -2297,15 +2297,17 @@ function resolveGitEnv(
 ): GitEnv {
   const envRecord = toEnvRecord(env);
   let token = envRecord.GIT_TOKEN || envRecord.GITHUB_TOKEN || undefined;
+  let ghUsername: string | undefined;
 
   // Fall back to stored gh auth token
   if (!token && vfs) {
     const ghConfig = readGhToken(vfs);
     if (ghConfig?.oauth_token) {
       token = ghConfig.oauth_token;
+      ghUsername = ghConfig.user || undefined;
     }
   }
-  const username = envRecord.GIT_USERNAME || undefined;
+  const username = envRecord.GIT_USERNAME || ghUsername || undefined;
   const password = envRecord.GIT_PASSWORD || undefined;
 
   return {
@@ -2334,6 +2336,10 @@ function resolveGitAuth(gitEnv: GitEnv): GitAuthResult {
   }
 
   return {};
+}
+
+export function shouldRetryDirectGitHttp(statusCode: number): boolean {
+  return statusCode === 404 || statusCode === 502 || statusCode === 503 || statusCode === 504;
 }
 
 function resolvePath(cwd: string, maybePath: string): string {

@@ -7,6 +7,7 @@ export interface GhHostConfig {
   oauth_token: string;
   user: string;
   git_protocol: string;
+  oauth_scopes?: string;
 }
 
 // ── Minimal YAML helpers ────────────────────────────────────────────────────
@@ -15,6 +16,7 @@ export interface GhHostConfig {
 //     oauth_token: gho_xxx
 //     user: octocat
 //     git_protocol: https
+//     oauth_scopes: repo read:org gist codespace
 
 function serializeHostsYml(hosts: Record<string, GhHostConfig>): string {
   const lines: string[] = [];
@@ -23,6 +25,9 @@ function serializeHostsYml(hosts: Record<string, GhHostConfig>): string {
     lines.push(`    oauth_token: ${config.oauth_token}`);
     lines.push(`    user: ${config.user}`);
     lines.push(`    git_protocol: ${config.git_protocol}`);
+    if (config.oauth_scopes?.trim()) {
+      lines.push(`    oauth_scopes: ${config.oauth_scopes.trim()}`);
+    }
   }
   return lines.join('\n') + '\n';
 }
@@ -38,7 +43,11 @@ function parseHostsYml(content: string): Record<string, GhHostConfig> {
     // Top-level key (no leading whitespace)
     if (!line.startsWith(' ') && !line.startsWith('\t') && trimmed.endsWith(':')) {
       currentHost = trimmed.slice(0, -1);
-      hosts[currentHost] = { oauth_token: '', user: '', git_protocol: 'https' };
+      hosts[currentHost] = {
+        oauth_token: '',
+        user: '',
+        git_protocol: 'https',
+      };
       continue;
     }
 
@@ -47,7 +56,12 @@ function parseHostsYml(content: string): Record<string, GhHostConfig> {
       const match = line.trim().match(/^(\w+):\s*(.*)$/);
       if (match) {
         const [, key, value] = match;
-        if (key === 'oauth_token' || key === 'user' || key === 'git_protocol') {
+        if (
+          key === 'oauth_token'
+          || key === 'user'
+          || key === 'git_protocol'
+          || key === 'oauth_scopes'
+        ) {
           (hosts[currentHost] as any)[key] = value;
         }
       }
