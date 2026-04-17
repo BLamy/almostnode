@@ -3239,6 +3239,22 @@ body.ide-active {
   color: var(--muted);
 }
 
+.hp-footer__link {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--accent, #7aa7ff);
+  text-decoration: none;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 0.4rem;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.hp-footer__link:hover {
+  background-color: var(--panel-border);
+  border-color: var(--accent, #7aa7ff);
+}
+
 /* ── Responsive ── */
 @media (max-width: 800px) {
   .ide-route-loading__sidebar {

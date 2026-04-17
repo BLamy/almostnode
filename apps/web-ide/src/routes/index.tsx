@@ -1083,6 +1083,9 @@ function Homepage() {
       <footer className="hp-footer">
         <div className="hp-footer__inner">
           <span className="hp-footer__brand">replayio-agents</span>
+          <Link to="/app-builder" className="hp-footer__link">
+            Open App Builder
+          </Link>
           <span className="hp-footer__copy">MIT License</span>
         </div>
       </footer>
