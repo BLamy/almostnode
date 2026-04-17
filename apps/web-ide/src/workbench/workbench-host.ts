@@ -26,11 +26,15 @@ import {
   parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
+import { isCloudflareLoginCommand } from "../features/cloudflare-command-routing";
+import { isFlyLoginCommand } from "../features/fly-command-routing";
+import { isNetlifyLoginCommand } from "../features/netlify-command-routing";
 import {
   buildClaudeIdeMcpConfig,
   ClaudeIdeBridge,
 } from "../features/claude-ide-bridge";
 import { installHostConsoleBridge } from "../features/host-console-bridge";
+import { installDesktopOAuthLoopbackBridge } from "../features/desktop-oauth-loopback";
 import { installOxcMonacoIntegration } from "../features/oxc-monaco";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
@@ -43,11 +47,14 @@ import {
   replaceScopedFilesInVfs,
   type SerializedFile,
 } from "../desktop/project-snapshot";
-import type {
-  ProjectAgentStateSnapshot,
-  ProjectGitRemoteRecord,
-  ProjectRecord,
-  ResumableThreadRecord,
+import {
+  ProjectDB,
+  type AppBuildingConfig,
+  type AppBuildingJobRecord,
+  type ProjectAgentStateSnapshot,
+  type ProjectGitRemoteRecord,
+  type ProjectRecord,
+  type ResumableThreadRecord,
 } from "../features/project-db";
 import type { GitHubRepositorySummary } from "../features/github-repositories";
 import {
@@ -57,6 +64,30 @@ import {
 } from "../features/resumable-threads";
 import { readGhToken } from "../../../../packages/almostnode/src/shims/gh-auth";
 import {
+  cancelPreparedCloudflareAuthPopup,
+  prepareCloudflareAuthPopup,
+  readWranglerAuthConfig,
+} from "../../../../packages/almostnode/src/shims/wrangler-auth";
+import {
+  cancelPreparedFlyAuthPopup,
+  DEFAULT_FLY_API_BASE_URL,
+  fetchFlyApps,
+  prepareFlyAuthPopup,
+  readFlyConfig,
+  writeFlyAppName,
+  type FlyAppSummary,
+} from "../../../../packages/almostnode/src/shims/fly-auth";
+import {
+  cancelPreparedNetlifyAuthPopup,
+  DEFAULT_NETLIFY_API_BASE_URL,
+  fetchNetlifyAccounts,
+  prepareNetlifyAuthPopup,
+  readNetlifyConfig,
+  type NetlifyAccount,
+} from "../../../../packages/almostnode/src/shims/netlify-auth";
+import { readNeonCredentials, NEON_CREDENTIALS_PATH } from "../../../../packages/almostnode/src/shims/neon-auth";
+import { readReplayAuth } from "../../../../packages/almostnode/src/shims/replay-auth";
+import {
   AWS_AUTH_PATH,
   AWS_CONFIG_PATH,
   readAwsAuth,
@@ -64,6 +95,19 @@ import {
   inspectAwsStoredState,
   writeAwsConfig,
 } from "../../../../packages/almostnode/src/shims/aws-storage";
+import {
+  ensureInfisicalFolder,
+  fetchInfisicalProjects,
+  INFISICAL_AUTH_PATH,
+  INFISICAL_CONFIG_PATH,
+  isInfisicalAccessTokenValid,
+  provisionInfisicalUniversalAuth,
+  readInfisicalAuth,
+  readInfisicalConfig,
+  upsertInfisicalSecret,
+  writeInfisicalConfig,
+  type InfisicalProjectInfo,
+} from "../../../../packages/almostnode/src/shims/infisical-auth";
 import {
   DEFAULT_AWS_REGION,
   DEFAULT_AWS_SESSION_NAME,
@@ -76,6 +120,7 @@ import {
   type ExtensionServiceOverrideBundle,
 } from "../extensions/extension-services";
 import {
+  AppBuildingPreviewSurface,
   FilesSidebarSurface,
   PreviewSurface,
   TerminalPanelSurface,
@@ -90,15 +135,38 @@ import {
   type KeychainSlotStatus,
   type RegisteredWorkbenchSurfaces,
 } from "./workbench-surfaces";
+import type { KeychainSlotPicker, KeychainVaultEnvVar, KeychainVaultSyncState } from "./surface-model-types";
 import {
   MarkdownEditorInput,
   JsonEditorInput,
 } from "../features/rendered-editors";
 import {
+  APP_BUILDING_CONFIG_PATH,
+  buildAppBuildingConfigSummary,
+  DEFAULT_APP_BUILDING_IMAGE_REF,
+  normalizeAppBuildingSetupDraft,
+  readAppBuildingSetup,
+  summarizeAppBuildingRepository,
+  validateAppBuildingSetupDraft,
+  writeAppBuildingSetup,
+  type AppBuildingSetupDraft,
+} from "../features/app-building-setup";
+import {
+  APP_BUILDING_HELP_TEXT,
+  formatAppBuildingJobList,
+  parseAppBuildingCommand,
+  summarizeAppBuildingPrompt,
+} from "../features/app-building-command";
+import {
   CLAUDE_AUTH_CONFIG_PATH,
   CLAUDE_AUTH_CREDENTIALS_PATH,
   CLAUDE_LEGACY_CONFIG_PATH,
+  FLY_CONFIG_PATH,
   Keychain,
+  NETLIFY_CONFIG_PATH,
+  NETLIFY_LEGACY_CONFIG_PATH,
+  WRANGLER_AUTH_CONFIG_PATH,
+  WRANGLER_LEGACY_AUTH_CONFIG_PATH,
   OPENCODE_AUTH_PATH,
   OPENCODE_CONFIG_JSONC_PATH,
   OPENCODE_CONFIG_PATH,
@@ -128,6 +196,23 @@ import {
   collectClipboardImageMimeTypes,
   describeClaudeImagePasteBlocker,
 } from "../features/claude-image-paste";
+import {
+  createAppBuildingMachine,
+  DEFAULT_APP_BUILDING_IMAGE_REF as DEFAULT_REMOTE_APP_BUILDING_IMAGE_REF,
+  destroyFlyMachine,
+  fetchAppBuildingEvents,
+  fetchAppBuildingStatus,
+  fetchFlyLogsSince,
+  formatFlyLogEntry,
+  getFlyMachine,
+  infisicalLogin,
+  mergeFlyLogDelta,
+  parseAddTaskLogMessage,
+  postAppBuildingMessage,
+  postAppBuildingStop,
+  waitForFlyMachineStarted,
+  waitForWorkerReady,
+} from "almostnode/internal";
 import {
   type WebIdeOpenTarget,
   parseWebIdeOpenTarget,
@@ -222,6 +307,7 @@ declare global {
 }
 
 type MarketplaceMode = "open-vsx" | "fixtures";
+type PreviewMode = "workbench" | "external";
 
 const WORKBENCH_WORKERS = {
   editorWorkerService: {
@@ -250,6 +336,7 @@ export interface WebIDEHostElements {
 export interface WebIDEHostOptions {
   elements: WebIDEHostElements;
   marketplaceMode?: MarketplaceMode;
+  previewMode?: PreviewMode;
   debugSections?: string[];
   template?: TemplateId;
   referenceApp?: ReferenceAppFiles;
@@ -261,6 +348,7 @@ export interface WebIDEHostOptions {
   hostProjectDirectory?: string | null;
   agentLaunchCommand?: string | null;
   onRequestAwsSetup?: (draft: AwsSetupDraft) => void;
+  onRequestAppBuildingSetup?: (draft: AppBuildingSetupDraft) => void;
 }
 
 export interface BridgedCommandResult extends RunResult {
@@ -299,6 +387,20 @@ function registerWorkbenchLanguages(): void {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isStaleFlyInstanceError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /failed \(400\)/i.test(error.message);
+}
+
+/** Stable djb2 hash as an unsigned base-36 string — enough entropy for card IDs. */
+function hashString(input: string): string {
+  let hash = 5381;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = ((hash << 5) + hash + input.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 
 async function withTimeout<T>(
@@ -828,11 +930,55 @@ interface PreviewSourcePickerRuntime {
   bridgePromise: Promise<PreviewSourcePickerBridge> | null;
 }
 
+type PreviewAppBuildingBridgeRequest =
+  | {
+    type: "almostnode-app-building-request";
+    requestId: string;
+    action: "create";
+    name: string;
+    prompt: string;
+  }
+  | {
+    type: "almostnode-app-building-request";
+    requestId: string;
+    action: "message";
+    jobId: string;
+    prompt: string;
+  }
+  | {
+    type: "almostnode-app-building-request";
+    requestId: string;
+    action: "status" | "stop" | "reset-logs";
+    jobId: string;
+  }
+  | {
+    type: "almostnode-app-building-request";
+    requestId: string;
+    action: "logs";
+    jobId: string;
+    offset?: number;
+  };
+
+interface PreviewAppBuildingBridgeResponse {
+  type: "almostnode-app-building-response";
+  requestId: string;
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  jobId?: string;
+  error?: string;
+}
+
 type EditorSelectionRange = {
   startLineNumber: number;
   startColumn: number;
   endLineNumber: number;
   endColumn: number;
+};
+
+type AppBuildingRunResult = RunResult & {
+  jobId?: string;
 };
 
 function getWorkbenchCorsProxyUrl(): string | undefined {
@@ -855,6 +1001,9 @@ export class WebIDEHost {
   private readonly filesSurface: FilesSidebarSurface;
   private readonly openCodeSurface: OpenCodeTerminalSurface;
   private readonly previewSurface: PreviewSurface;
+  private readonly appBuildingPreviewSurface: AppBuildingPreviewSurface;
+  private readonly appBuildingPreviewOpenedJobs = new Set<string>();
+  private currentAppBuildingPreviewUrl: string | null = null;
   private readonly terminalSurface: TerminalPanelSurface;
   private readonly workbenchSurfaces: RegisteredWorkbenchSurfaces;
   private readonly terminalTabs = new Map<string, TerminalTabState>();
@@ -886,20 +1035,40 @@ export class WebIDEHost {
   private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
+  private readonly projectDb = new ProjectDB();
   private readonly claudeImagePasteCleanup = new Map<string, () => void>();
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
   private tailscaleStatus: NetworkStatus | null = null;
   private tailscaleDiagnosticsHintPrinted = false;
   private hadTailscaleKeychainData = false;
   private pendingTailscaleKeychainActivation = false;
+  private netlifyAccountsCache: { userId: string; accounts: NetlifyAccount[] } | null = null;
+  private netlifyAccountsFetchInFlight: Promise<void> | null = null;
+  private infisicalProjectsCache: { key: string; projects: InfisicalProjectInfo[] } | null = null;
+  private infisicalProjectsFetchInFlight: Promise<void> | null = null;
+  private flyAppsCache: { tokenFingerprint: string; apps: FlyAppSummary[] } | null = null;
+  private flyAppsFetchInFlight: Promise<void> | null = null;
+  private flyAppsFetchState: { fingerprint: string; status: "loading" | "error"; message?: string } | null = null;
+  private infisicalUaProvisionInFlight: Promise<void> | null = null;
+  private infisicalUaProvisionState: { tokenFingerprint: string; status: "error"; message: string } | null = null;
+  private vaultSyncState: KeychainVaultSyncState = {
+    target: null,
+    targetLabel: null,
+    busy: false,
+    message: null,
+    messageKind: null,
+  };
+  private vaultSyncMessageClearTimer: ReturnType<typeof setTimeout> | null = null;
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
   private workspaceDependencyInstallKey: string | null = null;
   private workspaceDependencyInstallRequestKey: string | null = null;
   private pendingProjectLaunch = false;
+  private activeProjectId: string | null = null;
   private templateId: TemplateId;
   private readonly initialProjectFiles: SerializedFile[] | null;
   private readonly skipWorkspaceSeed: boolean;
   private readonly deferPreviewStart: boolean;
+  private readonly previewMode: PreviewMode;
   private readonly desktopBridge: DesktopBridge | null;
   private readonly hostProjectDirectory: string | null;
   private readonly agentLaunchCommand: string | null;
@@ -915,7 +1084,9 @@ export class WebIDEHost {
   private currentProjectDefaultDatabaseName = "default";
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
+  private externalPreviewWindow: Window | null = null;
   private removeHostConsoleBridge: (() => void) | null = null;
+  private removeDesktopOAuthLoopbackBridge: (() => void) | null = null;
   private claudeIdeBridge: ClaudeIdeBridge | null = null;
   private testRecorder:
     | import("../features/test-recorder").TestRecorder
@@ -984,6 +1155,7 @@ export class WebIDEHost {
     this.initialProjectFiles = options.initialProjectFiles ?? null;
     this.skipWorkspaceSeed = options.skipWorkspaceSeed === true;
     this.deferPreviewStart = options.deferPreviewStart === true;
+    this.previewMode = options.previewMode === "external" ? "external" : "workbench";
     this.pendingProjectLaunch = this.skipWorkspaceSeed || this.deferPreviewStart;
     this.desktopBridge = options.desktopBridge ?? null;
     this.hostProjectDirectory = options.hostProjectDirectory ?? null;
@@ -1018,6 +1190,7 @@ export class WebIDEHost {
         void this.togglePreviewSourcePicker();
       },
     });
+    this.appBuildingPreviewSurface = new AppBuildingPreviewSurface();
     this.terminalSurface = new TerminalPanelSurface({
       onCreateTab: () => {
         this.createUserTerminalTab(true);
@@ -1054,6 +1227,7 @@ export class WebIDEHost {
       filesSurface: this.filesSurface,
       openCodeSurface: this.openCodeSurface,
       previewSurface: this.previewSurface,
+      appBuildingPreviewSurface: this.appBuildingPreviewSurface,
       terminalSurface: this.terminalSurface,
       databaseSurface: this.databaseSurface,
       databaseBrowserSurface: this.databaseBrowserSurface,
@@ -1080,6 +1254,37 @@ export class WebIDEHost {
         return;
       }
 
+      if (action.startsWith("select-account:netlify:")) {
+        this.selectNetlifyAccount(
+          action.slice("select-account:netlify:".length),
+        );
+        return;
+      }
+
+      if (action.startsWith("select-project:infisical:")) {
+        this.selectInfisicalProject(
+          action.slice("select-project:infisical:".length),
+        );
+        return;
+      }
+
+      if (action.startsWith("select-environment:infisical:")) {
+        this.selectInfisicalEnvironment(
+          action.slice("select-environment:infisical:".length),
+        );
+        return;
+      }
+
+      if (action.startsWith("select-app:fly:")) {
+        this.selectFlyApp(action.slice("select-app:fly:".length));
+        return;
+      }
+
+      if (action === "sync-vault-env:infisical") {
+        void this.syncVaultEnvToInfisical();
+        return;
+      }
+
       switch (action) {
         case "unlock":
           void this.unlockKeychain();
@@ -1102,8 +1307,43 @@ export class WebIDEHost {
         case "logout:aws":
           void this.keychainAuthAction(this.buildAwsLogoutCommand());
           break;
+        case "login:infisical":
+          void this.handleInfisicalLogin();
+          break;
+        case "logout:infisical":
+          this.infisicalUaProvisionState = null;
+          this.infisicalProjectsCache = null;
+          void this.keychainAuthAction("infisical logout");
+          break;
+        case "login:fly":
+          void this.flyAuthAction("login");
+          break;
+        case "logout:fly":
+          void this.flyAuthAction("logout");
+          break;
+        case "login:netlify":
+          void this.netlifyAuthAction("login");
+          break;
+        case "logout:netlify":
+          void this.netlifyAuthAction("logout");
+          break;
+        case "login:cloudflare":
+          void this.cloudflareAuthAction("login");
+          break;
+        case "logout:cloudflare":
+          void this.cloudflareAuthAction("logout");
+          break;
+        case "login:neon":
+          void this.keychainAuthAction("neon auth login");
+          break;
+        case "logout:neon":
+          void this.keychainAuthAction("neon auth logout");
+          break;
         case "setup:aws":
           this.options.onRequestAwsSetup?.(this.getAwsSetupDraft());
+          break;
+        case "setup:app-building":
+          this.options.onRequestAppBuildingSetup?.(this.getAppBuildingSetupDraft());
           break;
         case "login:replay":
           void this.keychainAuthAction("replayio login");
@@ -1127,6 +1367,12 @@ export class WebIDEHost {
     ]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
     this.keychain.registerSlot("aws", [AWS_CONFIG_PATH, AWS_AUTH_PATH]);
+    this.keychain.registerSlot("infisical", [INFISICAL_CONFIG_PATH, INFISICAL_AUTH_PATH]);
+    this.keychain.registerSlot("fly", [FLY_CONFIG_PATH]);
+    this.keychain.registerSlot("netlify", [NETLIFY_CONFIG_PATH, NETLIFY_LEGACY_CONFIG_PATH]);
+    this.keychain.registerSlot("cloudflare", [WRANGLER_AUTH_CONFIG_PATH, WRANGLER_LEGACY_AUTH_CONFIG_PATH]);
+    this.keychain.registerSlot("neon", [NEON_CREDENTIALS_PATH]);
+    this.keychain.registerSlot("app-building", [APP_BUILDING_CONFIG_PATH]);
     this.keychain.registerSlot("opencode", [
       OPENCODE_AUTH_PATH,
       OPENCODE_MCP_AUTH_PATH,
@@ -1180,6 +1426,22 @@ export class WebIDEHost {
     return this.templateId;
   }
 
+  getPreviewUrl(): string | null {
+    return this.previewUrl;
+  }
+
+  setActiveProjectId(projectId: string | null): void {
+    this.activeProjectId = projectId;
+    void this.syncActiveProjectAppBuildingConfig();
+  }
+
+  registerExternalPreviewWindow(target: Window | null): void {
+    this.externalPreviewWindow = target;
+    if (target && this.previewPort !== null) {
+      this.container.setHMRTargetForPort(this.previewPort, target);
+    }
+  }
+
   hasGitHubCredentials(): boolean {
     return Boolean(readGhToken(this.container.vfs)?.oauth_token);
   }
@@ -1187,6 +1449,35 @@ export class WebIDEHost {
   async requestGitHubLogin(): Promise<void> {
     await this.keychainAuthAction("gh auth login");
     this.keychain.notifyExternalStateChanged();
+  }
+
+  async loginToFly(): Promise<void> {
+    await this.flyAuthAction("login");
+  }
+
+  async loginToGithub(): Promise<void> {
+    await this.keychainAuthAction("gh auth login");
+    this.keychain.notifyExternalStateChanged();
+  }
+
+  async loginToInfisical(): Promise<void> {
+    await this.handleInfisicalLogin();
+  }
+
+  async loginToNetlify(): Promise<void> {
+    await this.netlifyAuthAction("login");
+  }
+
+  async loginToNeon(): Promise<void> {
+    await this.keychainAuthAction("neon auth login");
+  }
+
+  async loginToReplay(): Promise<void> {
+    await this.keychainAuthAction("replayio login");
+  }
+
+  isServiceSignedIn(slot: string): boolean {
+    return this.keychain.hasSlotData(slot);
   }
 
   async listGitHubRepositories(): Promise<GitHubRepositorySummary[]> {
@@ -1248,50 +1539,21 @@ export class WebIDEHost {
   }
 
   async createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord> {
-    const token = this.getGitHubAuthToken();
-
-    const repoName = this.toGitHubRepositoryName(projectName);
-    const response = await this.fetchGitHubApi("https://api.github.com/user/repos", {
-      method: "POST",
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: repoName,
-        private: true,
-      }),
-    });
-
-    const raw = await response.text();
-    let payload: {
-      message?: string;
-      clone_url?: string;
-      full_name?: string;
-      html_url?: string;
-    } = {};
-    if (raw) {
-      try {
-        payload = JSON.parse(raw) as typeof payload;
-      } catch {
-        payload = {};
-      }
-    }
-
-    if (!response.ok) {
-      throw new Error(payload.message || `GitHub repository creation failed (${response.status}).`);
-    }
-    if (!payload.clone_url) {
-      throw new Error("GitHub repository creation did not return a clone URL.");
-    }
+    const createRepository = typeof (this as {
+      createGitHubRepository?: typeof WebIDEHost.prototype.createGitHubRepository;
+    }).createGitHubRepository === "function"
+      ? (this as {
+        createGitHubRepository: typeof WebIDEHost.prototype.createGitHubRepository;
+      }).createGitHubRepository.bind(this)
+      : WebIDEHost.prototype.createGitHubRepository.bind(this as WebIDEHost);
+    const repository = await createRepository(projectName);
 
     return {
       name: "origin",
-      url: payload.clone_url,
+      url: repository.cloneUrl,
       provider: "github",
-      repositoryFullName: payload.full_name,
-      repositoryUrl: payload.html_url,
+      repositoryFullName: repository.fullName,
+      repositoryUrl: repository.htmlUrl,
     };
   }
 
@@ -1313,6 +1575,7 @@ export class WebIDEHost {
     this.setPreviewSourcePickerActive(false);
     this.previewSurface.setActiveDb(null);
     this.previewSurface.clear("Switching projects…");
+    this.resetAppBuildingPreview("Switching projects…");
     this.databaseSurface.update([], null);
 
     clearProjectVfs(this.container.vfs);
@@ -1574,6 +1837,7 @@ export class WebIDEHost {
     this.setPreviewSourcePickerActive(false);
     this.previewSurface.setActiveDb(null);
     this.previewSurface.clear("Switching projects…");
+    this.resetAppBuildingPreview("Switching projects…");
     this.databaseSurface.update([], null);
 
     this.templateId = newTemplateId;
@@ -1655,6 +1919,7 @@ export class WebIDEHost {
     this.setPreviewSourcePickerActive(false);
     this.previewSurface.setActiveDb(null);
     this.previewSurface.clear("Switching projects\u2026");
+    this.resetAppBuildingPreview("Switching projects\u2026");
 
     // 6. Unregister PGlite middleware & close instances
     if (this.pgliteMiddleware) {
@@ -3407,6 +3672,42 @@ export class WebIDEHost {
         canAuth: true,
         ...this.buildAwsSidebarSlotStatus(),
       },
+      {
+        name: "infisical",
+        label: "Infisical",
+        canAuth: true,
+        ...this.buildInfisicalSidebarSlotStatus(),
+      },
+      {
+        name: "fly",
+        label: "Fly.io",
+        canAuth: true,
+        ...this.buildFlySidebarSlotStatus(),
+      },
+      {
+        name: "netlify",
+        label: "Netlify",
+        canAuth: true,
+        ...this.buildNetlifySidebarSlotStatus(),
+      },
+      {
+        name: "cloudflare",
+        label: "Cloudflare",
+        canAuth: true,
+        ...this.buildCloudflareSidebarSlotStatus(),
+      },
+      {
+        name: "neon",
+        label: "Neon",
+        canAuth: true,
+        ...this.buildNeonSidebarSlotStatus(),
+      },
+      {
+        name: "app-building",
+        label: "App Building",
+        canAuth: true,
+        ...this.buildAppBuildingSidebarSlotStatus(),
+      },
       ...(this.keychain.hasSlotData("claude")
         ? [
             {
@@ -3430,8 +3731,157 @@ export class WebIDEHost {
     ];
     this.keychainSurface.update(slots, {
       hasStoredVault: state.hasStoredVault,
+      hasUnlockedKey: state.hasUnlockedKey,
       supported: state.supported,
+      vaultEnvVars: state.hasUnlockedKey ? this.buildVaultEnvVars() : [],
+      vaultSync: this.getCurrentVaultSyncState(),
     });
+  }
+
+  private buildVaultEnvVars(): KeychainVaultEnvVar[] {
+    const vfs = this.container.vfs;
+
+    const claudeToken = (() => {
+      if (!vfs.existsSync(CLAUDE_AUTH_CREDENTIALS_PATH)) return null;
+      try {
+        const parsed = JSON.parse(vfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, "utf8")) as {
+          claudeAiOauth?: { accessToken?: string };
+        };
+        return parsed?.claudeAiOauth?.accessToken?.trim() || null;
+      } catch {
+        return null;
+      }
+    })();
+
+    const replayToken = readReplayAuth(vfs)?.accessToken?.trim() || null;
+
+    const ghToken = readGhToken(vfs)?.oauth_token?.trim() || null;
+
+    const netlifyConfig = readNetlifyConfig(vfs);
+    const netlifyToken = netlifyConfig.accessToken?.trim() || null;
+    const netlifyAccountSlug = (() => {
+      const fromPicker = this.getSelectedNetlifyAccountSlug(netlifyConfig.userId);
+      if (fromPicker) return fromPicker;
+      const candidates: unknown[] = [
+        (netlifyConfig.raw as { accountSlug?: unknown })?.accountSlug,
+        (netlifyConfig.raw as { account?: { slug?: unknown } })?.account?.slug,
+        (netlifyConfig.raw as { telemetryAccountSlug?: unknown })?.telemetryAccountSlug,
+      ];
+      for (const candidate of candidates) {
+        if (typeof candidate === "string" && candidate.trim()) {
+          return candidate.trim();
+        }
+      }
+      return null;
+    })();
+
+    const neonCredentials = readNeonCredentials(vfs);
+    const neonAccessToken = neonCredentials?.access_token?.trim() || null;
+    const neonApiKey = neonCredentials?.personal_api_key?.trim() || null;
+
+    const infisicalConfig = readInfisicalConfig(vfs);
+    const infisicalAuth = readInfisicalAuth(vfs);
+    const infisicalCacheKey = this.getInfisicalCacheKey();
+    const selectedInfisicalProjectId = infisicalCacheKey
+      ? this.getSelectedInfisicalProjectId(infisicalCacheKey)
+      : null;
+    const infisicalProjects = infisicalCacheKey
+      ? this.getCachedInfisicalProjects(infisicalCacheKey)
+      : [];
+    const selectedInfisicalProject = selectedInfisicalProjectId
+      ? infisicalProjects.find((entry) => entry.id === selectedInfisicalProjectId)
+      : undefined;
+    const infisicalEnvironment = this.resolveInfisicalEnvironment();
+    const infisicalClientId = infisicalConfig.machineIdentity?.clientId?.trim() || null;
+    const infisicalClientSecret = infisicalConfig.machineIdentity?.clientSecret?.trim() || null;
+
+    return [
+      {
+        name: "ANTHROPIC_API_KEY",
+        value: claudeToken,
+        source: CLAUDE_AUTH_CREDENTIALS_PATH,
+        note: claudeToken ? "Claude OAuth access token" : undefined,
+      },
+      {
+        name: "RECORD_REPLAY_API_KEY",
+        value: replayToken,
+        source: "/home/user/.replay/auth.json",
+      },
+      {
+        name: "GITHUB_TOKEN",
+        value: ghToken,
+        source: "/home/user/.config/gh/hosts.yml",
+      },
+      {
+        name: "NETLIFY_ACCOUNT_SLUG",
+        value: netlifyAccountSlug,
+        source: NETLIFY_CONFIG_PATH,
+        note: netlifyAccountSlug
+          ? undefined
+          : "Pick an account from the Netlify slot.",
+      },
+      {
+        name: "NETLIFY_AUTH_TOKEN",
+        value: netlifyToken,
+        source: NETLIFY_CONFIG_PATH,
+      },
+      {
+        name: "NEON_API_KEY",
+        value: neonApiKey,
+        source: NEON_CREDENTIALS_PATH,
+        note: neonApiKey
+          ? "Neon personal API key"
+          : neonAccessToken
+            ? "Not minted yet — run `neon auth api-key create` or re-login."
+            : undefined,
+      },
+      {
+        name: "NEON_ACCESS_TOKEN",
+        value: neonAccessToken,
+        source: NEON_CREDENTIALS_PATH,
+        note: neonAccessToken ? "Short-lived OAuth Bearer token" : undefined,
+      },
+      {
+        name: "INFISICAL_CLIENT_ID",
+        value: infisicalClientId,
+        source: INFISICAL_CONFIG_PATH,
+        note: infisicalClientId
+          ? "Infisical Universal Auth client ID"
+          : isInfisicalAccessTokenValid(infisicalAuth)
+            ? "Auto-provisioning…"
+            : "Sign in to Infisical to auto-provision.",
+        excludeFromSync: true,
+      },
+      {
+        name: "INFISICAL_CLIENT_SECRET",
+        value: infisicalClientSecret,
+        source: INFISICAL_CONFIG_PATH,
+        note: infisicalClientSecret
+          ? "Infisical Universal Auth client secret"
+          : isInfisicalAccessTokenValid(infisicalAuth)
+            ? "Auto-provisioning…"
+            : "Sign in to Infisical to auto-provision.",
+        excludeFromSync: true,
+      },
+      {
+        name: "INFISICAL_PROJECT_ID",
+        value: selectedInfisicalProjectId,
+        source: INFISICAL_CONFIG_PATH,
+        note: selectedInfisicalProjectId
+          ? "Selected Infisical project"
+          : "Pick a project from the Infisical slot.",
+        excludeFromSync: true,
+      },
+      {
+        name: "INFISICAL_ENVIRONMENT",
+        value: selectedInfisicalProject ? infisicalEnvironment : null,
+        source: INFISICAL_CONFIG_PATH,
+        note: selectedInfisicalProject
+          ? "Default Infisical environment"
+          : "Pick a project from the Infisical slot.",
+        excludeFromSync: true,
+      },
+    ];
   }
 
   private getTailscaleSidebarAuthAction(
@@ -3490,6 +3940,1081 @@ export class WebIDEHost {
     };
   }
 
+  private buildInfisicalSidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    | "active"
+    | "authAction"
+    | "authLabel"
+    | "statusText"
+    | "statusDetail"
+    | "pickers"
+  > {
+    const config = readInfisicalConfig(this.container.vfs);
+    const auth = readInfisicalAuth(this.container.vfs);
+    const isAuthenticated = isInfisicalAccessTokenValid(auth);
+    const identityLabel = auth.email || config.loggedInUserEmail;
+    const expiryLabel =
+      auth.expiresAt && !Number.isNaN(new Date(auth.expiresAt).getTime())
+        ? new Date(auth.expiresAt).toLocaleString()
+        : null;
+    const detail = [
+      `Domain: ${auth.domain || config.domain}`,
+      identityLabel ? `Account: ${identityLabel}` : null,
+    ].filter(Boolean).join(" • ");
+
+    if (isAuthenticated) {
+      void this.ensureInfisicalProjectsLoaded();
+      const cacheKey = this.getInfisicalCacheKey();
+      const projects = cacheKey ? this.getCachedInfisicalProjects(cacheKey) : [];
+      const selectedId = cacheKey
+        ? this.getSelectedInfisicalProjectId(cacheKey)
+        : null;
+      const projectOptions = projects.map((project) => ({
+        value: project.id,
+        label: project.name,
+      }));
+      const selectedProject = selectedId
+        ? projects.find((entry) => entry.id === selectedId)
+        : undefined;
+      const envOptions = (selectedProject?.environments ?? [])
+        .map((env) => {
+          const value = (env.slug ?? env.name ?? "").trim();
+          const label = (env.name ?? env.slug ?? "").trim();
+          return value ? { value, label: label || value } : null;
+        })
+        .filter((entry): entry is { value: string; label: string } => entry !== null);
+      const selectedEnv = cacheKey && selectedId
+        ? this.getSelectedInfisicalEnvironment(cacheKey, selectedId, envOptions.map((entry) => entry.value))
+        : null;
+
+      const pickers: KeychainSlotPicker[] = [];
+      if (projectOptions.length > 0) {
+        pickers.push({
+          actionPrefix: "select-project:infisical",
+          label: "Project",
+          options: projectOptions,
+          value: selectedId ?? undefined,
+        });
+      }
+      if (envOptions.length > 0) {
+        pickers.push({
+          actionPrefix: "select-environment:infisical",
+          label: "Env",
+          options: envOptions,
+          value: selectedEnv ?? undefined,
+        });
+      }
+
+      return {
+        active: true,
+        authAction: "logout:infisical",
+        authLabel: "Logout",
+        statusText: identityLabel ? `Signed in as ${identityLabel}` : "Signed in",
+        statusDetail: expiryLabel
+          ? `${detail} • Token expires: ${expiryLabel}`
+          : detail || "Infisical session stored in the workspace keychain.",
+        pickers: pickers.length > 0 ? pickers : undefined,
+      };
+    }
+
+    if (auth.accessToken) {
+      return {
+        active: false,
+        authAction: "login:infisical",
+        authLabel: "Re-authenticate",
+        statusText: "Session expired",
+        statusDetail: detail || "Sign in again to refresh the stored access token.",
+      };
+    }
+
+    return {
+      active: false,
+      authAction: "login:infisical",
+      authLabel: "Login",
+      statusText: "Ready to sign in",
+      statusDetail: detail || "Uses Infisical browser login and stores the session in this workspace.",
+    };
+  }
+
+  private getInfisicalCacheKey(): string | null {
+    const auth = readInfisicalAuth(this.container.vfs);
+    const config = readInfisicalConfig(this.container.vfs);
+    const domain = auth.domain || config.domain;
+    const email = auth.email || config.loggedInUserEmail;
+    if (!domain || !email) return null;
+    return `${domain.toLowerCase()}|${email.toLowerCase()}`;
+  }
+
+  private getInfisicalProjectsCacheKey(key: string): string {
+    return `almostnode.webide.infisical.projects.v1:${key}`;
+  }
+
+  private getInfisicalSelectedProjectKey(key: string): string {
+    return `almostnode.webide.infisical.selectedProject.v1:${key}`;
+  }
+
+  private getCachedInfisicalProjects(key: string): InfisicalProjectInfo[] {
+    if (this.infisicalProjectsCache?.key === key) {
+      return this.infisicalProjectsCache.projects;
+    }
+    try {
+      const raw = localStorage.getItem(this.getInfisicalProjectsCacheKey(key));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      const projects: InfisicalProjectInfo[] = [];
+      for (const entry of parsed) {
+        if (
+          entry
+          && typeof entry === "object"
+          && typeof (entry as InfisicalProjectInfo).id === "string"
+          && typeof (entry as InfisicalProjectInfo).name === "string"
+        ) {
+          const value = entry as InfisicalProjectInfo;
+          projects.push({
+            id: value.id,
+            name: value.name,
+            slug: typeof value.slug === "string" ? value.slug : null,
+            environments: Array.isArray(value.environments) ? value.environments : [],
+          });
+        }
+      }
+      this.infisicalProjectsCache = { key, projects };
+      return projects;
+    } catch {
+      return [];
+    }
+  }
+
+  private getSelectedInfisicalProjectId(key: string): string | null {
+    try {
+      const raw = localStorage.getItem(this.getInfisicalSelectedProjectKey(key));
+      const trimmed = raw?.trim();
+      if (!trimmed) return null;
+      const projects = this.getCachedInfisicalProjects(key);
+      if (projects.length > 0 && !projects.some((project) => project.id === trimmed)) {
+        return null;
+      }
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
+  private setSelectedInfisicalProjectId(key: string, projectId: string | null): void {
+    try {
+      const storageKey = this.getInfisicalSelectedProjectKey(key);
+      if (projectId) {
+        localStorage.setItem(storageKey, projectId);
+      } else {
+        localStorage.removeItem(storageKey);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private writeCachedInfisicalProjects(key: string, projects: InfisicalProjectInfo[]): void {
+    this.infisicalProjectsCache = { key, projects };
+    try {
+      localStorage.setItem(
+        this.getInfisicalProjectsCacheKey(key),
+        JSON.stringify(projects),
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  private async ensureInfisicalProjectsLoaded(): Promise<void> {
+    const key = this.getInfisicalCacheKey();
+    if (!key) return;
+    if (this.getCachedInfisicalProjects(key).length > 0) return;
+    if (this.infisicalProjectsFetchInFlight) return;
+
+    const auth = readInfisicalAuth(this.container.vfs);
+    const config = readInfisicalConfig(this.container.vfs);
+    const domain = auth.domain || config.domain;
+    const token = auth.accessToken;
+    if (!domain || !token) return;
+
+    this.infisicalProjectsFetchInFlight = (async () => {
+      try {
+        const projects = await fetchInfisicalProjects(domain, token);
+        this.writeCachedInfisicalProjects(key, projects);
+        if (!this.getSelectedInfisicalProjectId(key) && projects.length > 0) {
+          this.setSelectedInfisicalProjectId(key, projects[0].id);
+        }
+        this.updateKeychainSurface();
+      } catch {
+        // Network/API failures keep the picker hidden.
+      } finally {
+        this.infisicalProjectsFetchInFlight = null;
+      }
+    })();
+  }
+
+  private selectInfisicalProject(projectId: string): void {
+    const key = this.getInfisicalCacheKey();
+    if (!key || !projectId) return;
+    this.setSelectedInfisicalProjectId(key, projectId);
+    this.updateKeychainSurface();
+    void this.ensureInfisicalUniversalAuthProvisioned();
+  }
+
+  private getInfisicalSelectedEnvKey(key: string, projectId: string): string {
+    return `almostnode.webide.infisical.selectedEnv.v1:${key}:${projectId}`;
+  }
+
+  private getSelectedInfisicalEnvironment(
+    key: string,
+    projectId: string,
+    knownValues?: string[],
+  ): string | null {
+    try {
+      const raw = localStorage.getItem(this.getInfisicalSelectedEnvKey(key, projectId));
+      const trimmed = raw?.trim();
+      if (trimmed) {
+        if (!knownValues || knownValues.length === 0 || knownValues.includes(trimmed)) {
+          return trimmed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return knownValues && knownValues.length > 0 ? knownValues[0] : null;
+  }
+
+  private setSelectedInfisicalEnvironment(
+    key: string,
+    projectId: string,
+    env: string | null,
+  ): void {
+    try {
+      const storageKey = this.getInfisicalSelectedEnvKey(key, projectId);
+      if (env) {
+        localStorage.setItem(storageKey, env);
+      } else {
+        localStorage.removeItem(storageKey);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private selectInfisicalEnvironment(env: string): void {
+    const key = this.getInfisicalCacheKey();
+    if (!key || !env) return;
+    const projectId = this.getSelectedInfisicalProjectId(key);
+    if (!projectId) return;
+    this.setSelectedInfisicalEnvironment(key, projectId, env);
+    this.updateKeychainSurface();
+  }
+
+  private resolveInfisicalEnvironment(): string {
+    const key = this.getInfisicalCacheKey();
+    if (!key) return "prod";
+    const projectId = this.getSelectedInfisicalProjectId(key);
+    if (!projectId) return "prod";
+    const projects = this.getCachedInfisicalProjects(key);
+    const project = projects.find((entry) => entry.id === projectId);
+    const envOptions = (project?.environments ?? [])
+      .map((env) => (env.slug ?? env.name ?? "").trim())
+      .filter(Boolean);
+    const selected = this.getSelectedInfisicalEnvironment(key, projectId, envOptions);
+    if (selected) return selected;
+    return envOptions[0] ?? "prod";
+  }
+
+  private getInfisicalEnvironmentLabel(slug: string): string {
+    const key = this.getInfisicalCacheKey();
+    if (!key) return slug;
+    const projectId = this.getSelectedInfisicalProjectId(key);
+    if (!projectId) return slug;
+    const project = this.getCachedInfisicalProjects(key).find(
+      (entry) => entry.id === projectId,
+    );
+    if (!project) return slug;
+    const match = project.environments.find(
+      (env) => (env.slug ?? env.name ?? "").trim() === slug,
+    );
+    return match?.name?.trim() || match?.slug?.trim() || slug;
+  }
+
+  private async handleInfisicalLogin(): Promise<void> {
+    await this.keychainAuthAction("infisical login");
+    void this.ensureInfisicalUniversalAuthProvisioned();
+  }
+
+  private async ensureInfisicalUniversalAuthProvisioned(): Promise<void> {
+    if (this.infisicalUaProvisionInFlight) return;
+
+    const auth = readInfisicalAuth(this.container.vfs);
+    if (!isInfisicalAccessTokenValid(auth) || !auth.accessToken) return;
+
+    const config = readInfisicalConfig(this.container.vfs);
+    if (config.machineIdentity?.clientId && config.machineIdentity?.clientSecret) {
+      return;
+    }
+
+    const tokenFingerprint = auth.accessToken.length + ":" + auth.accessToken.slice(-12);
+    if (
+      this.infisicalUaProvisionState?.tokenFingerprint === tokenFingerprint
+      && this.infisicalUaProvisionState.status === "error"
+    ) {
+      return;
+    }
+
+    const domain = auth.domain || config.domain;
+    const token = auth.accessToken;
+    const cacheKey = this.getInfisicalCacheKey();
+    const projectId = cacheKey
+      ? this.getSelectedInfisicalProjectId(cacheKey)
+      : null;
+
+    this.infisicalUaProvisionInFlight = (async () => {
+      try {
+        const identityName = `almostnode-${typeof window !== "undefined" ? window.location.hostname : "browser"}-${new Date().toISOString().slice(0, 10)}`;
+        const result = await provisionInfisicalUniversalAuth({
+          domain,
+          token,
+          identityName,
+          projectId: projectId ?? undefined,
+        });
+
+        const refreshedConfig = readInfisicalConfig(this.container.vfs);
+        writeInfisicalConfig(this.container.vfs, {
+          ...refreshedConfig,
+          machineIdentity: {
+            method: "universal-auth",
+            clientId: result.clientId,
+            clientSecret: result.clientSecret,
+            organizationSlug: result.organizationSlug
+              ?? refreshedConfig.machineIdentity?.organizationSlug
+              ?? null,
+          },
+        });
+
+        this.infisicalUaProvisionState = null;
+        this.keychain.notifyExternalStateChanged();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.infisicalUaProvisionState = {
+          tokenFingerprint,
+          status: "error",
+          message,
+        };
+        if (typeof console !== "undefined") {
+          console.warn("Infisical Universal Auth auto-provision failed:", message);
+        }
+      } finally {
+        this.infisicalUaProvisionInFlight = null;
+        this.updateKeychainSurface();
+      }
+    })();
+  }
+
+  private getCurrentVaultSyncState(): KeychainVaultSyncState {
+    const key = this.getInfisicalCacheKey();
+    if (!key) {
+      return {
+        ...this.vaultSyncState,
+        target: null,
+        targetLabel: null,
+      };
+    }
+    const projects = this.getCachedInfisicalProjects(key);
+    const selectedId = this.getSelectedInfisicalProjectId(key);
+    const selected = selectedId
+      ? projects.find((project) => project.id === selectedId)
+      : undefined;
+    return {
+      ...this.vaultSyncState,
+      target: selected ? `infisical:${selected.id}` : null,
+      targetLabel: selected ? selected.name : null,
+    };
+  }
+
+  private setVaultSyncMessage(
+    message: string | null,
+    kind: KeychainVaultSyncState["messageKind"],
+    autoClearMs?: number,
+  ): void {
+    this.vaultSyncState = {
+      ...this.vaultSyncState,
+      message,
+      messageKind: message ? kind : null,
+    };
+    if (this.vaultSyncMessageClearTimer) {
+      clearTimeout(this.vaultSyncMessageClearTimer);
+      this.vaultSyncMessageClearTimer = null;
+    }
+    if (message && autoClearMs && autoClearMs > 0) {
+      this.vaultSyncMessageClearTimer = setTimeout(() => {
+        this.vaultSyncState = {
+          ...this.vaultSyncState,
+          message: null,
+          messageKind: null,
+        };
+        this.vaultSyncMessageClearTimer = null;
+        this.updateKeychainSurface();
+      }, autoClearMs);
+    }
+  }
+
+  private async syncVaultEnvToInfisical(): Promise<void> {
+    if (this.vaultSyncState.busy) return;
+
+    const key = this.getInfisicalCacheKey();
+    if (!key) {
+      this.setVaultSyncMessage(
+        "Sign in to Infisical and pick a project first.",
+        "error",
+        6000,
+      );
+      this.updateKeychainSurface();
+      return;
+    }
+
+    const auth = readInfisicalAuth(this.container.vfs);
+    const config = readInfisicalConfig(this.container.vfs);
+    const domain = auth.domain || config.domain;
+    const token = auth.accessToken;
+    if (!domain || !token) {
+      this.setVaultSyncMessage("Infisical session is missing.", "error", 6000);
+      this.updateKeychainSurface();
+      return;
+    }
+
+    const projects = this.getCachedInfisicalProjects(key);
+    const selectedId = this.getSelectedInfisicalProjectId(key);
+    const project = selectedId
+      ? projects.find((entry) => entry.id === selectedId)
+      : undefined;
+    if (!project) {
+      this.setVaultSyncMessage(
+        "Pick an Infisical project from the slot above first.",
+        "error",
+        6000,
+      );
+      this.updateKeychainSurface();
+      return;
+    }
+
+    const environment = this.resolveInfisicalEnvironment();
+
+    const envVars = this.buildVaultEnvVars().filter(
+      (entry) => entry.value && !entry.excludeFromSync,
+    );
+    if (envVars.length === 0) {
+      this.setVaultSyncMessage("No populated env vars to sync.", "error", 6000);
+      this.updateKeychainSurface();
+      return;
+    }
+
+    this.vaultSyncState = {
+      ...this.vaultSyncState,
+      busy: true,
+      message: `Syncing ${envVars.length} secret${envVars.length === 1 ? "" : "s"} to ${project.name}…`,
+      messageKind: "info",
+    };
+    this.updateKeychainSurface();
+
+    try {
+      await ensureInfisicalFolder({
+        domain,
+        token,
+        projectId: project.id,
+        environment,
+        secretPath: "/global",
+      });
+    } catch (error) {
+      this.vaultSyncState = { ...this.vaultSyncState, busy: false };
+      this.setVaultSyncMessage(
+        `Sync failed while ensuring /global folder: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+        10000,
+      );
+      this.updateKeychainSurface();
+      return;
+    }
+
+    let createdCount = 0;
+    let updatedCount = 0;
+    const failures: string[] = [];
+    for (const entry of envVars) {
+      try {
+        const result = await upsertInfisicalSecret({
+          domain,
+          token,
+          projectId: project.id,
+          environment,
+          key: entry.name,
+          value: entry.value as string,
+          secretPath: "/global",
+        });
+        if (result === "created") createdCount += 1;
+        else updatedCount += 1;
+      } catch (error) {
+        failures.push(`${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    this.vaultSyncState = {
+      ...this.vaultSyncState,
+      busy: false,
+    };
+
+    if (failures.length === 0) {
+      this.setVaultSyncMessage(
+        `Synced ${envVars.length} secret${envVars.length === 1 ? "" : "s"} to ${project.name} (${environment} • /global). ${createdCount} created, ${updatedCount} updated.`,
+        "success",
+        8000,
+      );
+    } else if (failures.length === envVars.length) {
+      this.setVaultSyncMessage(
+        `Sync failed: ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ""}`,
+        "error",
+        10000,
+      );
+    } else {
+      this.setVaultSyncMessage(
+        `Synced ${envVars.length - failures.length}/${envVars.length} secrets. Failed: ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ""}`,
+        "error",
+        10000,
+      );
+    }
+    this.updateKeychainSurface();
+  }
+
+  private buildFlySidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    | "active"
+    | "authAction"
+    | "authLabel"
+    | "statusText"
+    | "statusDetail"
+    | "selectActionPrefix"
+    | "selectLabel"
+    | "selectOptions"
+    | "selectValue"
+  > {
+    const config = readFlyConfig(this.container.vfs);
+    if (!config.accessToken) {
+      return {
+        active: false,
+        authAction: "login:fly",
+        authLabel: "Login",
+        statusText: "Ready to sign in",
+        statusDetail:
+          "Uses Fly.io's browser login flow and stores the short-lived auth token in this workspace.",
+      };
+    }
+
+    const parsedLastLogin = config.lastLogin ? new Date(config.lastLogin) : null;
+    const lastLoginLabel =
+      parsedLastLogin && !Number.isNaN(parsedLastLogin.getTime())
+        ? parsedLastLogin.toLocaleString()
+        : null;
+
+    void this.ensureFlyAppsLoaded(config.accessToken);
+    const fingerprint = this.getFlyTokenFingerprint(config.accessToken);
+    const apps = fingerprint ? this.getCachedFlyApps(fingerprint) : [];
+    const fetchStatus = this.getFlyAppsFetchStatus(config.accessToken);
+    const selectedAppName = fingerprint
+      ? this.getSelectedFlyAppName(fingerprint)
+      : null;
+    const appOptions = apps.map((app) => ({
+      value: app.name,
+      label: app.organizationSlug ? `${app.name} (${app.organizationSlug})` : app.name,
+    }));
+
+    const detailParts: string[] = [];
+    if (lastLoginLabel) detailParts.push(`Last login: ${lastLoginLabel}`);
+    if (apps.length === 0) {
+      if (fetchStatus?.status === "loading") {
+        detailParts.push("Loading apps…");
+      } else if (fetchStatus?.status === "error") {
+        detailParts.push(`Apps: ${fetchStatus.message ?? "fetch failed"}`);
+      } else {
+        detailParts.push("No Fly apps found for this token.");
+      }
+    }
+
+    return {
+      active: true,
+      authAction: "logout:fly",
+      authLabel: "Logout",
+      statusText: "Signed in",
+      statusDetail: detailParts.length > 0 ? detailParts.join(" • ") : undefined,
+      selectActionPrefix:
+        appOptions.length > 0 ? "select-app:fly" : undefined,
+      selectLabel: appOptions.length > 0 ? "App" : undefined,
+      selectOptions: appOptions.length > 0 ? appOptions : undefined,
+      selectValue: selectedAppName ?? undefined,
+    };
+  }
+
+  private getFlyTokenFingerprint(token: string | null): string | null {
+    if (!token) return null;
+    const trimmed = token.trim();
+    if (!trimmed) return null;
+    const tail = trimmed.slice(-12);
+    return `${trimmed.length}:${tail}`;
+  }
+
+  private getFlyAppsCacheKey(fingerprint: string): string {
+    return `almostnode.webide.fly.apps.v1:${fingerprint}`;
+  }
+
+  private getFlySelectedAppKey(fingerprint: string): string {
+    return `almostnode.webide.fly.selectedApp.v1:${fingerprint}`;
+  }
+
+  private getCachedFlyApps(fingerprint: string): FlyAppSummary[] {
+    if (this.flyAppsCache?.tokenFingerprint === fingerprint) {
+      return this.flyAppsCache.apps;
+    }
+    try {
+      const raw = localStorage.getItem(this.getFlyAppsCacheKey(fingerprint));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      const apps: FlyAppSummary[] = [];
+      for (const entry of parsed) {
+        if (
+          entry
+          && typeof entry === "object"
+          && typeof (entry as FlyAppSummary).id === "string"
+          && typeof (entry as FlyAppSummary).name === "string"
+        ) {
+          const value = entry as FlyAppSummary;
+          apps.push({
+            id: value.id,
+            name: value.name,
+            status: typeof value.status === "string" ? value.status : null,
+            organizationSlug:
+              typeof value.organizationSlug === "string"
+                ? value.organizationSlug
+                : null,
+          });
+        }
+      }
+      this.flyAppsCache = { tokenFingerprint: fingerprint, apps };
+      return apps;
+    } catch {
+      return [];
+    }
+  }
+
+  private getSelectedFlyAppName(fingerprint: string): string | null {
+    try {
+      const raw = localStorage.getItem(this.getFlySelectedAppKey(fingerprint));
+      const trimmed = raw?.trim();
+      if (!trimmed) return null;
+      const apps = this.getCachedFlyApps(fingerprint);
+      if (apps.length > 0 && !apps.some((app) => app.name === trimmed)) {
+        return null;
+      }
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
+  private setSelectedFlyAppName(fingerprint: string, name: string | null): void {
+    try {
+      const key = this.getFlySelectedAppKey(fingerprint);
+      if (name) {
+        localStorage.setItem(key, name);
+      } else {
+        localStorage.removeItem(key);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private writeCachedFlyApps(fingerprint: string, apps: FlyAppSummary[]): void {
+    this.flyAppsCache = { tokenFingerprint: fingerprint, apps };
+    try {
+      localStorage.setItem(
+        this.getFlyAppsCacheKey(fingerprint),
+        JSON.stringify(apps),
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  private async ensureFlyAppsLoaded(token: string | null): Promise<void> {
+    const fingerprint = this.getFlyTokenFingerprint(token);
+    if (!fingerprint || !token) return;
+    if (this.getCachedFlyApps(fingerprint).length > 0) return;
+    if (this.flyAppsFetchInFlight) return;
+    if (this.flyAppsFetchState?.fingerprint === fingerprint && this.flyAppsFetchState.status === "error") {
+      // Don't keep retrying a failed fetch on every render; user can refresh after re-login.
+      return;
+    }
+
+    this.flyAppsFetchState = { fingerprint, status: "loading" };
+    this.flyAppsFetchInFlight = (async () => {
+      try {
+        const apps = await fetchFlyApps(DEFAULT_FLY_API_BASE_URL, token);
+        this.writeCachedFlyApps(fingerprint, apps);
+        this.flyAppsFetchState = null;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.flyAppsFetchState = { fingerprint, status: "error", message };
+      } finally {
+        this.flyAppsFetchInFlight = null;
+        this.updateKeychainSurface();
+      }
+    })();
+  }
+
+  private getFlyAppsFetchStatus(token: string | null): { status: "loading" | "error"; message?: string } | null {
+    const fingerprint = this.getFlyTokenFingerprint(token);
+    if (!fingerprint) return null;
+    if (this.flyAppsFetchState?.fingerprint !== fingerprint) return null;
+    return {
+      status: this.flyAppsFetchState.status,
+      message: this.flyAppsFetchState.message,
+    };
+  }
+
+  private selectFlyApp(name: string): void {
+    const config = readFlyConfig(this.container.vfs);
+    const fingerprint = this.getFlyTokenFingerprint(config.accessToken);
+    if (!name) return;
+    if (fingerprint) {
+      this.setSelectedFlyAppName(fingerprint, name);
+    }
+    writeFlyAppName(this.container.vfs, name);
+    this.keychain.notifyExternalStateChanged();
+    this.updateKeychainSurface();
+  }
+
+  private getEffectiveFlyAppName(token: string | null, fallback: string): string {
+    const fingerprint = this.getFlyTokenFingerprint(token);
+    const fromLocalStorage = fingerprint ? this.getSelectedFlyAppName(fingerprint) : null;
+    const fromConfig = readFlyConfig(this.container.vfs).appName;
+    return fromLocalStorage || fromConfig || fallback;
+  }
+
+  private buildNetlifySidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    | "active"
+    | "authAction"
+    | "authLabel"
+    | "statusText"
+    | "statusDetail"
+    | "selectActionPrefix"
+    | "selectLabel"
+    | "selectOptions"
+    | "selectValue"
+  > {
+    const config = readNetlifyConfig(this.container.vfs);
+    if (!config.accessToken) {
+      return {
+        active: false,
+        authAction: "login:netlify",
+        authLabel: "Login",
+        statusText: "Ready to sign in",
+        statusDetail:
+          "Uses Netlify's browser authorization flow and stores the access token in this workspace.",
+      };
+    }
+
+    const identity = config.currentUser?.email
+      || config.currentUser?.name
+      || null;
+
+    void this.ensureNetlifyAccountsLoaded(config);
+
+    const accounts = this.getCachedNetlifyAccounts(config.userId);
+    const selectedSlug = this.getSelectedNetlifyAccountSlug(config.userId);
+    const accountOptions = accounts.map((account) => ({
+      value: account.slug,
+      label: account.name?.trim() || account.slug,
+    }));
+
+    return {
+      active: true,
+      authAction: "logout:netlify",
+      authLabel: "Logout",
+      statusText: identity ? `Signed in as ${identity}` : "Signed in",
+      statusDetail:
+        config.currentUser?.name && config.currentUser?.email
+          ? `${config.currentUser.name} • ${config.currentUser.email}`
+          : undefined,
+      selectActionPrefix:
+        accountOptions.length > 0 ? "select-account:netlify" : undefined,
+      selectLabel: accountOptions.length > 0 ? "Account" : undefined,
+      selectOptions: accountOptions.length > 0 ? accountOptions : undefined,
+      selectValue: selectedSlug ?? undefined,
+    };
+  }
+
+  private getNetlifyAccountsCacheKey(userId: string): string {
+    return `almostnode.webide.netlify.accounts.v1:${userId}`;
+  }
+
+  private getNetlifySelectedAccountKey(userId: string): string {
+    return `almostnode.webide.netlify.selectedAccount.v1:${userId}`;
+  }
+
+  private getCachedNetlifyAccounts(userId: string | null): NetlifyAccount[] {
+    if (!userId) return [];
+    if (this.netlifyAccountsCache?.userId === userId) {
+      return this.netlifyAccountsCache.accounts;
+    }
+    try {
+      const raw = localStorage.getItem(this.getNetlifyAccountsCacheKey(userId));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      const accounts: NetlifyAccount[] = [];
+      for (const entry of parsed) {
+        if (
+          entry
+          && typeof entry === "object"
+          && typeof (entry as NetlifyAccount).id === "string"
+          && typeof (entry as NetlifyAccount).slug === "string"
+        ) {
+          const value = entry as NetlifyAccount;
+          accounts.push({
+            id: value.id,
+            slug: value.slug,
+            name: typeof value.name === "string" ? value.name : null,
+            type: typeof value.type === "string" ? value.type : null,
+          });
+        }
+      }
+      this.netlifyAccountsCache = { userId, accounts };
+      return accounts;
+    } catch {
+      return [];
+    }
+  }
+
+  private getSelectedNetlifyAccountSlug(userId: string | null): string | null {
+    if (!userId) return null;
+    try {
+      const raw = localStorage.getItem(this.getNetlifySelectedAccountKey(userId));
+      const trimmed = raw?.trim();
+      if (!trimmed) return null;
+      const accounts = this.getCachedNetlifyAccounts(userId);
+      if (accounts.length > 0 && !accounts.some((account) => account.slug === trimmed)) {
+        return null;
+      }
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
+  private setSelectedNetlifyAccountSlug(userId: string, slug: string | null): void {
+    try {
+      const key = this.getNetlifySelectedAccountKey(userId);
+      if (slug) {
+        localStorage.setItem(key, slug);
+      } else {
+        localStorage.removeItem(key);
+      }
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  private writeCachedNetlifyAccounts(userId: string, accounts: NetlifyAccount[]): void {
+    this.netlifyAccountsCache = { userId, accounts };
+    try {
+      localStorage.setItem(
+        this.getNetlifyAccountsCacheKey(userId),
+        JSON.stringify(accounts),
+      );
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  private async ensureNetlifyAccountsLoaded(
+    config = readNetlifyConfig(this.container.vfs),
+  ): Promise<void> {
+    if (!config.accessToken || !config.userId) return;
+    if (this.getCachedNetlifyAccounts(config.userId).length > 0) return;
+    if (this.netlifyAccountsFetchInFlight) return;
+
+    const userId = config.userId;
+    const token = config.accessToken;
+    this.netlifyAccountsFetchInFlight = (async () => {
+      try {
+        const accounts = await fetchNetlifyAccounts(
+          DEFAULT_NETLIFY_API_BASE_URL,
+          token,
+        );
+        this.writeCachedNetlifyAccounts(userId, accounts);
+
+        if (!this.getSelectedNetlifyAccountSlug(userId) && accounts.length > 0) {
+          const personal = accounts.find(
+            (account) => (account.type ?? "").toLowerCase() === "personal",
+          );
+          this.setSelectedNetlifyAccountSlug(
+            userId,
+            (personal ?? accounts[0]).slug,
+          );
+        }
+
+        this.updateKeychainSurface();
+      } catch {
+        // Network/API failure — keep showing the slot without a picker.
+      } finally {
+        this.netlifyAccountsFetchInFlight = null;
+      }
+    })();
+  }
+
+  private selectNetlifyAccount(slug: string): void {
+    const config = readNetlifyConfig(this.container.vfs);
+    if (!config.userId || !slug) return;
+    this.setSelectedNetlifyAccountSlug(config.userId, slug);
+    this.updateKeychainSurface();
+  }
+
+  private buildNeonSidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"
+  > {
+    const credentials = readNeonCredentials(this.container.vfs);
+    if (!credentials?.access_token && !credentials?.refresh_token) {
+      return {
+        active: false,
+        authAction: "login:neon",
+        authLabel: "Login",
+        statusText: "Ready to sign in",
+        statusDetail:
+          this.desktopBridge
+            ? "Uses Neon OAuth with an automatic localhost callback listener in the desktop host. After login, run `neon auth api-key create --name <name>` for a personal API key or `neon auth token` for the short-lived bearer token."
+            : "Uses Neon OAuth and stores refreshable workspace credentials. After login, run `neon auth api-key create --name <name>` for a personal API key or `neon auth token` for the short-lived bearer token.",
+      };
+    }
+
+    const parsedExpiry = typeof credentials.expires_at === "number"
+      ? new Date(credentials.expires_at)
+      : null;
+    const expiryLabel =
+      parsedExpiry && !Number.isNaN(parsedExpiry.getTime())
+        ? parsedExpiry.toLocaleString()
+        : null;
+
+    return {
+      active: true,
+      authAction: "logout:neon",
+      authLabel: "Logout",
+      statusText: "Signed in",
+      statusDetail: expiryLabel ? `Token expires: ${expiryLabel}` : "Refresh token stored in workspace keychain.",
+    };
+  }
+
+  private buildCloudflareSidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"
+  > {
+    const config = readWranglerAuthConfig(this.container.vfs);
+    if (!config.accessToken && !config.refreshToken) {
+      return {
+        active: false,
+        authAction: "login:cloudflare",
+        authLabel: "Login",
+        statusText: "Ready to sign in",
+        statusDetail:
+          this.desktopBridge
+            ? "Uses Wrangler OAuth with an automatic localhost callback listener in the desktop host."
+            : "Uses Wrangler OAuth. In browser-only sessions, Cloudflare still redirects to localhost:8976, so the fallback is pasting the callback URL to complete login.",
+      };
+    }
+
+    const parsedExpiry = config.expirationTime ? new Date(config.expirationTime) : null;
+    const expiryLabel =
+      parsedExpiry && !Number.isNaN(parsedExpiry.getTime())
+        ? parsedExpiry.toLocaleString()
+        : null;
+
+    return {
+      active: true,
+      authAction: "logout:cloudflare",
+      authLabel: "Logout",
+      statusText: "Signed in",
+      statusDetail: expiryLabel ? `Token expires: ${expiryLabel}` : "Refresh token stored in workspace keychain.",
+    };
+  }
+
+  private buildAppBuildingSidebarSlotStatus(): Pick<
+    KeychainSlotStatus,
+    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail" | "canAuth"
+  > {
+    const config = this.getEffectiveAppBuildingSetup();
+    const missing: string[] = [];
+    if (!config.flyAppName) missing.push("Fly app (pick one in the Fly.io slot)");
+    if (!config.flyApiToken) missing.push("Fly API token (login via Fly.io slot)");
+    if (!config.infisicalClientId) missing.push("Infisical Universal Auth client ID");
+    if (!config.infisicalClientSecret) missing.push("Infisical Universal Auth client secret");
+    if (!config.infisicalProjectId) missing.push("Infisical project (pick one in the Infisical slot)");
+    if (!config.infisicalEnvironment) missing.push("Infisical environment");
+
+    if (missing.length > 0) {
+      return {
+        active: false,
+        canAuth: false,
+        statusText: `Missing ${missing.length} item${missing.length === 1 ? "" : "s"}`,
+        statusDetail: `Missing: ${missing.join(", ")}.`,
+      };
+    }
+
+    const envLabel = this.getInfisicalEnvironmentLabel(config.infisicalEnvironment);
+    const detail = [
+      `Fly app: ${config.flyAppName}`,
+      `Infisical: ${envLabel}`,
+      config.imageRef ? `Image: ${config.imageRef}` : null,
+    ].filter(Boolean).join(" • ");
+
+    return {
+      active: true,
+      canAuth: false,
+      statusText: "Ready for remote jobs",
+      statusDetail: detail || undefined,
+    };
+  }
+
+  private getEffectiveAppBuildingSetup(): AppBuildingSetupDraft {
+    const stored = readAppBuildingSetup(this.container.vfs);
+    const flyConfig = readFlyConfig(this.container.vfs);
+    const infisicalConfig = readInfisicalConfig(this.container.vfs);
+
+    const infisicalKey = this.getInfisicalCacheKey();
+    const selectedProjectId = infisicalKey
+      ? this.getSelectedInfisicalProjectId(infisicalKey)
+      : null;
+    const resolvedEnvironment = selectedProjectId
+      ? this.resolveInfisicalEnvironment()
+      : stored.infisicalEnvironment || "prod";
+
+    return normalizeAppBuildingSetupDraft({
+      flyAppName: this.getEffectiveFlyAppName(flyConfig.accessToken, stored.flyAppName),
+      flyApiToken: stored.flyApiToken || flyConfig.accessToken || undefined,
+      infisicalClientId:
+        infisicalConfig.machineIdentity?.clientId || stored.infisicalClientId,
+      infisicalClientSecret:
+        infisicalConfig.machineIdentity?.clientSecret || stored.infisicalClientSecret,
+      infisicalProjectId: selectedProjectId || stored.infisicalProjectId,
+      infisicalEnvironment: resolvedEnvironment,
+      repositoryCloneUrl: stored.repositoryCloneUrl,
+      repositoryBaseBranch: stored.repositoryBaseBranch,
+      imageRef: stored.imageRef,
+    });
+  }
+
   private getPreferredAwsSessionName(config = readAwsConfig(this.container.vfs)): string | null {
     if (config.defaultProfile && config.profiles[config.defaultProfile]) {
       const sessionName = config.profiles[config.defaultProfile].ssoSession;
@@ -3546,6 +5071,36 @@ export class WebIDEHost {
     writeAwsConfig(this.container.vfs, config);
     this.keychain.notifyExternalStateChanged();
     this.updateKeychainSurface();
+  }
+
+  private getAppBuildingSetupDraft(): AppBuildingSetupDraft {
+    return this.getEffectiveAppBuildingSetup();
+  }
+
+  async saveAppBuildingSetup(draft: AppBuildingSetupDraft): Promise<void> {
+    const normalized = normalizeAppBuildingSetupDraft(draft);
+    const validationError = validateAppBuildingSetupDraft(normalized);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
+    writeAppBuildingSetup(this.container.vfs, normalized);
+    await this.syncActiveProjectAppBuildingConfig();
+    this.keychain.notifyExternalStateChanged();
+    this.updateKeychainSurface();
+  }
+
+  private async syncActiveProjectAppBuildingConfig(): Promise<void> {
+    if (!this.activeProjectId) {
+      return;
+    }
+
+    const config = readAppBuildingSetup(this.container.vfs);
+    const summary = buildAppBuildingConfigSummary(
+      this.activeProjectId,
+      config,
+    );
+    await this.projectDb.putAppBuildingConfig(summary);
   }
 
   private handleTailscaleKeychainTransition(): void {
@@ -3645,7 +5200,52 @@ export class WebIDEHost {
   private async keychainAuthAction(command: string): Promise<void> {
     await this.revealTerminalPanel(true);
     const tab = this.createUserTerminalTab(true);
-    await this.runCommand(tab, command, { echoCommand: true });
+    try {
+      await this.runCommand(tab, command, { echoCommand: true });
+    } finally {
+      await this.syncActiveProjectAppBuildingConfig();
+      this.keychain.notifyExternalStateChanged();
+      this.updateKeychainStatusEntry();
+      this.updateKeychainSurface();
+    }
+  }
+
+  private async flyAuthAction(
+    action: "login" | "logout",
+  ): Promise<void> {
+    this.flyAppsCache = null;
+    this.flyAppsFetchState = null;
+    if (action === "logout") {
+      await this.keychainAuthAction("fly auth logout");
+      return;
+    }
+
+    prepareFlyAuthPopup();
+    await this.keychainAuthAction("fly auth login");
+  }
+
+  private async netlifyAuthAction(
+    action: "login" | "logout",
+  ): Promise<void> {
+    if (action === "logout") {
+      await this.keychainAuthAction("netlify logout");
+      return;
+    }
+
+    prepareNetlifyAuthPopup();
+    await this.keychainAuthAction("netlify login");
+  }
+
+  private async cloudflareAuthAction(
+    action: "login" | "logout",
+  ): Promise<void> {
+    if (action === "logout") {
+      await this.keychainAuthAction("wrangler logout");
+      return;
+    }
+
+    prepareCloudflareAuthPopup();
+    await this.keychainAuthAction("wrangler login");
   }
 
   private async tailscaleAuthAction(
@@ -3720,6 +5320,32 @@ export class WebIDEHost {
     await this.revealOpenCodePanel(focus);
   }
 
+  private isPreviewMessageSource(source: MessageEventSource | null): boolean {
+    if (source && this.externalPreviewWindow && source === this.externalPreviewWindow) {
+      return true;
+    }
+
+    const iframeWindow = this.previewSurface.getIframe().contentWindow;
+    return Boolean(iframeWindow && source === iframeWindow);
+  }
+
+  private registerPreviewHmrTargets(): void {
+    if (this.previewPort === null) {
+      return;
+    }
+
+    if (this.previewMode === "workbench") {
+      const iframeWindow = this.previewSurface.getIframe().contentWindow;
+      if (iframeWindow) {
+        this.container.setHMRTargetForPort(this.previewPort, iframeWindow);
+      }
+    }
+
+    if (this.externalPreviewWindow) {
+      this.container.setHMRTargetForPort(this.previewPort, this.externalPreviewWindow);
+    }
+  }
+
   private async runCommand(
     tab: TerminalTabState,
     command: string,
@@ -3737,6 +5363,30 @@ export class WebIDEHost {
     if (options?.echoCommand) {
       tab.terminal.write(trimmed);
       tab.terminal.write("\r\n");
+    }
+
+    const shouldPrepareFlyAuthPopup =
+      this.agentMode === "browser"
+      && tab.kind === "user"
+      && isFlyLoginCommand(trimmed);
+    if (shouldPrepareFlyAuthPopup) {
+      prepareFlyAuthPopup();
+    }
+
+    const shouldPrepareNetlifyAuthPopup =
+      this.agentMode === "browser"
+      && tab.kind === "user"
+      && isNetlifyLoginCommand(trimmed);
+    if (shouldPrepareNetlifyAuthPopup) {
+      prepareNetlifyAuthPopup();
+    }
+
+    const shouldPrepareCloudflareAuthPopup =
+      this.agentMode === "browser"
+      && tab.kind === "user"
+      && isCloudflareLoginCommand(trimmed);
+    if (shouldPrepareCloudflareAuthPopup) {
+      prepareCloudflareAuthPopup();
     }
 
     if (
@@ -3757,6 +5407,15 @@ export class WebIDEHost {
     }
 
     if (!(await this.keychain.prepareForCommand(trimmed))) {
+      if (shouldPrepareFlyAuthPopup) {
+        cancelPreparedFlyAuthPopup();
+      }
+      if (shouldPrepareNetlifyAuthPopup) {
+        cancelPreparedNetlifyAuthPopup();
+      }
+      if (shouldPrepareCloudflareAuthPopup) {
+        cancelPreparedCloudflareAuthPopup();
+      }
       this.updateTerminalStatus(tab, "Keychain unlock required");
       this.writeTerminal(
         tab,
@@ -3794,6 +5453,15 @@ export class WebIDEHost {
       });
       this.updateTerminalStatus(tab, `Exited ${result.exitCode}`);
     } finally {
+      if (shouldPrepareFlyAuthPopup) {
+        cancelPreparedFlyAuthPopup();
+      }
+      if (shouldPrepareNetlifyAuthPopup) {
+        cancelPreparedNetlifyAuthPopup();
+      }
+      if (shouldPrepareCloudflareAuthPopup) {
+        cancelPreparedCloudflareAuthPopup();
+      }
       tab.runningAbortController = null;
       this.printPrompt(tab);
     }
@@ -3846,6 +5514,23 @@ export class WebIDEHost {
         }
       },
     });
+
+    this.container.registerShellCommand({
+      name: "app-building",
+      interceptShellParsing: true,
+      execute: async (args, context) => {
+        try {
+          return await this.runAppBuildingShellCommand(args, context);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            stdout: "",
+            stderr: `${message}\n`,
+            exitCode: 1,
+          };
+        }
+      },
+    });
   }
 
   private async runWebIdeOpenCommand(
@@ -3870,6 +5555,1141 @@ export class WebIDEHost {
     };
     await this.openWorkspaceTargetInEditor(resolvedTarget);
     return resolvedTarget;
+  }
+
+  private async runAppBuildingShellCommand(
+    args: string[],
+    context: import("almostnode").ShellCommandContext,
+  ): Promise<AppBuildingRunResult> {
+    const command = parseAppBuildingCommand(args);
+
+    if (command.verb === "help") {
+      return { stdout: APP_BUILDING_HELP_TEXT, stderr: "", exitCode: 0 };
+    }
+
+    if (!(await this.keychain.prepareForCommand("app-building"))) {
+      throw new Error(
+        "Unlock the saved keychain before running app-building commands.",
+      );
+    }
+
+    if (command.verb === "list") {
+      const projectId = this.requireActiveProjectId();
+      const jobs = await this.projectDb.listAppBuildingJobs(projectId);
+      const refreshed = await Promise.all(
+        jobs.map(async (job) => {
+          const updated = await this.refreshAppBuildingJobFromFly(job);
+          if (updated !== job) {
+            await this.projectDb.putAppBuildingJob(updated);
+          }
+          return updated;
+        }),
+      );
+      return {
+        stdout: formatAppBuildingJobList(refreshed),
+        stderr: "",
+        exitCode: 0,
+      };
+    }
+
+    if (command.verb === "create") {
+      return this.handleAppBuildingCreate(command, context);
+    }
+
+    if (command.verb === "status") {
+      return this.handleAppBuildingStatus(command.jobId);
+    }
+
+    if (command.verb === "logs") {
+      return this.handleAppBuildingLogs(command.jobId, command.offset);
+    }
+
+    if (command.verb === "message") {
+      return this.handleAppBuildingMessage(command.jobId, command.prompt);
+    }
+
+    return this.handleAppBuildingStop(command.jobId);
+  }
+
+  private createPreviewAppBuildingBridgeContext(
+    stdoutChunks: string[],
+    stderrChunks: string[],
+  ): import("almostnode").ShellCommandContext {
+    const env: Record<string, string> = {};
+
+    return {
+      cwd: WORKSPACE_ROOT,
+      env,
+      stdin: "",
+      vfs: this.container.vfs,
+      writeStdout: (data: string) => {
+        stdoutChunks.push(data);
+      },
+      writeStderr: (data: string) => {
+        stderrChunks.push(data);
+      },
+      setEnv: (name: string, value: string | null | undefined) => {
+        if (value === null || typeof value === "undefined") {
+          delete env[name];
+          return;
+        }
+        env[name] = value;
+      },
+      getEnv: () => ({ ...env }),
+      setCwd: () => {},
+      exec: async () => ({
+        stdout: "",
+        stderr: "Shell exec is not available from the preview bridge.\n",
+        exitCode: 1,
+      }),
+    };
+  }
+
+  private async handlePreviewAppBuildingBridgeRequest(
+    targetWindow: Window,
+    request: PreviewAppBuildingBridgeRequest,
+  ): Promise<void> {
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+    const context = this.createPreviewAppBuildingBridgeContext(
+      stdoutChunks,
+      stderrChunks,
+    );
+
+    if (request.action === "reset-logs") {
+      try {
+        const reset = await this.resetAppBuildingLogCursor(request.jobId);
+        const response: PreviewAppBuildingBridgeResponse = {
+          type: "almostnode-app-building-response",
+          requestId: request.requestId,
+          ok: true,
+          stdout: "Log cursor reset.\n",
+          stderr: "",
+          exitCode: 0,
+          jobId: reset.id,
+        };
+        targetWindow.postMessage(response, "*");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const response: PreviewAppBuildingBridgeResponse = {
+          type: "almostnode-app-building-response",
+          requestId: request.requestId,
+          ok: false,
+          stdout: "",
+          stderr: `${message}\n`,
+          exitCode: 1,
+          error: message,
+        };
+        targetWindow.postMessage(response, "*");
+      }
+      return;
+    }
+
+    const args = request.action === "create"
+      ? ["create", "--remote", "--name", request.name, "--prompt", request.prompt]
+      : request.action === "message"
+        ? ["message", request.jobId, "--prompt", request.prompt]
+        : request.action === "logs"
+          ? [
+            "logs",
+            request.jobId,
+            ...(typeof request.offset === "number" ? ["--offset", String(request.offset)] : []),
+          ]
+          : [request.action, request.jobId];
+
+    try {
+      const result = await this.runAppBuildingShellCommand(args, context);
+      const response: PreviewAppBuildingBridgeResponse = {
+        type: "almostnode-app-building-response",
+        requestId: request.requestId,
+        ok: result.exitCode === 0,
+        stdout: `${stdoutChunks.join("")}${result.stdout}`,
+        stderr: `${stderrChunks.join("")}${result.stderr}`,
+        exitCode: result.exitCode,
+        jobId: result.jobId,
+      };
+      targetWindow.postMessage(response, "*");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const response: PreviewAppBuildingBridgeResponse = {
+        type: "almostnode-app-building-response",
+        requestId: request.requestId,
+        ok: false,
+        stdout: stdoutChunks.join(""),
+        stderr: `${stderrChunks.join("")}${message}\n`,
+        exitCode: 1,
+        error: message,
+      };
+      targetWindow.postMessage(response, "*");
+    }
+  }
+
+  private requireActiveProjectId(): string {
+    if (!this.activeProjectId) {
+      throw new Error("Select a project before using app-building commands.");
+    }
+    return this.activeProjectId;
+  }
+
+  private requireAppBuildingSetup(): AppBuildingSetupDraft {
+    const config = this.getAppBuildingSetupDraft();
+    const validationError = validateAppBuildingSetupDraft(config);
+    if (validationError) {
+      throw new Error(`${validationError} Configure the missing piece in the Keychain sidebar.`);
+    }
+    return config;
+  }
+
+  private getAppBuildingFlyCredentials(): {
+    appName: string;
+    token: string;
+  } | null {
+    const config = this.getAppBuildingSetupDraft();
+    if (!config.flyAppName || !config.flyApiToken) {
+      return null;
+    }
+    return {
+      appName: config.flyAppName,
+      token: config.flyApiToken,
+    };
+  }
+
+  private async resolveAppBuildingWorkerTarget(
+    job: AppBuildingJobRecord,
+    options: { forceRefresh?: boolean } = {},
+  ): Promise<{
+    job: AppBuildingJobRecord;
+    routeId: string | null;
+  }> {
+    if (!options.forceRefresh && job.machineInstanceId) {
+      return {
+        job,
+        routeId: job.machineInstanceId,
+      };
+    }
+
+    if (!job.machineId) {
+      throw new Error(`Job ${job.id} has no provisioned worker yet.`);
+    }
+
+    const credentials = this.getAppBuildingFlyCredentials();
+    if (!credentials) {
+      return {
+        job,
+        routeId: job.machineInstanceId ?? null,
+      };
+    }
+
+    try {
+      const machine = await getFlyMachine(
+        job.flyApp || credentials.appName,
+        credentials.token,
+        job.machineId,
+      );
+      const instanceId = machine.instance_id?.trim();
+      if (!instanceId) {
+        return {
+          job,
+          routeId: null,
+        };
+      }
+
+      if (instanceId === job.machineInstanceId) {
+        return { job, routeId: instanceId };
+      }
+
+      const nextJob = {
+        ...job,
+        machineInstanceId: instanceId,
+        updatedAt: Date.now(),
+      };
+      await this.projectDb.putAppBuildingJob(nextJob);
+      return {
+        job: nextJob,
+        routeId: instanceId,
+      };
+    } catch {
+      return {
+        job,
+        routeId: job.machineInstanceId ?? null,
+      };
+    }
+  }
+
+  private async callAppBuildingWorker<T>(
+    job: AppBuildingJobRecord,
+    fn: (
+      resolved: { job: AppBuildingJobRecord; routeId: string | null },
+    ) => Promise<T>,
+  ): Promise<{ job: AppBuildingJobRecord; result: T }> {
+    const firstResolved = await this.resolveAppBuildingWorkerTarget(job);
+    try {
+      const result = await fn(firstResolved);
+      return { job: firstResolved.job, result };
+    } catch (error) {
+      if (!isStaleFlyInstanceError(error)) {
+        throw error;
+      }
+      const refreshed = await this.resolveAppBuildingWorkerTarget(
+        firstResolved.job,
+        { forceRefresh: true },
+      );
+      if (
+        refreshed.routeId
+        && refreshed.routeId === firstResolved.routeId
+      ) {
+        throw error;
+      }
+      const result = await fn(refreshed);
+      return { job: refreshed.job, result };
+    }
+  }
+
+  private requireProvisionedAppBuildingJob(job: AppBuildingJobRecord): AppBuildingJobRecord {
+    if (!job.machineId || !job.baseUrl) {
+      throw new Error(
+        job.error
+          ? `Job ${job.id} never reached worker provisioning. ${job.error}`
+          : `Job ${job.id} has no provisioned worker yet.`,
+      );
+    }
+    return job;
+  }
+
+  private createAppBuildingJobRecord(
+    projectId: string,
+    appName: string,
+    prompt: string,
+    flyApp: string,
+    imageRef: string | null,
+    repositoryCloneUrl: string,
+    repositoryBaseBranch: string,
+  ): AppBuildingJobRecord {
+    const id = crypto.randomUUID();
+    const repository = this.buildAppBuildingTargetRepository(
+      repositoryCloneUrl,
+      repositoryBaseBranch,
+      appName,
+      id,
+    );
+    return {
+      id,
+      projectId,
+      appName,
+      prompt,
+      promptSummary: summarizeAppBuildingPrompt(prompt),
+      status: "starting",
+      repositoryName: repository.repositoryName,
+      repositoryFullName: repository.repositoryFullName,
+      repositoryUrl: repository.repositoryUrl,
+      repositoryCloneUrl: repository.repositoryCloneUrl,
+      cloneBranch: repository.cloneBranch,
+      pushBranch: repository.pushBranch,
+      flyApp,
+      baseUrl: flyApp ? `https://${flyApp}.fly.dev` : "",
+      containerName: "",
+      machineId: "",
+      machineInstanceId: null,
+      volumeId: null,
+      imageRef,
+      agentCommand: null,
+      revision: null,
+      queueLength: null,
+      pendingTasks: null,
+      totalCost: null,
+      lastActivityAt: null,
+      lastEventOffset: 0,
+      lastLogOffset: 0,
+      recentEvents: [],
+      recentLogs: [],
+      error: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+  }
+
+  private buildAppBuildingTargetRepository(
+    repositoryCloneUrl: string,
+    repositoryBaseBranch: string,
+    appName: string,
+    jobId: string,
+  ): Pick<
+    AppBuildingJobRecord,
+    | "repositoryName"
+    | "repositoryFullName"
+    | "repositoryUrl"
+    | "repositoryCloneUrl"
+    | "cloneBranch"
+    | "pushBranch"
+  > {
+    const repository = summarizeAppBuildingRepository(repositoryCloneUrl);
+    return {
+      repositoryName: repository.name,
+      repositoryFullName: repository.fullName,
+      repositoryUrl: repository.htmlUrl,
+      repositoryCloneUrl,
+      cloneBranch: repositoryBaseBranch || "main",
+      pushBranch: this.buildAppBuildingBranch(appName, jobId),
+    };
+  }
+
+  private buildAppBuildingBranch(appName: string, jobId: string): string {
+    const slug = this.toGitHubRepositoryName(appName).replace(/\./g, "-");
+    return `codex/${slug}-${jobId.slice(0, 8)}`;
+  }
+
+  private buildAppBuildingMachineName(jobId: string): string {
+    return `app-building-${jobId.slice(0, 8)}`;
+  }
+
+  private mapRemoteWorkerState(
+    state: string,
+  ): AppBuildingJobRecord["status"] {
+    if (
+      state === "starting"
+      || state === "processing"
+      || state === "idle"
+      || state === "stopping"
+      || state === "stopped"
+    ) {
+      return state;
+    }
+    return "error";
+  }
+
+  private mapFlyMachineState(
+    state: string | undefined,
+  ): AppBuildingJobRecord["status"] | null {
+    switch (state) {
+      case "created":
+      case "starting":
+      case "started":
+        return "starting";
+      case "stopping":
+      case "suspending":
+        return "stopping";
+      case "stopped":
+      case "suspended":
+        return "stopped";
+      case "replacing":
+      case "destroying":
+      case "destroyed":
+        return "error";
+      default:
+        return null;
+    }
+  }
+
+  private applyRemoteWorkerStatus(
+    job: AppBuildingJobRecord,
+    status: Awaited<ReturnType<typeof fetchAppBuildingStatus>>,
+  ): AppBuildingJobRecord {
+    return {
+      ...job,
+      status: this.mapRemoteWorkerState(status.state),
+      containerName: status.containerName || job.containerName,
+      revision: status.revision || null,
+      queueLength: status.pendingTasks,
+      pendingTasks: status.pendingTasks,
+      totalCost: status.totalCost,
+      lastActivityAt: status.lastActivityAt || null,
+      updatedAt: Date.now(),
+      error: null,
+    };
+  }
+
+  private async refreshAppBuildingJobFromFly(
+    job: AppBuildingJobRecord,
+  ): Promise<AppBuildingJobRecord> {
+    if (!job.machineId) {
+      return job;
+    }
+    const credentials = this.getAppBuildingFlyCredentials();
+    if (!credentials) {
+      return job;
+    }
+
+    let flyState: string | undefined;
+    try {
+      const machine = await getFlyMachine(
+        job.flyApp || credentials.appName,
+        credentials.token,
+        job.machineId,
+      );
+      flyState = machine.state;
+    } catch {
+      return job;
+    }
+
+    if (flyState === "started" && job.baseUrl) {
+      try {
+        const resolved = await this.resolveAppBuildingWorkerTarget(job);
+        const status = await fetchAppBuildingStatus(resolved.job.baseUrl, resolved.routeId);
+        return this.applyRemoteWorkerStatus(resolved.job, status);
+      } catch {
+        // Machine is up but worker HTTP isn't answering yet — still booting.
+      }
+    }
+
+    const mapped = this.mapFlyMachineState(flyState);
+    if (!mapped) {
+      return job;
+    }
+    if (mapped === job.status && (mapped !== "error" ? !job.error : true)) {
+      return job;
+    }
+    return {
+      ...job,
+      status: mapped,
+      error: mapped === "error" ? job.error : null,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private formatAppBuildingStatus(job: AppBuildingJobRecord): string {
+    const lines = [
+      `Job: ${job.id}`,
+      `Status: ${job.status}`,
+      `App: ${job.appName}`,
+      `Repo: ${job.repositoryFullName || "(pending)"}`,
+      `Repo URL: ${job.repositoryUrl || "(pending)"}`,
+      `Branch: ${job.pushBranch || "(pending)"}`,
+      `Fly app: ${job.flyApp || "(pending)"}`,
+      `Machine: ${job.machineId || "(pending)"}`,
+    ];
+
+    if (job.revision) {
+      lines.push(`Revision: ${job.revision}`);
+    }
+    if (job.pendingTasks !== null) {
+      lines.push(`Pending tasks: ${job.pendingTasks}`);
+    }
+    if (job.totalCost !== null) {
+      lines.push(`Total cost: ${job.totalCost}`);
+    }
+    if (job.lastActivityAt) {
+      lines.push(`Last activity: ${job.lastActivityAt}`);
+    }
+    if (job.error) {
+      lines.push(`Error: ${job.error}`);
+    }
+
+    return `${lines.join("\n")}\n`;
+  }
+
+  private async getAppBuildingJobOrThrow(jobId: string): Promise<AppBuildingJobRecord> {
+    const job = await this.projectDb.getAppBuildingJob(jobId);
+    if (!job) {
+      throw new Error(`Unknown app-building job: ${jobId}`);
+    }
+    return job;
+  }
+
+  private async handleAppBuildingCreate(
+    command: Extract<ReturnType<typeof parseAppBuildingCommand>, { verb: "create" }>,
+    context: import("almostnode").ShellCommandContext,
+  ): Promise<AppBuildingRunResult> {
+    const projectId = this.requireActiveProjectId();
+    const setup = this.requireAppBuildingSetup();
+    const imageRef = setup.imageRef || DEFAULT_REMOTE_APP_BUILDING_IMAGE_REF || DEFAULT_APP_BUILDING_IMAGE_REF;
+    let job = this.createAppBuildingJobRecord(
+      projectId,
+      command.name,
+      command.prompt,
+      setup.flyAppName,
+      imageRef,
+      setup.repositoryCloneUrl,
+      setup.repositoryBaseBranch,
+    );
+    await this.projectDb.putAppBuildingJob(job);
+
+    try {
+      const machineName = this.buildAppBuildingMachineName(job.id);
+
+      context.writeStdout("Logging in to Infisical...\n");
+      const infisicalToken = await infisicalLogin(
+        setup.infisicalClientId,
+        setup.infisicalClientSecret,
+      );
+
+      context.writeStdout(`Launching Fly worker in ${setup.flyAppName}...\n`);
+      const machine = await createAppBuildingMachine({
+        appName: setup.flyAppName,
+        token: setup.flyApiToken,
+        imageRef,
+        machineName,
+        env: {
+          PLAYWRIGHT_BROWSERS_PATH: "/opt/playwright",
+          PORT: "3000",
+          CONTAINER_NAME: machineName,
+          DETACHED: "1",
+          INITIAL_PROMPT: command.prompt,
+          REPO_URL: job.repositoryCloneUrl,
+          CLONE_BRANCH: job.cloneBranch,
+          PUSH_BRANCH: job.pushBranch,
+          GIT_AUTHOR_NAME: "App Builder",
+          GIT_AUTHOR_EMAIL: "app-builder@localhost",
+          GIT_COMMITTER_NAME: "App Builder",
+          GIT_COMMITTER_EMAIL: "app-builder@localhost",
+          FLY_API_TOKEN: setup.flyApiToken,
+          FLY_APP_NAME: setup.flyAppName,
+          INFISICAL_TOKEN: infisicalToken,
+          INFISICAL_PROJECT_ID: setup.infisicalProjectId,
+          INFISICAL_ENVIRONMENT: setup.infisicalEnvironment,
+        },
+      });
+
+      job = {
+        ...job,
+        containerName: machineName,
+        machineId: machine.machineId,
+        machineInstanceId: machine.instanceId,
+        volumeId: machine.volumeId,
+        imageRef,
+        updatedAt: Date.now(),
+      };
+      await this.projectDb.putAppBuildingJob(job);
+
+      await waitForFlyMachineStarted(
+        setup.flyAppName,
+        setup.flyApiToken,
+        machine.machineId,
+      );
+      const resolvedTarget = await this.resolveAppBuildingWorkerTarget(job);
+      job = resolvedTarget.job;
+      const status = await waitForWorkerReady(job.baseUrl, resolvedTarget.routeId);
+
+      job = this.applyRemoteWorkerStatus(job, status);
+      await this.projectDb.putAppBuildingJob(job);
+
+      return {
+        stdout: [
+          `Created app-building job ${job.id}`,
+          `Repo: ${job.repositoryFullName || job.repositoryCloneUrl}`,
+          `Repo URL: ${job.repositoryUrl || job.repositoryCloneUrl}`,
+          `Branch: ${job.pushBranch}`,
+          `Machine: ${job.machineId}`,
+          `Base URL: ${job.baseUrl}`,
+          "",
+          `Use \`app-building status ${job.id}\`, \`app-building logs ${job.id}\`, or \`app-building message ${job.id} --prompt "..."\`.`,
+          "",
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+        jobId: job.id,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const fallback = job.machineId
+        ? await this.refreshAppBuildingJobFromFly({ ...job, error: message })
+        : null;
+      job = fallback && fallback.status !== "error"
+        ? { ...fallback, error: message, updatedAt: Date.now() }
+        : {
+          ...job,
+          status: "error",
+          error: message,
+          updatedAt: Date.now(),
+        };
+      await this.projectDb.putAppBuildingJob(job);
+      return {
+        stdout: "",
+        stderr: `${message}\n`,
+        exitCode: 1,
+        jobId: job.id,
+      };
+    }
+  }
+
+  private async handleAppBuildingStatus(jobId: string): Promise<AppBuildingRunResult> {
+    let job = await this.getAppBuildingJobOrThrow(jobId);
+    if (!job.machineId || !job.baseUrl) {
+      return {
+        stdout: this.formatAppBuildingStatus(job),
+        stderr: job.error ? `${job.error}\n` : "",
+        exitCode: job.error ? 1 : 0,
+        jobId: job.id,
+      };
+    }
+    try {
+      const {
+        job: resolvedJob,
+        result: [status, events],
+      } = await this.callAppBuildingWorker(job, ({ job: j, routeId }) =>
+        Promise.all([
+          fetchAppBuildingStatus(j.baseUrl, routeId),
+          fetchAppBuildingEvents(j.baseUrl, routeId, j.lastEventOffset),
+        ]),
+      );
+      job = this.applyRemoteWorkerStatus(resolvedJob, status);
+      job.lastEventOffset = events.nextOffset;
+      job.recentEvents = events.items.slice(-12);
+      await this.projectDb.putAppBuildingJob(job);
+
+      if (
+        status.previewPort
+        && job.baseUrl
+        && !this.appBuildingPreviewOpenedJobs.has(job.id)
+      ) {
+        this.appBuildingPreviewOpenedJobs.add(job.id);
+        void this.openAppBuildingPreview(`${job.baseUrl.replace(/\/+$/, "")}/preview/`);
+      }
+
+      const eventText = events.items.length > 0
+        ? `\nRecent events:\n${events.items.join("\n")}\n`
+        : "";
+      return {
+        stdout: `${this.formatAppBuildingStatus(job)}${eventText}`,
+        stderr: "",
+        exitCode: 0,
+        jobId: job.id,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const fallback = job.machineId
+        ? await this.refreshAppBuildingJobFromFly({ ...job, error: message })
+        : null;
+      job = fallback && fallback.status !== "error"
+        ? { ...fallback, error: message, updatedAt: Date.now() }
+        : {
+          ...job,
+          status: "error",
+          error: message,
+          updatedAt: Date.now(),
+        };
+      await this.projectDb.putAppBuildingJob(job);
+      return {
+        stdout: this.formatAppBuildingStatus(job),
+        stderr: `${message}\n`,
+        exitCode: 1,
+        jobId: job.id,
+      };
+    }
+  }
+
+  private async handleAppBuildingLogs(
+    jobId: string,
+    _offset?: number,
+  ): Promise<AppBuildingRunResult> {
+    const job = await this.getAppBuildingJobOrThrow(jobId);
+    const { job: nextJob, newFormatted } = await this.fetchAppBuildingLogDelta(job);
+    return {
+      stdout: newFormatted.length > 0
+        ? `${newFormatted.join("\n")}\n`
+        : (nextJob.recentLogs?.length ? "" : "No logs yet.\n"),
+      stderr: "",
+      exitCode: 0,
+      jobId: nextJob.id,
+    };
+  }
+
+  /**
+   * Fetch the next page of Fly logs for a job using its cursor (or a
+   * start_time anchor on first call), dedup against the ring buffer,
+   * persist the advanced cursor + updated ring buffer, and return the delta.
+   */
+  private async fetchAppBuildingLogDelta(
+    jobInput: AppBuildingJobRecord,
+  ): Promise<{ job: AppBuildingJobRecord; newFormatted: string[] }> {
+    if (!jobInput.machineId) {
+      throw new Error(`Job ${jobInput.id} has no provisioned worker yet.`);
+    }
+    const credentials = this.getAppBuildingFlyCredentials();
+    if (!credentials) {
+      throw new Error("Fly credentials are not configured.");
+    }
+
+    const appName = jobInput.flyApp || credentials.appName;
+    const cursor = jobInput.lastLogCursor || null;
+    const startTime = cursor
+      ? null
+      : new Date(Math.max(jobInput.createdAt - 5 * 60_000, 0)).toISOString();
+
+    const page = await fetchFlyLogsSince(appName, credentials.token, {
+      machineId: jobInput.machineId,
+      cursor,
+      startTime,
+    });
+
+    this.autoCreateCardsFromLogs(jobInput.projectId, jobInput.id, page.entries);
+
+    const { newFormatted, mergedBuffer, latestTimestamp } = mergeFlyLogDelta(
+      jobInput.recentLogs ?? [],
+      page.entries,
+      { lastTimestamp: jobInput.lastLogTimestamp ?? null },
+    );
+
+    const nextCursor = page.nextToken || cursor || null;
+    const nextJob: AppBuildingJobRecord = {
+      ...jobInput,
+      lastLogCursor: nextCursor,
+      lastLogTimestamp: latestTimestamp,
+      recentLogs: mergedBuffer,
+      updatedAt: Date.now(),
+    };
+    await this.projectDb.putAppBuildingJob(nextJob);
+    return { job: nextJob, newFormatted };
+  }
+
+  /**
+   * Reset the log cursor + ring buffer so the next fetch backfills from a
+   * fresh start_time anchor. Used by the UI's "Refresh" action.
+   */
+  async resetAppBuildingLogCursor(jobId: string): Promise<AppBuildingJobRecord> {
+    const job = await this.getAppBuildingJobOrThrow(jobId);
+    const reset = {
+      ...job,
+      lastLogCursor: null,
+      lastLogTimestamp: null,
+      recentLogs: [],
+      updatedAt: Date.now(),
+    };
+    await this.projectDb.putAppBuildingJob(reset);
+    return reset;
+  }
+
+  /**
+   * Scan an incoming batch of Fly log entries for `add-task.ts` invocations
+   * and append any newly queued subtasks to the shared kanban-cards store so
+   * they appear on the board automatically. Idempotent — the same log entry
+   * never produces the same card twice thanks to content-addressed IDs.
+   */
+  private autoCreateCardsFromLogs(
+    projectId: string,
+    jobId: string,
+    entries: readonly { message?: string; timestamp?: string }[],
+  ): void {
+    if (typeof window === "undefined" || !window.localStorage) return;
+
+    const STORAGE_KEY = "almostnode.app-building.task-cards.v1";
+    let existing: unknown[];
+    try {
+      existing = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "[]");
+      if (!Array.isArray(existing)) existing = [];
+    } catch {
+      existing = [];
+    }
+
+    const existingIds = new Set(
+      existing
+        .map((card) => (card && typeof card === "object" ? (card as { id?: unknown }).id : null))
+        .filter((id): id is string => typeof id === "string"),
+    );
+
+    const newCards: Record<string, unknown>[] = [];
+    const now = Date.now();
+
+    for (const entry of entries) {
+      const subtasks = parseAddTaskLogMessage(entry.message ?? "");
+      if (!subtasks) continue;
+      for (let idx = 0; idx < subtasks.length; idx += 1) {
+        const subtask = subtasks[idx];
+        const hash = hashString(`${jobId}|${subtask.skill}|${subtask.raw}`);
+        const id = `auto:${jobId}:${hash}`;
+        if (existingIds.has(id)) continue;
+        existingIds.add(id);
+
+        const createdAt = entry.timestamp
+          ? Date.parse(entry.timestamp) || now
+          : now;
+        newCards.push({
+          id,
+          projectId,
+          jobId,
+          kind: "follow-up",
+          title: subtask.name,
+          prompt: subtask.description || subtask.raw,
+          promptSummary: subtask.description || subtask.raw,
+          status: "todo",
+          createdAt,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if (newCards.length === 0) return;
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify([...existing, ...newCards]),
+      );
+    } catch {
+      // Storage write failed (quota, privacy mode) — drop silently; the poller
+      // will try again on the next batch.
+    }
+  }
+
+  /**
+   * Subscribe to the running log stream for a job. Polls Fly's logs API using
+   * the persisted cursor, emits any new entries, and backs off on empty
+   * responses or errors. Pauses while `document.hidden` is true.
+   *
+   * Returns an unsubscribe function. Also honors `options.signal` if provided.
+   * Multiple subscribers for the same job share a single poller (refcounted).
+   */
+  subscribeAppBuildingLogs(
+    jobId: string,
+    options: {
+      onEntries?: (entries: string[], job: AppBuildingJobRecord) => void;
+      onError?: (error: unknown) => void;
+      onStatus?: (status: "active" | "paused" | "reconnecting") => void;
+      signal?: AbortSignal;
+      minIntervalMs?: number;
+      maxIntervalMs?: number;
+    } = {},
+  ): () => void {
+    const existing = this.appBuildingLogSubscriptions.get(jobId);
+    if (existing) {
+      existing.refs += 1;
+      const handlers = {
+        onEntries: options.onEntries,
+        onError: options.onError,
+        onStatus: options.onStatus,
+      };
+      existing.handlerSet.add(handlers);
+      const unsubscribe = () => {
+        existing.handlerSet.delete(handlers);
+        existing.refs -= 1;
+        if (existing.refs <= 0) existing.stop();
+      };
+      options.signal?.addEventListener("abort", unsubscribe, { once: true });
+      return unsubscribe;
+    }
+
+    const minInterval = Math.max(options.minIntervalMs ?? 1_500, 250);
+    const maxInterval = Math.max(options.maxIntervalMs ?? 10_000, minInterval);
+    const handlers = {
+      onEntries: options.onEntries,
+      onError: options.onError,
+      onStatus: options.onStatus,
+    };
+    const handlerSet = new Set<{
+      onEntries?: (entries: string[], job: AppBuildingJobRecord) => void;
+      onError?: (error: unknown) => void;
+      onStatus?: (status: "active" | "paused" | "reconnecting") => void;
+    }>();
+    handlerSet.add(handlers);
+
+    const controller = new AbortController();
+    let wakeup: (() => void) | null = null;
+    let stopped = false;
+    let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const emitEntries = (entries: string[], record: AppBuildingJobRecord) => {
+      for (const h of handlerSet) h.onEntries?.(entries, record);
+    };
+    const emitError = (err: unknown) => {
+      for (const h of handlerSet) h.onError?.(err);
+    };
+    const emitStatus = (s: "active" | "paused" | "reconnecting") => {
+      for (const h of handlerSet) h.onStatus?.(s);
+    };
+
+    const wake = () => {
+      if (pendingTimeout) {
+        clearTimeout(pendingTimeout);
+        pendingTimeout = null;
+      }
+      if (wakeup) {
+        wakeup();
+        wakeup = null;
+      }
+    };
+
+    const waitFor = (ms: number): Promise<void> =>
+      new Promise((resolve) => {
+        if (stopped) return resolve();
+        pendingTimeout = setTimeout(() => {
+          pendingTimeout = null;
+          resolve();
+        }, ms);
+        wakeup = resolve;
+      });
+
+    const waitUntilVisible = async () => {
+      if (typeof document === "undefined" || !document.hidden) return;
+      emitStatus("paused");
+      await new Promise<void>((resolve) => {
+        const handler = () => {
+          if (!document.hidden) {
+            document.removeEventListener("visibilitychange", handler);
+            resolve();
+          }
+        };
+        document.addEventListener("visibilitychange", handler);
+        controller.signal.addEventListener(
+          "abort",
+          () => {
+            document.removeEventListener("visibilitychange", handler);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    };
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      controller.abort();
+      wake();
+      this.appBuildingLogSubscriptions.delete(jobId);
+    };
+
+    const entry = {
+      refs: 1,
+      stop,
+      handlerSet,
+    };
+    this.appBuildingLogSubscriptions.set(jobId, entry);
+
+    const run = async () => {
+      let interval = minInterval;
+      let errorStreak = 0;
+      while (!stopped && !controller.signal.aborted) {
+        await waitUntilVisible();
+        if (stopped) break;
+        emitStatus(errorStreak > 0 ? "reconnecting" : "active");
+
+        let job: AppBuildingJobRecord;
+        try {
+          job = await this.getAppBuildingJobOrThrow(jobId);
+        } catch (error) {
+          emitError(error);
+          stop();
+          break;
+        }
+
+        try {
+          const { job: nextJob, newFormatted } = await this.fetchAppBuildingLogDelta(
+            job,
+          );
+          errorStreak = 0;
+          if (newFormatted.length > 0) {
+            emitEntries(newFormatted, nextJob);
+            interval = minInterval;
+          } else {
+            interval = Math.min(interval * 2, maxInterval);
+          }
+        } catch (error) {
+          errorStreak += 1;
+          emitError(error);
+          interval = Math.min(interval * 2, maxInterval);
+        }
+
+        await waitFor(interval);
+      }
+    };
+
+    void run();
+
+    const unsubscribe = () => {
+      handlerSet.delete(handlers);
+      entry.refs -= 1;
+      if (entry.refs <= 0) stop();
+    };
+    options.signal?.addEventListener("abort", unsubscribe, { once: true });
+    return unsubscribe;
+  }
+
+  private appBuildingLogSubscriptions = new Map<
+    string,
+    {
+      refs: number;
+      stop: () => void;
+      handlerSet: Set<{
+        onEntries?: (entries: string[], job: AppBuildingJobRecord) => void;
+        onError?: (error: unknown) => void;
+        onStatus?: (status: "active" | "paused" | "reconnecting") => void;
+      }>;
+    }
+  >();
+
+  private async handleAppBuildingMessage(
+    jobId: string,
+    prompt: string,
+  ): Promise<AppBuildingRunResult> {
+    let job = this.requireProvisionedAppBuildingJob(
+      await this.getAppBuildingJobOrThrow(jobId),
+    );
+    const resolvedTarget = await this.resolveAppBuildingWorkerTarget(job);
+    job = resolvedTarget.job;
+    await postAppBuildingMessage(job.baseUrl, resolvedTarget.routeId, prompt);
+
+    try {
+      const status = await fetchAppBuildingStatus(job.baseUrl, resolvedTarget.routeId);
+      job = this.applyRemoteWorkerStatus(job, status);
+    } catch {
+      job = {
+        ...job,
+        status: "processing",
+        updatedAt: Date.now(),
+      };
+    }
+
+    await this.projectDb.putAppBuildingJob(job);
+    return {
+      stdout: `Queued message for ${job.id}: ${summarizeAppBuildingPrompt(prompt, 100)}\n`,
+      stderr: "",
+      exitCode: 0,
+      jobId: job.id,
+    };
+  }
+
+  private async handleAppBuildingStop(jobId: string): Promise<AppBuildingRunResult> {
+    const setup = this.requireAppBuildingSetup();
+    let job = this.requireProvisionedAppBuildingJob(
+      await this.getAppBuildingJobOrThrow(jobId),
+    );
+
+    job = {
+      ...job,
+      status: "stopping",
+      updatedAt: Date.now(),
+    };
+    await this.projectDb.putAppBuildingJob(job);
+
+    try {
+      const resolvedTarget = await this.resolveAppBuildingWorkerTarget(job);
+      job = resolvedTarget.job;
+      await postAppBuildingStop(job.baseUrl, resolvedTarget.routeId).catch(() => undefined);
+      await destroyFlyMachine(
+        job.flyApp,
+        setup.flyApiToken,
+        job.machineId,
+        job.volumeId,
+      );
+
+      job = {
+        ...job,
+        status: "stopped",
+        stoppedAt: Date.now(),
+        updatedAt: Date.now(),
+        error: null,
+      };
+      await this.projectDb.putAppBuildingJob(job);
+      return {
+        stdout: `Stopped app-building job ${job.id}.\n`,
+        stderr: "",
+        exitCode: 0,
+        jobId: job.id,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      job = {
+        ...job,
+        status: "error",
+        error: message,
+        updatedAt: Date.now(),
+      };
+      await this.projectDb.putAppBuildingJob(job);
+      return {
+        stdout: "",
+        stderr: `${message}\n`,
+        exitCode: 1,
+        jobId: job.id,
+      };
+    }
   }
 
   async unlockKeychain(): Promise<void> {
@@ -4272,6 +7092,39 @@ export class WebIDEHost {
     });
   }
 
+  private resetAppBuildingPreview(message: string): void {
+    this.appBuildingPreviewOpenedJobs.clear();
+    this.currentAppBuildingPreviewUrl = null;
+    this.appBuildingPreviewSurface.clear(message);
+  }
+
+  async openAppBuildingPreview(url: string): Promise<void> {
+    if (!url) return;
+    if (this.currentAppBuildingPreviewUrl !== url) {
+      this.currentAppBuildingPreviewUrl = url;
+      this.appBuildingPreviewSurface.setUrl(url);
+    }
+
+    const editorService = await getService(IEditorService);
+    const previewInput = this.workbenchSurfaces.appBuildingPreviewInput;
+    const existing = previewInput.resource
+      ? editorService
+          .findEditors(previewInput.resource)
+          .find((identifier) => identifier.editor.typeId === previewInput.typeId)
+      : undefined;
+
+    if (existing?.groupId !== undefined) {
+      await editorService.openEditor(
+        previewInput,
+        { pinned: true },
+        existing.groupId,
+      );
+      return;
+    }
+
+    await editorService.openEditor(previewInput, { pinned: true });
+  }
+
   private async revealDatabaseEditor(): Promise<void> {
     const editorService = await getService(IEditorService);
     const databaseInput = this.workbenchSurfaces.databaseInput;
@@ -4328,24 +7181,69 @@ export class WebIDEHost {
     }
   }
 
-  async openPreview(): Promise<void> {
-    await this.revealPreviewEditor();
+  async ensurePreviewServerReady(timeoutMs = 15000): Promise<string> {
+    const start = Date.now();
 
     if (!this.previewUrl) {
       this.ensurePreviewServerRunning();
 
-      const start = Date.now();
-      while (!this.previewUrl && Date.now() - start < 15000) {
+      while (!this.previewUrl && Date.now() - start < timeoutMs) {
         await delay(100);
       }
     }
 
     if (this.previewUrl) {
-      this.previewSurface.focus();
-      return;
+      await this.waitForPreviewResponse(this.previewUrl, timeoutMs - (Date.now() - start));
+      return this.previewUrl;
     }
 
     throw new Error("Preview server did not become ready in time.");
+  }
+
+  private async waitForPreviewResponse(
+    previewUrl: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    if (timeoutMs <= 0) {
+      throw new Error("Preview server did not become ready in time.");
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    let lastFailure: string | null = null;
+
+    while (Date.now() < deadline) {
+      const probeUrl = new URL(previewUrl, window.location.href);
+      probeUrl.searchParams.set("__almostnode_preview_probe", String(Date.now()));
+
+      try {
+        const response = await fetch(probeUrl.toString(), {
+          cache: "no-store",
+          redirect: "follow",
+        });
+
+        if (response.ok) {
+          return;
+        }
+
+        lastFailure = `Preview responded with ${response.status}.`;
+      } catch (error) {
+        lastFailure = error instanceof Error ? error.message : String(error);
+      }
+
+      await delay(250);
+    }
+
+    throw new Error(
+      lastFailure
+        ? `Preview server did not become ready in time. ${lastFailure}`
+        : "Preview server did not become ready in time.",
+    );
+  }
+
+  async openPreview(): Promise<void> {
+    await this.revealPreviewEditor();
+    await this.ensurePreviewServerReady();
+    this.previewSurface.focus();
   }
 
   refreshPreview(): void {
@@ -5554,12 +8452,25 @@ export class WebIDEHost {
     )
       ? repository.owner as Record<string, unknown>
       : null;
-    const id = typeof repository.id === "number" ? repository.id : null;
-    const name = typeof repository.name === "string" ? repository.name : null;
     const fullName = typeof repository.full_name === "string" ? repository.full_name : null;
+    const fallbackOwnerLogin = fullName?.split("/")[0] ?? null;
+    const fallbackName = fullName?.split("/")[1] ?? null;
+    const id = typeof repository.id === "number"
+      ? repository.id
+      : fullName
+        ? Array.from(fullName).reduce(
+          (hash, character) => ((hash * 31) + character.charCodeAt(0)) >>> 0,
+          7,
+        )
+        : null;
+    const name = typeof repository.name === "string"
+      ? repository.name
+      : fallbackName;
     const cloneUrl = typeof repository.clone_url === "string" ? repository.clone_url : null;
     const htmlUrl = typeof repository.html_url === "string" ? repository.html_url : null;
-    const ownerLogin = typeof owner?.login === "string" ? owner.login : null;
+    const ownerLogin = typeof owner?.login === "string"
+      ? owner.login
+      : fallbackOwnerLogin;
 
     if (
       id === null
@@ -5773,6 +8684,10 @@ export class WebIDEHost {
         this.addConsoleEntry(level, args, timestamp);
       },
     );
+    this.removeDesktopOAuthLoopbackBridge?.();
+    this.removeDesktopOAuthLoopbackBridge = this.desktopBridge
+      ? installDesktopOAuthLoopbackBridge(this.desktopBridge)
+      : null;
 
     // Listen for console messages from the preview iframe
     window.addEventListener("message", (event) => {
@@ -5803,8 +8718,7 @@ export class WebIDEHost {
     });
 
     window.addEventListener("message", (event) => {
-      const iframeWindow = this.previewSurface.getIframe().contentWindow;
-      if (!iframeWindow || event.source !== iframeWindow) {
+      if (!this.isPreviewMessageSource(event.source)) {
         return;
       }
 
@@ -5844,6 +8758,23 @@ export class WebIDEHost {
       }
     });
 
+    window.addEventListener("message", (event) => {
+      if (!this.isPreviewMessageSource(event.source)) {
+        return;
+      }
+
+      const payload = event.data as PreviewAppBuildingBridgeRequest | undefined;
+      if (
+        !payload
+        || payload.type !== "almostnode-app-building-request"
+        || typeof payload.requestId !== "string"
+      ) {
+        return;
+      }
+
+      void this.handlePreviewAppBuildingBridgeRequest(event.source as Window, payload);
+    });
+
     this.container.on("server-ready", (_port: unknown, url: unknown) => {
       if (typeof _port !== "number" || typeof url !== "string") {
         return;
@@ -5852,20 +8783,15 @@ export class WebIDEHost {
       this.previewUrl = `${url}/`;
       this.previewStartRequested = false;
       this.clearScheduledPreviewStartRetry();
-      this.previewSurface.setUrl(this.previewUrl);
+      if (this.previewMode === "workbench") {
+        this.previewSurface.setUrl(this.previewUrl);
 
-      const iframe = this.previewSurface.getIframe();
-      const registerHMRTarget = () => {
-        if (iframe.contentWindow && this.previewPort !== null) {
-          this.container.setHMRTargetForPort(
-            this.previewPort,
-            iframe.contentWindow,
-          );
-        }
-      };
-      iframe.addEventListener("load", registerHMRTarget, { once: true });
-      // Also register immediately if iframe is already loaded
-      registerHMRTarget();
+        const iframe = this.previewSurface.getIframe();
+        iframe.addEventListener("load", () => {
+          this.registerPreviewHmrTargets();
+        }, { once: true });
+      }
+      this.registerPreviewHmrTargets();
 
       const previewTab = this.previewTerminalTabId
         ? this.terminalTabs.get(this.previewTerminalTabId)
@@ -5889,9 +8815,11 @@ export class WebIDEHost {
       this.previewSourcePickerRuntime = null;
       this.setPreviewSourcePickerActive(false);
       this.clearScheduledPreviewStartRetry();
-      this.previewSurface.clear(
-        "Preview server stopped. Run the workspace to start it again.",
-      );
+      if (this.previewMode === "workbench") {
+        this.previewSurface.clear(
+          "Preview server stopped. Run the workspace to start it again.",
+        );
+      }
       const previewTab = this.previewTerminalTabId
         ? this.terminalTabs.get(this.previewTerminalTabId)
         : null;

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron';
 import fs from 'node:fs';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -22,6 +22,10 @@ import {
   getProjectRootDirectory,
   setupProjectStorageHandlers,
 } from './project-storage';
+import {
+  createOAuthLoopbackService,
+  setupOAuthLoopbackIpcHandlers,
+} from './oauth-loopback';
 import { normalizeTemplateId } from './project-template-inference';
 import type { TemplateId } from './project-types';
 
@@ -90,6 +94,9 @@ let nodePtyHelperPermissionsEnsured = false;
 let appIsQuitting = false;
 let rendererHttpServerState: RendererHttpServerState | null = null;
 let rendererHttpServerPromise: Promise<RendererHttpServerState> | null = null;
+const oauthLoopbackService = createOAuthLoopbackService({
+  openExternal: (url) => shell.openExternal(url),
+});
 const CURRENT_DIR = dirname(fileURLToPath(import.meta.url));
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -816,6 +823,7 @@ app.whenReady().then(async () => {
   setupApplicationMenu();
   setupProjectStorageHandlers();
   setupAlmostNodeBridge();
+  setupOAuthLoopbackIpcHandlers(ipcMain, oauthLoopbackService);
   await ensureAlmostnodeToolingCliWrappers();
   await setupAlmostnodeCommandBridgeServer({
     invokeRenderer: invokeRendererForWindowId,
@@ -1004,6 +1012,7 @@ app.on('before-quit', () => {
   }
 
   void stopAlmostnodeCommandBridgeServer();
+  oauthLoopbackService.dispose();
   stopRendererHttpServer();
 });
 

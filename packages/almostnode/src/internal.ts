@@ -20,3 +20,31 @@ export {
   resolveOxcParserExtension,
   runOxcOnSource,
 } from './oxc/runtime';
+export {
+  createAppBuildingMachine,
+  DEFAULT_APP_BUILDING_IMAGE_REF,
+  destroyFlyMachine,
+  fetchAppBuildingEvents,
+  fetchAppBuildingLogs,
+  fetchAppBuildingStatus,
+  DEFAULT_FLY_LOG_BUFFER_LIMIT,
+  fetchFlyLogsPage,
+  fetchFlyLogsSince,
+  formatFlyLogEntry,
+  getFlyMachine,
+  infisicalLogin,
+  listFlyVolumes,
+  mergeFlyLogDelta,
+  parseAddTaskLogMessage,
+  pollFlyLogs,
+  postAppBuildingMessage,
+  postAppBuildingStop,
+  setInfisicalGlobalSecret,
+  waitForFlyMachineStarted,
+  waitForWorkerReady,
+} from './shims/app-building-remote';
+export type {
+  FlyLogsEntry,
+  FlyLogsPage,
+  ParsedAddTaskSubtask,
+} from './shims/app-building-remote';

@@ -99,6 +99,19 @@ const TEMPLATES: Array<{
       </svg>
     ),
   },
+  {
+    id: 'app-building',
+    title: 'App Building',
+    description: 'Control-plane starter for spawning and orchestrating remote Fly.io app-building workers from one main chat.',
+    tags: ['Fly.io', 'Infisical', 'Control Plane'],
+    logo: (
+      <svg className="hp-template__logo" viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">
+        <rect width="160" height="160" rx="38" fill="#10273A" />
+        <path d="M38 102 80 36l42 66H96l-16 24-16-24H38Z" fill="#FF7C3A" />
+        <path d="M62 102h36" stroke="#FFF3E8" strokeWidth="10" strokeLinecap="round" />
+      </svg>
+    ),
+  },
 ];
 
 const FEATURES = [

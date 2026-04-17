@@ -5,6 +5,8 @@ import type { Plugin } from "vite";
 interface TemplateMetadata {
   defaultFile: string;
   runCommand: string;
+  platforms?: Array<"web" | "desktop" | "mobile">;
+  kind?: "app" | "control-plane";
 }
 
 interface TemplateData {

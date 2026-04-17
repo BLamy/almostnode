@@ -41,6 +41,7 @@ const TEMPLATES: { id: TemplateId; label: string; description: string }[] = [
   { id: 'vite', label: 'Vite + React', description: 'React SPA with hot reload.' },
   { id: 'nextjs', label: 'Next.js', description: 'App and pages router ready to ship.' },
   { id: 'tanstack', label: 'TanStack Start', description: 'Full-stack React with server helpers.' },
+  { id: 'app-building', label: 'App Building', description: 'Control plane for remote Fly.io app-building workers.' },
 ];
 
 export function NewProjectDialog({

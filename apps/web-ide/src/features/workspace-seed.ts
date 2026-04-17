@@ -10,7 +10,7 @@ export const WORKSPACE_TEST_METADATA_PATH = `${WORKSPACE_TESTS_ROOT}/.almostnode
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
-export const TEMPLATE_IDS = ["vite", "nextjs", "tanstack"] as const;
+export const TEMPLATE_IDS = ["vite", "nextjs", "tanstack", "app-building"] as const;
 
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
 
@@ -22,6 +22,8 @@ export interface TemplateDefinition {
   id: TemplateId;
   defaultFile: string;
   runCommand: string;
+  platforms?: Array<"web" | "desktop" | "mobile">;
+  kind?: "app" | "control-plane";
   directories: string[];
   files: Record<string, string>;
 }
@@ -37,6 +39,8 @@ function buildTemplate(id: TemplateId): TemplateDefinition {
     id,
     defaultFile: `${WORKSPACE_ROOT}/${raw.metadata.defaultFile}`,
     runCommand: raw.metadata.runCommand,
+    platforms: raw.metadata.platforms,
+    kind: raw.metadata.kind,
     directories,
     files,
   };
@@ -46,6 +50,7 @@ const TEMPLATES: Record<TemplateId, TemplateDefinition> = {
   vite: buildTemplate("vite"),
   nextjs: buildTemplate("nextjs"),
   tanstack: buildTemplate("tanstack"),
+  "app-building": buildTemplate("app-building"),
 };
 
 export function getTemplateDefaults(id: TemplateId): {

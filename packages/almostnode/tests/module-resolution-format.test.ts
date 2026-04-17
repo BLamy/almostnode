@@ -53,4 +53,29 @@ describe('ModuleResolver.detectFormat', () => {
 
     expect(resolver.detectFormat('/node_modules/string-width/index.js')).toBe('cjs');
   });
+
+  it('treats shebang ESM bin files in type module packages as ESM', () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync('/node_modules/@anthropic-ai/claude-code', { recursive: true });
+    vfs.writeFileSync('/node_modules/@anthropic-ai/claude-code/package.json', JSON.stringify({
+      name: '@anthropic-ai/claude-code',
+      type: 'module',
+      bin: {
+        claude: './cli.js',
+      },
+    }));
+    vfs.writeFileSync(
+      '/node_modules/@anthropic-ai/claude-code/cli.js',
+      [
+        '#!/usr/bin/env node',
+        'import { createRequire } from "node:module";',
+        'const require = createRequire(import.meta.url);',
+        'export default require;',
+      ].join('\n'),
+    );
+
+    const resolver = new ModuleResolver(vfs);
+
+    expect(resolver.detectFormat('/node_modules/@anthropic-ai/claude-code/cli.js')).toBe('esm');
+  });
 });

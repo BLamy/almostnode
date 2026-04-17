@@ -9,9 +9,15 @@ import {
   serializeTailscaleSessionSnapshot,
   writeStoredTailscaleSessionSnapshot,
 } from './network-session';
+export { APP_BUILDING_CONFIG_PATH } from './app-building-setup';
 export const CLAUDE_AUTH_CREDENTIALS_PATH = '/home/user/.claude/.credentials.json';
 export const CLAUDE_AUTH_CONFIG_PATH = '/home/user/.claude/.config.json';
 export const CLAUDE_LEGACY_CONFIG_PATH = '/home/user/.claude.json';
+export const FLY_CONFIG_PATH = '/home/user/.fly/config.yml';
+export const NETLIFY_CONFIG_PATH = '/home/user/.config/netlify/config.json';
+export const NETLIFY_LEGACY_CONFIG_PATH = '/home/user/.netlify/config.json';
+export const WRANGLER_AUTH_CONFIG_PATH = '/home/user/.config/.wrangler/config/default.toml';
+export const WRANGLER_LEGACY_AUTH_CONFIG_PATH = '/home/user/.wrangler/config/default.toml';
 export const TAILSCALE_SESSION_KEYCHAIN_PATH = '/__almostnode/keychain/tailscale-session.json';
 const OPENCODE_DATA_ROOT = '/opencode/data/opencode';
 const OPENCODE_CONFIG_ROOT = '/opencode/config/opencode';
@@ -744,7 +750,8 @@ export class Keychain {
     const normalized = command.trim().toLowerCase();
     const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
       || matchesClaudeLaunchCommand(command)
-      || /\b(gh|replayio|tailscale|aws)\b/.test(normalized);
+      || /\b(gh|replayio|tailscale|aws|infisical|fly|netlify)\b/.test(normalized)
+      || /\bapp-building(?=\s|$)/.test(normalized);
     if (!shouldAutoRestore) {
       return true;
     }

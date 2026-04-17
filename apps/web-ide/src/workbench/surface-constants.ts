@@ -6,6 +6,12 @@ export const PREVIEW_EDITOR_RESOURCE = URI.from({
   path: "/workspace",
 });
 
+export const APP_BUILDING_PREVIEW_EDITOR_TYPE_ID = "almostnode.editor.app-building-preview";
+export const APP_BUILDING_PREVIEW_EDITOR_RESOURCE = URI.from({
+  scheme: "almostnode-app-building-preview",
+  path: "/workspace",
+});
+
 export const DATABASE_EDITOR_TYPE_ID = "almostnode.editor.database";
 export const DATABASE_EDITOR_RESOURCE = URI.from({
   scheme: "almostnode-database",

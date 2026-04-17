@@ -14,3 +14,6 @@
 [submodule "vendor/oxc"]
 	path = vendor/oxc
 	url = https://github.com/BLamy/oxc.git
+[submodule "packages/app-building"]
+	path = packages/app-building
+	url = https://github.com/replayio/app-building

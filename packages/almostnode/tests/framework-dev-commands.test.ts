@@ -185,6 +185,97 @@ describe('framework dev shell commands', () => {
     controller.abort();
     await runPromise;
   }, 30000);
+
+  it('wires `npx wrangler dev` to the internal Workers-style dev server', async () => {
+    const container = createContainer({ baseUrl: 'http://localhost:5173' });
+
+    container.vfs.mkdirSync('/workspace/cloudflare-worker/src', { recursive: true });
+    container.vfs.writeFileSync(
+      '/workspace/cloudflare-worker/src/index.ts',
+      [
+        'export default {',
+        '  async fetch(_request, env) {',
+        '    return new Response(`worker ${env.APP_NAME}`);',
+        '  },',
+        '};',
+        '',
+      ].join('\n'),
+    );
+    container.vfs.writeFileSync(
+      '/workspace/cloudflare-worker/wrangler.toml',
+      [
+        'name = "cloudflare-worker"',
+        'main = "src/index.ts"',
+        '',
+        '[vars]',
+        'APP_NAME = "ok"',
+        '',
+        '[dev]',
+        'port = 8787',
+        '',
+      ].join('\n'),
+    );
+
+    const output: string[] = [];
+    const controller = new AbortController();
+    const runPromise = container.run('cd /workspace/cloudflare-worker && npx wrangler dev', {
+      signal: controller.signal,
+      onStdout: (chunk) => output.push(chunk),
+      onStderr: (chunk) => output.push(chunk),
+    });
+
+    await waitFor(() => container.serverBridge.getServerPorts().includes(8787));
+    expect(output.join('')).toContain('/__virtual__/8787/');
+
+    const response = await container.serverBridge.handleRequest(8787, 'GET', '/', {});
+    expect(response.statusCode).toBe(200);
+    expect(response.body.toString()).toBe('worker ok');
+
+    controller.abort();
+    const result = await runPromise;
+
+    expect(result.exitCode).toBe(130);
+    expect(container.serverBridge.getServerPorts()).not.toContain(8787);
+  }, 30000);
+
+  it('wires `wrangler pages dev` to the internal Pages-style static server', async () => {
+    const container = createContainer({ baseUrl: 'http://localhost:5173' });
+
+    container.vfs.mkdirSync('/workspace/cloudflare-pages/dist', { recursive: true });
+    container.vfs.writeFileSync(
+      '/workspace/cloudflare-pages/dist/index.html',
+      '<!doctype html><html><body><main>pages ok</main></body></html>',
+    );
+    container.vfs.writeFileSync(
+      '/workspace/cloudflare-pages/wrangler.toml',
+      [
+        'name = "cloudflare-pages"',
+        'pages_build_output_dir = "dist"',
+        '',
+      ].join('\n'),
+    );
+
+    const output: string[] = [];
+    const controller = new AbortController();
+    const runPromise = container.run('cd /workspace/cloudflare-pages && wrangler pages dev', {
+      signal: controller.signal,
+      onStdout: (chunk) => output.push(chunk),
+      onStderr: (chunk) => output.push(chunk),
+    });
+
+    await waitFor(() => container.serverBridge.getServerPorts().includes(8788));
+    expect(output.join('')).toContain('/__virtual__/8788/');
+
+    const response = await container.serverBridge.handleRequest(8788, 'GET', '/', {});
+    expect(response.statusCode).toBe(200);
+    expect(response.body.toString()).toContain('pages ok');
+
+    controller.abort();
+    const result = await runPromise;
+
+    expect(result.exitCode).toBe(130);
+    expect(container.serverBridge.getServerPorts()).not.toContain(8788);
+  }, 30000);
 });
 
 function createMinimalTarball(files: Record<string, string>): Uint8Array {

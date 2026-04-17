@@ -198,6 +198,25 @@ describe("webide workspace seed", () => {
     expect(lintResult.stdout).toContain("src/App.tsx:4:1:");
   }, 60_000);
 
+  it("seeds the app-building template without vite demo tests", () => {
+    const container = createContainer();
+
+    seedWorkspace(container, "app-building");
+
+    expect(
+      container.vfs.existsSync(`${WORKSPACE_ROOT}/src/lib/app-building-dashboard.ts`),
+    ).toBe(true);
+    expect(
+      container.vfs.readFileSync(`${WORKSPACE_ROOT}/.almostnode/project.json`, "utf8"),
+    ).toContain('"templateId": "app-building"');
+
+    const pkg = JSON.parse(
+      container.vfs.readFileSync(`${WORKSPACE_ROOT}/package.json`, "utf8"),
+    ) as { name?: string };
+    expect(pkg.name).toBe("almostnode-app-building-control-plane");
+    expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`)).toBe(false);
+  });
+
   it("wires vite template npm typecheck to both tsc and tsgo-wasm", async () => {
     const container = createContainer({ cwd: WORKSPACE_ROOT });
 

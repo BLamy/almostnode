@@ -4,7 +4,9 @@ import { WebIDEHost } from '../workbench/workbench-host';
 import { ProjectManager } from '../features/project-manager';
 import { ProjectSidebar } from '../sidebar/project-sidebar';
 import { AwsSetupDialog } from '../sidebar/aws-setup-dialog';
+import { AppBuildingSetupDialog } from '../sidebar/app-building-setup-dialog';
 import type { AwsSetupDraft } from '../features/aws-setup';
+import type { AppBuildingSetupDraft } from '../features/app-building-setup';
 import type { DesktopBridge } from './bridge';
 import type { SerializedFile } from './project-snapshot';
 import { Button } from '../ui/button';
@@ -146,6 +148,7 @@ export function WorkbenchScreen({
   const [hostReady, setHostReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const [awsSetupDraft, setAwsSetupDraft] = useState<AwsSetupDraft | null>(null);
+  const [appBuildingSetupDraft, setAppBuildingSetupDraft] = useState<AppBuildingSetupDraft | null>(null);
   const [projectLaunchDialogOpen, setProjectLaunchDialogOpen] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null | undefined>(undefined);
 
@@ -215,6 +218,9 @@ export function WorkbenchScreen({
       onRequestAwsSetup: (draft) => {
         setAwsSetupDraft(draft);
       },
+      onRequestAppBuildingSetup: (draft) => {
+        setAppBuildingSetupDraft(draft);
+      },
     }).then((host) => {
       hostRef.current = host;
       // Wire project manager to host
@@ -261,6 +267,14 @@ export function WorkbenchScreen({
     manager,
   ]);
 
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || activeProjectId === undefined) {
+      return;
+    }
+    host.setActiveProjectId(activeProjectId);
+  }, [activeProjectId]);
+
   return (
     <div className="webide-shell">
       <header className="webide-header" />
@@ -301,6 +315,23 @@ export function WorkbenchScreen({
           }
           await host.saveAwsSetup(draft);
           setAwsSetupDraft(null);
+        }}
+      />
+      <AppBuildingSetupDialog
+        open={appBuildingSetupDraft !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setAppBuildingSetupDraft(null);
+          }
+        }}
+        initialDraft={appBuildingSetupDraft}
+        onSave={async (draft) => {
+          const host = hostRef.current;
+          if (!host) {
+            throw new Error('App-building setup is not ready yet.');
+          }
+          await host.saveAppBuildingSetup(draft);
+          setAppBuildingSetupDraft(null);
         }}
       />
     </div>

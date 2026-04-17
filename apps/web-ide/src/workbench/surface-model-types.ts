@@ -8,6 +8,14 @@ export interface SlotSurfaceActions {
   focus?: () => void;
 }
 
+export interface KeychainSlotPicker {
+  actionPrefix: string;
+  label: string;
+  options: Array<{ label: string; value: string }>;
+  value?: string;
+  placeholder?: string;
+}
+
 export interface KeychainSidebarSlotStatus {
   name: string;
   label: string;
@@ -19,14 +27,35 @@ export interface KeychainSidebarSlotStatus {
   statusText?: string;
   statusDetail?: string;
   selectActionPrefix?: string;
+  selectLabel?: string;
   selectOptions?: Array<{ label: string; value: string }>;
   selectValue?: string;
+  pickers?: KeychainSlotPicker[];
+}
+
+export interface KeychainVaultEnvVar {
+  name: string;
+  value: string | null;
+  source?: string;
+  note?: string;
+  excludeFromSync?: boolean;
+}
+
+export interface KeychainVaultSyncState {
+  target: string | null;
+  targetLabel: string | null;
+  busy: boolean;
+  message: string | null;
+  messageKind: "info" | "success" | "error" | null;
 }
 
 export interface KeychainSidebarState {
   slots: KeychainSidebarSlotStatus[];
   hasStoredVault: boolean;
+  hasUnlockedKey: boolean;
   supported: boolean;
+  vaultEnvVars: KeychainVaultEnvVar[];
+  vaultSync: KeychainVaultSyncState;
 }
 
 export interface KeychainSidebarActions {

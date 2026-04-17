@@ -15,6 +15,7 @@ describe('project template inference', () => {
     expect(normalizeTemplateId('vite')).toBe('vite');
     expect(normalizeTemplateId('nextjs')).toBe('nextjs');
     expect(normalizeTemplateId('tanstack')).toBe('tanstack');
+    expect(normalizeTemplateId('app-building')).toBe('app-building');
     expect(normalizeTemplateId('unknown')).toBeNull();
   });
 
@@ -71,5 +72,16 @@ describe('project template inference', () => {
         }),
       ),
     ).toBe('nextjs');
+  });
+
+  it('falls back to app-building markers when present', () => {
+    expect(
+      inferTemplateIdFromProjectFiles(
+        ['/project/src/lib/app-building-dashboard.ts'],
+        createReader({
+          '/project/package.json': JSON.stringify({ name: 'almostnode-app-building-control-plane' }),
+        }),
+      ),
+    ).toBe('app-building');
   });
 });

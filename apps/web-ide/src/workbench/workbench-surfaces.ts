@@ -20,6 +20,7 @@ import {
   registerWorkbenchEntrypoints,
 } from "./framework/registry";
 import {
+  APP_BUILDING_PREVIEW_EDITOR_TYPE_ID,
   DATABASE_EDITOR_TYPE_ID,
   DATABASE_VIEW_ID,
   FILES_VIEW_ID,
@@ -35,6 +36,8 @@ import type {
   KeychainSidebarActions,
   KeychainSidebarSlotStatus,
   KeychainSidebarState,
+  KeychainVaultEnvVar,
+  KeychainVaultSyncState,
   SlotSurfaceActions,
   SlotSurfaceState,
   TestsSidebarActions,
@@ -132,6 +135,7 @@ function mountStaticSlotSurface<TState, TActions>(
 
 export interface RegisteredWorkbenchSurfaces {
   previewInput: SimpleEditorInput;
+  appBuildingPreviewInput: SimpleEditorInput;
   databaseInput: SimpleEditorInput;
   renderedEditors: RenderedEditorFactories;
   filesViewId: string;
@@ -1203,6 +1207,125 @@ export class PreviewSurface {
 
   getBody(): HTMLDivElement {
     return this.body;
+  }
+}
+
+export class AppBuildingPreviewSurface {
+  private readonly root = document.createElement("div");
+  readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
+    createStaticSurfaceModel(
+      { slot: createDomSlot(this.root) },
+      {
+        focus: () => this.focus(),
+      },
+    );
+  private readonly toolbar = document.createElement("div");
+  private readonly status = document.createElement("div");
+  private readonly actions = document.createElement("div");
+  private readonly refreshButton = document.createElement("button");
+  private readonly openExternalButton = document.createElement("a");
+  private readonly body = document.createElement("div");
+  private readonly emptyState = document.createElement("div");
+  private readonly iframe = document.createElement("iframe");
+  private currentUrl: string | null = null;
+
+  constructor() {
+    this.root.className = "almostnode-preview-surface";
+    this.root.tabIndex = -1;
+
+    this.toolbar.className = "almostnode-preview-surface__toolbar";
+
+    this.status.className = "almostnode-preview-surface__status";
+    this.status.textContent = "Waiting for the worker dev server";
+
+    this.actions.className = "almostnode-preview-surface__actions";
+
+    this.refreshButton.type = "button";
+    this.refreshButton.className = "almostnode-preview-surface__button";
+    this.refreshButton.textContent = "Refresh";
+    this.refreshButton.addEventListener("click", () => this.reload());
+
+    this.openExternalButton.className = "almostnode-preview-surface__button";
+    this.openExternalButton.textContent = "Open in tab";
+    this.openExternalButton.target = "_blank";
+    this.openExternalButton.rel = "noopener noreferrer";
+    this.openExternalButton.style.display = "none";
+
+    this.actions.append(this.refreshButton, this.openExternalButton);
+    this.toolbar.append(this.status, this.actions);
+
+    this.body.className = "almostnode-preview-surface__body";
+
+    this.emptyState.className = "almostnode-preview-surface__empty";
+    this.emptyState.textContent =
+      "Waiting for the worker to start a dev server.";
+    this.emptyState.style.display = "grid";
+
+    this.iframe.className = "almostnode-preview-surface__frame";
+    this.iframe.title = "App Building Preview";
+    this.iframe.hidden = true;
+    this.iframe.style.display = "none";
+
+    this.body.append(this.emptyState, this.iframe);
+    this.root.append(this.toolbar, this.body);
+  }
+
+  attach(container: HTMLElement): IDisposable {
+    return mountStaticSlotSurface(
+      container,
+      APP_BUILDING_PREVIEW_EDITOR_TYPE_ID,
+      this.model,
+    );
+  }
+
+  setStatus(text: string): void {
+    this.status.textContent = text;
+    if (!this.currentUrl) {
+      this.emptyState.textContent = text;
+    }
+  }
+
+  setUrl(url: string): void {
+    if (this.currentUrl === url) return;
+    this.currentUrl = url;
+    this.status.textContent = url;
+    this.openExternalButton.href = url;
+    this.openExternalButton.style.display = "inline-flex";
+    this.emptyState.hidden = true;
+    this.emptyState.style.display = "none";
+    this.iframe.hidden = false;
+    this.iframe.style.display = "block";
+    this.iframe.src = url;
+  }
+
+  clear(text: string): void {
+    this.currentUrl = null;
+    this.status.textContent = text;
+    this.emptyState.textContent = text;
+    this.emptyState.hidden = false;
+    this.emptyState.style.display = "grid";
+    this.iframe.hidden = true;
+    this.iframe.style.display = "none";
+    this.iframe.removeAttribute("src");
+    this.openExternalButton.removeAttribute("href");
+    this.openExternalButton.style.display = "none";
+  }
+
+  reload(): void {
+    if (!this.currentUrl) return;
+    this.iframe.src = this.currentUrl;
+  }
+
+  getCurrentUrl(): string | null {
+    return this.currentUrl;
+  }
+
+  focus(): void {
+    if (!this.iframe.hidden) {
+      this.iframe.focus();
+      return;
+    }
+    this.root.focus();
   }
 }
 
@@ -2340,7 +2463,16 @@ export class KeychainSidebarSurface {
     {
       slots: [],
       hasStoredVault: false,
+      hasUnlockedKey: false,
       supported: false,
+      vaultEnvVars: [],
+      vaultSync: {
+        target: null,
+        targetLabel: null,
+        busy: false,
+        message: null,
+        messageKind: null,
+      },
     },
     {
       dispatch: (action) => {
@@ -2356,12 +2488,27 @@ export class KeychainSidebarSurface {
 
   update(
     slots: KeychainSlotStatus[],
-    options?: { hasStoredVault: boolean; supported: boolean },
+    options?: {
+      hasStoredVault: boolean;
+      supported: boolean;
+      hasUnlockedKey?: boolean;
+      vaultEnvVars?: KeychainVaultEnvVar[];
+      vaultSync?: KeychainVaultSyncState;
+    },
   ): void {
     this.model.setSnapshot({
       slots,
       hasStoredVault: options?.hasStoredVault ?? false,
+      hasUnlockedKey: options?.hasUnlockedKey ?? false,
       supported: options?.supported ?? false,
+      vaultEnvVars: options?.vaultEnvVars ?? [],
+      vaultSync: options?.vaultSync ?? {
+        target: null,
+        targetLabel: null,
+        busy: false,
+        message: null,
+        messageKind: null,
+      },
     });
   }
 
@@ -2426,6 +2573,7 @@ export function registerWorkbenchSurfaces(options: {
   filesSurface: FilesSidebarSurface;
   openCodeSurface: OpenCodeTerminalSurface;
   previewSurface: PreviewSurface;
+  appBuildingPreviewSurface: AppBuildingPreviewSurface;
   terminalSurface: TerminalPanelSurface;
   databaseSurface: DatabaseSidebarSurface;
   databaseBrowserSurface: DatabaseBrowserSurface;
@@ -2443,6 +2591,7 @@ export function registerWorkbenchSurfaces(options: {
       filesSurface: options.filesSurface,
       openCodeSurface: options.openCodeSurface,
       previewSurface: options.previewSurface,
+      appBuildingPreviewSurface: options.appBuildingPreviewSurface,
       terminalSurface: options.terminalSurface,
       databaseSurface: options.databaseSurface,
       databaseBrowserSurface: options.databaseBrowserSurface,
@@ -2454,6 +2603,9 @@ export function registerWorkbenchSurfaces(options: {
   return {
     get previewInput() {
       return entrypoints.createEditorInput(PREVIEW_EDITOR_TYPE_ID);
+    },
+    get appBuildingPreviewInput() {
+      return entrypoints.createEditorInput(APP_BUILDING_PREVIEW_EDITOR_TYPE_ID);
     },
     get databaseInput() {
       return entrypoints.createEditorInput(DATABASE_EDITOR_TYPE_ID);

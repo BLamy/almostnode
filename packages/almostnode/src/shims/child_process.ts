@@ -43,6 +43,7 @@ import type {
   ShellCommandContext,
   ShellCommandDefinition,
   ShellCommandExecOptions,
+  ShellCommandKeyEvent,
   ShellCommandResult,
 } from '../shell-commands';
 import type { VirtualFS } from '../virtual-fs';
@@ -63,7 +64,7 @@ import {
 
 type ManagedFrameworkDevServer = {
   key: string;
-  framework: 'next' | 'vite';
+  framework: 'next' | 'vite' | 'wrangler' | 'wrangler-pages';
   port: number;
   stop: () => void;
   clearInstalledPackagesCache?: () => void;
@@ -491,6 +492,40 @@ function createShellCommandExecutionContext(
   };
 }
 
+function createShellCommandStdinEmitter(): ActiveProcessStdin & {
+  on: (event: string, listener: (...args: unknown[]) => void) => void;
+  off: (event: string, listener: (...args: unknown[]) => void) => void;
+} {
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+  return {
+    emit(event, ...args) {
+      const handlers = listeners.get(event);
+      if (!handlers) return;
+      for (const handler of Array.from(handlers)) {
+        try {
+          handler(...args);
+        } catch {
+          // Ignore listener errors so one broken handler doesn't break the rest.
+        }
+      }
+    },
+    listenerCount(event) {
+      return listeners.get(event)?.size || 0;
+    },
+    on(event, listener) {
+      let bucket = listeners.get(event);
+      if (!bucket) {
+        bucket = new Set();
+        listeners.set(event, bucket);
+      }
+      bucket.add(listener);
+    },
+    off(event, listener) {
+      listeners.get(event)?.delete(listener);
+    },
+  };
+}
+
 function adaptShellCommandDefinition(
   controller: ChildProcessController,
   definition: ShellCommandDefinition
@@ -505,6 +540,12 @@ function adaptShellCommandDefinition(
     };
     let stdout = '';
     let stderr = '';
+
+    const stdinEmitter = createShellCommandStdinEmitter();
+    const previousActiveProcessStdin = execution?.activeProcessStdin ?? null;
+    if (execution) {
+      execution.activeProcessStdin = stdinEmitter;
+    }
 
     const syncEnvMap = (): void => {
       for (const key of Array.from(ctx.env.keys())) {
@@ -539,6 +580,29 @@ function adaptShellCommandDefinition(
       vfs: controller.vfs,
       writeStdout,
       writeStderr,
+      onInput: (handler) => {
+        const listener = (data: unknown) => {
+          if (typeof data === 'string') handler(data);
+        };
+        stdinEmitter.on('data', listener);
+        return () => stdinEmitter.off('data', listener);
+      },
+      onKeypress: (handler) => {
+        const listener = (ch: unknown, key: unknown) => {
+          handler(
+            typeof ch === 'string' ? ch : undefined,
+            (key || {}) as ShellCommandKeyEvent,
+          );
+        };
+        stdinEmitter.on('keypress', listener);
+        return () => stdinEmitter.off('keypress', listener);
+      },
+      terminalSize: execution
+        ? {
+          columns: execution.columns,
+          rows: execution.rows,
+        }
+        : undefined,
       setEnv: (name, value) => {
         if (value == null) {
           delete currentEnv[name];
@@ -588,14 +652,20 @@ function adaptShellCommandDefinition(
       },
     };
 
-    const result = await definition.execute(args, shellContext);
-    return {
-      stdout: stdout + (result.stdout || ''),
-      stderr: stderr + (result.stderr || ''),
-      exitCode: result.exitCode,
-      env: result.env || stripInternalChildProcessEnv(currentEnv),
-      stdoutEncoding: result.stdoutEncoding,
-    };
+    try {
+      const result = await definition.execute(args, shellContext);
+      return {
+        stdout: stdout + (result.stdout || ''),
+        stderr: stderr + (result.stderr || ''),
+        exitCode: result.exitCode,
+        env: result.env || stripInternalChildProcessEnv(currentEnv),
+        stdoutEncoding: result.stdoutEncoding,
+      };
+    } finally {
+      if (execution && execution.activeProcessStdin === stdinEmitter) {
+        execution.activeProcessStdin = previousActiveProcessStdin;
+      }
+    }
   });
 
   return createRegisteredShellCommand(definition.name, command, {
@@ -1600,6 +1670,21 @@ module.exports = (async () => {
       return runTscCommand(commandArgs, ctx, controller.vfs);
     }
 
+    const isWranglerNpxCommand = commandName === 'wrangler'
+      || commandName.startsWith('wrangler@')
+      || packageSpec === 'wrangler'
+      || packageSpec?.startsWith('wrangler@');
+    if (isWranglerNpxCommand) {
+      if (commandArgs[0] === 'dev') {
+        return runWranglerWorkerDev(commandArgs.slice(1), ctx);
+      }
+      if (commandArgs[0] === 'pages' && commandArgs[1] === 'dev') {
+        return runWranglerPagesDev(commandArgs.slice(2), ctx);
+      }
+      const { runWranglerCommand } = await import('./wrangler-command');
+      return runWranglerCommand(commandArgs, ctx, controller.vfs, controller.keychain);
+    }
+
     const installSpec = packageSpec || commandName;
 
     const { parsePackageSpec } = await import('../npm/index');
@@ -2100,6 +2185,326 @@ module.exports = (async () => {
     }
   });
 
+  const runWranglerWorkerDev = async (args: string[], ctx: CommandContext): Promise<JustBashExecResult> => {
+    const env = envToRecord(ctx.env);
+    const execution = getExecutionContextFromEnv(controller, env);
+    const normalizedCwd = normalizeCommandCwd(ctx.cwd);
+    const { readWranglerConfig, resolveWranglerWorkerEntry } = await import('./wrangler-config');
+
+    if (args.includes('--help') || args.includes('-h')) {
+      return {
+        stdout:
+          'Usage: wrangler dev [entry] [options]\n\nSupported:\n  -p, --port <n>\n      --ip <host>\n      --host <host>\n      --local-protocol <http|https>\n',
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+
+    const config = readWranglerConfig(controller.vfs, normalizedCwd);
+    let entryArg: string | null = null;
+    let port = config.dev.port ?? 8787;
+    let host = config.dev.ip || 'localhost';
+    let localProtocol = config.dev.localProtocol ?? 'http';
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (!arg.startsWith('-') && entryArg === null) {
+        entryArg = arg;
+        continue;
+      }
+      if (arg === '-p' || arg === '--port') {
+        const parsed = parsePortValue(args[i + 1]);
+        if (parsed == null) {
+          return { stdout: '', stderr: 'wrangler dev: invalid --port value\n', exitCode: 1 };
+        }
+        port = parsed;
+        i++;
+        continue;
+      }
+      if (arg.startsWith('--port=')) {
+        const parsed = parsePortValue(arg.slice('--port='.length));
+        if (parsed == null) {
+          return { stdout: '', stderr: 'wrangler dev: invalid --port value\n', exitCode: 1 };
+        }
+        port = parsed;
+        continue;
+      }
+      if (arg === '--ip' || arg === '--host') {
+        const value = args[i + 1];
+        if (!value || value.startsWith('-')) {
+          return { stdout: '', stderr: `wrangler dev: missing value for ${arg}\n`, exitCode: 1 };
+        }
+        host = value;
+        i++;
+        continue;
+      }
+      if (arg.startsWith('--ip=')) {
+        host = arg.slice('--ip='.length).trim() || host;
+        continue;
+      }
+      if (arg.startsWith('--host=')) {
+        host = arg.slice('--host='.length).trim() || host;
+        continue;
+      }
+      if (arg === '--local-protocol') {
+        const value = args[i + 1];
+        if (value !== 'http' && value !== 'https') {
+          return { stdout: '', stderr: 'wrangler dev: --local-protocol must be http or https\n', exitCode: 1 };
+        }
+        localProtocol = value;
+        i++;
+        continue;
+      }
+      if (arg.startsWith('--local-protocol=')) {
+        const value = arg.slice('--local-protocol='.length);
+        if (value !== 'http' && value !== 'https') {
+          return { stdout: '', stderr: 'wrangler dev: --local-protocol must be http or https\n', exitCode: 1 };
+        }
+        localProtocol = value;
+        continue;
+      }
+      return { stdout: '', stderr: `wrangler dev: unknown argument '${arg}'\n`, exitCode: 1 };
+    }
+
+    const entry = resolveWranglerWorkerEntry(controller.vfs, normalizedCwd, config, entryArg);
+    if (!entry) {
+      return {
+        stdout: '',
+        stderr: 'wrangler dev: could not find a worker entrypoint. Add `main` to wrangler.toml/jsonc or create src/index.ts.\n',
+        exitCode: 1,
+      };
+    }
+    if (!controller.vfs.existsSync(entry)) {
+      return {
+        stdout: '',
+        stderr: `wrangler dev: worker entry ${entry} does not exist\n`,
+        exitCode: 1,
+      };
+    }
+
+    const key = `wrangler:${port}`;
+    stopManagedFrameworkServersOnPort(controller, port);
+
+    try {
+      const [{ CloudflareWorkerDevServer }, { getServerBridge }] = await Promise.all([
+        import('../frameworks/cloudflare-worker-dev-server'),
+        import('../server-bridge'),
+      ]);
+
+      const bridge = getServerBridge();
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        try {
+          await bridge.initServiceWorker();
+        } catch {
+          // Service worker is optional for shell command usage.
+        }
+      }
+
+      const server = new CloudflareWorkerDevServer(controller.vfs, {
+        port,
+        root: normalizedCwd,
+        entry,
+        envBindings: { ...config.vars },
+        localProtocol,
+        runtimeEnv: { ...env },
+      });
+
+      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
+      server.start();
+
+      const url = `${bridge.getServerUrl(port)}/`;
+      const startup = `wrangler dev server running at ${url} (host: ${host}, entry: ${entry})\n`;
+      emitStreamData(execution, startup, 'stdout');
+
+      controller.frameworkDevServers.set(key, {
+        key,
+        framework: 'wrangler',
+        port,
+        stop: () => {
+          try {
+            server.stop();
+          } finally {
+            bridge.unregisterServer(port);
+          }
+        },
+      });
+
+      if (execution?.signal) {
+        await waitForAbort(execution.signal);
+        stopManagedFrameworkServer(controller, key);
+        return { stdout: startup, stderr: '', exitCode: 130 };
+      }
+
+      return { stdout: startup, stderr: '', exitCode: 0 };
+    } catch (error) {
+      stopManagedFrameworkServer(controller, key);
+      const message = error instanceof Error ? error.message : String(error);
+      return { stdout: '', stderr: `wrangler dev: failed to start dev server: ${message}\n`, exitCode: 1 };
+    }
+  };
+
+  const runWranglerPagesDev = async (args: string[], ctx: CommandContext): Promise<JustBashExecResult> => {
+    const env = envToRecord(ctx.env);
+    const execution = getExecutionContextFromEnv(controller, env);
+    const normalizedCwd = normalizeCommandCwd(ctx.cwd);
+    const { readWranglerConfig, resolveWranglerPagesDirectory } = await import('./wrangler-config');
+
+    if (args.includes('--help') || args.includes('-h')) {
+      return {
+        stdout:
+          'Usage: wrangler pages dev [dir] [options]\n\nSupported:\n  -p, --port <n>\n      --ip <host>\n      --host <host>\n      --local-protocol <http|https>\n',
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+
+    const config = readWranglerConfig(controller.vfs, normalizedCwd);
+    let assetsArg: string | null = null;
+    let port = config.dev.port ?? 8788;
+    let host = config.dev.ip || 'localhost';
+    let localProtocol = config.dev.localProtocol ?? 'http';
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (!arg.startsWith('-') && assetsArg === null) {
+        assetsArg = arg;
+        continue;
+      }
+      if (arg === '-p' || arg === '--port') {
+        const parsed = parsePortValue(args[i + 1]);
+        if (parsed == null) {
+          return { stdout: '', stderr: 'wrangler pages dev: invalid --port value\n', exitCode: 1 };
+        }
+        port = parsed;
+        i++;
+        continue;
+      }
+      if (arg.startsWith('--port=')) {
+        const parsed = parsePortValue(arg.slice('--port='.length));
+        if (parsed == null) {
+          return { stdout: '', stderr: 'wrangler pages dev: invalid --port value\n', exitCode: 1 };
+        }
+        port = parsed;
+        continue;
+      }
+      if (arg === '--ip' || arg === '--host') {
+        const value = args[i + 1];
+        if (!value || value.startsWith('-')) {
+          return { stdout: '', stderr: `wrangler pages dev: missing value for ${arg}\n`, exitCode: 1 };
+        }
+        host = value;
+        i++;
+        continue;
+      }
+      if (arg.startsWith('--ip=')) {
+        host = arg.slice('--ip='.length).trim() || host;
+        continue;
+      }
+      if (arg.startsWith('--host=')) {
+        host = arg.slice('--host='.length).trim() || host;
+        continue;
+      }
+      if (arg === '--local-protocol') {
+        const value = args[i + 1];
+        if (value !== 'http' && value !== 'https') {
+          return { stdout: '', stderr: 'wrangler pages dev: --local-protocol must be http or https\n', exitCode: 1 };
+        }
+        localProtocol = value;
+        i++;
+        continue;
+      }
+      if (arg.startsWith('--local-protocol=')) {
+        const value = arg.slice('--local-protocol='.length);
+        if (value !== 'http' && value !== 'https') {
+          return { stdout: '', stderr: 'wrangler pages dev: --local-protocol must be http or https\n', exitCode: 1 };
+        }
+        localProtocol = value;
+        continue;
+      }
+      return { stdout: '', stderr: `wrangler pages dev: unknown argument '${arg}'\n`, exitCode: 1 };
+    }
+
+    const assetsDir = resolveWranglerPagesDirectory(controller.vfs, normalizedCwd, config, assetsArg);
+    if (!assetsDir) {
+      return {
+        stdout: '',
+        stderr: 'wrangler pages dev: could not find a Pages assets directory. Pass one explicitly or set `pages_build_output_dir` in wrangler.toml/jsonc.\n',
+        exitCode: 1,
+      };
+    }
+
+    let isDirectory = false;
+    try {
+      isDirectory = controller.vfs.statSync(assetsDir).isDirectory();
+    } catch {
+      isDirectory = false;
+    }
+    if (!isDirectory) {
+      return {
+        stdout: '',
+        stderr: `wrangler pages dev: assets directory ${assetsDir} does not exist\n`,
+        exitCode: 1,
+      };
+    }
+
+    const key = `wrangler-pages:${port}`;
+    stopManagedFrameworkServersOnPort(controller, port);
+
+    try {
+      const [{ CloudflarePagesDevServer }, { getServerBridge }] = await Promise.all([
+        import('../frameworks/cloudflare-pages-dev-server'),
+        import('../server-bridge'),
+      ]);
+
+      const bridge = getServerBridge();
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        try {
+          await bridge.initServiceWorker();
+        } catch {
+          // Service worker is optional for shell command usage.
+        }
+      }
+
+      const server = new CloudflarePagesDevServer(controller.vfs, {
+        port,
+        root: normalizedCwd,
+        assetsDir,
+      });
+
+      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
+      server.start();
+
+      const url = `${bridge.getServerUrl(port)}/`;
+      const startup = `wrangler pages dev server running at ${url} (host: ${host}, assets: ${assetsDir}, protocol: ${localProtocol})\n`;
+      emitStreamData(execution, startup, 'stdout');
+
+      controller.frameworkDevServers.set(key, {
+        key,
+        framework: 'wrangler-pages',
+        port,
+        stop: () => {
+          try {
+            server.stop();
+          } finally {
+            bridge.unregisterServer(port);
+          }
+        },
+      });
+
+      if (execution?.signal) {
+        await waitForAbort(execution.signal);
+        stopManagedFrameworkServer(controller, key);
+        return { stdout: startup, stderr: '', exitCode: 130 };
+      }
+
+      return { stdout: startup, stderr: '', exitCode: 0 };
+    } catch (error) {
+      stopManagedFrameworkServer(controller, key);
+      const message = error instanceof Error ? error.message : String(error);
+      return { stdout: '', stderr: `wrangler pages dev: failed to start dev server: ${message}\n`, exitCode: 1 };
+    }
+  };
+
   const gitCommand = defineCommand('git', async (args, ctx) => {
     const { runGitCommand } = await import('./git-command');
     return runGitCommand(args, ctx, controller.vfs);
@@ -2334,9 +2739,51 @@ module.exports = (async () => {
     return runAwsCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
+
   const replayioCommand = defineCommand('replayio', async (args, ctx) => {
     const { runReplayioCommand } = await import('./replayio-command');
     return runReplayioCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const flyCommand = defineCommand('fly', async (args, ctx) => {
+    const { runFlyCommand } = await import('./fly-command');
+    return runFlyCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const flyctlCommand = defineCommand('flyctl', async (args, ctx) => {
+    const { runFlyCommand } = await import('./fly-command');
+    return runFlyCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const netlifyCommand = defineCommand('netlify', async (args, ctx) => {
+    const { runNetlifyCommand } = await import('./netlify-command');
+    return runNetlifyCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const neonCommand = defineCommand('neon', async (args, ctx) => {
+    const { runNeonCommand } = await import('./neon-command');
+    return runNeonCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const neonctlCommand = defineCommand('neonctl', async (args, ctx) => {
+    const { runNeonCommand } = await import('./neon-command');
+    return runNeonCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const wranglerCommand = defineCommand('wrangler', async (args, ctx) => {
+    const firstArg = args[0];
+    if (firstArg === 'dev') {
+      return runWranglerWorkerDev(args.slice(1), ctx);
+    }
+    if (firstArg === 'pages') {
+      const secondArg = args[1];
+      if (secondArg === 'dev') {
+        return runWranglerPagesDev(args.slice(2), ctx);
+      }
+    }
+
+    const { runWranglerCommand } = await import('./wrangler-command');
+    return runWranglerCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
   // --- grep / egrep / fgrep / rg commands (delegate to search provider) ---
@@ -2366,7 +2813,11 @@ module.exports = (async () => {
     for (const [, server] of controller.frameworkDevServers) {
       const cmd = server.framework === 'next'
         ? `next dev (port ${server.port})`
-        : `vite (port ${server.port})`;
+        : server.framework === 'vite'
+          ? `vite (port ${server.port})`
+          : server.framework === 'wrangler'
+            ? `wrangler dev (port ${server.port})`
+            : `wrangler pages dev (port ${server.port})`;
       lines.push(`${String(pid).padStart(5)} ?        Sl    ${cmd}`);
       pid += 1000;
     }
@@ -2507,6 +2958,15 @@ module.exports = (async () => {
   controllersById.set(controller.id, controller);
   defaultChildProcessController = controller;
 
+  const infisicalCommand = adaptShellCommandDefinition(controller, {
+    name: 'infisical',
+    interceptShellParsing: true,
+    execute: async (args, shellCtx) => {
+      const { runInfisicalCommand } = await import('./infisical-command');
+      return runInfisicalCommand(args, shellCtx, controller.vfs, controller.keychain);
+    },
+  });
+
   const builtinShellCommands: RegisteredShellCommand[] = [
     ...syntheticShellCommands.map((command) =>
       createRegisteredShellCommand(command.name, command)),
@@ -2530,7 +2990,14 @@ module.exports = (async () => {
     createRegisteredShellCommand(almostnodeLspBridgeCommand.name, almostnodeLspBridgeCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(ghCommand.name, ghCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(awsCommand.name, awsCommand, { interceptShellParsing: true }),
+    infisicalCommand,
     createRegisteredShellCommand(replayioCommand.name, replayioCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(flyCommand.name, flyCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(flyctlCommand.name, flyctlCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(netlifyCommand.name, netlifyCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(neonCommand.name, neonCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(neonctlCommand.name, neonctlCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(wranglerCommand.name, wranglerCommand, { interceptShellParsing: true }),
     createRegisteredShellCommand(grepCommand.name, grepCommand),
     createRegisteredShellCommand(egrepCommand.name, egrepCommand),
     createRegisteredShellCommand(fgrepCommand.name, fgrepCommand),

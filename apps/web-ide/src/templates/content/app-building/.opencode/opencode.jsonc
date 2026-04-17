@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "almostnode",
+  "formatter": {
+    "oxfmt": {
+      "command": ["oxfmt", "$FILE"],
+      "extensions": [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]
+    }
+  },
+  "lsp": {
+    "typescript": {
+      "disabled": true
+    },
+    "oxlint": {
+      "command": ["almostnode-lsp-bridge", "oxlint"],
+      "extensions": [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]
+    },
+    "tsgo": {
+      "command": ["almostnode-lsp-bridge", "tsgo"],
+      "extensions": [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]
+    }
+  }
+}

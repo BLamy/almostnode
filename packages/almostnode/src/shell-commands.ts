@@ -17,6 +17,14 @@ export interface ShellCommandExecOptions {
   args?: string[];
 }
 
+export interface ShellCommandKeyEvent {
+  sequence?: string;
+  name?: string;
+  ctrl?: boolean;
+  meta?: boolean;
+  shift?: boolean;
+}
+
 export interface ShellCommandContext {
   cwd: string;
   env: Record<string, string>;
@@ -32,6 +40,26 @@ export interface ShellCommandContext {
     command: string,
     options?: ShellCommandExecOptions,
   ) => Promise<ShellCommandResult>;
+  /**
+   * Subscribe to raw keystrokes delivered to the running command while it owns
+   * the terminal. Only fires once the command's execution has `activeProcessStdin`
+   * set (which `adaptShellCommandDefinition` does for every registered shell
+   * command). Returns an unsubscribe function.
+   */
+  onInput?: (handler: (data: string) => void) => () => void;
+  /**
+   * Like {@link onInput} but delivers decoded keypress events (arrow keys, enter,
+   * ctrl+c, etc.). Useful for building select menus and other TUI widgets.
+   */
+  onKeypress?: (
+    handler: (ch: string | undefined, key: ShellCommandKeyEvent) => void,
+  ) => () => void;
+  /**
+   * Terminal dimensions reported to the running command (columns, rows). Mirrors
+   * the values `process.stdout.columns` / `process.stdout.rows` would expose to a
+   * Node child process running in the same terminal.
+   */
+  terminalSize?: { columns: number; rows: number };
 }
 
 export interface ShellCommandDefinition {

@@ -1,10 +1,13 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import type { SurfaceModel } from "../../framework/model";
 import { useSurfaceModel } from "../../framework/hooks";
 import type {
   KeychainSidebarActions,
   KeychainSidebarSlotStatus,
   KeychainSidebarState,
+  KeychainSlotPicker,
+  KeychainVaultEnvVar,
+  KeychainVaultSyncState,
 } from "../../surface-model-types";
 
 const ICON_GITHUB = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
@@ -100,59 +103,73 @@ function ServiceCard(props: {
             {slot.statusDetail}
           </div>
         ) : null}
-        {slot.selectOptions?.length && slot.selectActionPrefix ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-              marginTop: "6px",
-            }}
-          >
-            <span
+        {(() => {
+          const pickers: KeychainSlotPicker[] = slot.pickers
+            ? slot.pickers
+            : slot.selectOptions?.length && slot.selectActionPrefix
+              ? [{
+                  actionPrefix: slot.selectActionPrefix,
+                  label: slot.selectLabel ?? "Exit Node",
+                  options: slot.selectOptions,
+                  value: slot.selectValue,
+                }]
+              : [];
+          if (pickers.length === 0) return null;
+          return pickers.map((picker, index) => (
+            <div
+              key={`${picker.actionPrefix}-${index}`}
               style={{
-                fontSize: "10px",
-                color: "var(--almostnode-quiet)",
-                textTransform: "uppercase",
-                letterSpacing: "0.4px",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                marginTop: "6px",
               }}
             >
-              Exit Node
-            </span>
-            <select
-              value={slot.selectValue ?? ""}
-              onChange={(event) => {
-                if (!event.currentTarget.value) {
-                  return;
-                }
-                actions.dispatch(
-                  `${slot.selectActionPrefix}:${event.currentTarget.value}`,
-                );
-              }}
-              style={{
-                minWidth: 0,
-                maxWidth: "160px",
-                background: "var(--almostnode-button-bg)",
-                color: "var(--text)",
-                border: "1px solid var(--almostnode-border-subtle)",
-                borderRadius: "4px",
-                padding: "3px 6px",
-                fontSize: "11px",
-              }}
-            >
-              {slot.selectValue ? null : (
-                <option value="" disabled>
-                  Choose…
-                </option>
-              )}
-              {slot.selectOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        ) : null}
+              <span
+                style={{
+                  fontSize: "10px",
+                  color: "var(--almostnode-quiet)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.4px",
+                }}
+              >
+                {picker.label}
+              </span>
+              <select
+                value={picker.value ?? ""}
+                onChange={(event) => {
+                  if (!event.currentTarget.value) {
+                    return;
+                  }
+                  actions.dispatch(
+                    `${picker.actionPrefix}:${event.currentTarget.value}`,
+                  );
+                }}
+                style={{
+                  minWidth: 0,
+                  maxWidth: "160px",
+                  background: "var(--almostnode-button-bg)",
+                  color: "var(--text)",
+                  border: "1px solid var(--almostnode-border-subtle)",
+                  borderRadius: "4px",
+                  padding: "3px 6px",
+                  fontSize: "11px",
+                }}
+              >
+                {picker.value ? null : (
+                  <option value="" disabled>
+                    {picker.placeholder ?? "Choose…"}
+                  </option>
+                )}
+                {picker.options.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ));
+        })()}
       </div>
       {slot.canAuth ? (
         <button
@@ -193,10 +210,230 @@ function ServiceCard(props: {
   );
 }
 
+function buildEnvFileText(envVars: KeychainVaultEnvVar[]): string {
+  return envVars
+    .filter((entry) => entry.value)
+    .map((entry) => `${entry.name}=${entry.value}`)
+    .join("\n");
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+  return false;
+}
+
+function VaultEnvPanel(props: {
+  envVars: KeychainVaultEnvVar[];
+  vaultSync: KeychainVaultSyncState;
+  onSync: () => void;
+}) {
+  const { envVars, vaultSync, onSync } = props;
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const populated = envVars.filter((entry) => entry.value);
+  const syncTargetLabel = vaultSync.targetLabel ?? "target";
+  const syncDisabled = !vaultSync.target || vaultSync.busy || populated.length === 0;
+  const syncTitle = !vaultSync.target
+    ? "Pick an Infisical project from the slot above to enable sync."
+    : populated.length === 0
+      ? "No populated env vars to sync."
+      : `Push these env vars to ${syncTargetLabel}.`;
+  const syncMessageColor = vaultSync.messageKind === "error"
+    ? "var(--almostnode-danger, #f87171)"
+    : vaultSync.messageKind === "success"
+      ? "var(--almostnode-success)"
+      : "var(--almostnode-quiet)";
+
+  const flashCopied = (key: string) => {
+    setCopiedKey(key);
+    window.setTimeout(() => {
+      setCopiedKey((current) => (current === key ? null : current));
+    }, 1200);
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: "10px",
+        padding: "10px",
+        borderRadius: "6px",
+        border: "1px solid var(--almostnode-border-subtle)",
+        background: "var(--almostnode-card-bg)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "8px",
+        }}
+      >
+        <span
+          style={{
+            fontSize: "10px",
+            textTransform: "uppercase",
+            letterSpacing: "0.4px",
+            color: "var(--almostnode-quiet)",
+          }}
+        >
+          Vault env vars
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <button
+            type="button"
+            disabled={populated.length === 0}
+            onClick={() => {
+              const text = buildEnvFileText(envVars);
+              if (!text) return;
+              void copyToClipboard(text).then((ok) => {
+                if (ok) flashCopied("__all__");
+              });
+            }}
+            style={{
+              background: "var(--almostnode-button-bg)",
+              color: "var(--muted)",
+              border: "1px solid var(--almostnode-border-subtle)",
+              padding: "3px 8px",
+              borderRadius: "4px",
+              cursor: populated.length === 0 ? "not-allowed" : "pointer",
+              fontSize: "10px",
+              fontWeight: 500,
+              opacity: populated.length === 0 ? 0.6 : 1,
+            }}
+          >
+            {copiedKey === "__all__" ? "Copied" : "Copy as .env"}
+          </button>
+          <button
+            type="button"
+            disabled={syncDisabled}
+            onClick={onSync}
+            title={syncTitle}
+            style={{
+              background: "var(--almostnode-button-bg)",
+              color: "var(--muted)",
+              border: "1px solid var(--almostnode-border-subtle)",
+              padding: "3px 8px",
+              borderRadius: "4px",
+              cursor: syncDisabled ? "not-allowed" : "pointer",
+              fontSize: "10px",
+              fontWeight: 500,
+              opacity: syncDisabled ? 0.6 : 1,
+            }}
+          >
+            {vaultSync.busy ? "Syncing…" : "Sync to Infisical"}
+          </button>
+        </div>
+      </div>
+      {vaultSync.message ? (
+        <div
+          style={{
+            fontSize: "10px",
+            color: syncMessageColor,
+            lineHeight: 1.4,
+          }}
+        >
+          {vaultSync.message}
+        </div>
+      ) : null}
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+        {envVars.map((entry) => {
+          const hasValue = Boolean(entry.value);
+          const masked = entry.value
+            ? entry.value.length <= 10
+              ? "•".repeat(entry.value.length)
+              : `${entry.value.slice(0, 4)}…${entry.value.slice(-4)}`
+            : "—";
+
+          return (
+            <div
+              key={entry.name}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "4px 6px",
+                borderRadius: "4px",
+                background: "var(--almostnode-button-bg)",
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: "11px",
+                    fontFamily:
+                      "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    color: "var(--text)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {entry.name}
+                </div>
+                <div
+                  style={{
+                    fontSize: "10px",
+                    color: hasValue
+                      ? "var(--almostnode-quiet)"
+                      : "var(--almostnode-quiet)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    fontStyle: hasValue ? "normal" : "italic",
+                  }}
+                  title={entry.note ?? entry.source}
+                >
+                  {hasValue ? masked : entry.note ?? "Not available"}
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={!hasValue}
+                onClick={() => {
+                  if (!entry.value) return;
+                  void copyToClipboard(entry.value).then((ok) => {
+                    if (ok) flashCopied(entry.name);
+                  });
+                }}
+                style={{
+                  background: "var(--almostnode-button-bg)",
+                  color: "var(--muted)",
+                  border: "1px solid var(--almostnode-border-subtle)",
+                  padding: "2px 6px",
+                  borderRadius: "3px",
+                  cursor: hasValue ? "pointer" : "not-allowed",
+                  fontSize: "10px",
+                  fontWeight: 500,
+                  flexShrink: 0,
+                  opacity: hasValue ? 1 : 0.5,
+                }}
+              >
+                {copiedKey === entry.name ? "Copied" : "Copy"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function KeychainSidebarView(props: {
   model: SurfaceModel<KeychainSidebarState, KeychainSidebarActions>;
 }) {
   const [state, actions] = useSurfaceModel(props.model);
+  const [vaultExpanded, setVaultExpanded] = useState(false);
 
   return (
     <div
@@ -261,44 +498,63 @@ export default function KeychainSidebarView(props: {
       <div
         style={{
           display: "flex",
-          gap: "6px",
+          flexDirection: "column",
           paddingTop: "12px",
           marginTop: "8px",
           borderTop: "1px solid var(--almostnode-toolbar-border)",
         }}
       >
-        {!state.supported ? (
-          <span
-            style={{ fontSize: "11px", color: "var(--almostnode-quiet)" }}
-          >
-            Passkey not supported in this browser
-          </span>
-        ) : state.hasStoredVault ? (
-          <>
+        <div style={{ display: "flex", gap: "6px" }}>
+          {!state.supported ? (
+            <span
+              style={{ fontSize: "11px", color: "var(--almostnode-quiet)" }}
+            >
+              Passkey not supported in this browser
+            </span>
+          ) : state.hasStoredVault ? (
+            <>
+              {state.hasUnlockedKey ? (
+                <button
+                  type="button"
+                  onClick={() => setVaultExpanded((value) => !value)}
+                  style={footerButtonStyles(true)}
+                >
+                  {vaultExpanded ? "Hide Vault" : "View Vault"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => actions.dispatch("unlock")}
+                  style={footerButtonStyles(true)}
+                >
+                  Unlock Vault
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => actions.dispatch("forget")}
+                style={footerButtonStyles(false)}
+              >
+                Forget
+              </button>
+            </>
+          ) : (
             <button
               type="button"
-              onClick={() => actions.dispatch("unlock")}
+              onClick={() => actions.dispatch("save")}
               style={footerButtonStyles(true)}
             >
-              Unlock Vault
+              Save with Passkey
             </button>
-            <button
-              type="button"
-              onClick={() => actions.dispatch("forget")}
-              style={footerButtonStyles(false)}
-            >
-              Forget
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            onClick={() => actions.dispatch("save")}
-            style={footerButtonStyles(true)}
-          >
-            Save with Passkey
-          </button>
-        )}
+          )}
+        </div>
+        {state.hasUnlockedKey && vaultExpanded ? (
+          <VaultEnvPanel
+            envVars={state.vaultEnvVars}
+            vaultSync={state.vaultSync}
+            onSync={() => actions.dispatch("sync-vault-env:infisical")}
+          />
+        ) : null}
       </div>
     </div>
   );

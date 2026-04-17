@@ -140,7 +140,7 @@ export class ModuleResolver {
 
     const packageType = this.getPackageTypeForFile(filePath);
 
-    const code = sourceOverride ?? this.safeReadFile(filePath);
+    const code = stripShebang(sourceOverride ?? this.safeReadFile(filePath));
     if (!code) {
       return packageType === 'module' ? 'esm' : 'cjs';
     }
@@ -369,6 +369,15 @@ export class ModuleResolver {
       return '';
     }
   }
+}
+
+function stripShebang(source: string): string {
+  if (!source.startsWith('#!')) {
+    return source;
+  }
+
+  const newlineIndex = source.indexOf('\n');
+  return newlineIndex === -1 ? '' : source.slice(newlineIndex + 1);
 }
 
 function hasEsmSyntax(ast: AstNode): boolean {

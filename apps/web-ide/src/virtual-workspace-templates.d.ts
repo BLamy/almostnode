@@ -2,6 +2,8 @@ declare module "virtual:workspace-templates" {
   interface TemplateMetadata {
     defaultFile: string;
     runCommand: string;
+    platforms?: Array<"web" | "desktop" | "mobile">;
+    kind?: "app" | "control-plane";
   }
 
   interface TemplateData {

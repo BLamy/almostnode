@@ -57,15 +57,92 @@ export interface ResumableThreadRecord {
   updatedAt: number;
 }
 
+export type AppBuildingJobStatus =
+  | 'starting'
+  | 'processing'
+  | 'idle'
+  | 'stopping'
+  | 'stopped'
+  | 'error';
+
+export interface AppBuildingConfig {
+  projectId: string;
+  flyAppName: string | null;
+  imageRef: string | null;
+  infisicalEnvironment: string | null;
+  hasInfisicalCredentials: boolean;
+  hasFlyApiToken: boolean;
+  updatedAt: number;
+}
+
+export interface AppBuildingJobRecord {
+  id: string;
+  projectId: string;
+  appName: string;
+  prompt: string;
+  promptSummary: string;
+  status: AppBuildingJobStatus;
+  repositoryName: string;
+  repositoryFullName: string;
+  repositoryUrl: string;
+  repositoryCloneUrl: string;
+  cloneBranch: string;
+  pushBranch: string;
+  flyApp: string;
+  baseUrl: string;
+  containerName: string;
+  machineId: string;
+  machineInstanceId?: string | null;
+  volumeId: string | null;
+  imageRef: string | null;
+  agentCommand: string | null;
+  revision: string | null;
+  queueLength: number | null;
+  pendingTasks: number | null;
+  totalCost: number | null;
+  lastActivityAt: string | null;
+  lastEventOffset: number;
+  lastLogOffset: number;
+  /** Opaque Fly logs API pagination cursor (`next_token`). */
+  lastLogCursor?: string | null;
+  /** ISO timestamp of the most recent log entry we've persisted. */
+  lastLogTimestamp?: string | null;
+  recentEvents?: string[];
+  recentLogs?: string[];
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  stoppedAt?: number;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DB_NAME = 'almostnode-webide';
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 
 const STORE_PROJECTS = 'projects';
 const STORE_PROJECT_FILES = 'project-files';
 const STORE_PROJECT_AGENT_STATE = 'project-agent-state';
 const STORE_RESUMABLE_THREADS = 'resumable-threads';
+const STORE_APP_BUILDING_CONFIG = 'app-building-config';
+const STORE_APP_BUILDING_JOBS = 'app-building-jobs';
+
+function isMissingStoreError(error: unknown): boolean {
+  if (
+    typeof DOMException !== 'undefined'
+    && error instanceof DOMException
+    && error.name === 'NotFoundError'
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('specified object stores was not found')
+    || message.includes('Object store')
+    || message.includes('Missing store:')
+  );
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -91,6 +168,15 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_RESUMABLE_THREADS)) {
         const threads = db.createObjectStore(STORE_RESUMABLE_THREADS, { keyPath: 'id' });
         threads.createIndex('projectId', 'projectId', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_APP_BUILDING_CONFIG)) {
+        db.createObjectStore(STORE_APP_BUILDING_CONFIG, { keyPath: 'projectId' });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_APP_BUILDING_JOBS)) {
+        const jobs = db.createObjectStore(STORE_APP_BUILDING_JOBS, { keyPath: 'id' });
+        jobs.createIndex('projectId', 'projectId', { unique: false });
       }
     };
 
@@ -186,99 +272,160 @@ export class ProjectDB {
     return this.dbPromise;
   }
 
+  private resetDb(): void {
+    const current = this.dbPromise;
+    this.dbPromise = null;
+    if (current) {
+      void current.then((db) => db.close()).catch(() => {});
+    }
+  }
+
+  private async withDb<T>(operation: (db: IDBDatabase) => Promise<T>): Promise<T> {
+    const db = await this.getDb();
+    try {
+      return await operation(db);
+    } catch (error) {
+      if (!isMissingStoreError(error)) {
+        throw error;
+      }
+      this.resetDb();
+      const repairedDb = await this.getDb();
+      return operation(repairedDb);
+    }
+  }
+
   // ── Projects ──
 
   async listProjects(): Promise<ProjectRecord[]> {
-    const db = await this.getDb();
-    const projects = await txGetAll<ProjectRecord>(db, STORE_PROJECTS);
-    return projects.sort((a, b) => b.lastModified - a.lastModified);
+    return this.withDb(async (db) => {
+      const projects = await txGetAll<ProjectRecord>(db, STORE_PROJECTS);
+      return projects.sort((a, b) => b.lastModified - a.lastModified);
+    });
   }
 
   async getProject(id: string): Promise<ProjectRecord | undefined> {
-    const db = await this.getDb();
-    return txGet<ProjectRecord>(db, STORE_PROJECTS, id);
+    return this.withDb((db) => txGet<ProjectRecord>(db, STORE_PROJECTS, id));
   }
 
   async putProject(project: ProjectRecord): Promise<void> {
-    const db = await this.getDb();
-    await txPut(db, STORE_PROJECTS, project);
+    await this.withDb((db) => txPut(db, STORE_PROJECTS, project));
   }
 
   async deleteProject(id: string): Promise<void> {
-    const db = await this.getDb();
-    await txDelete(db, STORE_PROJECTS, id);
-    await txDelete(db, STORE_PROJECT_FILES, id);
-    await txDelete(db, STORE_PROJECT_AGENT_STATE, id);
-    await txDeleteByIndex(db, STORE_RESUMABLE_THREADS, 'projectId', id);
+    await this.withDb(async (db) => {
+      await txDelete(db, STORE_PROJECTS, id);
+      await txDelete(db, STORE_PROJECT_FILES, id);
+      await txDelete(db, STORE_PROJECT_AGENT_STATE, id);
+      await txDelete(db, STORE_APP_BUILDING_CONFIG, id);
+      await txDeleteByIndex(db, STORE_APP_BUILDING_JOBS, 'projectId', id);
+      await txDeleteByIndex(db, STORE_RESUMABLE_THREADS, 'projectId', id);
+    });
   }
 
   // ── Project Files ──
 
   async getProjectFiles(projectId: string): Promise<SerializedFile[]> {
-    const db = await this.getDb();
-    const record = await txGet<ProjectFilesRecord>(db, STORE_PROJECT_FILES, projectId);
-    return record?.files ?? [];
+    return this.withDb(async (db) => {
+      const record = await txGet<ProjectFilesRecord>(db, STORE_PROJECT_FILES, projectId);
+      return record?.files ?? [];
+    });
   }
 
   async saveProjectFiles(projectId: string, files: SerializedFile[]): Promise<void> {
-    const db = await this.getDb();
-    const record: ProjectFilesRecord = {
-      projectId,
-      files,
-      savedAt: Date.now(),
-    };
-    await txPut(db, STORE_PROJECT_FILES, record);
+    await this.withDb(async (db) => {
+      const record: ProjectFilesRecord = {
+        projectId,
+        files,
+        savedAt: Date.now(),
+      };
+      await txPut(db, STORE_PROJECT_FILES, record);
+    });
   }
 
   // ── Agent State ──
 
   async getProjectAgentState(projectId: string): Promise<ProjectAgentStateRecord | undefined> {
-    const db = await this.getDb();
-    return txGet<ProjectAgentStateRecord>(db, STORE_PROJECT_AGENT_STATE, projectId);
+    return this.withDb((db) => txGet<ProjectAgentStateRecord>(db, STORE_PROJECT_AGENT_STATE, projectId));
   }
 
   async putProjectAgentState(state: ProjectAgentStateRecord): Promise<void> {
-    const db = await this.getDb();
-    await txPut(db, STORE_PROJECT_AGENT_STATE, state);
+    await this.withDb((db) => txPut(db, STORE_PROJECT_AGENT_STATE, state));
   }
 
   // ── Resumable Threads ──
 
   async listResumableThreads(projectId: string): Promise<ResumableThreadRecord[]> {
-    const db = await this.getDb();
-    const threads = await txGetAllByIndex<ResumableThreadRecord>(
-      db,
-      STORE_RESUMABLE_THREADS,
-      'projectId',
-      projectId,
-    );
-    return threads.sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.withDb(async (db) => {
+      const threads = await txGetAllByIndex<ResumableThreadRecord>(
+        db,
+        STORE_RESUMABLE_THREADS,
+        'projectId',
+        projectId,
+      );
+      return threads.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
   }
 
   async listAllResumableThreads(): Promise<ResumableThreadRecord[]> {
-    const db = await this.getDb();
-    const threads = await txGetAll<ResumableThreadRecord>(db, STORE_RESUMABLE_THREADS);
-    return threads.sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.withDb(async (db) => {
+      const threads = await txGetAll<ResumableThreadRecord>(db, STORE_RESUMABLE_THREADS);
+      return threads.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
   }
 
   async getResumableThread(id: string): Promise<ResumableThreadRecord | undefined> {
-    const db = await this.getDb();
-    return txGet<ResumableThreadRecord>(db, STORE_RESUMABLE_THREADS, id);
+    return this.withDb((db) => txGet<ResumableThreadRecord>(db, STORE_RESUMABLE_THREADS, id));
   }
 
   async replaceProjectResumableThreads(
     projectId: string,
     threads: ResumableThreadRecord[],
   ): Promise<void> {
-    const db = await this.getDb();
-    await txDeleteByIndex(db, STORE_RESUMABLE_THREADS, 'projectId', projectId);
-    for (const thread of threads) {
-      await txPut(db, STORE_RESUMABLE_THREADS, thread);
-    }
+    await this.withDb(async (db) => {
+      await txDeleteByIndex(db, STORE_RESUMABLE_THREADS, 'projectId', projectId);
+      for (const thread of threads) {
+        await txPut(db, STORE_RESUMABLE_THREADS, thread);
+      }
+    });
   }
 
   async putResumableThread(thread: ResumableThreadRecord): Promise<void> {
-    const db = await this.getDb();
-    await txPut(db, STORE_RESUMABLE_THREADS, thread);
+    await this.withDb((db) => txPut(db, STORE_RESUMABLE_THREADS, thread));
+  }
+
+  // ── App Building Config ──
+
+  async getAppBuildingConfig(projectId: string): Promise<AppBuildingConfig | undefined> {
+    return this.withDb((db) => txGet<AppBuildingConfig>(db, STORE_APP_BUILDING_CONFIG, projectId));
+  }
+
+  async putAppBuildingConfig(config: AppBuildingConfig): Promise<void> {
+    await this.withDb((db) => txPut(db, STORE_APP_BUILDING_CONFIG, config));
+  }
+
+  // ── App Building Jobs ──
+
+  async listAppBuildingJobs(projectId: string): Promise<AppBuildingJobRecord[]> {
+    return this.withDb(async (db) => {
+      const jobs = await txGetAllByIndex<AppBuildingJobRecord>(
+        db,
+        STORE_APP_BUILDING_JOBS,
+        'projectId',
+        projectId,
+      );
+      return jobs.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  }
+
+  async getAppBuildingJob(id: string): Promise<AppBuildingJobRecord | undefined> {
+    return this.withDb((db) => txGet<AppBuildingJobRecord>(db, STORE_APP_BUILDING_JOBS, id));
+  }
+
+  async putAppBuildingJob(job: AppBuildingJobRecord): Promise<void> {
+    await this.withDb((db) => txPut(db, STORE_APP_BUILDING_JOBS, job));
+  }
+
+  async deleteAppBuildingJob(id: string): Promise<void> {
+    await this.withDb((db) => txDelete(db, STORE_APP_BUILDING_JOBS, id));
   }
 }

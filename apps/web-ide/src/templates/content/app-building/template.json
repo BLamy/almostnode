@@ -1,0 +1,6 @@
+{
+  "defaultFile": "src/App.tsx",
+  "runCommand": "npm run dev",
+  "kind": "control-plane",
+  "platforms": ["web", "desktop"]
+}

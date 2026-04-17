@@ -59,7 +59,12 @@ function hasAnyPath(paths: Set<string>, candidates: string[]): boolean {
 }
 
 export function normalizeTemplateId(value: unknown): TemplateId | null {
-  if (value === 'vite' || value === 'nextjs' || value === 'tanstack') {
+  if (
+    value === 'vite'
+    || value === 'nextjs'
+    || value === 'tanstack'
+    || value === 'app-building'
+  ) {
     return value;
   }
   return null;
@@ -87,6 +92,13 @@ export function inferTemplateIdFromProjectFiles(
     || deps.has('@tanstack/react-router')
   ) {
     return 'tanstack';
+  }
+
+  if (
+    hasAnyPath(paths, ['/project/src/lib/app-building-dashboard.ts'])
+    || packageJson?.name === 'almostnode-app-building-control-plane'
+  ) {
+    return 'app-building';
   }
 
   return 'vite';

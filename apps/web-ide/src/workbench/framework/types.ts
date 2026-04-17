@@ -15,6 +15,7 @@ export interface WorkbenchMountContext {
     filesSurface: { model: SurfaceModel<unknown, unknown> };
     openCodeSurface: { model: SurfaceModel<unknown, unknown> };
     previewSurface: { model: SurfaceModel<unknown, unknown> };
+    appBuildingPreviewSurface: { model: SurfaceModel<unknown, unknown> };
     terminalSurface: { model: SurfaceModel<unknown, unknown> };
     databaseSurface: { model: SurfaceModel<unknown, unknown> };
     databaseBrowserSurface: { model: SurfaceModel<unknown, unknown> };
