@@ -41,6 +41,7 @@ import {
   AWS_AUTH_PATH,
   AWS_CONFIG_PATH,
 } from '../../../packages/almostnode/src/shims/aws-storage';
+import { NEON_CREDENTIALS_PATH } from '../../../packages/almostnode/src/shims/neon-auth';
 
 const CLAUDE_SLOT_PATHS = [
   CLAUDE_AUTH_CREDENTIALS_PATH,
@@ -181,8 +182,23 @@ function createKeychain(vfs = new VirtualFS()): Keychain {
   kc.registerSlot('claude', CLAUDE_SLOT_PATHS);
   kc.registerSlot('github', [GH_HOSTS_PATH]);
   kc.registerSlot('aws', AWS_SLOT_PATHS);
+  kc.registerSlot('neon', [NEON_CREDENTIALS_PATH]);
   kc.registerSlot('opencode', OPENCODE_SLOT_PATHS);
   return kc;
+}
+
+function writeNeonCredentialsFile(vfs: VirtualFS, token: string): string {
+  const raw = `${JSON.stringify({
+    access_token: token,
+    refresh_token: `refresh-${token}`,
+    token_type: 'Bearer',
+    expires_at: Date.now() + 3600_000,
+    personal_api_key: `napi_${token}`,
+    personal_api_key_id: 'key_test_1',
+  }, null, 2)}\n`;
+  vfs.mkdirSync('/home/user/.config/neonctl', { recursive: true });
+  vfs.writeFileSync(NEON_CREDENTIALS_PATH, raw);
+  return raw;
 }
 
 function writeClaudeAuth(vfs: VirtualFS, accessToken: string): string {
@@ -1036,6 +1052,30 @@ describe('Keychain', () => {
 
     expect(freshVfs.readFileSync(AWS_CONFIG_PATH, 'utf8')).toBe(config);
     expect(freshVfs.readFileSync(AWS_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshKc.getState().hasLiveCredentials).toBe(true);
+  });
+
+  it('auto-restores saved Neon credentials before neon commands run', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    const credentials = writeNeonCredentialsFile(setupVfs, 'neon-access-saved');
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    expect(freshVfs.existsSync(NEON_CREDENTIALS_PATH)).toBe(false);
+
+    await expect(freshKc.prepareForCommand('neon auth login')).resolves.toBe(true);
+
+    expect(freshVfs.readFileSync(NEON_CREDENTIALS_PATH, 'utf8')).toBe(credentials);
     expect(freshKc.getState().hasLiveCredentials).toBe(true);
   });
 

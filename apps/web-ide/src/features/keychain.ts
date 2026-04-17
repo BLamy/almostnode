@@ -750,7 +750,7 @@ export class Keychain {
     const normalized = command.trim().toLowerCase();
     const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
       || matchesClaudeLaunchCommand(command)
-      || /\b(gh|replayio|tailscale|aws|infisical|fly|netlify)\b/.test(normalized)
+      || /\b(gh|replayio|tailscale|aws|infisical|fly|netlify|neon)\b/.test(normalized)
       || /\bapp-building(?=\s|$)/.test(normalized);
     if (!shouldAutoRestore) {
       return true;

@@ -251,6 +251,7 @@ function BuilderSetupForm({
 export function AppBuilderScreen() {
   const navigate = useNavigate();
   const workbenchRef = useRef<HTMLDivElement | null>(null);
+  const bootstrappedRef = useRef(false);
   const hostRef = useRef<WebIDEHost | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const previousProjectIdRef = useRef<string | null>(null);
@@ -281,6 +282,7 @@ export function AppBuilderScreen() {
   const builderReady = bootState === 'ready' && allServicesSignedIn && savedSetupValid;
 
   useEffect(() => {
+    if (bootstrappedRef.current) return;
     const workbenchElement = workbenchRef.current;
     if (!workbenchElement) {
       return;
@@ -299,6 +301,7 @@ export function AppBuilderScreen() {
     setBootState('booting');
     setPreviewState('loading');
     setPreviewError(null);
+    bootstrappedRef.current = true;
 
     void import('../workbench/workbench-host').then(({ WebIDEHost }) => WebIDEHost.bootstrap({
       elements: { workbench: workbenchElement },
