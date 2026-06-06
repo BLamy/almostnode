@@ -222,7 +222,7 @@ describe("KeychainSidebarSurface", () => {
     expect(container.textContent).toContain("Missing 2 items");
     expect(container.textContent).toContain("Fly app");
     const inlineButtons = Array.from(container.querySelectorAll("button")).filter(
-      (button) => !["Save with Passkey", "Unlock Vault", "Forget", "View Vault", "Hide Vault"].includes(button.textContent ?? ""),
+      (button) => !["Save with Passkey", "Unlock Vault", "Forget", "View Vault", "Hide Vault", "+ Add OAuth service"].includes(button.textContent ?? ""),
     );
     expect(inlineButtons.length).toBe(0);
   });
@@ -249,7 +249,7 @@ describe("KeychainSidebarSurface", () => {
 
     expect(container.textContent).toContain("Ready for remote jobs");
     const inlineButtons = Array.from(container.querySelectorAll("button")).filter(
-      (button) => !["Save with Passkey", "Unlock Vault", "Forget", "View Vault", "Hide Vault"].includes(button.textContent ?? ""),
+      (button) => !["Save with Passkey", "Unlock Vault", "Forget", "View Vault", "Hide Vault", "+ Add OAuth service"].includes(button.textContent ?? ""),
     );
     expect(inlineButtons.length).toBe(0);
   });

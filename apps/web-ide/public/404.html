@@ -18,6 +18,48 @@
 
         url.pathname = `${basePath}/`;
         url.search = params.toString();
+      } else if (routePath === "/oauth/callback") {
+        // OAuth popup callback path. GH Pages 404s on this URL because no
+        // static asset exists at /oauth/callback; the popup is transient
+        // (postMessage + window.close) so we handle it inline here rather
+        // than booting the SPA. We mirror the route component logic in
+        // src/routes/oauth.callback.tsx, which serves the same purpose in
+        // dev mode where Vite serves the SPA directly.
+        //
+        // We relay on TWO channels — `window.opener.postMessage` AND a
+        // same-origin `BroadcastChannel` — because Cross-Origin-Opener-
+        // Policy frequently nulls `window.opener` during the provider's
+        // cross-origin authorize hop. When that happens the opener path
+        // is a silent no-op and the BroadcastChannel is the only way the
+        // IDE hears back. Keep this in sync with oauth.callback.tsx.
+        const payload = {
+          type: "almostnode:oauth-callback",
+          code: params.get("code") || undefined,
+          state: params.get("state") || undefined,
+          error: params.get("error") || undefined,
+          errorDescription: params.get("error_description") || undefined,
+        };
+        try {
+          if (window.opener) {
+            window.opener.postMessage(payload, window.location.origin);
+          }
+        } catch (err) {
+          // Best-effort — BroadcastChannel below is authoritative.
+        }
+        try {
+          if (typeof BroadcastChannel === "function") {
+            const channel = new BroadcastChannel("almostnode:oauth-callback-channel");
+            channel.postMessage(payload);
+            setTimeout(function () { try { channel.close(); } catch (_) { /* ignore */ } }, 0);
+          }
+        } catch (err) {
+          // ignore
+        }
+        try { window.close(); } catch (err) { /* ignore */ }
+        // If window.close() did nothing (e.g. opened in a normal tab),
+        // fall through to redirect home.
+        url.pathname = `${basePath}/`;
+        url.search = "";
       } else {
         url.pathname = `${basePath}/`;
         url.search = "";

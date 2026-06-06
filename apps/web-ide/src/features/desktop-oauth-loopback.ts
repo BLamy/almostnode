@@ -50,3 +50,9 @@ export function installDesktopOAuthLoopbackBridge(
     }
   };
 }
+
+export function getDesktopOAuthLoopbackBridge():
+  | DesktopOAuthLoopbackBridge
+  | undefined {
+  return (globalThis as OAuthGlobal)[DESKTOP_OAUTH_LOOPBACK_BRIDGE_KEY];
+}

@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { SurfaceModel } from "../../framework/model";
 import { useSurfaceModel } from "../../framework/hooks";
 import type {
@@ -9,6 +9,7 @@ import type {
   KeychainVaultEnvVar,
   KeychainVaultSyncState,
 } from "../../surface-model-types";
+import { AddOAuthServiceModal } from "./add-oauth-service-modal";
 
 const ICON_GITHUB = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
 const ICON_REPLAY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM6.5 4.5l5 3.5-5 3.5v-7z"/></svg>`;
@@ -171,43 +172,91 @@ function ServiceCard(props: {
           ));
         })()}
       </div>
-      {slot.canAuth ? (
-        <button
-          type="button"
-          disabled={isDisabled}
-          onClick={() => actions.dispatch(action)}
-          style={{
-            background: isDisabled
-              ? "var(--almostnode-button-bg)"
-              : isLogout
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "4px",
+          flexShrink: 0,
+        }}
+      >
+        {slot.refreshAction ? (
+          <button
+            type="button"
+            disabled={Boolean(slot.refreshing)}
+            onClick={() => actions.dispatch(slot.refreshAction!)}
+            title="Refresh access token now"
+            style={iconButtonStyles(Boolean(slot.refreshing))}
+          >
+            {slot.refreshing ? "…" : "↻"}
+          </button>
+        ) : null}
+        {slot.removeAction ? (
+          <button
+            type="button"
+            onClick={() => actions.dispatch(slot.removeAction!)}
+            title="Remove this OAuth service"
+            style={iconButtonStyles(false)}
+          >
+            ×
+          </button>
+        ) : null}
+        {slot.canAuth ? (
+          <button
+            type="button"
+            disabled={isDisabled}
+            onClick={() => actions.dispatch(action)}
+            style={{
+              background: isDisabled
                 ? "var(--almostnode-button-bg)"
-                : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)",
-            color: isDisabled
-              ? "var(--almostnode-quiet)"
-              : isLogout
-                ? "var(--muted)"
-                : "var(--almostnode-success)",
-            border: `1px solid ${
-              isDisabled
-                ? "var(--almostnode-border-subtle)"
                 : isLogout
+                  ? "var(--almostnode-button-bg)"
+                  : "color-mix(in srgb, var(--almostnode-success) 18%, transparent)",
+              color: isDisabled
+                ? "var(--almostnode-quiet)"
+                : isLogout
+                  ? "var(--muted)"
+                  : "var(--almostnode-success)",
+              border: `1px solid ${
+                isDisabled
                   ? "var(--almostnode-border-subtle)"
-                  : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)"
-            }`,
-            padding: "3px 10px",
-            borderRadius: "4px",
-            cursor: isDisabled ? "not-allowed" : "pointer",
-            fontSize: "11px",
-            fontWeight: 500,
-            flexShrink: 0,
-            opacity: isDisabled ? 0.7 : 1,
-          }}
-        >
-          {slot.authLabel ?? (isLogout ? "Logout" : "Login")}
-        </button>
-      ) : null}
+                  : isLogout
+                    ? "var(--almostnode-border-subtle)"
+                    : "color-mix(in srgb, var(--almostnode-success) 35%, transparent)"
+              }`,
+              padding: "3px 10px",
+              borderRadius: "4px",
+              cursor: isDisabled ? "not-allowed" : "pointer",
+              fontSize: "11px",
+              fontWeight: 500,
+              opacity: isDisabled ? 0.7 : 1,
+            }}
+          >
+            {slot.authLabel ?? (isLogout ? "Logout" : "Login")}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
+}
+
+function iconButtonStyles(disabled: boolean): CSSProperties {
+  return {
+    background: "var(--almostnode-button-bg)",
+    color: disabled ? "var(--almostnode-quiet)" : "var(--muted)",
+    border: "1px solid var(--almostnode-border-subtle)",
+    width: "22px",
+    height: "22px",
+    padding: 0,
+    borderRadius: "4px",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontSize: "13px",
+    lineHeight: 1,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontFamily: "inherit",
+  };
 }
 
 function buildEnvFileText(envVars: KeychainVaultEnvVar[]): string {
@@ -435,6 +484,27 @@ export default function KeychainSidebarView(props: {
   const [state, actions] = useSurfaceModel(props.model);
   const [vaultExpanded, setVaultExpanded] = useState(false);
 
+  // The OAuth modal references the `almostnode-oauth-spin` keyframes for its
+  // loading spinner. Inject them once on mount so the rule is available even
+  // when the modal mounts on its own (no other component owns the spinner).
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const styleId = "almostnode-oauth-spin-keyframes";
+    if (document.getElementById(styleId)) return;
+    const style = document.createElement("style");
+    style.id = styleId;
+    style.textContent =
+      "@keyframes almostnode-oauth-spin { to { transform: rotate(360deg); } }";
+    document.head.appendChild(style);
+  }, []);
+
+  // Split the slot list into built-in vs. user-added OAuth services so we can
+  // render a thin separator between them.
+  const builtInSlots = state.slots.filter((slot) => !slot.userOAuthServiceId);
+  const userOAuthSlots = state.slots.filter((slot) => Boolean(slot.userOAuthServiceId));
+  const addFlow = state.addServiceFlow;
+  const modalOpen = Boolean(addFlow && addFlow.status !== "idle");
+
   return (
     <div
       className="almostnode-keychain-sidebar"
@@ -488,11 +558,57 @@ export default function KeychainSidebarView(props: {
           display: "flex",
           flexDirection: "column",
           gap: "6px",
+          overflowY: "auto",
+          minHeight: 0,
         }}
       >
-        {state.slots.map((slot) => (
+        {builtInSlots.map((slot) => (
           <ServiceCard key={slot.name} slot={slot} actions={actions} />
         ))}
+
+        {userOAuthSlots.length > 0 ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              marginTop: "10px",
+              marginBottom: "2px",
+            }}
+          >
+            <span
+              style={{
+                fontSize: "10px",
+                textTransform: "uppercase",
+                letterSpacing: "0.4px",
+                color: "var(--almostnode-quiet)",
+                fontWeight: 600,
+              }}
+            >
+              Your OAuth services
+            </span>
+            <span
+              style={{
+                flex: 1,
+                height: "1px",
+                background: "var(--almostnode-border-subtle)",
+              }}
+            />
+          </div>
+        ) : null}
+
+        {userOAuthSlots.map((slot) => (
+          <ServiceCard key={slot.name} slot={slot} actions={actions} />
+        ))}
+
+        <button
+          type="button"
+          onClick={() => actions.dispatch("oauth:add-start")}
+          style={addServiceButtonStyles}
+          title="Connect any OAuth-compatible service via .well-known discovery"
+        >
+          + Add OAuth service
+        </button>
       </div>
 
       <div
@@ -556,6 +672,14 @@ export default function KeychainSidebarView(props: {
           />
         ) : null}
       </div>
+
+      {modalOpen && addFlow ? (
+        <AddOAuthServiceModal
+          flow={addFlow}
+          callbackUrl={state.oauthCallbackUrl ?? ""}
+          actions={actions}
+        />
+      ) : null}
     </div>
   );
 }
@@ -578,3 +702,17 @@ function footerButtonStyles(primary: boolean): CSSProperties {
     fontWeight: 500,
   };
 }
+
+const addServiceButtonStyles: CSSProperties = {
+  marginTop: "8px",
+  background: "transparent",
+  color: "var(--almostnode-quiet)",
+  border: "1px dashed var(--almostnode-border-subtle)",
+  padding: "8px 10px",
+  borderRadius: "6px",
+  cursor: "pointer",
+  fontSize: "12px",
+  fontWeight: 500,
+  textAlign: "center",
+  fontFamily: "inherit",
+};

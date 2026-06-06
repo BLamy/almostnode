@@ -35,6 +35,14 @@ import {
 } from "../features/claude-ide-bridge";
 import { installHostConsoleBridge } from "../features/host-console-bridge";
 import { installDesktopOAuthLoopbackBridge } from "../features/desktop-oauth-loopback";
+import { CredentialMirror } from "../features/credential-mirror";
+import {
+  buildCallbackUrl,
+  discoverOAuthService,
+  OAuthServiceOrchestrator,
+  OAuthServiceRegistry,
+  type OAuthServiceStatus,
+} from "../features/oauth-services";
 import { installOxcMonacoIntegration } from "../features/oxc-monaco";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
@@ -135,7 +143,12 @@ import {
   type KeychainSlotStatus,
   type RegisteredWorkbenchSurfaces,
 } from "./workbench-surfaces";
-import type { KeychainSlotPicker, KeychainVaultEnvVar, KeychainVaultSyncState } from "./surface-model-types";
+import type {
+  KeychainAddServiceFlowState,
+  KeychainSlotPicker,
+  KeychainVaultEnvVar,
+  KeychainVaultSyncState,
+} from "./surface-model-types";
 import {
   MarkdownEditorInput,
   JsonEditorInput,
@@ -1035,6 +1048,14 @@ export class WebIDEHost {
   private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
+  private readonly credentialMirror: CredentialMirror;
+  private readonly oauthRegistry: OAuthServiceRegistry;
+  private readonly oauthOrchestrator: OAuthServiceOrchestrator;
+  private oauthStatuses: OAuthServiceStatus[] = [];
+  private oauthAddFlow: KeychainAddServiceFlowState | undefined = undefined;
+  private pendingOAuthPlaceholder: Window | null = null;
+  private oauthOrchestratorRunning = false;
+  private wasKeychainUnlocked = false;
   private readonly projectDb = new ProjectDB();
   private readonly claudeImagePasteCleanup = new Map<string, () => void>();
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
@@ -1241,12 +1262,110 @@ export class WebIDEHost {
       overlayRoot:
         options.elements.workbench.parentElement ?? options.elements.workbench,
       onStateChange: (state) => {
+        this.syncOAuthOrchestrator(state);
         this.updateKeychainStatusEntry(state);
         this.updateKeychainSurface(state);
         this.updateAiLauncherSurface();
       },
     });
+    this.oauthRegistry = new OAuthServiceRegistry();
+    this.oauthOrchestrator = new OAuthServiceOrchestrator({
+      vfs: this.container.vfs,
+      registry: this.oauthRegistry,
+      keychain: {
+        registerSlot: (name, paths) => this.keychain.registerSlot(name, paths),
+        hasSlotData: (name) => this.keychain.hasSlotData(name),
+        notifyExternalStateChanged: () => this.updateKeychainSurface(),
+      },
+      baseHref: import.meta.env.BASE_URL ?? "/",
+      openPopup: (url) => {
+        if (this.pendingOAuthPlaceholder) {
+          const win = this.pendingOAuthPlaceholder;
+          this.pendingOAuthPlaceholder = null;
+          try {
+            win.location.replace(url);
+            return win;
+          } catch {
+            try {
+              win.close();
+            } catch {
+              // ignore
+            }
+            return null;
+          }
+        }
+        if (typeof window === "undefined") return null;
+        return window.open(
+          url,
+          "almostnode-oauth",
+          "popup=yes,width=520,height=720,resizable=yes,scrollbars=yes",
+        );
+      },
+      onStatusChange: (statuses) => {
+        this.oauthStatuses = statuses;
+        this.updateKeychainSurface();
+      },
+    });
     this.keychainSurface.setActionHandler((action) => {
+      if (action === "oauth:add-start") {
+        this.startOAuthAddFlow();
+        return;
+      }
+      if (action === "oauth:add-cancel") {
+        this.cancelOAuthAddFlow();
+        return;
+      }
+      if (action === "oauth:add-connect") {
+        this.connectOAuthFromAddFlow();
+        return;
+      }
+      if (action.startsWith("oauth:add-discover:")) {
+        void this.discoverOAuthFromInput(
+          action.slice("oauth:add-discover:".length),
+        );
+        return;
+      }
+      if (action.startsWith("oauth:add-set-display-name:")) {
+        this.setOAuthAddField({
+          displayNameOverride: action.slice(
+            "oauth:add-set-display-name:".length,
+          ),
+        });
+        return;
+      }
+      if (action.startsWith("oauth:add-set-scopes:")) {
+        const csv = action.slice("oauth:add-set-scopes:".length);
+        this.setOAuthAddField({
+          selectedScopes: csv
+            .split(/[,\s]+/)
+            .map((part) => part.trim())
+            .filter(Boolean),
+        });
+        return;
+      }
+      if (action.startsWith("oauth:add-set-manual-client:")) {
+        this.setOAuthAddField({
+          manualClientId: action.slice("oauth:add-set-manual-client:".length),
+        });
+        return;
+      }
+      if (action.startsWith("oauth:add-set-manual-secret:")) {
+        this.setOAuthAddField({
+          manualClientSecret: action.slice(
+            "oauth:add-set-manual-secret:".length,
+          ),
+        });
+        return;
+      }
+      if (action.startsWith("oauth:refresh:")) {
+        void this.refreshOAuthService(action.slice("oauth:refresh:".length));
+        return;
+      }
+      if (action.startsWith("oauth:remove:")) {
+        this.removeOAuthService(action.slice("oauth:remove:".length));
+        return;
+      }
+
       if (action.startsWith("select-exit-node:tailscale:")) {
         void this.selectTailscaleExitNode(
           action.slice("select-exit-node:tailscale:".length),
@@ -1381,6 +1500,30 @@ export class WebIDEHost {
       OPENCODE_LEGACY_CONFIG_PATH,
     ]);
     this.keychain.registerSlot("replay", ["/home/user/.replay/auth.json"]);
+    this.oauthOrchestrator.registerAllSlots();
+    this.oauthStatuses = this.oauthOrchestrator.getStatuses();
+    this.credentialMirror = new CredentialMirror({
+      vfs: this.container.vfs,
+      paths: [
+        CLAUDE_AUTH_CREDENTIALS_PATH,
+        CLAUDE_AUTH_CONFIG_PATH,
+        CLAUDE_LEGACY_CONFIG_PATH,
+        "/home/user/.config/gh/hosts.yml",
+        AWS_CONFIG_PATH,
+        AWS_AUTH_PATH,
+        INFISICAL_CONFIG_PATH,
+        INFISICAL_AUTH_PATH,
+        FLY_CONFIG_PATH,
+        NETLIFY_CONFIG_PATH,
+        NETLIFY_LEGACY_CONFIG_PATH,
+        WRANGLER_AUTH_CONFIG_PATH,
+        WRANGLER_LEGACY_AUTH_CONFIG_PATH,
+        NEON_CREDENTIALS_PATH,
+        APP_BUILDING_CONFIG_PATH,
+        "/home/user/.replay/auth.json",
+      ],
+    });
+    this.credentialMirror.hydrateFromStorage();
     this.hadTailscaleKeychainData = this.keychain.hasSlotData("tailscale");
     void this.container.network.getStatus().then((status) => {
       this.tailscaleStatus = status;
@@ -3728,6 +3871,7 @@ export class WebIDEHost {
         active: this.keychain.hasSlotData("replay"),
         canAuth: true,
       },
+      ...this.buildUserOAuthSidebarSlots(),
     ];
     this.keychainSurface.update(slots, {
       hasStoredVault: state.hasStoredVault,
@@ -3735,7 +3879,213 @@ export class WebIDEHost {
       supported: state.supported,
       vaultEnvVars: state.hasUnlockedKey ? this.buildVaultEnvVars() : [],
       vaultSync: this.getCurrentVaultSyncState(),
+      addServiceFlow: this.oauthAddFlow,
+      oauthCallbackUrl: this.computeOAuthCallbackUrl(),
     });
+  }
+
+
+  private buildUserOAuthSidebarSlots(): KeychainSlotStatus[] {
+    return this.oauthStatuses.map((status) => ({
+      name: `oauth:${status.id}`,
+      label: status.displayName,
+      active: status.status === "connected",
+      userOAuthServiceId: status.id,
+      removeAction: `oauth:remove:${status.id}`,
+      refreshAction: `oauth:refresh:${status.id}`,
+      refreshing: status.refreshing,
+      statusText: this.formatOAuthStatusText(status),
+      statusDetail: status.statusDetail,
+    }));
+  }
+
+  private formatOAuthStatusText(status: OAuthServiceStatus): string {
+    switch (status.status) {
+      case "connected": {
+        if (!status.expiresAt) return "Connected";
+        const remainingMs = new Date(status.expiresAt).getTime() - Date.now();
+        if (Number.isNaN(remainingMs)) return "Connected";
+        if (remainingMs <= 0) return "Expired - refreshing...";
+        const seconds = Math.floor(remainingMs / 1000);
+        if (seconds < 90) return `Expires in ${seconds}s`;
+        if (seconds < 3600) return `Expires in ${Math.round(seconds / 60)} min`;
+        return "Connected";
+      }
+      case "pending":
+        return status.statusDetail ?? "Awaiting authorization...";
+      case "needs-reauth":
+        return status.statusDetail ?? "Reconnect required";
+      case "error":
+        return status.statusDetail ?? "Error";
+      default:
+        return "";
+    }
+  }
+
+  private computeOAuthCallbackUrl(): string {
+    try {
+      return buildCallbackUrl(import.meta.env.BASE_URL ?? "/");
+    } catch {
+      return "";
+    }
+  }
+
+  private syncOAuthOrchestrator(state: KeychainState): void {
+    const wasUnlocked = this.wasKeychainUnlocked;
+    const isUnlocked = state.hasUnlockedKey;
+    if (isUnlocked && !this.oauthOrchestratorRunning) {
+      this.oauthOrchestrator.start();
+      this.oauthOrchestratorRunning = true;
+      this.oauthStatuses = this.oauthOrchestrator.getStatuses();
+    } else if (!isUnlocked && this.oauthOrchestratorRunning) {
+      this.oauthOrchestrator.stop();
+      this.oauthOrchestratorRunning = false;
+    }
+    if (wasUnlocked !== isUnlocked) {
+      this.wasKeychainUnlocked = isUnlocked;
+    }
+  }
+
+  private setOAuthAddFlow(next: KeychainAddServiceFlowState | undefined): void {
+    this.oauthAddFlow = next && next.status !== "idle" ? next : undefined;
+    this.updateKeychainSurface();
+  }
+
+  private setOAuthAddField(patch: Partial<KeychainAddServiceFlowState>): void {
+    if (!this.oauthAddFlow) return;
+    this.setOAuthAddFlow({ ...this.oauthAddFlow, ...patch });
+  }
+
+  private startOAuthAddFlow(): void {
+    this.setOAuthAddFlow({ status: "prompt", inputUrl: "" });
+  }
+
+  private cancelOAuthAddFlow(): void {
+    if (this.pendingOAuthPlaceholder) {
+      try {
+        this.pendingOAuthPlaceholder.close();
+      } catch {
+        // ignore
+      }
+      this.pendingOAuthPlaceholder = null;
+    }
+    this.setOAuthAddFlow(undefined);
+  }
+
+  private async discoverOAuthFromInput(rawUrl: string): Promise<void> {
+    const url = rawUrl.trim();
+    if (!url) {
+      this.setOAuthAddFlow({ status: "prompt", inputUrl: "" });
+      return;
+    }
+    this.setOAuthAddFlow({
+      status: "discovering",
+      inputUrl: url,
+      errorMessage: undefined,
+    });
+    try {
+      const discovered = await discoverOAuthService(url);
+      this.setOAuthAddFlow({
+        status: discovered.supportsDynamicRegistration
+          ? "preview"
+          : "manual-client",
+        inputUrl: url,
+        discovered,
+        displayNameOverride: discovered.suggestedDisplayName,
+        selectedScopes: discovered.scopesSupported
+          ? [...discovered.scopesSupported]
+          : [],
+      });
+    } catch (error) {
+      this.setOAuthAddFlow({
+        status: "error",
+        inputUrl: url,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private connectOAuthFromAddFlow(): void {
+    const flow = this.oauthAddFlow;
+    if (!flow) return;
+    if (flow.status !== "preview" && flow.status !== "manual-client") return;
+    if (!flow.discovered) return;
+
+    const placeholder =
+      typeof window !== "undefined"
+        ? window.open(
+            "about:blank",
+            "almostnode-oauth",
+            "popup=yes,width=520,height=720,resizable=yes,scrollbars=yes",
+          )
+        : null;
+    if (!placeholder) {
+      this.setOAuthAddFlow({
+        ...flow,
+        status: "error",
+        errorMessage:
+          "Browser blocked the OAuth popup. Allow popups for this site, then try again.",
+      });
+      return;
+    }
+
+    this.pendingOAuthPlaceholder = placeholder;
+    this.setOAuthAddFlow({
+      ...flow,
+      status: "authorizing",
+      errorMessage: undefined,
+    });
+    void this.runOAuthAddFlow(flow, placeholder);
+  }
+
+  private async runOAuthAddFlow(
+    flow: KeychainAddServiceFlowState,
+    placeholder: Window,
+  ): Promise<void> {
+    if (!flow.discovered) return;
+    try {
+      await this.oauthOrchestrator.addService({
+        discovered: flow.discovered,
+        displayName:
+          (flow.displayNameOverride ?? "").trim() ||
+          flow.discovered.suggestedDisplayName,
+        scopes: flow.selectedScopes ?? flow.discovered.scopesSupported ?? [],
+        manualClientId: flow.manualClientId,
+        manualClientSecret: flow.manualClientSecret,
+      });
+      this.setOAuthAddFlow(undefined);
+      this.oauthStatuses = this.oauthOrchestrator.getStatuses();
+      this.updateKeychainSurface();
+    } catch (error) {
+      this.setOAuthAddFlow({
+        ...flow,
+        status: "error",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (this.pendingOAuthPlaceholder === placeholder) {
+        try {
+          placeholder.close();
+        } catch {
+          // ignore
+        }
+        this.pendingOAuthPlaceholder = null;
+      }
+    }
+  }
+
+  private async refreshOAuthService(id: string): Promise<void> {
+    try {
+      await this.oauthOrchestrator.refreshIfNeeded(id);
+    } catch (error) {
+      console.error(`OAuth refresh failed for ${id}`, error);
+    }
+  }
+
+  private removeOAuthService(id: string): void {
+    this.oauthOrchestrator.removeService(id);
+    this.oauthStatuses = this.oauthOrchestrator.getStatuses();
+    this.updateKeychainSurface();
   }
 
   private buildVaultEnvVars(): KeychainVaultEnvVar[] {
@@ -8665,6 +9015,7 @@ export class WebIDEHost {
     this.installWorkerEnvironment();
     const initialTab = this.createUserTerminalTab(false);
     await this.keychain.init();
+    this.credentialMirror.startWatching();
     this.updateAiLauncherSurface();
     this.container.setKeychain(this.keychain);
     this.container.setSearchProvider(this.createSearchProvider());

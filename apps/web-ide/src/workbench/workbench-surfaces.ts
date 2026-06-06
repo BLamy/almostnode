@@ -33,6 +33,7 @@ import {
 import type {
   DatabaseSidebarActions,
   DatabaseSidebarState,
+  KeychainAddServiceFlowState,
   KeychainSidebarActions,
   KeychainSidebarSlotStatus,
   KeychainSidebarState,
@@ -2494,6 +2495,8 @@ export class KeychainSidebarSurface {
       hasUnlockedKey?: boolean;
       vaultEnvVars?: KeychainVaultEnvVar[];
       vaultSync?: KeychainVaultSyncState;
+      addServiceFlow?: KeychainAddServiceFlowState;
+      oauthCallbackUrl?: string;
     },
   ): void {
     this.model.setSnapshot({
@@ -2509,6 +2512,8 @@ export class KeychainSidebarSurface {
         message: null,
         messageKind: null,
       },
+      addServiceFlow: options?.addServiceFlow,
+      oauthCallbackUrl: options?.oauthCallbackUrl,
     });
   }
 
