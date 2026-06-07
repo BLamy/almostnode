@@ -5,6 +5,12 @@ import {
   scheduleWorkbenchScreenPreload,
 } from '../desktop/workbench-screen-lazy';
 import type { TemplateId } from '../features/workspace-seed';
+import almostnodeLogoUrl from '../../readme-assets/logos/app-building.svg?url';
+import codexLogoUrl from '../../readme-assets/logos/codex-openai.svg?url';
+import opencodeLogoUrl from '../../readme-assets/logos/opencode.svg?url';
+import pgliteLogoUrl from '../../readme-assets/logos/pglite.svg?url';
+import replayLogoUrl from '../../readme-assets/logos/replay.svg?url';
+import tailscaleLogoUrl from '../../readme-assets/logos/tailscale.svg?url';
 
 type IndexSearch = {
   template?: string;
@@ -51,12 +57,12 @@ export const Route = createFileRoute('/')({
 const TEMPLATE_IDS: TemplateId[] = ['vite', 'nextjs', 'tanstack', 'app-building'];
 
 const LOGOS = {
-  almostnode: new URL('../../readme-assets/logos/app-building.svg', import.meta.url).href,
-  tailscale: new URL('../../readme-assets/logos/tailscale.svg', import.meta.url).href,
-  opencode: new URL('../../readme-assets/logos/opencode.svg', import.meta.url).href,
-  codex: new URL('../../readme-assets/logos/codex-openai.svg', import.meta.url).href,
-  pglite: new URL('../../readme-assets/logos/pglite.svg', import.meta.url).href,
-  replay: new URL('../../readme-assets/logos/replay.svg', import.meta.url).href,
+  almostnode: almostnodeLogoUrl,
+  tailscale: tailscaleLogoUrl,
+  opencode: opencodeLogoUrl,
+  codex: codexLogoUrl,
+  pglite: pgliteLogoUrl,
+  replay: replayLogoUrl,
 } as const;
 
 const STACK_SECTIONS: StackSection[] = [
