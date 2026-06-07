@@ -49,6 +49,9 @@ jobs:
       - name: Install vendored OpenCode/OpenTUI dependencies
         run: pnpm vendor:install:opencode
 
+      - name: Build vendored Codex wasm adapter
+        run: pnpm vendor:install:codex
+
       - name: Build web-ide
         run: pnpm nx build web-ide
         env:

@@ -35,14 +35,11 @@ import {
 } from "../features/claude-ide-bridge";
 import { installHostConsoleBridge } from "../features/host-console-bridge";
 import { installDesktopOAuthLoopbackBridge } from "../features/desktop-oauth-loopback";
-import { CredentialMirror } from "../features/credential-mirror";
+import { registerWebIdeCodexCliShellCommand } from "../features/codex-cli-browser-session";
 import {
-  buildCallbackUrl,
-  discoverOAuthService,
-  OAuthServiceOrchestrator,
-  OAuthServiceRegistry,
-  type OAuthServiceStatus,
-} from "../features/oauth-services";
+  parseCodexIdToken,
+  runCodexBrowserLogin,
+} from "../features/codex-auth";
 import { installOxcMonacoIntegration } from "../features/oxc-monaco";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
@@ -93,7 +90,10 @@ import {
   readNetlifyConfig,
   type NetlifyAccount,
 } from "../../../../packages/almostnode/src/shims/netlify-auth";
-import { readNeonCredentials, NEON_CREDENTIALS_PATH } from "../../../../packages/almostnode/src/shims/neon-auth";
+import {
+  readNeonCredentials,
+  NEON_CREDENTIALS_PATH,
+} from "../../../../packages/almostnode/src/shims/neon-auth";
 import { readReplayAuth } from "../../../../packages/almostnode/src/shims/replay-auth";
 import {
   AWS_AUTH_PATH,
@@ -144,7 +144,6 @@ import {
   type RegisteredWorkbenchSurfaces,
 } from "./workbench-surfaces";
 import type {
-  KeychainAddServiceFlowState,
   KeychainSlotPicker,
   KeychainVaultEnvVar,
   KeychainVaultSyncState,
@@ -174,6 +173,9 @@ import {
   CLAUDE_AUTH_CONFIG_PATH,
   CLAUDE_AUTH_CREDENTIALS_PATH,
   CLAUDE_LEGACY_CONFIG_PATH,
+  CODEX_AUTH_PATH,
+  CODEX_CONFIG_JSON_PATH,
+  CODEX_CONFIG_TOML_PATH,
   FLY_CONFIG_PATH,
   Keychain,
   NETLIFY_CONFIG_PATH,
@@ -188,6 +190,16 @@ import {
   TAILSCALE_SESSION_KEYCHAIN_PATH,
   type KeychainState,
 } from "../features/keychain";
+import { CredentialMirror } from "../features/credential-mirror";
+import {
+  buildCallbackUrl,
+  discoverOAuthService,
+  OAuthServiceOrchestrator,
+  OAuthServiceRegistry,
+  tokenFilePathForService,
+  type OAuthServiceStatus,
+} from "../features/oauth-services";
+import type { KeychainAddServiceFlowState } from "./surface-model-types";
 import {
   clearStoredWorkbenchNetworkConfig,
   clearStoredTailscaleSessionSnapshot,
@@ -498,31 +510,6 @@ const TERMINAL_THEME_DARK = {
   brightWhite: "#ffffff",
 };
 
-const TERMINAL_THEME_LIGHT = {
-  background: "#ffffff",
-  foreground: "#24292f",
-  cursor: "#d1480a",
-  cursorAccent: "#ffffff",
-  selectionBackground: "rgba(209, 72, 10, 0.18)",
-  selectionInactiveBackground: "rgba(209, 72, 10, 0.12)",
-  black: "#24292f",
-  red: "#cf222e",
-  green: "#116329",
-  yellow: "#9a6700",
-  blue: "#0550ae",
-  magenta: "#8250df",
-  cyan: "#1b7c83",
-  white: "#6e7781",
-  brightBlack: "#57606a",
-  brightRed: "#a40e26",
-  brightGreen: "#1a7f37",
-  brightYellow: "#7d5600",
-  brightBlue: "#0969da",
-  brightMagenta: "#6639ba",
-  brightCyan: "#3192aa",
-  brightWhite: "#8b949e",
-};
-
 /**
  * CSS overrides for light mode. Scoped to Monaco's `.vs` theme class so they
  * activate when the workbench color theme is light — independent of the OS
@@ -786,9 +773,11 @@ function loadPwWeb(): Promise<void> {
 }
 
 function getTerminalTheme(
-  themeKind: WorkbenchThemeKind,
+  _themeKind: WorkbenchThemeKind,
 ): typeof TERMINAL_THEME_DARK {
-  return themeKind === "light" ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
+  // ANSI apps like Codex and OpenCode render their own dark TUI surfaces.
+  // Keeping xterm dark avoids black ANSI spans on a white workbench terminal.
+  return TERMINAL_THEME_DARK;
 }
 
 function normalizeWorkbenchThemeKind(
@@ -836,7 +825,7 @@ interface TerminalTabState {
   kind: "user" | "preview" | "agent";
   inputMode: "managed" | "passthrough";
   surface: "panel" | "sidebar";
-  agentHarness: "claude" | "opencode" | null;
+  agentHarness: "claude" | "opencode" | "codex" | null;
 }
 
 interface OpenCodeTabState {
@@ -925,13 +914,21 @@ interface PreviewSourcePickerRuntime {
     ElementSource?: {
       resolveSource?: (
         element: Element,
-      ) => Promise<PreviewSourcePickerSourceInfo | null> | PreviewSourcePickerSourceInfo | null;
+      ) =>
+        | Promise<PreviewSourcePickerSourceInfo | null>
+        | PreviewSourcePickerSourceInfo
+        | null;
       resolveStack?: (
         element: Element,
-      ) => Promise<PreviewSourcePickerSourceInfo[]> | PreviewSourcePickerSourceInfo[];
+      ) =>
+        | Promise<PreviewSourcePickerSourceInfo[]>
+        | PreviewSourcePickerSourceInfo[];
       resolveElementInfo?: (
         element: Element,
-      ) => Promise<PreviewSourcePickerElementInfo | null> | PreviewSourcePickerElementInfo | null;
+      ) =>
+        | Promise<PreviewSourcePickerElementInfo | null>
+        | PreviewSourcePickerElementInfo
+        | null;
       formatStack?: (
         stack: PreviewSourcePickerSourceInfo[],
         maxLines?: number,
@@ -945,32 +942,32 @@ interface PreviewSourcePickerRuntime {
 
 type PreviewAppBuildingBridgeRequest =
   | {
-    type: "almostnode-app-building-request";
-    requestId: string;
-    action: "create";
-    name: string;
-    prompt: string;
-  }
+      type: "almostnode-app-building-request";
+      requestId: string;
+      action: "create";
+      name: string;
+      prompt: string;
+    }
   | {
-    type: "almostnode-app-building-request";
-    requestId: string;
-    action: "message";
-    jobId: string;
-    prompt: string;
-  }
+      type: "almostnode-app-building-request";
+      requestId: string;
+      action: "message";
+      jobId: string;
+      prompt: string;
+    }
   | {
-    type: "almostnode-app-building-request";
-    requestId: string;
-    action: "status" | "stop" | "reset-logs";
-    jobId: string;
-  }
+      type: "almostnode-app-building-request";
+      requestId: string;
+      action: "status" | "stop" | "reset-logs";
+      jobId: string;
+    }
   | {
-    type: "almostnode-app-building-request";
-    requestId: string;
-    action: "logs";
-    jobId: string;
-    offset?: number;
-  };
+      type: "almostnode-app-building-request";
+      requestId: string;
+      action: "logs";
+      jobId: string;
+      offset?: number;
+    };
 
 interface PreviewAppBuildingBridgeResponse {
   type: "almostnode-app-building-response";
@@ -1037,6 +1034,7 @@ export class WebIDEHost {
   private openCodeSidebarCounter = 0;
   private openCodeSidebarTerminalCounter = 0;
   private claudeSidebarCounter = 0;
+  private codexSidebarCounter = 0;
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
@@ -1048,11 +1046,21 @@ export class WebIDEHost {
   private consoleMessageCount = 0;
   private extensionServices: ExtensionServiceOverrideBundle | null = null;
   private readonly keychain: Keychain;
+  private readonly keychainStateListeners = new Set<
+    (state: KeychainState) => void
+  >();
   private readonly credentialMirror: CredentialMirror;
+  // ── User-configurable OAuth services (keychain sidebar) ────────────────────
   private readonly oauthRegistry: OAuthServiceRegistry;
   private readonly oauthOrchestrator: OAuthServiceOrchestrator;
   private oauthStatuses: OAuthServiceStatus[] = [];
   private oauthAddFlow: KeychainAddServiceFlowState | undefined = undefined;
+  /**
+   * Pre-opened popup window we hand to the orchestrator. Captured
+   * synchronously inside the user gesture (`oauth:add-connect`) so the browser
+   * doesn't block it during the async DCR / token-exchange that precedes the
+   * actual `popup.location.replace(authorizeUrl)` call.
+   */
   private pendingOAuthPlaceholder: Window | null = null;
   private oauthOrchestratorRunning = false;
   private wasKeychainUnlocked = false;
@@ -1063,15 +1071,32 @@ export class WebIDEHost {
   private tailscaleDiagnosticsHintPrinted = false;
   private hadTailscaleKeychainData = false;
   private pendingTailscaleKeychainActivation = false;
-  private netlifyAccountsCache: { userId: string; accounts: NetlifyAccount[] } | null = null;
+  private netlifyAccountsCache: {
+    userId: string;
+    accounts: NetlifyAccount[];
+  } | null = null;
   private netlifyAccountsFetchInFlight: Promise<void> | null = null;
-  private infisicalProjectsCache: { key: string; projects: InfisicalProjectInfo[] } | null = null;
+  private infisicalProjectsCache: {
+    key: string;
+    projects: InfisicalProjectInfo[];
+  } | null = null;
   private infisicalProjectsFetchInFlight: Promise<void> | null = null;
-  private flyAppsCache: { tokenFingerprint: string; apps: FlyAppSummary[] } | null = null;
+  private flyAppsCache: {
+    tokenFingerprint: string;
+    apps: FlyAppSummary[];
+  } | null = null;
   private flyAppsFetchInFlight: Promise<void> | null = null;
-  private flyAppsFetchState: { fingerprint: string; status: "loading" | "error"; message?: string } | null = null;
+  private flyAppsFetchState: {
+    fingerprint: string;
+    status: "loading" | "error";
+    message?: string;
+  } | null = null;
   private infisicalUaProvisionInFlight: Promise<void> | null = null;
-  private infisicalUaProvisionState: { tokenFingerprint: string; status: "error"; message: string } | null = null;
+  private infisicalUaProvisionState: {
+    tokenFingerprint: string;
+    status: "error";
+    message: string;
+  } | null = null;
   private vaultSyncState: KeychainVaultSyncState = {
     target: null,
     targetLabel: null,
@@ -1079,7 +1104,8 @@ export class WebIDEHost {
     message: null,
     messageKind: null,
   };
-  private vaultSyncMessageClearTimer: ReturnType<typeof setTimeout> | null = null;
+  private vaultSyncMessageClearTimer: ReturnType<typeof setTimeout> | null =
+    null;
   private workspaceDependencyInstallPromise: Promise<void> | null = null;
   private workspaceDependencyInstallKey: string | null = null;
   private workspaceDependencyInstallRequestKey: string | null = null;
@@ -1176,8 +1202,10 @@ export class WebIDEHost {
     this.initialProjectFiles = options.initialProjectFiles ?? null;
     this.skipWorkspaceSeed = options.skipWorkspaceSeed === true;
     this.deferPreviewStart = options.deferPreviewStart === true;
-    this.previewMode = options.previewMode === "external" ? "external" : "workbench";
-    this.pendingProjectLaunch = this.skipWorkspaceSeed || this.deferPreviewStart;
+    this.previewMode =
+      options.previewMode === "external" ? "external" : "workbench";
+    this.pendingProjectLaunch =
+      this.skipWorkspaceSeed || this.deferPreviewStart;
     this.desktopBridge = options.desktopBridge ?? null;
     this.hostProjectDirectory = options.hostProjectDirectory ?? null;
     this.agentMode = this.desktopBridge ? "host" : "browser";
@@ -1266,6 +1294,13 @@ export class WebIDEHost {
         this.updateKeychainStatusEntry(state);
         this.updateKeychainSurface(state);
         this.updateAiLauncherSurface();
+        for (const listener of this.keychainStateListeners) {
+          try {
+            listener(state);
+          } catch (error) {
+            console.error("keychain state listener failed", error);
+          }
+        }
       },
     });
     this.oauthRegistry = new OAuthServiceRegistry();
@@ -1278,6 +1313,11 @@ export class WebIDEHost {
         notifyExternalStateChanged: () => this.updateKeychainSurface(),
       },
       baseHref: import.meta.env.BASE_URL ?? "/",
+      // The orchestrator delegates window.open to us so we can re-use a
+      // popup window opened SYNCHRONOUSLY by the click handler in
+      // `connectOAuthFromAddFlow`. Without this, the async DCR step inside
+      // `addService` would defer the popup beyond the user gesture and
+      // browsers would block it.
       openPopup: (url) => {
         if (this.pendingOAuthPlaceholder) {
           const win = this.pendingOAuthPlaceholder;
@@ -1307,6 +1347,7 @@ export class WebIDEHost {
       },
     });
     this.keychainSurface.setActionHandler((action) => {
+      // ── OAuth services prefixes (placed first so they short-circuit) ──
       if (action === "oauth:add-start") {
         this.startOAuthAddFlow();
         return;
@@ -1458,11 +1499,16 @@ export class WebIDEHost {
         case "logout:neon":
           void this.keychainAuthAction("neon auth logout");
           break;
+        case "login:codex":
+          void this.keychainAuthAction("codex login");
+          break;
         case "setup:aws":
           this.options.onRequestAwsSetup?.(this.getAwsSetupDraft());
           break;
         case "setup:app-building":
-          this.options.onRequestAppBuildingSetup?.(this.getAppBuildingSetupDraft());
+          this.options.onRequestAppBuildingSetup?.(
+            this.getAppBuildingSetupDraft(),
+          );
           break;
         case "login:replay":
           void this.keychainAuthAction("replayio login");
@@ -1484,12 +1530,26 @@ export class WebIDEHost {
       CLAUDE_AUTH_CONFIG_PATH,
       CLAUDE_LEGACY_CONFIG_PATH,
     ]);
+    this.keychain.registerSlot("codex", [
+      CODEX_AUTH_PATH,
+      CODEX_CONFIG_TOML_PATH,
+      CODEX_CONFIG_JSON_PATH,
+    ]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
     this.keychain.registerSlot("aws", [AWS_CONFIG_PATH, AWS_AUTH_PATH]);
-    this.keychain.registerSlot("infisical", [INFISICAL_CONFIG_PATH, INFISICAL_AUTH_PATH]);
+    this.keychain.registerSlot("infisical", [
+      INFISICAL_CONFIG_PATH,
+      INFISICAL_AUTH_PATH,
+    ]);
     this.keychain.registerSlot("fly", [FLY_CONFIG_PATH]);
-    this.keychain.registerSlot("netlify", [NETLIFY_CONFIG_PATH, NETLIFY_LEGACY_CONFIG_PATH]);
-    this.keychain.registerSlot("cloudflare", [WRANGLER_AUTH_CONFIG_PATH, WRANGLER_LEGACY_AUTH_CONFIG_PATH]);
+    this.keychain.registerSlot("netlify", [
+      NETLIFY_CONFIG_PATH,
+      NETLIFY_LEGACY_CONFIG_PATH,
+    ]);
+    this.keychain.registerSlot("cloudflare", [
+      WRANGLER_AUTH_CONFIG_PATH,
+      WRANGLER_LEGACY_AUTH_CONFIG_PATH,
+    ]);
     this.keychain.registerSlot("neon", [NEON_CREDENTIALS_PATH]);
     this.keychain.registerSlot("app-building", [APP_BUILDING_CONFIG_PATH]);
     this.keychain.registerSlot("opencode", [
@@ -1500,7 +1560,12 @@ export class WebIDEHost {
       OPENCODE_LEGACY_CONFIG_PATH,
     ]);
     this.keychain.registerSlot("replay", ["/home/user/.replay/auth.json"]);
+    // Register slots for every persisted user OAuth service. MUST happen
+    // before `keychain.init()` because the watcher rejects writes to unknown
+    // managed paths during `restoreSavedCredentials`.
     this.oauthOrchestrator.registerAllSlots();
+    // Seed the surface snapshot with the registry's persisted entries (still
+    // in their default `pending` runtime state until the orchestrator starts).
     this.oauthStatuses = this.oauthOrchestrator.getStatuses();
     this.credentialMirror = new CredentialMirror({
       vfs: this.container.vfs,
@@ -1508,6 +1573,9 @@ export class WebIDEHost {
         CLAUDE_AUTH_CREDENTIALS_PATH,
         CLAUDE_AUTH_CONFIG_PATH,
         CLAUDE_LEGACY_CONFIG_PATH,
+        CODEX_AUTH_PATH,
+        CODEX_CONFIG_TOML_PATH,
+        CODEX_CONFIG_JSON_PATH,
         "/home/user/.config/gh/hosts.yml",
         AWS_CONFIG_PATH,
         AWS_AUTH_PATH,
@@ -1659,8 +1727,8 @@ export class WebIDEHost {
 
       const rawPageRepositories = Array.isArray(payload) ? payload : [];
       const pageRepositories = rawPageRepositories
-          .map((entry) => this.toGitHubRepositorySummary(entry))
-          .filter((entry): entry is GitHubRepositorySummary => entry !== null);
+        .map((entry) => this.toGitHubRepositorySummary(entry))
+        .filter((entry): entry is GitHubRepositorySummary => entry !== null);
 
       repositories.push(...pageRepositories);
 
@@ -1676,19 +1744,72 @@ export class WebIDEHost {
       deduped.set(repository.id, repository);
     }
 
-    return Array.from(deduped.values()).sort((left, right) => (
-      right.updatedAt.localeCompare(left.updatedAt)
-    ));
+    return Array.from(deduped.values()).sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt),
+    );
   }
 
-  async createGitHubRemote(projectName: string): Promise<ProjectGitRemoteRecord> {
-    const createRepository = typeof (this as {
-      createGitHubRepository?: typeof WebIDEHost.prototype.createGitHubRepository;
-    }).createGitHubRepository === "function"
-      ? (this as {
-        createGitHubRepository: typeof WebIDEHost.prototype.createGitHubRepository;
-      }).createGitHubRepository.bind(this)
-      : WebIDEHost.prototype.createGitHubRepository.bind(this as WebIDEHost);
+  private async createGitHubRepository(
+    projectName: string,
+  ): Promise<GitHubRepositorySummary> {
+    const token = this.getGitHubAuthToken();
+    const response = await this.fetchGitHubApi(
+      "https://api.github.com/user/repos",
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: this.toGitHubRepositoryName(projectName),
+          private: true,
+        }),
+      },
+    );
+
+    const raw = await response.text();
+    let payload: unknown = {};
+    if (raw) {
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = {};
+      }
+    }
+
+    if (!response.ok) {
+      const message = this.getGitHubApiErrorMessage(
+        payload,
+        `GitHub repository creation failed with status ${response.status}`,
+      );
+      throw new Error(message);
+    }
+
+    const repository = this.toGitHubRepositorySummary(payload);
+    if (!repository) {
+      throw new Error("GitHub repository creation returned an invalid repository payload.");
+    }
+
+    return repository;
+  }
+
+  async createGitHubRemote(
+    projectName: string,
+  ): Promise<ProjectGitRemoteRecord> {
+    const createRepository =
+      typeof (
+        this as {
+          createGitHubRepository?: typeof WebIDEHost.prototype.createGitHubRepository;
+        }
+      ).createGitHubRepository === "function"
+        ? (
+            this as {
+              createGitHubRepository: typeof WebIDEHost.prototype.createGitHubRepository;
+            }
+          ).createGitHubRepository.bind(this)
+        : WebIDEHost.prototype.createGitHubRepository.bind(this as WebIDEHost);
     const repository = await createRepository(projectName);
 
     return {
@@ -1791,9 +1912,7 @@ export class WebIDEHost {
     }
   }
 
-  async discoverActiveProjectThreads(
-    projectId: string,
-  ): Promise<{
+  async discoverActiveProjectThreads(projectId: string): Promise<{
     claude: ResumableThreadRecord[];
     opencode: ResumableThreadRecord[];
   }> {
@@ -1818,11 +1937,11 @@ export class WebIDEHost {
   }
 
   async resumeResumableThread(thread: ResumableThreadRecord): Promise<void> {
-    const title = thread.title.trim() || (
-      thread.harness === "claude"
+    const title =
+      thread.title.trim() ||
+      (thread.harness === "claude"
         ? `Claude Code ${++this.claudeSidebarCounter}`
-        : `OpenCode ${++this.openCodeSidebarTerminalCounter}`
-    );
+        : `OpenCode ${++this.openCodeSidebarTerminalCounter}`);
     if (thread.harness === "opencode") {
       await this.launchAiSession("opencode", {
         title,
@@ -1839,8 +1958,13 @@ export class WebIDEHost {
       title,
       agentHarness: "claude",
     });
-    const command = this.buildClaudeLaunchCommand({ resumeToken: thread.resumeToken });
-    await this.runCommand(tab, command, { echoCommand: true, interceptAgentLaunch: false });
+    const command = this.buildClaudeLaunchCommand({
+      resumeToken: thread.resumeToken,
+    });
+    await this.runCommand(tab, command, {
+      echoCommand: true,
+      interceptAgentLaunch: false,
+    });
   }
 
   private normalizeProjectDatabaseNamespace(dbPrefix?: string): string {
@@ -1848,7 +1972,9 @@ export class WebIDEHost {
     return trimmed ? trimmed : "global";
   }
 
-  private normalizeProjectDefaultDatabaseName(defaultDatabaseName?: string): string {
+  private normalizeProjectDefaultDatabaseName(
+    defaultDatabaseName?: string,
+  ): string {
     const trimmed = defaultDatabaseName?.trim();
     return trimmed ? trimmed : "default";
   }
@@ -1881,7 +2007,9 @@ export class WebIDEHost {
     }
   }
 
-  private async waitForPreviewServerShutdown(port: number | null): Promise<void> {
+  private async waitForPreviewServerShutdown(
+    port: number | null,
+  ): Promise<void> {
     if (typeof port !== "number") {
       return;
     }
@@ -1949,8 +2077,8 @@ export class WebIDEHost {
     const nextDefaultDatabaseName =
       this.normalizeProjectDefaultDatabaseName(defaultDatabaseName);
     if (
-      this.currentProjectDatabaseNamespace !== nextNamespace
-      || this.currentProjectDefaultDatabaseName !== nextDefaultDatabaseName
+      this.currentProjectDatabaseNamespace !== nextNamespace ||
+      this.currentProjectDefaultDatabaseName !== nextDefaultDatabaseName
     ) {
       await this.closeCurrentProjectDatabase();
     }
@@ -2162,10 +2290,7 @@ export class WebIDEHost {
       // Leave raw values untouched if they are not valid URLs.
     }
 
-    normalized = normalized
-      .replace(/\\/g, "/")
-      .split(/[?#]/, 1)[0]
-      .trim();
+    normalized = normalized.replace(/\\/g, "/").split(/[?#]/, 1)[0].trim();
 
     try {
       normalized = decodeURIComponent(normalized);
@@ -2175,7 +2300,10 @@ export class WebIDEHost {
 
     normalized = normalized.replace(/^\/?__virtual__\/\d+(?=\/)/, "");
     normalized = normalized.replace(/^[^/]+:\d+(?=\/)/, "");
-    normalized = normalized.replace(/^\/?\d+(?=\/(src|app|pages|components|lib|routes|tests?|e2e|drizzle|public)\b)/, "");
+    normalized = normalized.replace(
+      /^\/?\d+(?=\/(src|app|pages|components|lib|routes|tests?|e2e|drizzle|public)\b)/,
+      "",
+    );
     if (normalized && !normalized.startsWith("/")) {
       normalized = `/${normalized}`;
     }
@@ -2236,19 +2364,19 @@ export class WebIDEHost {
     this.previewSurface.setSelectActive(active);
   }
 
-  private getPreviewSourcePickerRuntime():
-    | PreviewSourcePickerRuntime
-    | null {
+  private getPreviewSourcePickerRuntime(): PreviewSourcePickerRuntime | null {
     const iframe = this.previewSurface.getIframe();
-    const win = iframe.contentWindow as PreviewSourcePickerRuntime["window"] | null;
+    const win = iframe.contentWindow as
+      | PreviewSourcePickerRuntime["window"]
+      | null;
     const doc = iframe.contentDocument;
     if (!win || !doc) {
       return null;
     }
 
     if (
-      !this.previewSourcePickerRuntime
-      || this.previewSourcePickerRuntime.window !== win
+      !this.previewSourcePickerRuntime ||
+      this.previewSourcePickerRuntime.window !== win
     ) {
       this.previewSourcePickerRuntime = {
         window: win,
@@ -3025,7 +3153,7 @@ export class WebIDEHost {
       session?: WorkbenchTerminalSession;
       inputMode?: "managed" | "passthrough";
       surface?: "panel" | "sidebar";
-      agentHarness?: "claude" | "opencode" | null;
+      agentHarness?: "claude" | "opencode" | "codex" | null;
     },
   ): TerminalTabState {
     const id = options?.id ?? `${kind}-${crypto.randomUUID()}`;
@@ -3143,7 +3271,8 @@ export class WebIDEHost {
     options?: {
       id?: string;
       title?: string;
-      agentHarness?: "claude" | "opencode" | null;
+      agentHarness?: "claude" | "opencode" | "codex" | null;
+      env?: Record<string, string>;
     },
   ): TerminalTabState {
     const id = options?.id ?? `ai-sidebar-${crypto.randomUUID()}`;
@@ -3152,6 +3281,7 @@ export class WebIDEHost {
     return this.createTerminalTab("user", title, focus, true, {
       id,
       cwd: WORKSPACE_ROOT,
+      env: options?.env,
       surface: "sidebar",
       agentHarness: options?.agentHarness ?? null,
     });
@@ -3230,26 +3360,24 @@ export class WebIDEHost {
 
   private getClaudeLauncherAvailable(): boolean {
     return (
-      this.tailscaleStatus?.state === "running"
-      && this.keychain.hasSlotData("claude")
+      this.tailscaleStatus?.state === "running" &&
+      this.keychain.hasSlotData("claude")
     );
   }
 
   private hasAiSidebarTab(id: string | null | undefined): boolean {
     return Boolean(
-      id
-      && (
-        this.openCodeSidebarTabs.has(id)
-        || this.openCodeSidebarTerminalTabs.has(id)
-      ),
+      id &&
+      (this.openCodeSidebarTabs.has(id) ||
+        this.openCodeSidebarTerminalTabs.has(id)),
     );
   }
 
   private getFirstAiSidebarTabId(): string | null {
     return (
-      this.openCodeSidebarTabs.keys().next().value
-      ?? this.openCodeSidebarTerminalTabs.keys().next().value
-      ?? null
+      this.openCodeSidebarTabs.keys().next().value ??
+      this.openCodeSidebarTerminalTabs.keys().next().value ??
+      null
     );
   }
 
@@ -3317,14 +3445,16 @@ export class WebIDEHost {
   private getAiLaunchCommand(
     kind: Exclude<AgentLaunchKind, "terminal">,
   ): string {
-    return kind === "claude"
-      ? this.buildClaudeLaunchCommand()
-      : "npx opencode-ai";
+    if (kind === "claude") {
+      return this.buildClaudeLaunchCommand();
+    }
+    if (kind === "codex") {
+      return "codex";
+    }
+    return "npx opencode-ai";
   }
 
-  private buildClaudeLaunchCommand(options?: {
-    resumeToken?: string;
-  }): string {
+  private buildClaudeLaunchCommand(options?: { resumeToken?: string }): string {
     const parts = [
       "/usr/local/bin/claude-wrapper",
       "--plugin-dir",
@@ -3473,6 +3603,25 @@ export class WebIDEHost {
 
     if (kind === "terminal") {
       this.createAiSidebarTerminalTab(true);
+      return;
+    }
+
+    if (kind === "codex") {
+      const command = this.getAiLaunchCommand(kind);
+      if (!(await this.keychain.prepareForCommand(command))) {
+        await this.revealKeychainPanel();
+        return;
+      }
+
+      const tab = this.createAiSidebarTerminalTab(true, {
+        title: `Codex ${++this.codexSidebarCounter}`,
+        agentHarness: "codex",
+        env: this.buildCodexShellEnv(),
+      });
+      await this.runCommand(tab, command, {
+        echoCommand: true,
+        interceptAgentLaunch: false,
+      });
       return;
     }
 
@@ -3777,9 +3926,8 @@ export class WebIDEHost {
   private updateKeychainSurface(state = this.keychain.getState()): void {
     const tailscaleStatus = this.tailscaleStatus;
     const tailscaleStatusText = this.formatTailscaleStatus(tailscaleStatus);
-    const tailscaleAuthAction = this.getTailscaleSidebarAuthAction(
-      tailscaleStatus,
-    );
+    const tailscaleAuthAction =
+      this.getTailscaleSidebarAuthAction(tailscaleStatus);
     const requestedExitNodeId = this.getRequestedTailscaleExitNodeId();
     const exitNodeOptions = tailscaleStatus?.exitNodes.map((exitNode) => ({
       value: exitNode.id,
@@ -3799,9 +3947,9 @@ export class WebIDEHost {
             : undefined,
         selectOptions: exitNodeOptions,
         selectValue:
-          tailscaleStatus?.selectedExitNodeId
-          ?? requestedExitNodeId
-          ?? undefined,
+          tailscaleStatus?.selectedExitNodeId ??
+          requestedExitNodeId ??
+          undefined,
       },
       {
         name: "github",
@@ -3866,6 +4014,16 @@ export class WebIDEHost {
         active: this.keychain.hasSlotData("opencode"),
       },
       {
+        name: "codex",
+        label: "Codex",
+        active: this.keychain.hasSlotData("codex"),
+        canAuth: true,
+        authAction: "login:codex",
+        authLabel: this.keychain.hasSlotData("codex")
+          ? "Re-authenticate"
+          : "Login",
+      },
+      {
         name: "replay",
         label: "Replay.io",
         active: this.keychain.hasSlotData("replay"),
@@ -3884,6 +4042,7 @@ export class WebIDEHost {
     });
   }
 
+  // ── User-configurable OAuth services ────────────────────────────────────
 
   private buildUserOAuthSidebarSlots(): KeychainSlotStatus[] {
     return this.oauthStatuses.map((status) => ({
@@ -3905,14 +4064,14 @@ export class WebIDEHost {
         if (!status.expiresAt) return "Connected";
         const remainingMs = new Date(status.expiresAt).getTime() - Date.now();
         if (Number.isNaN(remainingMs)) return "Connected";
-        if (remainingMs <= 0) return "Expired - refreshing...";
+        if (remainingMs <= 0) return "Expired — refreshing…";
         const seconds = Math.floor(remainingMs / 1000);
         if (seconds < 90) return `Expires in ${seconds}s`;
         if (seconds < 3600) return `Expires in ${Math.round(seconds / 60)} min`;
         return "Connected";
       }
       case "pending":
-        return status.statusDetail ?? "Awaiting authorization...";
+        return status.statusDetail ?? "Awaiting authorization…";
       case "needs-reauth":
         return status.statusDetail ?? "Reconnect required";
       case "error":
@@ -4005,6 +4164,12 @@ export class WebIDEHost {
     }
   }
 
+  /**
+   * Click handler for the modal's "Connect" button. Synchronous up to and
+   * including `window.open` so the popup is tied to the user gesture; the
+   * orchestrator then re-uses the placeholder window once it has finished
+   * DCR + PKCE.
+   */
   private connectOAuthFromAddFlow(): void {
     const flow = this.oauthAddFlow;
     if (!flow) return;
@@ -4088,13 +4253,115 @@ export class WebIDEHost {
     this.updateKeychainSurface();
   }
 
+  private readCodexAuth(): {
+    apiKey: string | null;
+    accessToken: string | null;
+    accountId: string | null;
+    isFedrampAccount: boolean;
+  } {
+    const vfs = this.container.vfs;
+    if (!vfs.existsSync(CODEX_AUTH_PATH)) {
+      return {
+        apiKey: null,
+        accessToken: null,
+        accountId: null,
+        isFedrampAccount: false,
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(vfs.readFileSync(CODEX_AUTH_PATH, "utf8")) as {
+        OPENAI_API_KEY?: unknown;
+        openai_api_key?: unknown;
+        agent_identity?: unknown;
+        tokens?: {
+          access_token?: unknown;
+          accessToken?: unknown;
+          account_id?: unknown;
+          accountId?: unknown;
+          id_token?:
+            | string
+            | {
+                chatgpt_account_id?: unknown;
+                chatgpt_account_is_fedramp?: unknown;
+              };
+        };
+      };
+      const apiKey =
+        typeof parsed.OPENAI_API_KEY === "string"
+          ? parsed.OPENAI_API_KEY.trim()
+          : typeof parsed.openai_api_key === "string"
+            ? parsed.openai_api_key.trim()
+            : "";
+      const rawAccessToken =
+        parsed.tokens?.access_token ??
+        parsed.tokens?.accessToken ??
+        parsed.agent_identity;
+      const accessToken =
+        typeof rawAccessToken === "string" ? rawAccessToken.trim() : "";
+      const rawAccountId =
+        parsed.tokens?.account_id ??
+        parsed.tokens?.accountId ??
+        (typeof parsed.tokens?.id_token === "object" &&
+        parsed.tokens.id_token !== null
+          ? parsed.tokens.id_token.chatgpt_account_id
+          : undefined);
+      const idTokenInfo =
+        typeof parsed.tokens?.id_token === "string"
+          ? parseCodexIdToken(parsed.tokens.id_token)
+          : null;
+      const accountId =
+        typeof rawAccountId === "string"
+          ? rawAccountId.trim()
+          : idTokenInfo?.chatgpt_account_id?.trim() ?? "";
+      return {
+        apiKey: apiKey || null,
+        accessToken: accessToken || null,
+        accountId: accountId || null,
+        isFedrampAccount:
+          (typeof parsed.tokens?.id_token === "object" &&
+            parsed.tokens.id_token !== null &&
+            parsed.tokens.id_token.chatgpt_account_is_fedramp === true) ||
+          idTokenInfo?.chatgpt_account_is_fedramp === true,
+      };
+    } catch {
+      return {
+        apiKey: null,
+        accessToken: null,
+        accountId: null,
+        isFedrampAccount: false,
+      };
+    }
+  }
+
+  private buildCodexShellEnv(): Record<string, string> {
+    const auth = this.readCodexAuth();
+    const env: Record<string, string> = {};
+    if (auth.apiKey) {
+      env.OPENAI_API_KEY = auth.apiKey;
+      env.CODEX_API_KEY = auth.apiKey;
+    }
+    if (auth.accessToken) {
+      env.CODEX_ACCESS_TOKEN = auth.accessToken;
+    }
+    if (auth.accountId) {
+      env.CODEX_CHATGPT_ACCOUNT_ID = auth.accountId;
+    }
+    if (auth.isFedrampAccount) {
+      env.CODEX_CHATGPT_ACCOUNT_IS_FEDRAMP = "true";
+    }
+    return env;
+  }
+
   private buildVaultEnvVars(): KeychainVaultEnvVar[] {
     const vfs = this.container.vfs;
 
     const claudeToken = (() => {
       if (!vfs.existsSync(CLAUDE_AUTH_CREDENTIALS_PATH)) return null;
       try {
-        const parsed = JSON.parse(vfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, "utf8")) as {
+        const parsed = JSON.parse(
+          vfs.readFileSync(CLAUDE_AUTH_CREDENTIALS_PATH, "utf8"),
+        ) as {
           claudeAiOauth?: { accessToken?: string };
         };
         return parsed?.claudeAiOauth?.accessToken?.trim() || null;
@@ -4106,16 +4373,20 @@ export class WebIDEHost {
     const replayToken = readReplayAuth(vfs)?.accessToken?.trim() || null;
 
     const ghToken = readGhToken(vfs)?.oauth_token?.trim() || null;
+    const codexAuth = this.readCodexAuth();
 
     const netlifyConfig = readNetlifyConfig(vfs);
     const netlifyToken = netlifyConfig.accessToken?.trim() || null;
     const netlifyAccountSlug = (() => {
-      const fromPicker = this.getSelectedNetlifyAccountSlug(netlifyConfig.userId);
+      const fromPicker = this.getSelectedNetlifyAccountSlug(
+        netlifyConfig.userId,
+      );
       if (fromPicker) return fromPicker;
       const candidates: unknown[] = [
         (netlifyConfig.raw as { accountSlug?: unknown })?.accountSlug,
         (netlifyConfig.raw as { account?: { slug?: unknown } })?.account?.slug,
-        (netlifyConfig.raw as { telemetryAccountSlug?: unknown })?.telemetryAccountSlug,
+        (netlifyConfig.raw as { telemetryAccountSlug?: unknown })
+          ?.telemetryAccountSlug,
       ];
       for (const candidate of candidates) {
         if (typeof candidate === "string" && candidate.trim()) {
@@ -4139,11 +4410,15 @@ export class WebIDEHost {
       ? this.getCachedInfisicalProjects(infisicalCacheKey)
       : [];
     const selectedInfisicalProject = selectedInfisicalProjectId
-      ? infisicalProjects.find((entry) => entry.id === selectedInfisicalProjectId)
+      ? infisicalProjects.find(
+          (entry) => entry.id === selectedInfisicalProjectId,
+        )
       : undefined;
     const infisicalEnvironment = this.resolveInfisicalEnvironment();
-    const infisicalClientId = infisicalConfig.machineIdentity?.clientId?.trim() || null;
-    const infisicalClientSecret = infisicalConfig.machineIdentity?.clientSecret?.trim() || null;
+    const infisicalClientId =
+      infisicalConfig.machineIdentity?.clientId?.trim() || null;
+    const infisicalClientSecret =
+      infisicalConfig.machineIdentity?.clientSecret?.trim() || null;
 
     return [
       {
@@ -4161,6 +4436,35 @@ export class WebIDEHost {
         name: "GITHUB_TOKEN",
         value: ghToken,
         source: "/home/user/.config/gh/hosts.yml",
+      },
+      {
+        name: "OPENAI_API_KEY",
+        value: codexAuth.apiKey,
+        source: CODEX_AUTH_PATH,
+        note: codexAuth.apiKey ? "Codex API key" : undefined,
+      },
+      {
+        name: "CODEX_API_KEY",
+        value: codexAuth.apiKey,
+        source: CODEX_AUTH_PATH,
+        note: codexAuth.apiKey ? "Codex API key alias" : undefined,
+      },
+      {
+        name: "CODEX_ACCESS_TOKEN",
+        value: codexAuth.accessToken,
+        source: CODEX_AUTH_PATH,
+        note: codexAuth.accessToken ? "Codex ChatGPT access token" : undefined,
+      },
+      {
+        name: "CODEX_CHATGPT_ACCOUNT_ID",
+        value: codexAuth.accountId,
+        source: CODEX_AUTH_PATH,
+        note: codexAuth.accountId ? "Codex ChatGPT account" : undefined,
+      },
+      {
+        name: "CODEX_CHATGPT_ACCOUNT_IS_FEDRAMP",
+        value: codexAuth.isFedrampAccount ? "true" : null,
+        source: CODEX_AUTH_PATH,
       },
       {
         name: "NETLIFY_ACCOUNT_SLUG",
@@ -4237,8 +4541,10 @@ export class WebIDEHost {
   private getTailscaleSidebarAuthAction(
     status: NetworkStatus | null,
   ): "login:tailscale" | "logout:tailscale" {
-    return status?.provider === "tailscale"
-      && (status.canLogout || status.state === "running" || status.state === "starting")
+    return status?.provider === "tailscale" &&
+      (status.canLogout ||
+        status.state === "running" ||
+        status.state === "starting")
       ? "logout:tailscale"
       : "login:tailscale";
   }
@@ -4247,11 +4553,18 @@ export class WebIDEHost {
     summary = inspectAwsStoredState(this.container.vfs),
     config = readAwsConfig(this.container.vfs),
     auth = readAwsAuth(this.container.vfs),
-  ): Pick<KeychainSlotStatus, "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"> {
-    const hasStoredLoginState = Object.keys(auth.sessions).length > 0
-      || Object.keys(auth.roleCredentials).length > 0;
-    const activeContext = summary.defaultProfile
-      || (Object.keys(config.ssoSessions).length === 1 ? Object.keys(config.ssoSessions)[0] : null);
+  ): Pick<
+    KeychainSlotStatus,
+    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail"
+  > {
+    const hasStoredLoginState =
+      Object.keys(auth.sessions).length > 0 ||
+      Object.keys(auth.roleCredentials).length > 0;
+    const activeContext =
+      summary.defaultProfile ||
+      (Object.keys(config.ssoSessions).length === 1
+        ? Object.keys(config.ssoSessions)[0]
+        : null);
 
     if (!summary.hasSsoSessions) {
       return {
@@ -4259,7 +4572,8 @@ export class WebIDEHost {
         authAction: "setup:aws",
         authLabel: "Set up AWS",
         statusText: "Setup required",
-        statusDetail: "Add your AWS access portal and region before signing in.",
+        statusDetail:
+          "Add your AWS access portal and region before signing in.",
       };
     }
 
@@ -4268,7 +4582,9 @@ export class WebIDEHost {
         active: true,
         authAction: "logout:aws",
         authLabel: "Logout",
-        statusText: activeContext ? `Signed in via ${activeContext}` : "Signed in",
+        statusText: activeContext
+          ? `Signed in via ${activeContext}`
+          : "Signed in",
       };
     }
 
@@ -4310,12 +4626,16 @@ export class WebIDEHost {
     const detail = [
       `Domain: ${auth.domain || config.domain}`,
       identityLabel ? `Account: ${identityLabel}` : null,
-    ].filter(Boolean).join(" • ");
+    ]
+      .filter(Boolean)
+      .join(" • ");
 
     if (isAuthenticated) {
       void this.ensureInfisicalProjectsLoaded();
       const cacheKey = this.getInfisicalCacheKey();
-      const projects = cacheKey ? this.getCachedInfisicalProjects(cacheKey) : [];
+      const projects = cacheKey
+        ? this.getCachedInfisicalProjects(cacheKey)
+        : [];
       const selectedId = cacheKey
         ? this.getSelectedInfisicalProjectId(cacheKey)
         : null;
@@ -4332,10 +4652,17 @@ export class WebIDEHost {
           const label = (env.name ?? env.slug ?? "").trim();
           return value ? { value, label: label || value } : null;
         })
-        .filter((entry): entry is { value: string; label: string } => entry !== null);
-      const selectedEnv = cacheKey && selectedId
-        ? this.getSelectedInfisicalEnvironment(cacheKey, selectedId, envOptions.map((entry) => entry.value))
-        : null;
+        .filter(
+          (entry): entry is { value: string; label: string } => entry !== null,
+        );
+      const selectedEnv =
+        cacheKey && selectedId
+          ? this.getSelectedInfisicalEnvironment(
+              cacheKey,
+              selectedId,
+              envOptions.map((entry) => entry.value),
+            )
+          : null;
 
       const pickers: KeychainSlotPicker[] = [];
       if (projectOptions.length > 0) {
@@ -4359,7 +4686,9 @@ export class WebIDEHost {
         active: true,
         authAction: "logout:infisical",
         authLabel: "Logout",
-        statusText: identityLabel ? `Signed in as ${identityLabel}` : "Signed in",
+        statusText: identityLabel
+          ? `Signed in as ${identityLabel}`
+          : "Signed in",
         statusDetail: expiryLabel
           ? `${detail} • Token expires: ${expiryLabel}`
           : detail || "Infisical session stored in the workspace keychain.",
@@ -4373,7 +4702,8 @@ export class WebIDEHost {
         authAction: "login:infisical",
         authLabel: "Re-authenticate",
         statusText: "Session expired",
-        statusDetail: detail || "Sign in again to refresh the stored access token.",
+        statusDetail:
+          detail || "Sign in again to refresh the stored access token.",
       };
     }
 
@@ -4382,7 +4712,9 @@ export class WebIDEHost {
       authAction: "login:infisical",
       authLabel: "Login",
       statusText: "Ready to sign in",
-      statusDetail: detail || "Uses Infisical browser login and stores the session in this workspace.",
+      statusDetail:
+        detail ||
+        "Uses Infisical browser login and stores the session in this workspace.",
     };
   }
 
@@ -4415,17 +4747,19 @@ export class WebIDEHost {
       const projects: InfisicalProjectInfo[] = [];
       for (const entry of parsed) {
         if (
-          entry
-          && typeof entry === "object"
-          && typeof (entry as InfisicalProjectInfo).id === "string"
-          && typeof (entry as InfisicalProjectInfo).name === "string"
+          entry &&
+          typeof entry === "object" &&
+          typeof (entry as InfisicalProjectInfo).id === "string" &&
+          typeof (entry as InfisicalProjectInfo).name === "string"
         ) {
           const value = entry as InfisicalProjectInfo;
           projects.push({
             id: value.id,
             name: value.name,
             slug: typeof value.slug === "string" ? value.slug : null,
-            environments: Array.isArray(value.environments) ? value.environments : [],
+            environments: Array.isArray(value.environments)
+              ? value.environments
+              : [],
           });
         }
       }
@@ -4438,11 +4772,16 @@ export class WebIDEHost {
 
   private getSelectedInfisicalProjectId(key: string): string | null {
     try {
-      const raw = localStorage.getItem(this.getInfisicalSelectedProjectKey(key));
+      const raw = localStorage.getItem(
+        this.getInfisicalSelectedProjectKey(key),
+      );
       const trimmed = raw?.trim();
       if (!trimmed) return null;
       const projects = this.getCachedInfisicalProjects(key);
-      if (projects.length > 0 && !projects.some((project) => project.id === trimmed)) {
+      if (
+        projects.length > 0 &&
+        !projects.some((project) => project.id === trimmed)
+      ) {
         return null;
       }
       return trimmed;
@@ -4451,7 +4790,10 @@ export class WebIDEHost {
     }
   }
 
-  private setSelectedInfisicalProjectId(key: string, projectId: string | null): void {
+  private setSelectedInfisicalProjectId(
+    key: string,
+    projectId: string | null,
+  ): void {
     try {
       const storageKey = this.getInfisicalSelectedProjectKey(key);
       if (projectId) {
@@ -4464,7 +4806,10 @@ export class WebIDEHost {
     }
   }
 
-  private writeCachedInfisicalProjects(key: string, projects: InfisicalProjectInfo[]): void {
+  private writeCachedInfisicalProjects(
+    key: string,
+    projects: InfisicalProjectInfo[],
+  ): void {
     this.infisicalProjectsCache = { key, projects };
     try {
       localStorage.setItem(
@@ -4522,10 +4867,16 @@ export class WebIDEHost {
     knownValues?: string[],
   ): string | null {
     try {
-      const raw = localStorage.getItem(this.getInfisicalSelectedEnvKey(key, projectId));
+      const raw = localStorage.getItem(
+        this.getInfisicalSelectedEnvKey(key, projectId),
+      );
       const trimmed = raw?.trim();
       if (trimmed) {
-        if (!knownValues || knownValues.length === 0 || knownValues.includes(trimmed)) {
+        if (
+          !knownValues ||
+          knownValues.length === 0 ||
+          knownValues.includes(trimmed)
+        ) {
           return trimmed;
         }
       }
@@ -4571,7 +4922,11 @@ export class WebIDEHost {
     const envOptions = (project?.environments ?? [])
       .map((env) => (env.slug ?? env.name ?? "").trim())
       .filter(Boolean);
-    const selected = this.getSelectedInfisicalEnvironment(key, projectId, envOptions);
+    const selected = this.getSelectedInfisicalEnvironment(
+      key,
+      projectId,
+      envOptions,
+    );
     if (selected) return selected;
     return envOptions[0] ?? "prod";
   }
@@ -4603,14 +4958,18 @@ export class WebIDEHost {
     if (!isInfisicalAccessTokenValid(auth) || !auth.accessToken) return;
 
     const config = readInfisicalConfig(this.container.vfs);
-    if (config.machineIdentity?.clientId && config.machineIdentity?.clientSecret) {
+    if (
+      config.machineIdentity?.clientId &&
+      config.machineIdentity?.clientSecret
+    ) {
       return;
     }
 
-    const tokenFingerprint = auth.accessToken.length + ":" + auth.accessToken.slice(-12);
+    const tokenFingerprint =
+      auth.accessToken.length + ":" + auth.accessToken.slice(-12);
     if (
-      this.infisicalUaProvisionState?.tokenFingerprint === tokenFingerprint
-      && this.infisicalUaProvisionState.status === "error"
+      this.infisicalUaProvisionState?.tokenFingerprint === tokenFingerprint &&
+      this.infisicalUaProvisionState.status === "error"
     ) {
       return;
     }
@@ -4639,9 +4998,10 @@ export class WebIDEHost {
             method: "universal-auth",
             clientId: result.clientId,
             clientSecret: result.clientSecret,
-            organizationSlug: result.organizationSlug
-              ?? refreshedConfig.machineIdentity?.organizationSlug
-              ?? null,
+            organizationSlug:
+              result.organizationSlug ??
+              refreshedConfig.machineIdentity?.organizationSlug ??
+              null,
           },
         });
 
@@ -4655,7 +5015,10 @@ export class WebIDEHost {
           message,
         };
         if (typeof console !== "undefined") {
-          console.warn("Infisical Universal Auth auto-provision failed:", message);
+          console.warn(
+            "Infisical Universal Auth auto-provision failed:",
+            message,
+          );
         }
       } finally {
         this.infisicalUaProvisionInFlight = null;
@@ -4806,7 +5169,9 @@ export class WebIDEHost {
         if (result === "created") createdCount += 1;
         else updatedCount += 1;
       } catch (error) {
-        failures.push(`${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
+        failures.push(
+          `${entry.name}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 
@@ -4861,7 +5226,9 @@ export class WebIDEHost {
       };
     }
 
-    const parsedLastLogin = config.lastLogin ? new Date(config.lastLogin) : null;
+    const parsedLastLogin = config.lastLogin
+      ? new Date(config.lastLogin)
+      : null;
     const lastLoginLabel =
       parsedLastLogin && !Number.isNaN(parsedLastLogin.getTime())
         ? parsedLastLogin.toLocaleString()
@@ -4876,7 +5243,9 @@ export class WebIDEHost {
       : null;
     const appOptions = apps.map((app) => ({
       value: app.name,
-      label: app.organizationSlug ? `${app.name} (${app.organizationSlug})` : app.name,
+      label: app.organizationSlug
+        ? `${app.name} (${app.organizationSlug})`
+        : app.name,
     }));
 
     const detailParts: string[] = [];
@@ -4896,9 +5265,9 @@ export class WebIDEHost {
       authAction: "logout:fly",
       authLabel: "Logout",
       statusText: "Signed in",
-      statusDetail: detailParts.length > 0 ? detailParts.join(" • ") : undefined,
-      selectActionPrefix:
-        appOptions.length > 0 ? "select-app:fly" : undefined,
+      statusDetail:
+        detailParts.length > 0 ? detailParts.join(" • ") : undefined,
+      selectActionPrefix: appOptions.length > 0 ? "select-app:fly" : undefined,
       selectLabel: appOptions.length > 0 ? "App" : undefined,
       selectOptions: appOptions.length > 0 ? appOptions : undefined,
       selectValue: selectedAppName ?? undefined,
@@ -4933,10 +5302,10 @@ export class WebIDEHost {
       const apps: FlyAppSummary[] = [];
       for (const entry of parsed) {
         if (
-          entry
-          && typeof entry === "object"
-          && typeof (entry as FlyAppSummary).id === "string"
-          && typeof (entry as FlyAppSummary).name === "string"
+          entry &&
+          typeof entry === "object" &&
+          typeof (entry as FlyAppSummary).id === "string" &&
+          typeof (entry as FlyAppSummary).name === "string"
         ) {
           const value = entry as FlyAppSummary;
           apps.push({
@@ -4972,7 +5341,10 @@ export class WebIDEHost {
     }
   }
 
-  private setSelectedFlyAppName(fingerprint: string, name: string | null): void {
+  private setSelectedFlyAppName(
+    fingerprint: string,
+    name: string | null,
+  ): void {
     try {
       const key = this.getFlySelectedAppKey(fingerprint);
       if (name) {
@@ -5002,7 +5374,10 @@ export class WebIDEHost {
     if (!fingerprint || !token) return;
     if (this.getCachedFlyApps(fingerprint).length > 0) return;
     if (this.flyAppsFetchInFlight) return;
-    if (this.flyAppsFetchState?.fingerprint === fingerprint && this.flyAppsFetchState.status === "error") {
+    if (
+      this.flyAppsFetchState?.fingerprint === fingerprint &&
+      this.flyAppsFetchState.status === "error"
+    ) {
       // Don't keep retrying a failed fetch on every render; user can refresh after re-login.
       return;
     }
@@ -5023,7 +5398,9 @@ export class WebIDEHost {
     })();
   }
 
-  private getFlyAppsFetchStatus(token: string | null): { status: "loading" | "error"; message?: string } | null {
+  private getFlyAppsFetchStatus(
+    token: string | null,
+  ): { status: "loading" | "error"; message?: string } | null {
     const fingerprint = this.getFlyTokenFingerprint(token);
     if (!fingerprint) return null;
     if (this.flyAppsFetchState?.fingerprint !== fingerprint) return null;
@@ -5045,9 +5422,14 @@ export class WebIDEHost {
     this.updateKeychainSurface();
   }
 
-  private getEffectiveFlyAppName(token: string | null, fallback: string): string {
+  private getEffectiveFlyAppName(
+    token: string | null,
+    fallback: string,
+  ): string {
     const fingerprint = this.getFlyTokenFingerprint(token);
-    const fromLocalStorage = fingerprint ? this.getSelectedFlyAppName(fingerprint) : null;
+    const fromLocalStorage = fingerprint
+      ? this.getSelectedFlyAppName(fingerprint)
+      : null;
     const fromConfig = readFlyConfig(this.container.vfs).appName;
     return fromLocalStorage || fromConfig || fallback;
   }
@@ -5076,9 +5458,8 @@ export class WebIDEHost {
       };
     }
 
-    const identity = config.currentUser?.email
-      || config.currentUser?.name
-      || null;
+    const identity =
+      config.currentUser?.email || config.currentUser?.name || null;
 
     void this.ensureNetlifyAccountsLoaded(config);
 
@@ -5127,10 +5508,10 @@ export class WebIDEHost {
       const accounts: NetlifyAccount[] = [];
       for (const entry of parsed) {
         if (
-          entry
-          && typeof entry === "object"
-          && typeof (entry as NetlifyAccount).id === "string"
-          && typeof (entry as NetlifyAccount).slug === "string"
+          entry &&
+          typeof entry === "object" &&
+          typeof (entry as NetlifyAccount).id === "string" &&
+          typeof (entry as NetlifyAccount).slug === "string"
         ) {
           const value = entry as NetlifyAccount;
           accounts.push({
@@ -5151,11 +5532,16 @@ export class WebIDEHost {
   private getSelectedNetlifyAccountSlug(userId: string | null): string | null {
     if (!userId) return null;
     try {
-      const raw = localStorage.getItem(this.getNetlifySelectedAccountKey(userId));
+      const raw = localStorage.getItem(
+        this.getNetlifySelectedAccountKey(userId),
+      );
       const trimmed = raw?.trim();
       if (!trimmed) return null;
       const accounts = this.getCachedNetlifyAccounts(userId);
-      if (accounts.length > 0 && !accounts.some((account) => account.slug === trimmed)) {
+      if (
+        accounts.length > 0 &&
+        !accounts.some((account) => account.slug === trimmed)
+      ) {
         return null;
       }
       return trimmed;
@@ -5164,7 +5550,10 @@ export class WebIDEHost {
     }
   }
 
-  private setSelectedNetlifyAccountSlug(userId: string, slug: string | null): void {
+  private setSelectedNetlifyAccountSlug(
+    userId: string,
+    slug: string | null,
+  ): void {
     try {
       const key = this.getNetlifySelectedAccountKey(userId);
       if (slug) {
@@ -5177,7 +5566,10 @@ export class WebIDEHost {
     }
   }
 
-  private writeCachedNetlifyAccounts(userId: string, accounts: NetlifyAccount[]): void {
+  private writeCachedNetlifyAccounts(
+    userId: string,
+    accounts: NetlifyAccount[],
+  ): void {
     this.netlifyAccountsCache = { userId, accounts };
     try {
       localStorage.setItem(
@@ -5206,7 +5598,10 @@ export class WebIDEHost {
         );
         this.writeCachedNetlifyAccounts(userId, accounts);
 
-        if (!this.getSelectedNetlifyAccountSlug(userId) && accounts.length > 0) {
+        if (
+          !this.getSelectedNetlifyAccountSlug(userId) &&
+          accounts.length > 0
+        ) {
           const personal = accounts.find(
             (account) => (account.type ?? "").toLowerCase() === "personal",
           );
@@ -5243,16 +5638,16 @@ export class WebIDEHost {
         authAction: "login:neon",
         authLabel: "Login",
         statusText: "Ready to sign in",
-        statusDetail:
-          this.desktopBridge
-            ? "Uses Neon OAuth with an automatic localhost callback listener in the desktop host. After login, run `neon auth api-key create --name <name>` for a personal API key or `neon auth token` for the short-lived bearer token."
-            : "Uses Neon OAuth and stores refreshable workspace credentials. After login, run `neon auth api-key create --name <name>` for a personal API key or `neon auth token` for the short-lived bearer token.",
+        statusDetail: this.desktopBridge
+          ? "Uses Neon OAuth with an automatic localhost callback listener in the desktop host. After login, run `neon auth api-key create --name <name>` for a personal API key or `neon auth token` for the short-lived bearer token."
+          : "Uses Neon OAuth and stores refreshable workspace credentials. After login, run `neon auth api-key create --name <name>` for a personal API key or `neon auth token` for the short-lived bearer token.",
       };
     }
 
-    const parsedExpiry = typeof credentials.expires_at === "number"
-      ? new Date(credentials.expires_at)
-      : null;
+    const parsedExpiry =
+      typeof credentials.expires_at === "number"
+        ? new Date(credentials.expires_at)
+        : null;
     const expiryLabel =
       parsedExpiry && !Number.isNaN(parsedExpiry.getTime())
         ? parsedExpiry.toLocaleString()
@@ -5263,7 +5658,9 @@ export class WebIDEHost {
       authAction: "logout:neon",
       authLabel: "Logout",
       statusText: "Signed in",
-      statusDetail: expiryLabel ? `Token expires: ${expiryLabel}` : "Refresh token stored in workspace keychain.",
+      statusDetail: expiryLabel
+        ? `Token expires: ${expiryLabel}`
+        : "Refresh token stored in workspace keychain.",
     };
   }
 
@@ -5278,14 +5675,15 @@ export class WebIDEHost {
         authAction: "login:cloudflare",
         authLabel: "Login",
         statusText: "Ready to sign in",
-        statusDetail:
-          this.desktopBridge
-            ? "Uses Wrangler OAuth with an automatic localhost callback listener in the desktop host."
-            : "Uses Wrangler OAuth. In browser-only sessions, Cloudflare still redirects to localhost:8976, so the fallback is pasting the callback URL to complete login.",
+        statusDetail: this.desktopBridge
+          ? "Uses Wrangler OAuth with an automatic localhost callback listener in the desktop host."
+          : "Uses Wrangler OAuth. In browser-only sessions, Cloudflare still redirects to localhost:8976, so the fallback is pasting the callback URL to complete login.",
       };
     }
 
-    const parsedExpiry = config.expirationTime ? new Date(config.expirationTime) : null;
+    const parsedExpiry = config.expirationTime
+      ? new Date(config.expirationTime)
+      : null;
     const expiryLabel =
       parsedExpiry && !Number.isNaN(parsedExpiry.getTime())
         ? parsedExpiry.toLocaleString()
@@ -5296,21 +5694,33 @@ export class WebIDEHost {
       authAction: "logout:cloudflare",
       authLabel: "Logout",
       statusText: "Signed in",
-      statusDetail: expiryLabel ? `Token expires: ${expiryLabel}` : "Refresh token stored in workspace keychain.",
+      statusDetail: expiryLabel
+        ? `Token expires: ${expiryLabel}`
+        : "Refresh token stored in workspace keychain.",
     };
   }
 
   private buildAppBuildingSidebarSlotStatus(): Pick<
     KeychainSlotStatus,
-    "active" | "authAction" | "authLabel" | "statusText" | "statusDetail" | "canAuth"
+    | "active"
+    | "authAction"
+    | "authLabel"
+    | "statusText"
+    | "statusDetail"
+    | "canAuth"
   > {
     const config = this.getEffectiveAppBuildingSetup();
     const missing: string[] = [];
-    if (!config.flyAppName) missing.push("Fly app (pick one in the Fly.io slot)");
-    if (!config.flyApiToken) missing.push("Fly API token (login via Fly.io slot)");
-    if (!config.infisicalClientId) missing.push("Infisical Universal Auth client ID");
-    if (!config.infisicalClientSecret) missing.push("Infisical Universal Auth client secret");
-    if (!config.infisicalProjectId) missing.push("Infisical project (pick one in the Infisical slot)");
+    if (!config.flyAppName)
+      missing.push("Fly app (pick one in the Fly.io slot)");
+    if (!config.flyApiToken)
+      missing.push("Fly API token (login via Fly.io slot)");
+    if (!config.infisicalClientId)
+      missing.push("Infisical Universal Auth client ID");
+    if (!config.infisicalClientSecret)
+      missing.push("Infisical Universal Auth client secret");
+    if (!config.infisicalProjectId)
+      missing.push("Infisical project (pick one in the Infisical slot)");
     if (!config.infisicalEnvironment) missing.push("Infisical environment");
 
     if (missing.length > 0) {
@@ -5322,12 +5732,16 @@ export class WebIDEHost {
       };
     }
 
-    const envLabel = this.getInfisicalEnvironmentLabel(config.infisicalEnvironment);
+    const envLabel = this.getInfisicalEnvironmentLabel(
+      config.infisicalEnvironment,
+    );
     const detail = [
       `Fly app: ${config.flyAppName}`,
       `Infisical: ${envLabel}`,
       config.imageRef ? `Image: ${config.imageRef}` : null,
-    ].filter(Boolean).join(" • ");
+    ]
+      .filter(Boolean)
+      .join(" • ");
 
     return {
       active: true,
@@ -5351,12 +5765,16 @@ export class WebIDEHost {
       : stored.infisicalEnvironment || "prod";
 
     return normalizeAppBuildingSetupDraft({
-      flyAppName: this.getEffectiveFlyAppName(flyConfig.accessToken, stored.flyAppName),
+      flyAppName: this.getEffectiveFlyAppName(
+        flyConfig.accessToken,
+        stored.flyAppName,
+      ),
       flyApiToken: stored.flyApiToken || flyConfig.accessToken || undefined,
       infisicalClientId:
         infisicalConfig.machineIdentity?.clientId || stored.infisicalClientId,
       infisicalClientSecret:
-        infisicalConfig.machineIdentity?.clientSecret || stored.infisicalClientSecret,
+        infisicalConfig.machineIdentity?.clientSecret ||
+        stored.infisicalClientSecret,
       infisicalProjectId: selectedProjectId || stored.infisicalProjectId,
       infisicalEnvironment: resolvedEnvironment,
       repositoryCloneUrl: stored.repositoryCloneUrl,
@@ -5365,7 +5783,9 @@ export class WebIDEHost {
     });
   }
 
-  private getPreferredAwsSessionName(config = readAwsConfig(this.container.vfs)): string | null {
+  private getPreferredAwsSessionName(
+    config = readAwsConfig(this.container.vfs),
+  ): string | null {
     if (config.defaultProfile && config.profiles[config.defaultProfile]) {
       const sessionName = config.profiles[config.defaultProfile].ssoSession;
       if (config.ssoSessions[sessionName]) {
@@ -5416,7 +5836,9 @@ export class WebIDEHost {
     config.ssoSessions[normalized.sessionName] = {
       startUrl: normalized.startUrl,
       region: normalized.region,
-      registrationScopes: existingSession?.registrationScopes || ["sso:account:access"],
+      registrationScopes: existingSession?.registrationScopes || [
+        "sso:account:access",
+      ],
     };
     writeAwsConfig(this.container.vfs, config);
     this.keychain.notifyExternalStateChanged();
@@ -5446,10 +5868,7 @@ export class WebIDEHost {
     }
 
     const config = readAppBuildingSetup(this.container.vfs);
-    const summary = buildAppBuildingConfigSummary(
-      this.activeProjectId,
-      config,
-    );
+    const summary = buildAppBuildingConfigSummary(this.activeProjectId, config);
     await this.projectDb.putAppBuildingConfig(summary);
   }
 
@@ -5471,8 +5890,8 @@ export class WebIDEHost {
     this.hadTailscaleKeychainData = true;
 
     if (
-      this.pendingTailscaleKeychainActivation
-      && this.isTailscaleSessionReadyForKeychain(this.tailscaleStatus)
+      this.pendingTailscaleKeychainActivation &&
+      this.isTailscaleSessionReadyForKeychain(this.tailscaleStatus)
     ) {
       this.pendingTailscaleKeychainActivation = false;
       void this.keychain.handleExternalCredentialActivation();
@@ -5491,14 +5910,16 @@ export class WebIDEHost {
     }
 
     const requestedExitNodeId = this.getRequestedTailscaleExitNodeId();
-    const selectedExitNodeName =
-      status.selectedExitNodeId
-        ? status.exitNodes.find((exitNode) => exitNode.id === status.selectedExitNodeId)?.name
-        : null;
+    const selectedExitNodeName = status.selectedExitNodeId
+      ? status.exitNodes.find(
+          (exitNode) => exitNode.id === status.selectedExitNodeId,
+        )?.name
+      : null;
     const requestedExitNodeName =
       !selectedExitNodeName && requestedExitNodeId
-        ? status.exitNodes.find((exitNode) => exitNode.id === requestedExitNodeId)?.name
-          ?? requestedExitNodeId
+        ? (status.exitNodes.find(
+            (exitNode) => exitNode.id === requestedExitNodeId,
+          )?.name ?? requestedExitNodeId)
         : null;
 
     switch (status.state) {
@@ -5516,9 +5937,9 @@ export class WebIDEHost {
           ? `Running via ${selectedExitNodeName}`
           : requestedExitNodeName
             ? `Running, selecting ${requestedExitNodeName}`
-          : status.exitNodes.length > 0
-            ? "Running, choose an exit node"
-            : "Running, no exit nodes available";
+            : status.exitNodes.length > 0
+              ? "Running, choose an exit node"
+              : "Running, no exit nodes available";
       case "needs-login":
         return "Needs login";
       case "needs-machine-auth":
@@ -5560,9 +5981,7 @@ export class WebIDEHost {
     }
   }
 
-  private async flyAuthAction(
-    action: "login" | "logout",
-  ): Promise<void> {
+  private async flyAuthAction(action: "login" | "logout"): Promise<void> {
     this.flyAppsCache = null;
     this.flyAppsFetchState = null;
     if (action === "logout") {
@@ -5574,9 +5993,7 @@ export class WebIDEHost {
     await this.keychainAuthAction("fly auth login");
   }
 
-  private async netlifyAuthAction(
-    action: "login" | "logout",
-  ): Promise<void> {
+  private async netlifyAuthAction(action: "login" | "logout"): Promise<void> {
     if (action === "logout") {
       await this.keychainAuthAction("netlify logout");
       return;
@@ -5598,9 +6015,7 @@ export class WebIDEHost {
     await this.keychainAuthAction("wrangler login");
   }
 
-  private async tailscaleAuthAction(
-    action: "login" | "logout",
-  ): Promise<void> {
+  private async tailscaleAuthAction(action: "login" | "logout"): Promise<void> {
     try {
       if (action === "login") {
         await this.container.network.configure({
@@ -5671,7 +6086,11 @@ export class WebIDEHost {
   }
 
   private isPreviewMessageSource(source: MessageEventSource | null): boolean {
-    if (source && this.externalPreviewWindow && source === this.externalPreviewWindow) {
+    if (
+      source &&
+      this.externalPreviewWindow &&
+      source === this.externalPreviewWindow
+    ) {
       return true;
     }
 
@@ -5692,7 +6111,10 @@ export class WebIDEHost {
     }
 
     if (this.externalPreviewWindow) {
-      this.container.setHMRTargetForPort(this.previewPort, this.externalPreviewWindow);
+      this.container.setHMRTargetForPort(
+        this.previewPort,
+        this.externalPreviewWindow,
+      );
     }
   }
 
@@ -5716,33 +6138,33 @@ export class WebIDEHost {
     }
 
     const shouldPrepareFlyAuthPopup =
-      this.agentMode === "browser"
-      && tab.kind === "user"
-      && isFlyLoginCommand(trimmed);
+      this.agentMode === "browser" &&
+      tab.kind === "user" &&
+      isFlyLoginCommand(trimmed);
     if (shouldPrepareFlyAuthPopup) {
       prepareFlyAuthPopup();
     }
 
     const shouldPrepareNetlifyAuthPopup =
-      this.agentMode === "browser"
-      && tab.kind === "user"
-      && isNetlifyLoginCommand(trimmed);
+      this.agentMode === "browser" &&
+      tab.kind === "user" &&
+      isNetlifyLoginCommand(trimmed);
     if (shouldPrepareNetlifyAuthPopup) {
       prepareNetlifyAuthPopup();
     }
 
     const shouldPrepareCloudflareAuthPopup =
-      this.agentMode === "browser"
-      && tab.kind === "user"
-      && isCloudflareLoginCommand(trimmed);
+      this.agentMode === "browser" &&
+      tab.kind === "user" &&
+      isCloudflareLoginCommand(trimmed);
     if (shouldPrepareCloudflareAuthPopup) {
       prepareCloudflareAuthPopup();
     }
 
     if (
-      this.agentMode === "browser"
-      && tab.kind === "user"
-      && options?.interceptAgentLaunch !== false
+      this.agentMode === "browser" &&
+      tab.kind === "user" &&
+      options?.interceptAgentLaunch !== false
     ) {
       const openCodeLaunchArgs = parseOpenCodeLaunchCommand(trimmed);
       if (openCodeLaunchArgs) {
@@ -5837,6 +6259,24 @@ export class WebIDEHost {
       return;
     }
 
+    registerWebIdeCodexCliShellCommand(this.container, {
+      cwd: WORKSPACE_ROOT,
+      requestBrowserLogin: async ({ login, context }) => {
+        const result = await runCodexBrowserLogin({
+          method: login.type,
+          vfs: this.container.vfs,
+          signal: context.signal,
+          writeStdout: context.writeStdout,
+        });
+        if (result.exitCode === 0) {
+          this.keychain.notifyExternalStateChanged();
+          this.updateKeychainStatusEntry();
+          this.updateKeychainSurface();
+        }
+        return result;
+      },
+    });
+
     this.container.registerShellCommand({
       name: "webide-open",
       interceptShellParsing: true,
@@ -5844,7 +6284,10 @@ export class WebIDEHost {
         const rawTarget = args.join(" ").trim();
 
         try {
-          const target = await this.runWebIdeOpenCommand(rawTarget, context.cwd);
+          const target = await this.runWebIdeOpenCommand(
+            rawTarget,
+            context.cwd,
+          );
           const suffix =
             typeof target.line === "number"
               ? `:${target.line}${typeof target.column === "number" ? `:${target.column}` : ""}`
@@ -5855,7 +6298,8 @@ export class WebIDEHost {
             exitCode: 0,
           };
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           return {
             stdout: "",
             stderr: `${message}\n`,
@@ -5872,7 +6316,8 @@ export class WebIDEHost {
         try {
           return await this.runAppBuildingShellCommand(args, context);
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           return {
             stdout: "",
             stderr: `${message}\n`,
@@ -5888,7 +6333,11 @@ export class WebIDEHost {
     cwd: string,
   ): Promise<WebIdeOpenTarget> {
     const target = parseWebIdeOpenTarget(rawTarget);
-    const resolvedPath = resolveWebIdeOpenPath(target.path, cwd, WORKSPACE_ROOT);
+    const resolvedPath = resolveWebIdeOpenPath(
+      target.path,
+      cwd,
+      WORKSPACE_ROOT,
+    );
 
     if (!this.container.vfs.existsSync(resolvedPath)) {
       throw new Error(`File not found: ${resolvedPath}`);
@@ -5896,7 +6345,9 @@ export class WebIDEHost {
 
     const stat = this.container.vfs.statSync(resolvedPath);
     if (stat.isDirectory()) {
-      throw new Error(`webide-open only supports files, not directories: ${resolvedPath}`);
+      throw new Error(
+        `webide-open only supports files, not directories: ${resolvedPath}`,
+      );
     }
 
     const resolvedTarget: WebIdeOpenTarget = {
@@ -6035,17 +6486,27 @@ export class WebIDEHost {
       return;
     }
 
-    const args = request.action === "create"
-      ? ["create", "--remote", "--name", request.name, "--prompt", request.prompt]
-      : request.action === "message"
-        ? ["message", request.jobId, "--prompt", request.prompt]
-        : request.action === "logs"
-          ? [
-            "logs",
-            request.jobId,
-            ...(typeof request.offset === "number" ? ["--offset", String(request.offset)] : []),
+    const args =
+      request.action === "create"
+        ? [
+            "create",
+            "--remote",
+            "--name",
+            request.name,
+            "--prompt",
+            request.prompt,
           ]
-          : [request.action, request.jobId];
+        : request.action === "message"
+          ? ["message", request.jobId, "--prompt", request.prompt]
+          : request.action === "logs"
+            ? [
+                "logs",
+                request.jobId,
+                ...(typeof request.offset === "number"
+                  ? ["--offset", String(request.offset)]
+                  : []),
+              ]
+            : [request.action, request.jobId];
 
     try {
       const result = await this.runAppBuildingShellCommand(args, context);
@@ -6085,7 +6546,9 @@ export class WebIDEHost {
     const config = this.getAppBuildingSetupDraft();
     const validationError = validateAppBuildingSetupDraft(config);
     if (validationError) {
-      throw new Error(`${validationError} Configure the missing piece in the Keychain sidebar.`);
+      throw new Error(
+        `${validationError} Configure the missing piece in the Keychain sidebar.`,
+      );
     }
     return config;
   }
@@ -6168,9 +6631,10 @@ export class WebIDEHost {
 
   private async callAppBuildingWorker<T>(
     job: AppBuildingJobRecord,
-    fn: (
-      resolved: { job: AppBuildingJobRecord; routeId: string | null },
-    ) => Promise<T>,
+    fn: (resolved: {
+      job: AppBuildingJobRecord;
+      routeId: string | null;
+    }) => Promise<T>,
   ): Promise<{ job: AppBuildingJobRecord; result: T }> {
     const firstResolved = await this.resolveAppBuildingWorkerTarget(job);
     try {
@@ -6184,10 +6648,7 @@ export class WebIDEHost {
         firstResolved.job,
         { forceRefresh: true },
       );
-      if (
-        refreshed.routeId
-        && refreshed.routeId === firstResolved.routeId
-      ) {
+      if (refreshed.routeId && refreshed.routeId === firstResolved.routeId) {
         throw error;
       }
       const result = await fn(refreshed);
@@ -6195,7 +6656,9 @@ export class WebIDEHost {
     }
   }
 
-  private requireProvisionedAppBuildingJob(job: AppBuildingJobRecord): AppBuildingJobRecord {
+  private requireProvisionedAppBuildingJob(
+    job: AppBuildingJobRecord,
+  ): AppBuildingJobRecord {
     if (!job.machineId || !job.baseUrl) {
       throw new Error(
         job.error
@@ -6292,15 +6755,13 @@ export class WebIDEHost {
     return `app-building-${jobId.slice(0, 8)}`;
   }
 
-  private mapRemoteWorkerState(
-    state: string,
-  ): AppBuildingJobRecord["status"] {
+  private mapRemoteWorkerState(state: string): AppBuildingJobRecord["status"] {
     if (
-      state === "starting"
-      || state === "processing"
-      || state === "idle"
-      || state === "stopping"
-      || state === "stopped"
+      state === "starting" ||
+      state === "processing" ||
+      state === "idle" ||
+      state === "stopping" ||
+      state === "stopped"
     ) {
       return state;
     }
@@ -6374,7 +6835,10 @@ export class WebIDEHost {
     if (flyState === "started" && job.baseUrl) {
       try {
         const resolved = await this.resolveAppBuildingWorkerTarget(job);
-        const status = await fetchAppBuildingStatus(resolved.job.baseUrl, resolved.routeId);
+        const status = await fetchAppBuildingStatus(
+          resolved.job.baseUrl,
+          resolved.routeId,
+        );
         return this.applyRemoteWorkerStatus(resolved.job, status);
       } catch {
         // Machine is up but worker HTTP isn't answering yet — still booting.
@@ -6427,7 +6891,9 @@ export class WebIDEHost {
     return `${lines.join("\n")}\n`;
   }
 
-  private async getAppBuildingJobOrThrow(jobId: string): Promise<AppBuildingJobRecord> {
+  private async getAppBuildingJobOrThrow(
+    jobId: string,
+  ): Promise<AppBuildingJobRecord> {
     const job = await this.projectDb.getAppBuildingJob(jobId);
     if (!job) {
       throw new Error(`Unknown app-building job: ${jobId}`);
@@ -6436,12 +6902,18 @@ export class WebIDEHost {
   }
 
   private async handleAppBuildingCreate(
-    command: Extract<ReturnType<typeof parseAppBuildingCommand>, { verb: "create" }>,
+    command: Extract<
+      ReturnType<typeof parseAppBuildingCommand>,
+      { verb: "create" }
+    >,
     context: import("almostnode").ShellCommandContext,
   ): Promise<AppBuildingRunResult> {
     const projectId = this.requireActiveProjectId();
     const setup = this.requireAppBuildingSetup();
-    const imageRef = setup.imageRef || DEFAULT_REMOTE_APP_BUILDING_IMAGE_REF || DEFAULT_APP_BUILDING_IMAGE_REF;
+    const imageRef =
+      setup.imageRef ||
+      DEFAULT_REMOTE_APP_BUILDING_IMAGE_REF ||
+      DEFAULT_APP_BUILDING_IMAGE_REF;
     let job = this.createAppBuildingJobRecord(
       projectId,
       command.name,
@@ -6507,7 +6979,10 @@ export class WebIDEHost {
       );
       const resolvedTarget = await this.resolveAppBuildingWorkerTarget(job);
       job = resolvedTarget.job;
-      const status = await waitForWorkerReady(job.baseUrl, resolvedTarget.routeId);
+      const status = await waitForWorkerReady(
+        job.baseUrl,
+        resolvedTarget.routeId,
+      );
 
       job = this.applyRemoteWorkerStatus(job, status);
       await this.projectDb.putAppBuildingJob(job);
@@ -6533,14 +7008,15 @@ export class WebIDEHost {
       const fallback = job.machineId
         ? await this.refreshAppBuildingJobFromFly({ ...job, error: message })
         : null;
-      job = fallback && fallback.status !== "error"
-        ? { ...fallback, error: message, updatedAt: Date.now() }
-        : {
-          ...job,
-          status: "error",
-          error: message,
-          updatedAt: Date.now(),
-        };
+      job =
+        fallback && fallback.status !== "error"
+          ? { ...fallback, error: message, updatedAt: Date.now() }
+          : {
+              ...job,
+              status: "error",
+              error: message,
+              updatedAt: Date.now(),
+            };
       await this.projectDb.putAppBuildingJob(job);
       return {
         stdout: "",
@@ -6551,7 +7027,9 @@ export class WebIDEHost {
     }
   }
 
-  private async handleAppBuildingStatus(jobId: string): Promise<AppBuildingRunResult> {
+  private async handleAppBuildingStatus(
+    jobId: string,
+  ): Promise<AppBuildingRunResult> {
     let job = await this.getAppBuildingJobOrThrow(jobId);
     if (!job.machineId || !job.baseUrl) {
       return {
@@ -6577,17 +7055,20 @@ export class WebIDEHost {
       await this.projectDb.putAppBuildingJob(job);
 
       if (
-        status.previewPort
-        && job.baseUrl
-        && !this.appBuildingPreviewOpenedJobs.has(job.id)
+        status.previewPort &&
+        job.baseUrl &&
+        !this.appBuildingPreviewOpenedJobs.has(job.id)
       ) {
         this.appBuildingPreviewOpenedJobs.add(job.id);
-        void this.openAppBuildingPreview(`${job.baseUrl.replace(/\/+$/, "")}/preview/`);
+        void this.openAppBuildingPreview(
+          `${job.baseUrl.replace(/\/+$/, "")}/preview/`,
+        );
       }
 
-      const eventText = events.items.length > 0
-        ? `\nRecent events:\n${events.items.join("\n")}\n`
-        : "";
+      const eventText =
+        events.items.length > 0
+          ? `\nRecent events:\n${events.items.join("\n")}\n`
+          : "";
       return {
         stdout: `${this.formatAppBuildingStatus(job)}${eventText}`,
         stderr: "",
@@ -6599,14 +7080,15 @@ export class WebIDEHost {
       const fallback = job.machineId
         ? await this.refreshAppBuildingJobFromFly({ ...job, error: message })
         : null;
-      job = fallback && fallback.status !== "error"
-        ? { ...fallback, error: message, updatedAt: Date.now() }
-        : {
-          ...job,
-          status: "error",
-          error: message,
-          updatedAt: Date.now(),
-        };
+      job =
+        fallback && fallback.status !== "error"
+          ? { ...fallback, error: message, updatedAt: Date.now() }
+          : {
+              ...job,
+              status: "error",
+              error: message,
+              updatedAt: Date.now(),
+            };
       await this.projectDb.putAppBuildingJob(job);
       return {
         stdout: this.formatAppBuildingStatus(job),
@@ -6622,11 +7104,15 @@ export class WebIDEHost {
     _offset?: number,
   ): Promise<AppBuildingRunResult> {
     const job = await this.getAppBuildingJobOrThrow(jobId);
-    const { job: nextJob, newFormatted } = await this.fetchAppBuildingLogDelta(job);
+    const { job: nextJob, newFormatted } =
+      await this.fetchAppBuildingLogDelta(job);
     return {
-      stdout: newFormatted.length > 0
-        ? `${newFormatted.join("\n")}\n`
-        : (nextJob.recentLogs?.length ? "" : "No logs yet.\n"),
+      stdout:
+        newFormatted.length > 0
+          ? `${newFormatted.join("\n")}\n`
+          : nextJob.recentLogs?.length
+            ? ""
+            : "No logs yet.\n",
       stderr: "",
       exitCode: 0,
       jobId: nextJob.id,
@@ -6685,7 +7171,9 @@ export class WebIDEHost {
    * Reset the log cursor + ring buffer so the next fetch backfills from a
    * fresh start_time anchor. Used by the UI's "Refresh" action.
    */
-  async resetAppBuildingLogCursor(jobId: string): Promise<AppBuildingJobRecord> {
+  async resetAppBuildingLogCursor(
+    jobId: string,
+  ): Promise<AppBuildingJobRecord> {
     const job = await this.getAppBuildingJobOrThrow(jobId);
     const reset = {
       ...job,
@@ -6722,7 +7210,11 @@ export class WebIDEHost {
 
     const existingIds = new Set(
       existing
-        .map((card) => (card && typeof card === "object" ? (card as { id?: unknown }).id : null))
+        .map((card) =>
+          card && typeof card === "object"
+            ? (card as { id?: unknown }).id
+            : null,
+        )
         .filter((id): id is string => typeof id === "string"),
     );
 
@@ -6911,9 +7403,8 @@ export class WebIDEHost {
         }
 
         try {
-          const { job: nextJob, newFormatted } = await this.fetchAppBuildingLogDelta(
-            job,
-          );
+          const { job: nextJob, newFormatted } =
+            await this.fetchAppBuildingLogDelta(job);
           errorStreak = 0;
           if (newFormatted.length > 0) {
             emitEntries(newFormatted, nextJob);
@@ -6967,7 +7458,10 @@ export class WebIDEHost {
     await postAppBuildingMessage(job.baseUrl, resolvedTarget.routeId, prompt);
 
     try {
-      const status = await fetchAppBuildingStatus(job.baseUrl, resolvedTarget.routeId);
+      const status = await fetchAppBuildingStatus(
+        job.baseUrl,
+        resolvedTarget.routeId,
+      );
       job = this.applyRemoteWorkerStatus(job, status);
     } catch {
       job = {
@@ -6986,7 +7480,9 @@ export class WebIDEHost {
     };
   }
 
-  private async handleAppBuildingStop(jobId: string): Promise<AppBuildingRunResult> {
+  private async handleAppBuildingStop(
+    jobId: string,
+  ): Promise<AppBuildingRunResult> {
     const setup = this.requireAppBuildingSetup();
     let job = this.requireProvisionedAppBuildingJob(
       await this.getAppBuildingJobOrThrow(jobId),
@@ -7002,7 +7498,9 @@ export class WebIDEHost {
     try {
       const resolvedTarget = await this.resolveAppBuildingWorkerTarget(job);
       job = resolvedTarget.job;
-      await postAppBuildingStop(job.baseUrl, resolvedTarget.routeId).catch(() => undefined);
+      await postAppBuildingStop(job.baseUrl, resolvedTarget.routeId).catch(
+        () => undefined,
+      );
       await destroyFlyMachine(
         job.flyApp,
         setup.flyApiToken,
@@ -7054,6 +7552,25 @@ export class WebIDEHost {
     return this.keychain.getState();
   }
 
+  onKeychainStateChange(listener: (state: KeychainState) => void): () => void {
+    this.keychainStateListeners.add(listener);
+    return () => {
+      this.keychainStateListeners.delete(listener);
+    };
+  }
+
+  notifyKeychainExternalChange(): void {
+    this.keychain.notifyExternalStateChanged();
+  }
+
+  getVaultEnvVars(): KeychainVaultEnvVar[] {
+    return this.buildVaultEnvVars();
+  }
+
+  rehydrateCredentialMirror(): void {
+    this.credentialMirror.hydrateFromStorage();
+  }
+
   private async openWorkspaceFile(path: string): Promise<void> {
     const lowerPath = path.toLowerCase();
 
@@ -7090,9 +7607,7 @@ export class WebIDEHost {
     }
 
     if (!this.container.vfs.existsSync(normalizedPath)) {
-      this.updatePreviewStatus(
-        `Resolved source is missing: ${normalizedPath}`,
-      );
+      this.updatePreviewStatus(`Resolved source is missing: ${normalizedPath}`);
       return false;
     }
 
@@ -7152,12 +7667,10 @@ export class WebIDEHost {
       column: columnNumber,
     });
 
-    let bestRange:
-      | {
-          start: number;
-          end: number;
-        }
-      | null = null;
+    let bestRange: {
+      start: number;
+      end: number;
+    } | null = null;
 
     const visit = (node: import("typescript").Node): void => {
       const start = node.getStart(sourceFile, false);
@@ -7324,12 +7837,10 @@ export class WebIDEHost {
         ).catch(() => null);
         if (
           jsxSelection &&
-          (
-            jsxSelection.startLineNumber !== selection.startLineNumber ||
+          (jsxSelection.startLineNumber !== selection.startLineNumber ||
             jsxSelection.startColumn !== selection.startColumn ||
             jsxSelection.endLineNumber !== selection.endLineNumber ||
-            jsxSelection.endColumn !== selection.endColumn
-          )
+            jsxSelection.endColumn !== selection.endColumn)
         ) {
           selection = jsxSelection;
           const activeModelPath = codeEditor?.getModel?.()?.uri?.path;
@@ -7344,9 +7855,7 @@ export class WebIDEHost {
             );
             if (typeof codeEditor.revealRangeNearTop === "function") {
               codeEditor.revealRangeNearTop(selection);
-            } else if (
-              typeof codeEditor.revealPositionNearTop === "function"
-            ) {
+            } else if (typeof codeEditor.revealPositionNearTop === "function") {
               codeEditor.revealPositionNearTop({
                 lineNumber: selection.startLineNumber,
                 column: selection.startColumn,
@@ -7407,9 +7916,8 @@ export class WebIDEHost {
   private async showClaudeImagePasteUnsupportedError(
     mimeTypes: readonly string[],
   ): Promise<void> {
-    const { initToasts, showClaudeImagePasteUnsupportedToast } = await import(
-      "../features/toast"
-    );
+    const { initToasts, showClaudeImagePasteUnsupportedToast } =
+      await import("../features/toast");
     const workbenchEl = this.options.elements.workbench;
     initToasts(workbenchEl.parentElement ?? workbenchEl);
     showClaudeImagePasteUnsupportedToast(mimeTypes);
@@ -7419,11 +7927,9 @@ export class WebIDEHost {
     const editorService = await getService(IEditorService);
     const previewInput = this.workbenchSurfaces.previewInput;
     const existing = previewInput.resource
-      ? editorService
-          .findEditors(previewInput.resource)
-          .find((identifier) => {
-            return identifier.editor.typeId === previewInput.typeId;
-          })
+      ? editorService.findEditors(previewInput.resource).find((identifier) => {
+          return identifier.editor.typeId === previewInput.typeId;
+        })
       : undefined;
 
     if (existing?.groupId !== undefined) {
@@ -7460,7 +7966,9 @@ export class WebIDEHost {
     const existing = previewInput.resource
       ? editorService
           .findEditors(previewInput.resource)
-          .find((identifier) => identifier.editor.typeId === previewInput.typeId)
+          .find(
+            (identifier) => identifier.editor.typeId === previewInput.typeId,
+          )
       : undefined;
 
     if (existing?.groupId !== undefined) {
@@ -7479,11 +7987,9 @@ export class WebIDEHost {
     const editorService = await getService(IEditorService);
     const databaseInput = this.workbenchSurfaces.databaseInput;
     const existing = databaseInput.resource
-      ? editorService
-          .findEditors(databaseInput.resource)
-          .find((identifier) => {
-            return identifier.editor.typeId === databaseInput.typeId;
-          })
+      ? editorService.findEditors(databaseInput.resource).find((identifier) => {
+          return identifier.editor.typeId === databaseInput.typeId;
+        })
       : undefined;
 
     if (existing?.groupId !== undefined) {
@@ -7543,7 +8049,10 @@ export class WebIDEHost {
     }
 
     if (this.previewUrl) {
-      await this.waitForPreviewResponse(this.previewUrl, timeoutMs - (Date.now() - start));
+      await this.waitForPreviewResponse(
+        this.previewUrl,
+        timeoutMs - (Date.now() - start),
+      );
       return this.previewUrl;
     }
 
@@ -7563,7 +8072,10 @@ export class WebIDEHost {
 
     while (Date.now() < deadline) {
       const probeUrl = new URL(previewUrl, window.location.href);
-      probeUrl.searchParams.set("__almostnode_preview_probe", String(Date.now()));
+      probeUrl.searchParams.set(
+        "__almostnode_preview_probe",
+        String(Date.now()),
+      );
 
       try {
         const response = await fetch(probeUrl.toString(), {
@@ -7619,7 +8131,9 @@ export class WebIDEHost {
     }
 
     if (!this.previewUrl) {
-      this.updatePreviewStatus("Preview source picker needs a running preview.");
+      this.updatePreviewStatus(
+        "Preview source picker needs a running preview.",
+      );
       return;
     }
 
@@ -8241,9 +8755,9 @@ export class WebIDEHost {
           "extensions.autoUpdate": false,
         },
         productConfiguration: {
-          nameShort: "almostnode",
-          nameLong: "almostnode webide",
-          applicationName: "almostnode-webide",
+          nameShort: "agent-wasm",
+          nameLong: "agent-wasm webide",
+          applicationName: "agent-wasm-webide",
           extensionsGallery: {
             serviceUrl: `${baseUrl}/vscode/gallery`,
             controlUrl: `${baseUrl}/vscode/item`,
@@ -8255,7 +8769,7 @@ export class WebIDEHost {
         commands: [
           {
             id: "almostnode.run",
-            label: "Almostnode: Run Command",
+            label: "agent-wasm: Run Command",
             menu: Menu.CommandPalette,
             handler: (...args: unknown[]) =>
               this.executeHostCommand(
@@ -8264,48 +8778,48 @@ export class WebIDEHost {
           },
           {
             id: "almostnode.preview.open",
-            label: "Almostnode: Open Preview",
+            label: "agent-wasm: Open Preview",
             menu: Menu.CommandPalette,
             handler: () => this.openPreview(),
           },
           {
             id: "almostnode.preview.refresh",
-            label: "Almostnode: Refresh Preview",
+            label: "agent-wasm: Refresh Preview",
             menu: Menu.CommandPalette,
             handler: () => this.refreshPreview(),
           },
           {
             id: "almostnode.terminal.focus",
-            label: "Almostnode: Focus Terminal",
+            label: "agent-wasm: Focus Terminal",
             menu: Menu.CommandPalette,
             handler: () => this.focusTerminal(),
           },
           {
             id: "almostnode.opencode.open",
-            label: "Almostnode: Open OpenCode",
+            label: "agent-wasm: Open OpenCode",
             menu: Menu.CommandPalette,
             handler: () => this.revealOpenCodePanel(true),
           },
           {
             id: "almostnode.claude.open",
-            label: "Almostnode: Open Claude Code",
+            label: "agent-wasm: Open Claude Code",
             menu: Menu.CommandPalette,
             handler: () => this.revealClaudePanel(true),
           },
           {
             id: "almostnode.keychain.primary",
-            label: "Almostnode: Open Keychain",
+            label: "agent-wasm: Open Keychain",
             handler: () => this.revealKeychainPanel(),
           },
           {
             id: "almostnode.keychain.unlock",
-            label: "Almostnode: Unlock Keychain",
+            label: "agent-wasm: Unlock Keychain",
             menu: Menu.CommandPalette,
             handler: () => this.unlockKeychain(),
           },
           {
             id: "almostnode.keychain.forget",
-            label: "Almostnode: Forget Keychain",
+            label: "agent-wasm: Forget Keychain",
             menu: Menu.CommandPalette,
             handler: () => this.forgetKeychain(),
           },
@@ -8547,7 +9061,9 @@ export class WebIDEHost {
       createDatabase,
       deleteDatabase,
     } = await import("../../../../packages/almostnode/src/pglite/db-manager");
-    const namespace = setDatabaseNamespace(this.currentProjectDatabaseNamespace);
+    const namespace = setDatabaseNamespace(
+      this.currentProjectDatabaseNamespace,
+    );
     const hasExistingDbs = listDatabases(namespace).length > 0;
 
     if (!hasSchema && !hasDrizzleDir && !hasExistingDbs) {
@@ -8625,7 +9141,10 @@ export class WebIDEHost {
                 getIdbPath(name, callbackNamespace),
               );
               this.previewSurface.setActiveDb(name);
-              this.databaseSurface.update(listDatabases(callbackNamespace), name);
+              this.databaseSurface.update(
+                listDatabases(callbackNamespace),
+                name,
+              );
             }
             // Update browser surface and open tab
             this.databaseBrowserSurface.setDatabase(name);
@@ -8705,7 +9224,10 @@ export class WebIDEHost {
               this.databaseBrowserSurface.setDatabase(newActive);
               active = newActive;
             }
-            this.databaseSurface.update(listDatabases(callbackNamespace), active);
+            this.databaseSurface.update(
+              listDatabases(callbackNamespace),
+              active,
+            );
             console.log(`[pglite] Deleted database "${name}"`);
           } catch (err) {
             console.error("[pglite] Delete failed:", err);
@@ -8717,7 +9239,9 @@ export class WebIDEHost {
     }
   }
 
-  private async ensureGitInitialized(project?: Pick<ProjectRecord, "gitRemote">): Promise<void> {
+  private async ensureGitInitialized(
+    project?: Pick<ProjectRecord, "gitRemote">,
+  ): Promise<void> {
     if (!this.container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)) {
       await this.runWorkspaceGitCommand("git init");
       await this.runWorkspaceGitCommand("git add .");
@@ -8729,7 +9253,9 @@ export class WebIDEHost {
     }
   }
 
-  private async ensureProjectRemote(remote: ProjectGitRemoteRecord): Promise<void> {
+  private async ensureProjectRemote(
+    remote: ProjectGitRemoteRecord,
+  ): Promise<void> {
     const remoteName = remote.name || "origin";
     const current = await this.container.run(
       `git remote get-url ${this.quoteShellArg(remoteName)}`,
@@ -8755,7 +9281,10 @@ export class WebIDEHost {
     return this.runRequiredCommand(command, WORKSPACE_ROOT);
   }
 
-  private async runRequiredCommand(command: string, cwd: string): Promise<RunResult> {
+  private async runRequiredCommand(
+    command: string,
+    cwd: string,
+  ): Promise<RunResult> {
     const result = await this.container.run(command, { cwd });
     if (result.exitCode !== 0) {
       throw new Error(
@@ -8772,63 +9301,67 @@ export class WebIDEHost {
   private getGitHubAuthToken(): string {
     const auth = readGhToken(this.container.vfs);
     if (!auth?.oauth_token) {
-      throw new Error("GitHub credentials are not available. Run `gh auth login` first.");
+      throw new Error(
+        "GitHub credentials are not available. Run `gh auth login` first.",
+      );
     }
     return auth.oauth_token;
   }
 
   private getGitHubApiErrorMessage(payload: unknown, fallback: string): string {
     if (
-      payload
-      && typeof payload === "object"
-      && "message" in payload
-      && typeof payload.message === "string"
-      && payload.message.trim().length > 0
+      payload &&
+      typeof payload === "object" &&
+      "message" in payload &&
+      typeof payload.message === "string" &&
+      payload.message.trim().length > 0
     ) {
       return payload.message;
     }
     return fallback;
   }
 
-  private toGitHubRepositorySummary(payload: unknown): GitHubRepositorySummary | null {
+  private toGitHubRepositorySummary(
+    payload: unknown,
+  ): GitHubRepositorySummary | null {
     if (!payload || typeof payload !== "object") {
       return null;
     }
 
     const repository = payload as Record<string, unknown>;
-    const owner = (
-      repository.owner
-      && typeof repository.owner === "object"
-    )
-      ? repository.owner as Record<string, unknown>
-      : null;
-    const fullName = typeof repository.full_name === "string" ? repository.full_name : null;
+    const owner =
+      repository.owner && typeof repository.owner === "object"
+        ? (repository.owner as Record<string, unknown>)
+        : null;
+    const fullName =
+      typeof repository.full_name === "string" ? repository.full_name : null;
     const fallbackOwnerLogin = fullName?.split("/")[0] ?? null;
     const fallbackName = fullName?.split("/")[1] ?? null;
-    const id = typeof repository.id === "number"
-      ? repository.id
-      : fullName
-        ? Array.from(fullName).reduce(
-          (hash, character) => ((hash * 31) + character.charCodeAt(0)) >>> 0,
-          7,
-        )
-        : null;
-    const name = typeof repository.name === "string"
-      ? repository.name
-      : fallbackName;
-    const cloneUrl = typeof repository.clone_url === "string" ? repository.clone_url : null;
-    const htmlUrl = typeof repository.html_url === "string" ? repository.html_url : null;
-    const ownerLogin = typeof owner?.login === "string"
-      ? owner.login
-      : fallbackOwnerLogin;
+    const id =
+      typeof repository.id === "number"
+        ? repository.id
+        : fullName
+          ? Array.from(fullName).reduce(
+              (hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0,
+              7,
+            )
+          : null;
+    const name =
+      typeof repository.name === "string" ? repository.name : fallbackName;
+    const cloneUrl =
+      typeof repository.clone_url === "string" ? repository.clone_url : null;
+    const htmlUrl =
+      typeof repository.html_url === "string" ? repository.html_url : null;
+    const ownerLogin =
+      typeof owner?.login === "string" ? owner.login : fallbackOwnerLogin;
 
     if (
-      id === null
-      || !name
-      || !fullName
-      || !cloneUrl
-      || !htmlUrl
-      || !ownerLogin
+      id === null ||
+      !name ||
+      !fullName ||
+      !cloneUrl ||
+      !htmlUrl ||
+      !ownerLogin
     ) {
       return null;
     }
@@ -8837,16 +9370,19 @@ export class WebIDEHost {
       id,
       name,
       fullName,
-      description: typeof repository.description === "string"
-        ? repository.description
-        : null,
+      description:
+        typeof repository.description === "string"
+          ? repository.description
+          : null,
       private: Boolean(repository.private),
-      updatedAt: typeof repository.updated_at === "string"
-        ? repository.updated_at
-        : new Date(0).toISOString(),
-      defaultBranch: typeof repository.default_branch === "string"
-        ? repository.default_branch
-        : "main",
+      updatedAt:
+        typeof repository.updated_at === "string"
+          ? repository.updated_at
+          : new Date(0).toISOString(),
+      defaultBranch:
+        typeof repository.default_branch === "string"
+          ? repository.default_branch
+          : "main",
       cloneUrl,
       htmlUrl,
       ownerLogin,
@@ -8875,8 +9411,8 @@ export class WebIDEHost {
     }
 
     if (
-      typeof window !== "undefined"
-      && ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)
+      typeof window !== "undefined" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)
     ) {
       return `${window.location.origin}/__api/cors-proxy?url=`;
     }
@@ -9116,14 +9652,17 @@ export class WebIDEHost {
 
       const payload = event.data as PreviewAppBuildingBridgeRequest | undefined;
       if (
-        !payload
-        || payload.type !== "almostnode-app-building-request"
-        || typeof payload.requestId !== "string"
+        !payload ||
+        payload.type !== "almostnode-app-building-request" ||
+        typeof payload.requestId !== "string"
       ) {
         return;
       }
 
-      void this.handlePreviewAppBuildingBridgeRequest(event.source as Window, payload);
+      void this.handlePreviewAppBuildingBridgeRequest(
+        event.source as Window,
+        payload,
+      );
     });
 
     this.container.on("server-ready", (_port: unknown, url: unknown) => {
@@ -9138,9 +9677,13 @@ export class WebIDEHost {
         this.previewSurface.setUrl(this.previewUrl);
 
         const iframe = this.previewSurface.getIframe();
-        iframe.addEventListener("load", () => {
-          this.registerPreviewHmrTargets();
-        }, { once: true });
+        iframe.addEventListener(
+          "load",
+          () => {
+            this.registerPreviewHmrTargets();
+          },
+          { once: true },
+        );
       }
       this.registerPreviewHmrTargets();
 
@@ -9268,8 +9811,8 @@ export class WebIDEHost {
           return "nextjs";
         }
         if (
-          dependencyNames.has("@tanstack/start")
-          || dependencyNames.has("@tanstack/react-start")
+          dependencyNames.has("@tanstack/start") ||
+          dependencyNames.has("@tanstack/react-start")
         ) {
           return "tanstack";
         }
@@ -9308,7 +9851,11 @@ export class WebIDEHost {
     }
 
     const parts = [`package.json:${packageJson}`];
-    for (const lockFile of ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+    for (const lockFile of [
+      "pnpm-lock.yaml",
+      "package-lock.json",
+      "yarn.lock",
+    ]) {
       const lockPath = `${WORKSPACE_ROOT}/${lockFile}`;
       const lockContents = this.readWorkspaceFileText(lockPath);
       if (lockContents !== null) {

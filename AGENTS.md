@@ -1,4 +1,4 @@
-# almostnode
+# agent-wasm
 
 This repository now includes root OpenCode/Codex project guidance for the monorepo.
 
@@ -8,11 +8,11 @@ This repository now includes root OpenCode/Codex project guidance for the monore
 
 ## What This Repo Is
 
-almostnode is an Nx monorepo for a browser-based Node.js runtime and the apps around it. This is not a normal OS-first backend repo.
+agent-wasm is an Nx monorepo for browser-native AI agent workspaces built on an internal browser Node.js runtime. This is not a normal OS-first backend repo.
 
 Primary areas:
 
-- `packages/almostnode/` - runtime, VFS, npm/package manager, framework servers, shell command shims
+- `packages/almostnode/` - internal runtime package, VFS, npm/package manager, framework servers, shell command shims
 - `apps/web-ide/` - browser IDE, terminal routing, workspace templates, template seeding
 - `apps/desktop-ide/` - desktop host integration and workspace/project wiring
 - `apps/sdk-showcase/` - showcase app and browser integration surface
@@ -28,7 +28,7 @@ Do not paper over platform gaps with package-specific hacks.
 
 ## Runtime Model
 
-almostnode provides a browser-safe runtime with a virtual filesystem, package installation, service worker-backed dev servers, and registered CLI shims. Treat the available commands as first-class tools, not as examples.
+The internal `almostnode` package provides a browser-safe runtime with a virtual filesystem, package installation, service worker-backed dev servers, and registered CLI shims. Treat the available commands as first-class tools, not as examples.
 
 - Filesystem may be virtual or bridged, depending on context
 - CLI behavior may be implemented by almostnode shims rather than a host OS binary

@@ -22,7 +22,7 @@ const registeredPorts = new Set();
 // Whether Eruda devtools injection is enabled
 let erudaEnabled = true;
 
-// Base path prefix (e.g. '/almostnode' when deployed to GitHub Pages subpath)
+// Base path prefix (e.g. '/agent-wasm' when deployed to GitHub Pages subpath)
 // Infer from registration scope so it's available immediately on SW restart,
 // before the main thread sends the 'init' message.
 let basePath = (() => {

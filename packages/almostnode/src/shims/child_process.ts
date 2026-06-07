@@ -4,20 +4,20 @@
  */
 
 // Polyfill process for just-bash (it expects Node.js environment)
-if (typeof globalThis.process === 'undefined') {
+if (typeof globalThis.process === "undefined") {
   (globalThis as any).process = {
     env: {
-      HOME: '/home/user',
-      USER: 'user',
-      PATH: '/usr/local/bin:/usr/bin:/bin',
-      NODE_ENV: 'development',
-      SHELL: '/bin/bash',
+      HOME: "/home/user",
+      USER: "user",
+      PATH: "/usr/local/bin:/usr/bin:/bin",
+      NODE_ENV: "development",
+      SHELL: "/bin/bash",
     },
-    cwd: () => '/',
-    arch: 'x64',
-    platform: 'linux',
-    version: 'v18.0.0',
-    versions: { node: '18.0.0' },
+    cwd: () => "/",
+    arch: "x64",
+    platform: "linux",
+    version: "v18.0.0",
+    versions: { node: "18.0.0" },
     pid: Math.floor(Math.random() * 10000) + 1000,
     ppid: 0,
     getuid: () => 1000,
@@ -29,42 +29,42 @@ if (typeof globalThis.process === 'undefined') {
   };
 }
 
-import { Bash, defineCommand } from 'just-bash';
+import { Bash, defineCommand } from "just-bash";
 import type {
   Command as JustBashCommand,
   CommandContext,
   ExecResult as JustBashExecResult,
-} from 'just-bash';
-import { EventEmitter } from './events';
-import { closeFdSync, dupFdSync, writeToFdSync } from './fs';
-import { Readable, Writable, Buffer } from './stream';
-import type { Process } from './process';
+} from "just-bash";
+import { EventEmitter } from "./events";
+import { closeFdSync, dupFdSync, writeToFdSync } from "./fs";
+import { Readable, Writable, Buffer } from "./stream";
+import type { Process } from "./process";
 import type {
   ShellCommandContext,
   ShellCommandDefinition,
   ShellCommandExecOptions,
   ShellCommandKeyEvent,
   ShellCommandResult,
-} from '../shell-commands';
-import type { VirtualFS } from '../virtual-fs';
-import { VirtualFSAdapter } from './vfs-adapter';
-import { Runtime } from '../runtime';
-import type { InstallMode, PackageManagerMutationSummary } from '../npm';
-import type { PackageJson } from '../types/package-json';
-import { almostnodeDebugError, almostnodeDebugLog } from '../utils/debug';
-import * as path from './path';
-import { extractTarball } from '../npm/tarball';
-import type { OxcFileAccessor } from '../oxc/runtime';
+} from "../shell-commands";
+import type { VirtualFS } from "../virtual-fs";
+import { VirtualFSAdapter } from "./vfs-adapter";
+import { Runtime } from "../runtime";
+import type { InstallMode, PackageManagerMutationSummary } from "../npm";
+import type { PackageJson } from "../types/package-json";
+import { almostnodeDebugError, almostnodeDebugLog } from "../utils/debug";
+import * as path from "./path";
+import { extractTarball } from "../npm/tarball";
+import type { OxcFileAccessor } from "../oxc/runtime";
 import {
   DEFAULT_POSIX_SHELL,
   SYNTHETIC_SHELL_COMMAND_NAMES,
   getSyntheticShellSpec,
   getSyntheticShellVersion,
-} from './synthetic-shells';
+} from "./synthetic-shells";
 
 type ManagedFrameworkDevServer = {
   key: string;
-  framework: 'next' | 'vite' | 'wrangler' | 'wrangler-pages';
+  framework: "next" | "vite" | "wrangler" | "wrangler-pages";
   port: number;
   stop: () => void;
   clearInstalledPackagesCache?: () => void;
@@ -108,31 +108,36 @@ export interface WorkspaceSearchProvider {
   search(options: WorkspaceSearchOptions): Promise<WorkspaceSearchResult>;
 }
 
-const CONTROLLER_ID_ENV_KEY = '__ALMOSTNODE_CONTROLLER_ID';
-const EXECUTION_ID_ENV_KEY = '__ALMOSTNODE_EXECUTION_ID';
-const INTERNAL_ENV_KEYS = [CONTROLLER_ID_ENV_KEY, EXECUTION_ID_ENV_KEY] as const;
+const CONTROLLER_ID_ENV_KEY = "__ALMOSTNODE_CONTROLLER_ID";
+const EXECUTION_ID_ENV_KEY = "__ALMOSTNODE_EXECUTION_ID";
+const INTERNAL_ENV_KEYS = [
+  CONTROLLER_ID_ENV_KEY,
+  EXECUTION_ID_ENV_KEY,
+] as const;
 
 /**
  * Convert ctx.env to a plain Record<string, string>.
  * just-bash 2.13+ changed CommandContext.env from Record to Map<string, string>.
  * All our code expects a plain object, so we normalize here.
  */
-function envToRecord(env: Map<string, string> | Record<string, string> | undefined): Record<string, string> {
+function envToRecord(
+  env: Map<string, string> | Record<string, string> | undefined,
+): Record<string, string> {
   if (!env) return {};
   if (env instanceof Map) return Object.fromEntries(env);
   return env;
 }
 
 const DEFAULT_SHELL_ENV: Record<string, string> = {
-  HOME: '/home/user',
-  USER: 'user',
-  PATH: '/usr/local/bin:/usr/bin:/bin:/node_modules/.bin',
-  NODE_ENV: 'development',
+  HOME: "/home/user",
+  USER: "user",
+  PATH: "/usr/local/bin:/usr/bin:/bin:/node_modules/.bin",
+  NODE_ENV: "development",
   SHELL: DEFAULT_POSIX_SHELL,
 };
 
-const DEFAULT_CLAUDE_WRAPPER_PATH = '/usr/local/bin/claude-wrapper';
-const DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE = '@anthropic-ai/claude-code@2.1.52';
+const DEFAULT_CLAUDE_WRAPPER_PATH = "/usr/local/bin/claude-wrapper";
+const DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code@2.1.52";
 
 interface ActiveProcessStdin {
   emit: (event: string, ...args: unknown[]) => void;
@@ -171,7 +176,9 @@ export interface ChildProcessController {
   vfsAdapter: VirtualFSAdapter;
   bashInstance: Bash;
   installMode: InstallMode;
-  onInstallMutation: ((summary: PackageManagerMutationSummary) => void | Promise<void>) | null;
+  onInstallMutation:
+    | ((summary: PackageManagerMutationSummary) => void | Promise<void>)
+    | null;
   frameworkDevServers: Map<string, ManagedFrameworkDevServer>;
   executions: Map<string, ChildProcessExecutionContext>;
   builtinShellCommands: Map<string, RegisteredShellCommand>;
@@ -191,10 +198,14 @@ export interface ChildProcessController {
   runCommand: (
     command: string,
     options?: { cwd?: string; env?: Record<string, string> },
-    executionId?: string | null
+    executionId?: string | null,
   ) => Promise<JustBashExecResult>;
   sendInput: (executionId: string | null | undefined, data: string) => void;
-  updateExecutionSize: (executionId: string | null | undefined, cols: number, rows: number) => void;
+  updateExecutionSize: (
+    executionId: string | null | undefined,
+    cols: number,
+    rows: number,
+  ) => void;
   registerShellCommand: (definition: ShellCommandDefinition) => void;
   unregisterShellCommand: (name: string) => boolean;
 }
@@ -216,8 +227,10 @@ function isGlobalLikeTarget(target: object): boolean {
   }
 
   try {
-    return Reflect.get(target, 'globalThis', target) === target
-      || Reflect.get(target, 'global', target) === target;
+    return (
+      Reflect.get(target, "globalThis", target) === target ||
+      Reflect.get(target, "global", target) === target
+    );
   } catch {
     return false;
   }
@@ -229,7 +242,11 @@ function isGlobalLikeTarget(target: object): boolean {
 // so libraries like vitest or undici that define non-configurable globals need them
 // relaxed for re-runs and proxy invariants.
 const _realDefineProperty = Object.defineProperty;
-Object.defineProperty = function(target: object, key: PropertyKey, descriptor: PropertyDescriptor): object {
+Object.defineProperty = function (
+  target: object,
+  key: PropertyKey,
+  descriptor: PropertyDescriptor,
+): object {
   if (descriptor && !descriptor.configurable && isGlobalLikeTarget(target)) {
     descriptor = { ...descriptor, configurable: true };
   }
@@ -284,7 +301,7 @@ function createExecutionContext(
     interactive?: boolean;
     cols?: number;
     rows?: number;
-  }
+  },
 ): ChildProcessExecutionContext {
   const execution: ChildProcessExecutionContext = {
     id: crypto.randomUUID(),
@@ -299,14 +316,21 @@ function createExecutionContext(
     onForkedChildExit: null,
     activeShellChildren: 0,
     outputStreamed: false,
-    columns: Number.isFinite(opts?.cols) ? Math.max(1, Math.floor(opts!.cols!)) : 80,
-    rows: Number.isFinite(opts?.rows) ? Math.max(1, Math.floor(opts!.rows!)) : 24,
+    columns: Number.isFinite(opts?.cols)
+      ? Math.max(1, Math.floor(opts!.cols!))
+      : 80,
+    rows: Number.isFinite(opts?.rows)
+      ? Math.max(1, Math.floor(opts!.rows!))
+      : 24,
   };
   controller.executions.set(execution.id, execution);
   return execution;
 }
 
-function applyExecutionTerminalSize(execution: ChildProcessExecutionContext, proc: Process): void {
+function applyExecutionTerminalSize(
+  execution: ChildProcessExecutionContext,
+  proc: Process,
+): void {
   const columns = Math.max(1, Math.floor(execution.columns || 80));
   const rows = Math.max(1, Math.floor(execution.rows || 24));
 
@@ -316,14 +340,14 @@ function applyExecutionTerminalSize(execution: ChildProcessExecutionContext, pro
   proc.stdout.rows = rows;
   proc.stderr.columns = columns;
   proc.stderr.rows = rows;
-  proc.stdout.emit?.('resize', columns, rows);
-  proc.stderr.emit?.('resize', columns, rows);
-  proc.emit?.('SIGWINCH', rows, columns);
+  proc.stdout.emit?.("resize", columns, rows);
+  proc.stderr.emit?.("resize", columns, rows);
+  proc.emit?.("SIGWINCH", rows, columns);
 }
 
 function destroyExecutionContext(
   controller: ChildProcessController,
-  executionId: string | null | undefined
+  executionId: string | null | undefined,
 ): void {
   if (!executionId) return;
   const execution = controller.executions.get(executionId);
@@ -334,21 +358,28 @@ function destroyExecutionContext(
   controller.executions.delete(executionId);
 }
 
-function getControllerById(controllerId: string | undefined | null): ChildProcessController | null {
+function getControllerById(
+  controllerId: string | undefined | null,
+): ChildProcessController | null {
   if (!controllerId) return null;
   return controllersById.get(controllerId) ?? null;
 }
 
-function getActiveController(binding?: ChildProcessModuleBinding, env?: Record<string, string>): ChildProcessController | null {
-  return binding?.controller
-    ?? getControllerById(env?.[CONTROLLER_ID_ENV_KEY])
-    ?? getControllerById(binding?.getDefaultEnv?.()?.[CONTROLLER_ID_ENV_KEY])
-    ?? defaultChildProcessController;
+function getActiveController(
+  binding?: ChildProcessModuleBinding,
+  env?: Record<string, string>,
+): ChildProcessController | null {
+  return (
+    binding?.controller ??
+    getControllerById(env?.[CONTROLLER_ID_ENV_KEY]) ??
+    getControllerById(binding?.getDefaultEnv?.()?.[CONTROLLER_ID_ENV_KEY]) ??
+    defaultChildProcessController
+  );
 }
 
 function getExecutionContextFromEnv(
   controller: ChildProcessController,
-  env?: Record<string, string>
+  env?: Record<string, string>,
 ): ChildProcessExecutionContext | null {
   const executionId = env?.[EXECUTION_ID_ENV_KEY];
   if (!executionId) return null;
@@ -358,16 +389,20 @@ function getExecutionContextFromEnv(
 function getActiveExecutionContext(
   controller: ChildProcessController,
   binding?: ChildProcessModuleBinding,
-  env?: Record<string, string>
+  env?: Record<string, string>,
 ): ChildProcessExecutionContext | null {
-  return getExecutionContextFromEnv(controller, env)
-    ?? getExecutionContextFromEnv(controller, binding?.getDefaultEnv?.())
-    ?? (binding?.getExecutionId ? controller.executions.get(binding.getExecutionId() || '') ?? null : null);
+  return (
+    getExecutionContextFromEnv(controller, env) ??
+    getExecutionContextFromEnv(controller, binding?.getDefaultEnv?.()) ??
+    (binding?.getExecutionId
+      ? (controller.executions.get(binding.getExecutionId() || "") ?? null)
+      : null)
+  );
 }
 
 function applyLegacyStreamingDefaults(
   controller: ChildProcessController,
-  execution: ChildProcessExecutionContext | null
+  execution: ChildProcessExecutionContext | null,
 ): ChildProcessExecutionContext {
   if (execution) return execution;
   return createExecutionContext(controller, {
@@ -380,7 +415,7 @@ function applyLegacyStreamingDefaults(
 function withExecutionEnv(
   controller: ChildProcessController,
   execution: ChildProcessExecutionContext,
-  env: Record<string, string>
+  env: Record<string, string>,
 ): Record<string, string> {
   return {
     ...env,
@@ -389,7 +424,9 @@ function withExecutionEnv(
   };
 }
 
-export function stripInternalChildProcessEnv(env: Record<string, string>): Record<string, string> {
+export function stripInternalChildProcessEnv(
+  env: Record<string, string>,
+): Record<string, string> {
   const next: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if ((INTERNAL_ENV_KEYS as readonly string[]).includes(key)) continue;
@@ -404,7 +441,7 @@ function createRegisteredShellCommand(
   options?: {
     trusted?: boolean;
     interceptShellParsing?: boolean;
-  }
+  },
 ): RegisteredShellCommand {
   return {
     name,
@@ -416,7 +453,7 @@ function createRegisteredShellCommand(
 
 function registerActiveShellCommand(
   controller: ChildProcessController,
-  shellCommand: RegisteredShellCommand
+  shellCommand: RegisteredShellCommand,
 ): void {
   controller.activeShellCommands.set(shellCommand.name, shellCommand);
   controller.bashInstance.registerCommand(shellCommand.command);
@@ -424,10 +461,12 @@ function registerActiveShellCommand(
 
 function unregisterActiveShellCommand(
   controller: ChildProcessController,
-  name: string
+  name: string,
 ): void {
   controller.activeShellCommands.delete(name);
-  const bashInstance = controller.bashInstance as unknown as { commands?: Map<string, JustBashCommand> };
+  const bashInstance = controller.bashInstance as unknown as {
+    commands?: Map<string, JustBashCommand>;
+  };
   bashInstance.commands?.delete(name);
   for (const binPath of [`/bin/${name}`, `/usr/bin/${name}`]) {
     if (controller.vfs.existsSync(binPath)) {
@@ -444,14 +483,17 @@ function createShellCommandExecutionContext(
   controller: ChildProcessController,
   env: Record<string, string>,
   cwd: string,
-  stdin = ''
+  stdin = "",
 ): {
   ctx: CommandContext;
   getEnv: () => Record<string, string>;
 } {
   const executionId = env[EXECUTION_ID_ENV_KEY] ?? null;
   let currentCwd = normalizeCommandCwd(cwd);
-  const currentEnv: Record<string, string> = { ...env, PWD: env.PWD || currentCwd };
+  const currentEnv: Record<string, string> = {
+    ...env,
+    PWD: env.PWD || currentCwd,
+  };
   const envMap = new Map<string, string>(Object.entries(currentEnv));
 
   const ctx: CommandContext = {
@@ -465,9 +507,9 @@ function createShellCommandExecutionContext(
       const nextEnv = options.replaceEnv
         ? { ...(options.env || {}) }
         : {
-          ...Object.fromEntries(envMap),
-          ...(options.env || {}),
-        };
+            ...Object.fromEntries(envMap),
+            ...(options.env || {}),
+          };
       const result = await runCommandInController(
         controller,
         command,
@@ -479,7 +521,8 @@ function createShellCommandExecutionContext(
       );
       return result;
     },
-    getRegisteredCommands: () => Array.from(controller.activeShellCommands.keys()),
+    getRegisteredCommands: () =>
+      Array.from(controller.activeShellCommands.keys()),
   };
 
   return {
@@ -528,7 +571,7 @@ function createShellCommandStdinEmitter(): ActiveProcessStdin & {
 
 function adaptShellCommandDefinition(
   controller: ChildProcessController,
-  definition: ShellCommandDefinition
+  definition: ShellCommandDefinition,
 ): RegisteredShellCommand {
   const command = defineCommand(definition.name, async (args, ctx) => {
     const envRecord = envToRecord(ctx.env);
@@ -538,8 +581,8 @@ function adaptShellCommandDefinition(
       ...envRecord,
       PWD: envRecord.PWD || currentCwd,
     };
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
 
     const stdinEmitter = createShellCommandStdinEmitter();
     const previousActiveProcessStdin = execution?.activeProcessStdin ?? null;
@@ -559,13 +602,13 @@ function adaptShellCommandDefinition(
     const writeStdout = (data: string): void => {
       if (!data) return;
       stdout += data;
-      emitStreamData(execution, data, 'stdout');
+      emitStreamData(execution, data, "stdout");
     };
 
     const writeStderr = (data: string): void => {
       if (!data) return;
       stderr += data;
-      emitStreamData(execution, data, 'stderr');
+      emitStreamData(execution, data, "stderr");
     };
 
     const shellContext: ShellCommandContext = {
@@ -577,32 +620,51 @@ function adaptShellCommandDefinition(
       },
       stdin: ctx.stdin,
       signal: ctx.signal,
+      interactive: execution?.interactive ?? false,
       vfs: controller.vfs,
       writeStdout,
       writeStderr,
       onInput: (handler) => {
         const listener = (data: unknown) => {
-          if (typeof data === 'string') handler(data);
+          if (typeof data === "string") handler(data);
         };
-        stdinEmitter.on('data', listener);
-        return () => stdinEmitter.off('data', listener);
+        stdinEmitter.on("data", listener);
+        return () => stdinEmitter.off("data", listener);
       },
       onKeypress: (handler) => {
         const listener = (ch: unknown, key: unknown) => {
           handler(
-            typeof ch === 'string' ? ch : undefined,
+            typeof ch === "string" ? ch : undefined,
             (key || {}) as ShellCommandKeyEvent,
           );
         };
-        stdinEmitter.on('keypress', listener);
-        return () => stdinEmitter.off('keypress', listener);
+        stdinEmitter.on("keypress", listener);
+        return () => stdinEmitter.off("keypress", listener);
       },
-      terminalSize: execution
-        ? {
-          columns: execution.columns,
-          rows: execution.rows,
-        }
-        : undefined,
+      onResize: (handler) => {
+        const listener = (columns: unknown, rows: unknown) => {
+          handler({
+            columns:
+              typeof columns === "number" && Number.isFinite(columns)
+                ? Math.max(1, Math.floor(columns))
+                : 80,
+            rows:
+              typeof rows === "number" && Number.isFinite(rows)
+                ? Math.max(1, Math.floor(rows))
+                : 24,
+          });
+        };
+        stdinEmitter.on("resize", listener);
+        return () => stdinEmitter.off("resize", listener);
+      },
+      get terminalSize() {
+        return execution
+          ? {
+              columns: execution.columns,
+              rows: execution.rows,
+            }
+          : undefined;
+      },
       setEnv: (name, value) => {
         if (value == null) {
           delete currentEnv[name];
@@ -622,7 +684,7 @@ function adaptShellCommandDefinition(
       exec: async (command, options = {}) => {
         if (!ctx.exec) {
           return {
-            stdout: '',
+            stdout: "",
             stderr: `${definition.name}: command execution not available in this context\n`,
             exitCode: 1,
           };
@@ -631,9 +693,9 @@ function adaptShellCommandDefinition(
         const execEnv = options.replaceEnv
           ? { ...(options.env || {}) }
           : {
-            ...currentEnv,
-            ...(options.env || {}),
-          };
+              ...currentEnv,
+              ...(options.env || {}),
+            };
         const result = await ctx.exec(command, {
           cwd: resolvedCwd,
           env: execEnv,
@@ -646,7 +708,9 @@ function adaptShellCommandDefinition(
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode,
-          env: result.env ? stripInternalChildProcessEnv(result.env) : undefined,
+          env: result.env
+            ? stripInternalChildProcessEnv(result.env)
+            : undefined,
           stdoutEncoding: result.stdoutEncoding,
         };
       },
@@ -655,8 +719,8 @@ function adaptShellCommandDefinition(
     try {
       const result = await definition.execute(args, shellContext);
       return {
-        stdout: stdout + (result.stdout || ''),
-        stderr: stderr + (result.stderr || ''),
+        stdout: stdout + (result.stdout || ""),
+        stderr: stderr + (result.stderr || ""),
         exitCode: result.exitCode,
         env: result.env || stripInternalChildProcessEnv(currentEnv),
         stdoutEncoding: result.stdoutEncoding,
@@ -678,17 +742,24 @@ async function runCommandInController(
   controller: ChildProcessController,
   command: string,
   options?: { cwd?: string; env?: Record<string, string> },
-  executionId?: string | null
+  executionId?: string | null,
 ): Promise<JustBashExecResult> {
-  const existingExecution = executionId ? controller.executions.get(executionId) ?? null : null;
-  const execution = existingExecution ?? createExecutionContext(controller, {
-    onStdout: legacyStreamingCallbacks.onStdout || undefined,
-    onStderr: legacyStreamingCallbacks.onStderr || undefined,
-    signal: legacyStreamingCallbacks.signal || undefined,
-  });
+  const existingExecution = executionId
+    ? (controller.executions.get(executionId) ?? null)
+    : null;
+  const execution =
+    existingExecution ??
+    createExecutionContext(controller, {
+      onStdout: legacyStreamingCallbacks.onStdout || undefined,
+      onStderr: legacyStreamingCallbacks.onStderr || undefined,
+      signal: legacyStreamingCallbacks.signal || undefined,
+    });
   const ownsExecution = !existingExecution;
-  const resolvedCwd = options?.cwd ?? '/';
-  const resolvedEnv = addNodeModuleBinPaths(options?.env ? { ...options.env } : {}, resolvedCwd);
+  const resolvedCwd = options?.cwd ?? "/";
+  const resolvedEnv = addNodeModuleBinPaths(
+    options?.env ? { ...options.env } : {},
+    resolvedCwd,
+  );
   const envWithContext = withExecutionEnv(controller, execution, resolvedEnv);
 
   execution.activeShellChildren++;
@@ -699,12 +770,25 @@ async function runCommandInController(
       resolvedCwd,
       envWithContext,
     );
-    result ??= await maybeRunCustomCommandDirect(controller, command, resolvedCwd, envWithContext);
-    result ??= await maybeRunSyntheticShellCommand(controller, command, resolvedCwd, envWithContext);
-    result ??= await controller.bashInstance.exec(stripQuotesForBash(normalizeQuotes(command)), {
-      cwd: resolvedCwd,
-      env: envWithContext,
-    });
+    result ??= await maybeRunCustomCommandDirect(
+      controller,
+      command,
+      resolvedCwd,
+      envWithContext,
+    );
+    result ??= await maybeRunSyntheticShellCommand(
+      controller,
+      command,
+      resolvedCwd,
+      envWithContext,
+    );
+    result ??= await controller.bashInstance.exec(
+      stripQuotesForBash(normalizeQuotes(command)),
+      {
+        cwd: resolvedCwd,
+        env: envWithContext,
+      },
+    );
 
     if (!result) {
       throw new Error(`Command execution returned no result for: ${command}`);
@@ -715,13 +799,18 @@ async function runCommandInController(
     // Custom command handlers (node, next, vite, npm install) already call
     // execution.onStdout/onStderr directly and set outputStreamed = true.
     if (!execution.outputStreamed) {
-      if (result.stdout && execution.onStdout) execution.onStdout(result.stdout);
-      if (result.stderr && execution.onStderr) execution.onStderr(result.stderr);
+      if (result.stdout && execution.onStdout)
+        execution.onStdout(result.stdout);
+      if (result.stderr && execution.onStderr)
+        execution.onStderr(result.stderr);
     }
 
     return result;
   } finally {
-    execution.activeShellChildren = Math.max(0, execution.activeShellChildren - 1);
+    execution.activeShellChildren = Math.max(
+      0,
+      execution.activeShellChildren - 1,
+    );
     if (ownsExecution) {
       destroyExecutionContext(controller, execution.id);
     }
@@ -739,7 +828,7 @@ function readTextFileFromVfs(vfs: VirtualFS, filePath: string): string | null {
 
   try {
     const raw: unknown = vfs.readFileSync(filePath);
-    if (typeof raw === 'string') {
+    if (typeof raw === "string") {
       return raw;
     }
     if (raw instanceof Uint8Array) {
@@ -748,7 +837,7 @@ function readTextFileFromVfs(vfs: VirtualFS, filePath: string): string | null {
     if (raw instanceof ArrayBuffer) {
       return new TextDecoder().decode(new Uint8Array(raw));
     }
-    if (raw && typeof raw === 'object' && ArrayBuffer.isView(raw)) {
+    if (raw && typeof raw === "object" && ArrayBuffer.isView(raw)) {
       const view = raw as ArrayBufferView;
       return new TextDecoder().decode(
         new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
@@ -790,7 +879,12 @@ function collectSupportedOxcFiles(
     if (stat.isDirectory()) {
       const entries = vfs.readdirSync(candidatePath).slice().sort();
       for (const entry of entries) {
-        if (entry === "." || entry === ".." || entry === "node_modules" || entry === ".git") {
+        if (
+          entry === "." ||
+          entry === ".." ||
+          entry === "node_modules" ||
+          entry === ".git"
+        ) {
           continue;
         }
         visit(path.join(candidatePath, entry));
@@ -798,7 +892,11 @@ function collectSupportedOxcFiles(
       return;
     }
 
-    if (!stat.isFile() || !isSupportedOxcPath(candidatePath) || seen.has(candidatePath)) {
+    if (
+      !stat.isFile() ||
+      !isSupportedOxcPath(candidatePath) ||
+      seen.has(candidatePath)
+    ) {
       return;
     }
 
@@ -830,28 +928,29 @@ async function maybeRunAlmostnodeLspBridgeCommand(
   controller: ChildProcessController,
   command: string,
   cwd: string,
-  env: Record<string, string>
+  env: Record<string, string>,
 ): Promise<JustBashExecResult | null> {
   const normalized = normalizeQuotes(command.trim());
   const tokens = splitCommandArgs(normalized);
-  if (tokens[0] !== 'almostnode-lsp-bridge') {
+  if (tokens[0] !== "almostnode-lsp-bridge") {
     return null;
   }
 
-  const subcommand = tokens[1] || '';
+  const subcommand = tokens[1] || "";
   const execution = getExecutionContextFromEnv(controller, env);
 
-  if (subcommand === 'oxlint') {
+  if (subcommand === "oxlint") {
     if (!execution?.interactive) {
       return {
-        stdout: '',
-        stderr: 'almostnode-lsp-bridge oxlint requires an interactive stdio session\n',
+        stdout: "",
+        stderr:
+          "almostnode-lsp-bridge oxlint requires an interactive stdio session\n",
         exitCode: 1,
         env: stripInternalChildProcessEnv(env),
       };
     }
 
-    const { runOxcLspSession } = await import('../oxc/lsp');
+    const { runOxcLspSession } = await import("../oxc/lsp");
     const result = await runOxcLspSession({
       execution,
       accessor: createOxcFileAccessor(controller.vfs),
@@ -863,15 +962,15 @@ async function maybeRunAlmostnodeLspBridgeCommand(
     };
   }
 
-  if (subcommand === 'tsgo') {
+  if (subcommand === "tsgo") {
     return runCommandInController(
       controller,
-      'npx -y tsgo-wasm --lsp --stdio',
+      "npx -y tsgo-wasm --lsp --stdio",
       {
         cwd,
         env: {
           ...env,
-          ALMOSTNODE_LONG_NODE_IDLE: '1',
+          ALMOSTNODE_LONG_NODE_IDLE: "1",
         },
       },
       env[EXECUTION_ID_ENV_KEY] ?? null,
@@ -879,8 +978,8 @@ async function maybeRunAlmostnodeLspBridgeCommand(
   }
 
   return {
-    stdout: '',
-    stderr: 'Usage: almostnode-lsp-bridge <oxlint|tsgo>\n',
+    stdout: "",
+    stderr: "Usage: almostnode-lsp-bridge <oxlint|tsgo>\n",
     exitCode: 64,
     env: stripInternalChildProcessEnv(env),
   };
@@ -896,7 +995,7 @@ function maybeRunCustomCommandDirect(
   controller: ChildProcessController,
   command: string,
   cwd: string,
-  env: Record<string, string>
+  env: Record<string, string>,
 ): Promise<JustBashExecResult> | null {
   const normalized = normalizeQuotes(command.trim());
   const tokens = splitCommandArgs(normalized);
@@ -906,25 +1005,30 @@ function maybeRunCustomCommandDirect(
   // Strip quoted content and shell redirections (e.g. 2>&1) first so
   // operators inside quotes or redirections are ignored.
   const withoutQuoted = normalized
-    .replace(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g, '')
-    .replace(/\d*>&\d+/g, '');
+    .replace(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g, "")
+    .replace(/\d*>&\d+/g, "");
   if (/[|;&]/.test(withoutQuoted)) return null;
 
   const cmd = tokens[0];
   const directRegistered = controller.activeShellCommands.get(cmd);
-  const basenameRegistered = cmd.includes('/')
+  const basenameRegistered = cmd.includes("/")
     ? controller.activeShellCommands.get(path.basename(cmd))
     : undefined;
   const registered = directRegistered ?? basenameRegistered;
-  const shouldDirectDispatch = Boolean(directRegistered?.interceptShellParsing)
-    || Boolean(basenameRegistered);
+  const shouldDirectDispatch =
+    Boolean(directRegistered?.interceptShellParsing) ||
+    Boolean(basenameRegistered);
   if (!registered || !shouldDirectDispatch) {
     return null;
   }
 
-  const args = tokens.slice(1).filter(t => !/^\d*>&\d+$/.test(t));
+  const args = tokens.slice(1).filter((t) => !/^\d*>&\d+$/.test(t));
   return (async () => {
-    const executionContext = createShellCommandExecutionContext(controller, env, cwd);
+    const executionContext = createShellCommandExecutionContext(
+      controller,
+      env,
+      cwd,
+    );
     const result = await registered.command.execute(args, executionContext.ctx);
     return {
       stdout: result.stdout,
@@ -954,17 +1058,17 @@ function stripQuotesForBash(command: string): string {
     if (match[1] !== undefined) {
       // Was double-quoted — unescape, then re-quote if it contains
       // characters that would confuse just-bash's lexer.
-      const content = match[1].replace(/\\(["\\$`!])/g, '$1');
+      const content = match[1].replace(/\\(["\\$`!])/g, "$1");
       if (/[()$`]/.test(content) || /\s/.test(content)) {
-        result.push('"' + content.replace(/["\\$`]/g, '\\$&') + '"');
+        result.push('"' + content.replace(/["\\$`]/g, "\\$&") + '"');
       } else {
         result.push(content);
       }
     } else if (match[2] !== undefined) {
       // Was single-quoted — unescape, then re-quote if needed.
-      const content = match[2].replace(/\\(['\\!])/g, '$1');
+      const content = match[2].replace(/\\(['\\!])/g, "$1");
       if (/[()$`]/.test(content) || /\s/.test(content)) {
-        result.push('"' + content.replace(/["\\$`]/g, '\\$&') + '"');
+        result.push('"' + content.replace(/["\\$`]/g, "\\$&") + '"');
       } else {
         result.push(content);
       }
@@ -974,11 +1078,11 @@ function stripQuotesForBash(command: string): string {
     }
   }
 
-  return result.join(' ');
+  return result.join(" ");
 }
 
 function normalizeCommandCwd(cwd?: string): string {
-  if (!cwd) return '/';
+  if (!cwd) return "/";
   if (path.isAbsolute(cwd)) return path.normalize(cwd);
   return path.normalize(`/${cwd}`);
 }
@@ -988,7 +1092,10 @@ function resolveFromCwd(cwd: string, candidate: string): string {
   return path.normalize(path.join(cwd, candidate));
 }
 
-function stopManagedFrameworkServer(controller: ChildProcessController, key: string): void {
+function stopManagedFrameworkServer(
+  controller: ChildProcessController,
+  key: string,
+): void {
   const existing = controller.frameworkDevServers.get(key);
   if (!existing) return;
   try {
@@ -1000,13 +1107,18 @@ function stopManagedFrameworkServer(controller: ChildProcessController, key: str
   }
 }
 
-function stopAllManagedFrameworkServers(controller: ChildProcessController): void {
+function stopAllManagedFrameworkServers(
+  controller: ChildProcessController,
+): void {
   for (const key of controller.frameworkDevServers.keys()) {
     stopManagedFrameworkServer(controller, key);
   }
 }
 
-function stopManagedFrameworkServersOnPort(controller: ChildProcessController, port: number): void {
+function stopManagedFrameworkServersOnPort(
+  controller: ChildProcessController,
+  port: number,
+): void {
   for (const [key, server] of controller.frameworkDevServers.entries()) {
     if (server.port === port) {
       stopManagedFrameworkServer(controller, key);
@@ -1018,10 +1130,10 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise<void>((resolve) => {
     const onAbort = () => {
-      signal.removeEventListener('abort', onAbort);
+      signal.removeEventListener("abort", onAbort);
       resolve();
     };
-    signal.addEventListener('abort', onAbort, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -1038,24 +1150,26 @@ function createBridgeServerWrapper(devServer: {
     method: string,
     url: string,
     headers: Record<string, string>,
-    body?: Buffer
+    body?: Buffer,
   ) => Promise<unknown>;
 }) {
   return {
     listening: true,
     address: () => ({
       port: devServer.getPort(),
-      address: '0.0.0.0',
-      family: 'IPv4',
+      address: "0.0.0.0",
+      family: "IPv4",
     }),
     async handleRequest(
       method: string,
       url: string,
       headers: Record<string, string>,
-      body?: string | Buffer
+      body?: string | Buffer,
     ) {
       const bodyBuffer = body
-        ? (typeof body === 'string' ? Buffer.from(body) : body)
+        ? typeof body === "string"
+          ? Buffer.from(body)
+          : body
         : undefined;
       return devServer.handleRequest(method, url, headers, bodyBuffer);
     },
@@ -1063,27 +1177,31 @@ function createBridgeServerWrapper(devServer: {
 }
 
 function getDefaultProcessCwd(): string {
-  const proc = (globalThis as any).process as { cwd?: () => string } | undefined;
-  if (proc && typeof proc.cwd === 'function') {
+  const proc = (globalThis as any).process as
+    | { cwd?: () => string }
+    | undefined;
+  if (proc && typeof proc.cwd === "function") {
     try {
       const cwd = proc.cwd();
-      if (typeof cwd === 'string' && cwd.length > 0) {
+      if (typeof cwd === "string" && cwd.length > 0) {
         return cwd;
       }
     } catch {
       // Fall back to root
     }
   }
-  return '/';
+  return "/";
 }
 
 function getDefaultProcessEnv(): Record<string, string> {
-  const proc = (globalThis as any).process as { env?: Record<string, string | undefined> } | undefined;
+  const proc = (globalThis as any).process as
+    | { env?: Record<string, string | undefined> }
+    | undefined;
   const env: Record<string, string> = {};
   if (!proc?.env) return env;
 
   for (const [key, value] of Object.entries(proc.env)) {
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       env[key] = value;
     }
   }
@@ -1091,23 +1209,30 @@ function getDefaultProcessEnv(): Record<string, string> {
   return env;
 }
 
-function mergeWithDefaultProcessEnv(env?: Record<string, string>): Record<string, string> {
+function mergeWithDefaultProcessEnv(
+  env?: Record<string, string>,
+): Record<string, string> {
   return {
     ...getDefaultProcessEnv(),
     ...(env || {}),
   };
 }
 
-function addNodeModuleBinPaths(env: Record<string, string>, cwd: string): Record<string, string> {
-  const pathKey = Object.prototype.hasOwnProperty.call(env, 'PATH')
-    ? 'PATH'
-    : (Object.prototype.hasOwnProperty.call(env, 'Path') ? 'Path' : 'PATH');
-  const current = env[pathKey] || '';
-  const segments = current.split(':').filter(Boolean);
-  const normalizedCwd = normalizeCommandCwd(cwd || '/');
+function addNodeModuleBinPaths(
+  env: Record<string, string>,
+  cwd: string,
+): Record<string, string> {
+  const pathKey = Object.prototype.hasOwnProperty.call(env, "PATH")
+    ? "PATH"
+    : Object.prototype.hasOwnProperty.call(env, "Path")
+      ? "Path"
+      : "PATH";
+  const current = env[pathKey] || "";
+  const segments = current.split(":").filter(Boolean);
+  const normalizedCwd = normalizeCommandCwd(cwd || "/");
   const candidateBins = [
-    path.normalize(path.join(normalizedCwd, 'node_modules/.bin')),
-    '/node_modules/.bin',
+    path.normalize(path.join(normalizedCwd, "node_modules/.bin")),
+    "/node_modules/.bin",
   ];
 
   const nextSegments = [...segments];
@@ -1120,18 +1245,18 @@ function addNodeModuleBinPaths(env: Record<string, string>, cwd: string): Record
 
   return {
     ...env,
-    [pathKey]: nextSegments.join(':'),
+    [pathKey]: nextSegments.join(":"),
   };
 }
 
 function emitStreamData(
   execution: ChildProcessExecutionContext | null,
   output: unknown,
-  stream: 'stdout' | 'stderr'
+  stream: "stdout" | "stderr",
 ) {
-  if (typeof output !== 'string') return;
+  if (typeof output !== "string") return;
   if (execution) execution.outputStreamed = true;
-  if (stream === 'stdout') {
+  if (stream === "stdout") {
     execution?.onStdout?.(output);
   } else {
     execution?.onStderr?.(output);
@@ -1152,7 +1277,9 @@ interface KeypressMeta {
   shift: boolean;
 }
 
-function decodeKeypressEvents(data: string): Array<{ ch: string | undefined; key: KeypressMeta }> {
+function decodeKeypressEvents(
+  data: string,
+): Array<{ ch: string | undefined; key: KeypressMeta }> {
   const events: Array<{ ch: string | undefined; key: KeypressMeta }> = [];
 
   const pushKey = (ch: string | undefined, key: KeypressMeta) => {
@@ -1164,66 +1291,126 @@ function decodeKeypressEvents(data: string): Array<{ ch: string | undefined; key
     const ch = data[i];
 
     // Common escape sequences from terminals (arrow keys)
-    if (ch === '\u001b') {
+    if (ch === "\u001b") {
       const seq3 = data.slice(i, i + 3);
-      if (seq3 === '\u001b[A' || seq3 === '\u001bOA') {
-        pushKey(undefined, { sequence: seq3, name: 'up', ctrl: false, meta: false, shift: false });
+      if (seq3 === "\u001b[A" || seq3 === "\u001bOA") {
+        pushKey(undefined, {
+          sequence: seq3,
+          name: "up",
+          ctrl: false,
+          meta: false,
+          shift: false,
+        });
         i += 3;
         continue;
       }
-      if (seq3 === '\u001b[B' || seq3 === '\u001bOB') {
-        pushKey(undefined, { sequence: seq3, name: 'down', ctrl: false, meta: false, shift: false });
+      if (seq3 === "\u001b[B" || seq3 === "\u001bOB") {
+        pushKey(undefined, {
+          sequence: seq3,
+          name: "down",
+          ctrl: false,
+          meta: false,
+          shift: false,
+        });
         i += 3;
         continue;
       }
-      if (seq3 === '\u001b[C' || seq3 === '\u001bOC') {
-        pushKey(undefined, { sequence: seq3, name: 'right', ctrl: false, meta: false, shift: false });
+      if (seq3 === "\u001b[C" || seq3 === "\u001bOC") {
+        pushKey(undefined, {
+          sequence: seq3,
+          name: "right",
+          ctrl: false,
+          meta: false,
+          shift: false,
+        });
         i += 3;
         continue;
       }
-      if (seq3 === '\u001b[D' || seq3 === '\u001bOD') {
-        pushKey(undefined, { sequence: seq3, name: 'left', ctrl: false, meta: false, shift: false });
+      if (seq3 === "\u001b[D" || seq3 === "\u001bOD") {
+        pushKey(undefined, {
+          sequence: seq3,
+          name: "left",
+          ctrl: false,
+          meta: false,
+          shift: false,
+        });
         i += 3;
         continue;
       }
 
-      pushKey(undefined, { sequence: '\u001b', name: 'escape', ctrl: false, meta: false, shift: false });
+      pushKey(undefined, {
+        sequence: "\u001b",
+        name: "escape",
+        ctrl: false,
+        meta: false,
+        shift: false,
+      });
       i += 1;
       continue;
     }
 
-    if (ch === '\r' && data[i + 1] === '\n') {
-      pushKey('\r', { sequence: '\r\n', name: 'return', ctrl: false, meta: false, shift: false });
+    if (ch === "\r" && data[i + 1] === "\n") {
+      pushKey("\r", {
+        sequence: "\r\n",
+        name: "return",
+        ctrl: false,
+        meta: false,
+        shift: false,
+      });
       i += 2;
       continue;
     }
 
-    if (ch === '\r' || ch === '\n') {
-      pushKey(ch, { sequence: ch, name: 'return', ctrl: false, meta: false, shift: false });
+    if (ch === "\r" || ch === "\n") {
+      pushKey(ch, {
+        sequence: ch,
+        name: "return",
+        ctrl: false,
+        meta: false,
+        shift: false,
+      });
       i += 1;
       continue;
     }
 
-    if (ch === '\t') {
-      pushKey(ch, { sequence: ch, name: 'tab', ctrl: false, meta: false, shift: false });
+    if (ch === "\t") {
+      pushKey(ch, {
+        sequence: ch,
+        name: "tab",
+        ctrl: false,
+        meta: false,
+        shift: false,
+      });
       i += 1;
       continue;
     }
 
-    if (ch === '\u007f') {
-      pushKey(undefined, { sequence: ch, name: 'backspace', ctrl: false, meta: false, shift: false });
+    if (ch === "\u007f") {
+      pushKey(undefined, {
+        sequence: ch,
+        name: "backspace",
+        ctrl: false,
+        meta: false,
+        shift: false,
+      });
       i += 1;
       continue;
     }
 
-    if (ch === '\u0003') {
-      pushKey(undefined, { sequence: ch, name: 'c', ctrl: true, meta: false, shift: false });
+    if (ch === "\u0003") {
+      pushKey(undefined, {
+        sequence: ch,
+        name: "c",
+        ctrl: true,
+        meta: false,
+        shift: false,
+      });
       i += 1;
       continue;
     }
 
     const lower = ch.toLowerCase();
-    const isLetter = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+    const isLetter = (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
     pushKey(ch, {
       sequence: ch,
       name: lower,
@@ -1244,38 +1431,49 @@ function decodeKeypressEvents(data: string): Array<{ ch: string | undefined; key
 export function sendStdin(data: string): void {
   const controller = defaultChildProcessController;
   if (!controller) return;
-  const interactiveExecutions = Array.from(controller.executions.values()).filter((execution) => execution.activeProcessStdin);
-  const latestExecution = interactiveExecutions[interactiveExecutions.length - 1] || null;
+  const interactiveExecutions = Array.from(
+    controller.executions.values(),
+  ).filter((execution) => execution.activeProcessStdin);
+  const latestExecution =
+    interactiveExecutions[interactiveExecutions.length - 1] || null;
   if (!latestExecution?.activeProcessStdin) return;
   pushInputToExecutionStdin(latestExecution.activeProcessStdin, data);
 }
 
-function pushInputToExecutionStdin(target: ActiveProcessStdin, data: string): void {
+function pushInputToExecutionStdin(
+  target: ActiveProcessStdin,
+  data: string,
+): void {
   const normalized = data
-    .replace(/\u001b\[200~/g, '')
-    .replace(/\u001b\[201~/g, '');
+    .replace(/\u001b\[200~/g, "")
+    .replace(/\u001b\[201~/g, "");
   if (!normalized) return;
 
   (target as any).__almostnodePushInput?.(normalized);
-  const hasKeypressListeners = typeof target.listenerCount === 'function'
-    && target.listenerCount('keypress') > 0;
+  const hasKeypressListeners =
+    typeof target.listenerCount === "function" &&
+    target.listenerCount("keypress") > 0;
   const decoded = decodeKeypressEvents(normalized);
 
-  const isControlSequenceOnly = decoded.length > 0 && decoded.every(({ ch, key }) => {
-    if (ch !== undefined) return false;
-    return key.name === 'up'
-      || key.name === 'down'
-      || key.name === 'left'
-      || key.name === 'right'
-      || key.name === 'escape';
-  });
+  const isControlSequenceOnly =
+    decoded.length > 0 &&
+    decoded.every(({ ch, key }) => {
+      if (ch !== undefined) return false;
+      return (
+        key.name === "up" ||
+        key.name === "down" ||
+        key.name === "left" ||
+        key.name === "right" ||
+        key.name === "escape"
+      );
+    });
 
   if (!(hasKeypressListeners && isControlSequenceOnly)) {
-    target.emit('data', normalized);
+    target.emit("data", normalized);
   }
 
   for (const { ch, key } of decoded) {
-    target.emit('keypress', ch, key);
+    target.emit("keypress", ch, key);
   }
 }
 
@@ -1287,7 +1485,9 @@ export function initChildProcess(
   vfs: VirtualFS,
   options: {
     installMode?: InstallMode;
-    onInstallMutation?: (summary: PackageManagerMutationSummary) => void | Promise<void>;
+    onInstallMutation?: (
+      summary: PackageManagerMutationSummary,
+    ) => void | Promise<void>;
   } = {},
 ): ChildProcessController {
   const existing = controllersByVfs.get(vfs);
@@ -1300,35 +1500,47 @@ export function initChildProcess(
   const vfsAdapter = new VirtualFSAdapter(vfs);
   let controller: ChildProcessController;
 
-  const nodeCommand = defineCommand('node', async (args, ctx) => {
+  const nodeCommand = defineCommand("node", async (args, ctx) => {
     const env = envToRecord(ctx.env);
-    const execution = getExecutionContextFromEnv(controller, env) ?? createExecutionContext(controller);
+    const execution =
+      getExecutionContextFromEnv(controller, env) ??
+      createExecutionContext(controller);
     const ownsExecution = !getExecutionContextFromEnv(controller, env);
 
     const scriptPath = args[0];
     if (!scriptPath) {
       if (ownsExecution) destroyExecutionContext(controller, execution.id);
-      return { stdout: '', stderr: 'Usage: node <script.js> [args...]\n', exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: "Usage: node <script.js> [args...]\n",
+        exitCode: 1,
+      };
     }
 
-    const resolvedPath = scriptPath.startsWith('/')
+    const resolvedPath = scriptPath.startsWith("/")
       ? scriptPath
-      : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, '/');
-    const isNodeModulesCli = resolvedPath.includes('/node_modules/');
-    const isOneShotNodeModulesCli = isNodeModulesCli && isLikelyOneShotCliInvocation(args.slice(1));
-    const isNpxExec = env.ALMOSTNODE_NPX_EXEC === '1';
+      : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, "/");
+    const isNodeModulesCli = resolvedPath.includes("/node_modules/");
+    const isOneShotNodeModulesCli =
+      isNodeModulesCli && isLikelyOneShotCliInvocation(args.slice(1));
+    const isNpxExec = env.ALMOSTNODE_NPX_EXEC === "1";
     const isLongIdleNodeModulesCli =
       isNodeModulesCli &&
       !isOneShotNodeModulesCli &&
-      (env.ALMOSTNODE_LONG_NODE_IDLE === '1' || env.ALMOSTNODE_LONG_NODE_IDLE === 'true');
+      (env.ALMOSTNODE_LONG_NODE_IDLE === "1" ||
+        env.ALMOSTNODE_LONG_NODE_IDLE === "true");
 
     if (!controller.vfs.existsSync(resolvedPath)) {
       if (ownsExecution) destroyExecutionContext(controller, execution.id);
-      return { stdout: '', stderr: `Error: Cannot find module '${resolvedPath}'\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `Error: Cannot find module '${resolvedPath}'\n`,
+        exitCode: 1,
+      };
     }
 
-    let stdout = '';
-    let stderr = '';
+    let stdout = "";
+    let stderr = "";
     let lastActivityAt = Date.now();
     const initialShellChildren = execution.activeShellChildren;
 
@@ -1336,7 +1548,9 @@ export function initChildProcess(
     let exitCode = 0;
     let syncExecution = true;
     let exitResolve: ((code: number) => void) | null = null;
-    const exitPromise = new Promise<number>((resolve) => { exitResolve = resolve; });
+    const exitPromise = new Promise<number>((resolve) => {
+      exitResolve = resolve;
+    });
 
     execution.outputStreamed = true;
 
@@ -1356,8 +1570,8 @@ export function initChildProcess(
       env,
       childProcessController: controller,
       onConsole: (method, consoleArgs) => {
-        const msg = consoleArgs.map((arg) => String(arg)).join(' ') + '\n';
-        if (method === 'error') {
+        const msg = consoleArgs.map((arg) => String(arg)).join(" ") + "\n";
+        if (method === "error") {
           appendStderr(msg);
         } else {
           appendStdout(msg);
@@ -1376,16 +1590,17 @@ export function initChildProcess(
       if (!exitCalled) {
         exitCalled = true;
         exitCode = code;
-        proc.emit('exit', code);
+        proc.emit("exit", code);
         exitResolve!(code);
       }
       if (syncExecution) {
         throw new Error(`Process exited with code ${code}`);
       }
     }) as (code?: number) => never;
-    proc.argv = ['node', resolvedPath, ...args.slice(1)];
+    proc.argv = ["node", resolvedPath, ...args.slice(1)];
 
-    const shouldEnableTty = !!execution.signal || !!execution.onStdout || !!execution.onStderr;
+    const shouldEnableTty =
+      !!execution.signal || !!execution.onStdout || !!execution.onStderr;
     let stdinRawMode = false;
     if (shouldEnableTty) {
       proc.stdout.isTTY = true;
@@ -1404,10 +1619,15 @@ export function initChildProcess(
 
     const preloadYogaLayout = async (): Promise<void> => {
       const candidates = [
-        `${ctx.cwd}/node_modules/yoga-layout/dist/src/load.js`.replace(/\/+/g, '/'),
-        '/node_modules/yoga-layout/dist/src/load.js',
+        `${ctx.cwd}/node_modules/yoga-layout/dist/src/load.js`.replace(
+          /\/+/g,
+          "/",
+        ),
+        "/node_modules/yoga-layout/dist/src/load.js",
       ];
-      const yogaLoadPath = candidates.find((candidate) => controller.vfs.existsSync(candidate));
+      const yogaLoadPath = candidates.find((candidate) =>
+        controller.vfs.existsSync(candidate),
+      );
       if (!yogaLoadPath) return;
 
       const preloadCode = `
@@ -1424,8 +1644,13 @@ module.exports = (async () => {
 })();
       `;
 
-      const preloadResult = (await runtime.execute(preloadCode, '/__almostnode_preload_yoga__.js')).exports;
-      if (preloadResult && typeof (preloadResult as Promise<unknown>).then === 'function') {
+      const preloadResult = (
+        await runtime.execute(preloadCode, "/__almostnode_preload_yoga__.js")
+      ).exports;
+      if (
+        preloadResult &&
+        typeof (preloadResult as Promise<unknown>).then === "function"
+      ) {
         await (preloadResult as Promise<unknown>);
       }
     };
@@ -1434,12 +1659,16 @@ module.exports = (async () => {
       await preloadYogaLayout();
       await runtime.runFile(resolvedPath);
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith('Process exited with code')) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith("Process exited with code")
+      ) {
         return { stdout, stderr, exitCode };
       }
-      const errorMsg = error instanceof Error
-        ? `${error.message}\n${error.stack || ''}`
-        : String(error);
+      const errorMsg =
+        error instanceof Error
+          ? `${error.message}\n${error.stack || ""}`
+          : String(error);
       return { stdout, stderr: stderr + `Error: ${errorMsg}\n`, exitCode: 1 };
     } finally {
       syncExecution = false;
@@ -1451,28 +1680,32 @@ module.exports = (async () => {
 
     const rejectionHandler = (event: PromiseRejectionEvent) => {
       const reason = event.reason;
-      if (reason instanceof Error && reason.message.startsWith('Process exited with code')) {
+      if (
+        reason instanceof Error &&
+        reason.message.startsWith("Process exited with code")
+      ) {
         event.preventDefault();
         return;
       }
-      const msg = reason instanceof Error
-        ? `Unhandled rejection: ${reason.message}\n${reason.stack || ''}\n`
-        : `Unhandled rejection: ${String(reason)}\n`;
+      const msg =
+        reason instanceof Error
+          ? `Unhandled rejection: ${reason.message}\n${reason.stack || ""}\n`
+          : `Unhandled rejection: ${String(reason)}\n`;
       appendStderr(msg);
       event.preventDefault();
     };
     const hasGlobalRejectionEvents =
-      typeof (globalThis as any).addEventListener === 'function' &&
-      typeof (globalThis as any).removeEventListener === 'function';
+      typeof (globalThis as any).addEventListener === "function" &&
+      typeof (globalThis as any).removeEventListener === "function";
     if (hasGlobalRejectionEvents) {
-      globalThis.addEventListener('unhandledrejection', rejectionHandler);
+      globalThis.addEventListener("unhandledrejection", rejectionHandler);
     }
 
     const vfsActivityHandler = () => {
       lastActivityAt = Date.now();
     };
-    controller.vfs.on('change', vfsActivityHandler);
-    controller.vfs.on('delete', vfsActivityHandler);
+    controller.vfs.on("change", vfsActivityHandler);
+    controller.vfs.on("delete", vfsActivityHandler);
 
     let childrenExited = false;
     let hadActiveSubprocess = false;
@@ -1486,15 +1719,29 @@ module.exports = (async () => {
       const MAX_TOTAL_MS = isLongIdleNodeModulesCli ? 5 * 60 * 1000 : 60_000;
       const IDLE_TIMEOUT_MS = isLongIdleNodeModulesCli
         ? 10_000
-        : (isNodeModulesCli ? 300 : 200);
+        : isNodeModulesCli
+          ? 300
+          : 200;
       const NO_OUTPUT_IDLE_MS = isLongIdleNodeModulesCli
-        ? (isNpxExec ? 15_000 : 20_000)
-        : (isNpxExec ? 30_000 : (isNodeModulesCli ? 2_000 : 1_000));
+        ? isNpxExec
+          ? 15_000
+          : 20_000
+        : isNpxExec
+          ? 30_000
+          : isNodeModulesCli
+            ? 2_000
+            : 1_000;
       const STALE_PENDING_TIMER_IDLE_MS = isLongIdleNodeModulesCli
-        ? (isNpxExec ? 5_000 : 10_000)
-        : (isNodeModulesCli ? 2_000 : Number.POSITIVE_INFINITY);
+        ? isNpxExec
+          ? 5_000
+          : 10_000
+        : isNodeModulesCli
+          ? 2_000
+          : Number.POSITIVE_INFINITY;
       const POST_CHILD_EXIT_IDLE_MS = isLongIdleNodeModulesCli ? 500 : 100;
-      const ACTIVE_SUBPROCESS_STALE_MS = isLongIdleNodeModulesCli ? 5_000 : 2_000;
+      const ACTIVE_SUBPROCESS_STALE_MS = isLongIdleNodeModulesCli
+        ? 5_000
+        : 2_000;
       const CHECK_MS = 50;
       const startTime = Date.now();
       let lastOutputLen = stdout.length + stderr.length;
@@ -1505,11 +1752,13 @@ module.exports = (async () => {
         if (execution.signal?.aborted) break;
 
         const raceResult = await Promise.race([
-          exitPromise.then(() => 'exit' as const),
-          new Promise<'tick'>((resolve) => setTimeout(() => resolve('tick'), CHECK_MS)),
+          exitPromise.then(() => "exit" as const),
+          new Promise<"tick">((resolve) =>
+            setTimeout(() => resolve("tick"), CHECK_MS),
+          ),
         ]);
 
-        if (raceResult === 'exit' || exitCalled) break;
+        if (raceResult === "exit" || exitCalled) break;
         if (execution.signal?.aborted) break;
 
         const currentLen = stdout.length + stderr.length;
@@ -1522,10 +1771,9 @@ module.exports = (async () => {
           pendingTimerIdleMs += CHECK_MS;
         }
 
-        const keepAliveForInteractiveInput = !!execution.signal && (
-          stdinRawMode ||
-          hasActiveStdinListeners(proc.stdin)
-        );
+        const keepAliveForInteractiveInput =
+          !!execution.signal &&
+          (stdinRawMode || hasActiveStdinListeners(proc.stdin));
         if (keepAliveForInteractiveInput) {
           continue;
         }
@@ -1539,19 +1787,24 @@ module.exports = (async () => {
             execution.activeForkedChildren <= 0 &&
             execution.activeShellChildren <= initialShellChildren;
 
-          if (!allowStalePendingTimerExit || pendingTimerIdleMs < STALE_PENDING_TIMER_IDLE_MS) {
+          if (
+            !allowStalePendingTimerExit ||
+            pendingTimerIdleMs < STALE_PENDING_TIMER_IDLE_MS
+          ) {
             continue;
           }
 
           almostnodeDebugLog(
-            'npx',
-            `[almostnode DEBUG] node exiting after stale pending timers: path=${resolvedPath} idleMs=${pendingTimerIdleMs} interactive=${execution.interactive ? '1' : '0'}`,
+            "npx",
+            `[almostnode DEBUG] node exiting after stale pending timers: path=${resolvedPath} idleMs=${pendingTimerIdleMs} interactive=${execution.interactive ? "1" : "0"}`,
           );
         } else {
           pendingTimerIdleMs = 0;
         }
 
-        const hasActiveSubprocess = execution.activeForkedChildren > 0 || execution.activeShellChildren > initialShellChildren;
+        const hasActiveSubprocess =
+          execution.activeForkedChildren > 0 ||
+          execution.activeShellChildren > initialShellChildren;
         if (hasActiveSubprocess) {
           hadActiveSubprocess = true;
           const activityAge = Date.now() - lastActivityAt;
@@ -1561,13 +1814,20 @@ module.exports = (async () => {
           }
         }
 
-        const effectiveIdle = (childrenExited || hadActiveSubprocess) ? POST_CHILD_EXIT_IDLE_MS : IDLE_TIMEOUT_MS;
+        const effectiveIdle =
+          childrenExited || hadActiveSubprocess
+            ? POST_CHILD_EXIT_IDLE_MS
+            : IDLE_TIMEOUT_MS;
         if (lastOutputLen > 0 && idleMs >= effectiveIdle) break;
         if (lastOutputLen === 0 && idleMs >= NO_OUTPUT_IDLE_MS) break;
       }
 
       const aborted = execution.signal?.aborted;
-      return { stdout, stderr, exitCode: exitCalled ? exitCode : (aborted ? 130 : 0) };
+      return {
+        stdout,
+        stderr,
+        exitCode: exitCalled ? exitCode : aborted ? 130 : 0,
+      };
     } finally {
       // Free all cached module data (parsed ASTs, transformed code, resolver caches)
       // to avoid accumulating memory across consecutive node command invocations.
@@ -1578,54 +1838,55 @@ module.exports = (async () => {
       execution.activeProcessStdin = null;
       execution.onForkedChildExit = prevChildExitHandler;
       if (hasGlobalRejectionEvents) {
-        globalThis.removeEventListener('unhandledrejection', rejectionHandler);
+        globalThis.removeEventListener("unhandledrejection", rejectionHandler);
       }
-      controller.vfs.off('change', vfsActivityHandler);
-      controller.vfs.off('delete', vfsActivityHandler);
+      controller.vfs.off("change", vfsActivityHandler);
+      controller.vfs.off("delete", vfsActivityHandler);
       if (ownsExecution) {
         destroyExecutionContext(controller, execution.id);
       }
     }
   });
 
-  const npmCommand = defineCommand('npm', async (args, ctx) => {
+  const npmCommand = defineCommand("npm", async (args, ctx) => {
     const subcommand = args[0];
 
-    if (!subcommand || subcommand === 'help' || subcommand === '--help') {
+    if (!subcommand || subcommand === "help" || subcommand === "--help") {
       return {
-        stdout: 'Usage: npm <command>\n\nCommands:\n  run <script>   Run a script from package.json\n  start          Run the start script\n  test           Run the test script\n  install [pkg]  Install packages\n  ls             List installed packages\n',
-        stderr: '',
+        stdout:
+          "Usage: npm <command>\n\nCommands:\n  run <script>   Run a script from package.json\n  start          Run the start script\n  test           Run the test script\n  install [pkg]  Install packages\n  ls             List installed packages\n",
+        stderr: "",
         exitCode: 0,
       };
     }
 
     switch (subcommand) {
-      case 'run':
-      case 'run-script':
+      case "run":
+      case "run-script":
         return handleNpmRun(controller, args.slice(1), ctx);
-      case 'start':
-        return handleNpmRun(controller, ['start'], ctx);
-      case 'test':
-      case 't':
-      case 'tst':
-        return handleNpmRun(controller, ['test'], ctx);
-      case 'install':
-      case 'i':
-      case 'add':
+      case "start":
+        return handleNpmRun(controller, ["start"], ctx);
+      case "test":
+      case "t":
+      case "tst":
+        return handleNpmRun(controller, ["test"], ctx);
+      case "install":
+      case "i":
+      case "add":
         return handleNpmInstall(controller, args.slice(1), ctx);
-      case 'ls':
-      case 'list':
+      case "ls":
+      case "list":
         return handleNpmList(controller, ctx);
       default:
         return {
-          stdout: '',
+          stdout: "",
           stderr: `npm ERR! Unknown command: "${subcommand}"\n`,
           exitCode: 1,
         };
     }
   });
 
-  const npxCommand = defineCommand('npx', async (args, ctx) => {
+  const npxCommand = defineCommand("npx", async (args, ctx) => {
     const env = envToRecord(ctx.env);
     const execution = getExecutionContextFromEnv(controller, env);
     let packageSpec: string | null = null;
@@ -1634,12 +1895,12 @@ module.exports = (async () => {
 
     while (i < args.length) {
       const arg = args[i];
-      if ((arg === '-p' || arg === '--package') && i + 1 < args.length) {
+      if ((arg === "-p" || arg === "--package") && i + 1 < args.length) {
         packageSpec = args[i + 1];
         i += 2;
-      } else if (arg === '-y' || arg === '--yes') {
+      } else if (arg === "-y" || arg === "--yes") {
         i++;
-      } else if (arg === '--') {
+      } else if (arg === "--") {
         cmdArgs.push(...args.slice(i + 1));
         break;
       } else {
@@ -1649,7 +1910,12 @@ module.exports = (async () => {
     }
 
     if (cmdArgs.length === 0) {
-      return { stdout: '', stderr: 'npx: missing command\nUsage: npx [options] <command> [args...]\n', exitCode: 1 };
+      return {
+        stdout: "",
+        stderr:
+          "npx: missing command\nUsage: npx [options] <command> [args...]\n",
+        exitCode: 1,
+      };
     }
 
     const LONG_RUNNING_NPX_COMMANDS = new Set<string>([
@@ -1660,54 +1926,67 @@ module.exports = (async () => {
     const commandArgs = cmdArgs.slice(1);
 
     // Intercept commands that have custom shim implementations — skip npm resolution
-    if (commandName === 'drizzle-kit') {
-      const { runDrizzleKitCommand } = await import('./drizzle-kit-command');
+    if (commandName === "drizzle-kit") {
+      const { runDrizzleKitCommand } = await import("./drizzle-kit-command");
       return runDrizzleKitCommand(commandArgs, ctx, controller.vfs);
     }
 
-    if (commandName === 'tsc') {
-      const { runTscCommand } = await import('./tsc-command');
+    if (commandName === "tsc") {
+      const { runTscCommand } = await import("./tsc-command");
       return runTscCommand(commandArgs, ctx, controller.vfs);
     }
 
-    const isWranglerNpxCommand = commandName === 'wrangler'
-      || commandName.startsWith('wrangler@')
-      || packageSpec === 'wrangler'
-      || packageSpec?.startsWith('wrangler@');
+    const isWranglerNpxCommand =
+      commandName === "wrangler" ||
+      commandName.startsWith("wrangler@") ||
+      packageSpec === "wrangler" ||
+      packageSpec?.startsWith("wrangler@");
     if (isWranglerNpxCommand) {
-      if (commandArgs[0] === 'dev') {
+      if (commandArgs[0] === "dev") {
         return runWranglerWorkerDev(commandArgs.slice(1), ctx);
       }
-      if (commandArgs[0] === 'pages' && commandArgs[1] === 'dev') {
+      if (commandArgs[0] === "pages" && commandArgs[1] === "dev") {
         return runWranglerPagesDev(commandArgs.slice(2), ctx);
       }
-      const { runWranglerCommand } = await import('./wrangler-command');
-      return runWranglerCommand(commandArgs, ctx, controller.vfs, controller.keychain);
+      const { runWranglerCommand } = await import("./wrangler-command");
+      return runWranglerCommand(
+        commandArgs,
+        ctx,
+        controller.vfs,
+        controller.keychain,
+      );
     }
 
     const installSpec = packageSpec || commandName;
 
-    const { parsePackageSpec } = await import('../npm/index');
-    const {
-      name: pkgName,
-      version: requestedVersion,
-    } = parsePackageSpec(typeof installSpec === 'string' ? installSpec : commandName);
-    const forceLatestInstall = requestedVersion === 'latest';
-    const binName = packageSpec ? commandName : (pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName);
+    const { parsePackageSpec } = await import("../npm/index");
+    const { name: pkgName, version: requestedVersion } = parsePackageSpec(
+      typeof installSpec === "string" ? installSpec : commandName,
+    );
+    const forceLatestInstall = requestedVersion === "latest";
+    const binName = packageSpec
+      ? commandName
+      : pkgName.includes("/")
+        ? pkgName.split("/").pop()!
+        : pkgName;
     const quoteArg = (value: string) => JSON.stringify(value);
-    const installDecision = forceLatestInstall ? 'install-latest' : 'reuse-or-install';
+    const installDecision = forceLatestInstall
+      ? "install-latest"
+      : "reuse-or-install";
 
     almostnodeDebugLog(
-      'npx',
-      `[almostnode DEBUG] npx parsed: command=${commandName} installSpec=${installSpec} package=${pkgName} version=${requestedVersion || 'latest'} bin=${binName} cwd=${ctx.cwd} mode=${controller.installMode} decision=${installDecision}`,
+      "npx",
+      `[almostnode DEBUG] npx parsed: command=${commandName} installSpec=${installSpec} package=${pkgName} version=${requestedVersion || "latest"} bin=${binName} cwd=${ctx.cwd} mode=${controller.installMode} decision=${installDecision}`,
     );
 
     let npxSuppressedCount = 0;
     const emitInstallProgress = (message: string) => {
       // Suppress per-dep spam (same logic as handleNpmInstall)
-      if ((/^Resolving\s+/.test(message) && !message.endsWith('...')) ||
-          /^\s+Downloading\s+/.test(message) ||
-          /^Skipping\s+/.test(message)) {
+      if (
+        (/^Resolving\s+/.test(message) && !message.endsWith("...")) ||
+        /^\s+Downloading\s+/.test(message) ||
+        /^Skipping\s+/.test(message)
+      ) {
         npxSuppressedCount++;
         return;
       }
@@ -1715,18 +1994,25 @@ module.exports = (async () => {
       // interleaving with Claude Code's UI rendering.
     };
 
-    const formatOutputTail = (output: string, maxLines = 20, maxChars = 2000): string => {
-      if (!output) return '';
+    const formatOutputTail = (
+      output: string,
+      maxLines = 20,
+      maxChars = 2000,
+    ): string => {
+      if (!output) return "";
       const normalized = output.trimEnd();
-      if (!normalized) return '';
+      if (!normalized) return "";
       const lines = normalized.split(/\r?\n/);
-      const tail = lines.slice(-maxLines).join('\n');
+      const tail = lines.slice(-maxLines).join("\n");
       return tail.length > maxChars ? tail.slice(-maxChars) : tail;
     };
 
-    const withNpxExecDiagnostics = (result: JustBashExecResult, executionTarget: string): JustBashExecResult => {
+    const withNpxExecDiagnostics = (
+      result: JustBashExecResult,
+      executionTarget: string,
+    ): JustBashExecResult => {
       if (result.exitCode === 0) return result;
-      const stderrText = result.stderr || '';
+      const stderrText = result.stderr || "";
       const firstStderrLine = stderrText
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -1737,12 +2023,12 @@ module.exports = (async () => {
         diagnostic += `npx: first stderr line: ${firstStderrLine}\n`;
       }
       if (!stderrText.trim()) {
-        const stdoutTail = formatOutputTail(result.stdout || '');
+        const stdoutTail = formatOutputTail(result.stdout || "");
         if (stdoutTail) {
           diagnostic += `npx: stdout tail:\n${stdoutTail}\n`;
         }
       }
-      almostnodeDebugError('npx', `[almostnode DEBUG] ${diagnostic.trimEnd()}`);
+      almostnodeDebugError("npx", `[almostnode DEBUG] ${diagnostic.trimEnd()}`);
 
       return {
         ...result,
@@ -1751,20 +2037,27 @@ module.exports = (async () => {
     };
 
     const resolveBin = (lookupCwd: string) => {
-      const normalizedCwd = lookupCwd || '/';
+      const normalizedCwd = lookupCwd || "/";
       const binPaths = [
-        `${normalizedCwd}/node_modules/.bin/${binName}`.replace(/\/+/g, '/'),
+        `${normalizedCwd}/node_modules/.bin/${binName}`.replace(/\/+/g, "/"),
         `/node_modules/.bin/${binName}`,
       ];
 
       return {
-        binPath: binPaths.find((candidate) => controller.vfs.existsSync(candidate)) ?? null,
-        resolvedBinTarget: getPackageBinTarget(controller, pkgName, binName, normalizedCwd),
+        binPath:
+          binPaths.find((candidate) => controller.vfs.existsSync(candidate)) ??
+          null,
+        resolvedBinTarget: getPackageBinTarget(
+          controller,
+          pkgName,
+          binName,
+          normalizedCwd,
+        ),
       };
     };
 
     const installPackage = async (installCwd: string) => {
-      const pm = await createPackageManager(controller, installCwd || '/');
+      const pm = await createPackageManager(controller, installCwd || "/");
       try {
         await pm.install(installSpec, { onProgress: emitInstallProgress });
         npxSuppressedCount = 0;
@@ -1776,14 +2069,14 @@ module.exports = (async () => {
     let { binPath, resolvedBinTarget } = resolveBin(ctx.cwd);
     let useExtendedNodeIdle = false;
     almostnodeDebugLog(
-      'npx',
-      `[almostnode DEBUG] npx resolve before install: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} mode=${controller.installMode}`,
+      "npx",
+      `[almostnode DEBUG] npx resolve before install: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} mode=${controller.installMode}`,
     );
 
     if (forceLatestInstall && (binPath || resolvedBinTarget)) {
       almostnodeDebugLog(
-        'npx',
-        `[almostnode DEBUG] npx skipping @latest reinstall: already resolved binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'}`,
+        "npx",
+        `[almostnode DEBUG] npx skipping @latest reinstall: already resolved binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"}`,
       );
     }
 
@@ -1791,89 +2084,123 @@ module.exports = (async () => {
       useExtendedNodeIdle = true;
       try {
         almostnodeDebugLog(
-          'npx',
+          "npx",
           `[almostnode DEBUG] npx install start: spec=${installSpec} cwd=${ctx.cwd} mode=${controller.installMode}`,
         );
         await installPackage(ctx.cwd);
         ({ binPath, resolvedBinTarget } = resolveBin(ctx.cwd));
         almostnodeDebugLog(
-          'npx',
-          `[almostnode DEBUG] npx resolve after install: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} cwd=${ctx.cwd}`,
+          "npx",
+          `[almostnode DEBUG] npx resolve after install: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} cwd=${ctx.cwd}`,
         );
-        if (!binPath && !resolvedBinTarget && ctx.cwd !== '/') {
-          emitInstallProgress('npx: retrying install in / to resolve command bin...');
+        if (!binPath && !resolvedBinTarget && ctx.cwd !== "/") {
+          emitInstallProgress(
+            "npx: retrying install in / to resolve command bin...",
+          );
           almostnodeDebugLog(
-            'npx',
+            "npx",
             `[almostnode DEBUG] npx install retry in /: spec=${installSpec} originalCwd=${ctx.cwd} mode=${controller.installMode}`,
           );
-          await installPackage('/');
-          ({ binPath, resolvedBinTarget } = resolveBin('/'));
+          await installPackage("/");
+          ({ binPath, resolvedBinTarget } = resolveBin("/"));
           almostnodeDebugLog(
-            'npx',
-            `[almostnode DEBUG] npx resolve after root retry: binPath=${binPath || '-'} resolvedBinTarget=${resolvedBinTarget || '-'} cwd=/`,
+            "npx",
+            `[almostnode DEBUG] npx resolve after root retry: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} cwd=/`,
           );
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        almostnodeDebugError('npx', `[almostnode DEBUG] npx install failed: spec=${installSpec} cwd=${ctx.cwd} -> ${msg}`);
-        return { stdout: '', stderr: `npx: install failed: ${msg}\n`, exitCode: 1 };
+        almostnodeDebugError(
+          "npx",
+          `[almostnode DEBUG] npx install failed: spec=${installSpec} cwd=${ctx.cwd} -> ${msg}`,
+        );
+        return {
+          stdout: "",
+          stderr: `npx: install failed: ${msg}\n`,
+          exitCode: 1,
+        };
       }
     }
 
     if (!binPath && !resolvedBinTarget) {
       almostnodeDebugError(
-        'npx',
+        "npx",
         `[almostnode DEBUG] npx command not found after resolution: package=${pkgName} bin=${binName} cwd=${ctx.cwd}`,
       );
-      return { stdout: '', stderr: `npx: command not found: ${binName}\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `npx: command not found: ${binName}\n`,
+        exitCode: 1,
+      };
     }
 
     if (!ctx.exec) {
       return {
-        stdout: '',
-        stderr: 'npx: command execution not available in this context\n',
+        stdout: "",
+        stderr: "npx: command execution not available in this context\n",
         exitCode: 1,
       };
     }
 
     const execEnv = {
       ...env,
-      ...((useExtendedNodeIdle || LONG_RUNNING_NPX_COMMANDS.has(commandName)) ? { ALMOSTNODE_LONG_NODE_IDLE: '1' } : {}),
-      ALMOSTNODE_NPX_EXEC: '1',
+      ...(useExtendedNodeIdle || LONG_RUNNING_NPX_COMMANDS.has(commandName)
+        ? { ALMOSTNODE_LONG_NODE_IDLE: "1" }
+        : {}),
+      ALMOSTNODE_NPX_EXEC: "1",
     };
 
     if (resolvedBinTarget) {
-      const fullCommand = ['node', resolvedBinTarget, ...commandArgs].map((value) => quoteArg(value)).join(' ');
+      const fullCommand = ["node", resolvedBinTarget, ...commandArgs]
+        .map((value) => quoteArg(value))
+        .join(" ");
       almostnodeDebugLog(
-        'npx',
-        `[almostnode DEBUG] npx exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
+        "npx",
+        `[almostnode DEBUG] npx exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? "1" : "0"}`,
       );
-      const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
+      const result = await ctx.exec(fullCommand, {
+        cwd: ctx.cwd,
+        env: execEnv,
+      });
       return withNpxExecDiagnostics(result, `node ${resolvedBinTarget}`);
     }
 
     if (!binPath) {
-      return { stdout: '', stderr: `npx: command not found: ${binName}\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `npx: command not found: ${binName}\n`,
+        exitCode: 1,
+      };
     }
 
-    const fullCommand = [binPath, ...commandArgs].map((value) => quoteArg(value)).join(' ');
+    const fullCommand = [binPath, ...commandArgs]
+      .map((value) => quoteArg(value))
+      .join(" ");
     almostnodeDebugLog(
-      'npx',
-      `[almostnode DEBUG] npx exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? '1' : '0'}`,
+      "npx",
+      `[almostnode DEBUG] npx exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? "1" : "0"}`,
     );
     const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
     return withNpxExecDiagnostics(result, binPath);
   });
 
-  const tarCommand = defineCommand('tar', async (args, ctx) => {
+  const tarCommand = defineCommand("tar", async (args, ctx) => {
     const parsed = parseTarOptions(args, ctx.cwd);
     if (!parsed.options) {
-      return { stdout: '', stderr: `tar: ${parsed.error || 'invalid arguments'}\n`, exitCode: 2 };
+      return {
+        stdout: "",
+        stderr: `tar: ${parsed.error || "invalid arguments"}\n`,
+        exitCode: 2,
+      };
     }
 
     const { archivePath, destPath, verbose } = parsed.options;
     if (!controller.vfs.existsSync(archivePath)) {
-      return { stdout: '', stderr: `tar: ${archivePath}: Cannot open: No such file or directory\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `tar: ${archivePath}: Cannot open: No such file or directory\n`,
+        exitCode: 1,
+      };
     }
 
     try {
@@ -1883,68 +2210,90 @@ module.exports = (async () => {
         stripComponents: 0,
         filter: isSafeTarEntryPath,
       });
-      const stdout = verbose && extracted.length > 0
-        ? `${extracted.map((entry) => path.relative(destPath, entry)).join('\n')}\n`
-        : '';
-      return { stdout, stderr: '', exitCode: 0 };
+      const stdout =
+        verbose && extracted.length > 0
+          ? `${extracted.map((entry) => path.relative(destPath, entry)).join("\n")}\n`
+          : "";
+      return { stdout, stderr: "", exitCode: 0 };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { stdout: '', stderr: `tar: ${message}\n`, exitCode: 1 };
+      return { stdout: "", stderr: `tar: ${message}\n`, exitCode: 1 };
     }
   });
 
-  const nextCommand = defineCommand('next', async (args, ctx) => {
+  const nextCommand = defineCommand("next", async (args, ctx) => {
     const env = envToRecord(ctx.env);
     const execution = getExecutionContextFromEnv(controller, env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
-    const explicitSubcommand = args[0] && !args[0].startsWith('-') ? args[0] : 'dev';
-    const devArgs = explicitSubcommand === 'dev' ? args.slice(args[0] === 'dev' ? 1 : 0) : args.slice(1);
+    const explicitSubcommand =
+      args[0] && !args[0].startsWith("-") ? args[0] : "dev";
+    const devArgs =
+      explicitSubcommand === "dev"
+        ? args.slice(args[0] === "dev" ? 1 : 0)
+        : args.slice(1);
 
-    if (explicitSubcommand === 'help' || explicitSubcommand === '--help' || explicitSubcommand === '-h') {
+    if (
+      explicitSubcommand === "help" ||
+      explicitSubcommand === "--help" ||
+      explicitSubcommand === "-h"
+    ) {
       return {
-        stdout: 'Usage: next dev [options]\n\nSupported:\n  -p, --port <n>\n  -H, --hostname <host>\n\nOther subcommands are delegated to installed next CLI.\n',
-        stderr: '',
+        stdout:
+          "Usage: next dev [options]\n\nSupported:\n  -p, --port <n>\n  -H, --hostname <host>\n\nOther subcommands are delegated to installed next CLI.\n",
+        stderr: "",
         exitCode: 0,
       };
     }
 
-    if (explicitSubcommand !== 'dev') {
-      return execInstalledPackageBin(controller, 'next', 'next', args, ctx);
+    if (explicitSubcommand !== "dev") {
+      return execInstalledPackageBin(controller, "next", "next", args, ctx);
     }
 
     let port = 3000;
-    let hostname = 'localhost';
+    let hostname = "localhost";
 
     for (let i = 0; i < devArgs.length; i++) {
       const arg = devArgs[i];
-      if (arg === '-p' || arg === '--port') {
+      if (arg === "-p" || arg === "--port") {
         const parsed = parsePortValue(devArgs[i + 1]);
         if (parsed == null) {
-          return { stdout: '', stderr: 'next: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "next: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         i++;
         continue;
       }
-      if (arg.startsWith('--port=')) {
-        const parsed = parsePortValue(arg.slice('--port='.length));
+      if (arg.startsWith("--port=")) {
+        const parsed = parsePortValue(arg.slice("--port=".length));
         if (parsed == null) {
-          return { stdout: '', stderr: 'next: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "next: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         continue;
       }
-      if (arg === '-H' || arg === '--hostname') {
+      if (arg === "-H" || arg === "--hostname") {
         const value = devArgs[i + 1];
-        if (!value || value.startsWith('-')) {
-          return { stdout: '', stderr: 'next: missing --hostname value\n', exitCode: 1 };
+        if (!value || value.startsWith("-")) {
+          return {
+            stdout: "",
+            stderr: "next: missing --hostname value\n",
+            exitCode: 1,
+          };
         }
         hostname = value;
         i++;
         continue;
       }
-      if (arg.startsWith('--hostname=')) {
-        const value = arg.slice('--hostname='.length).trim();
+      if (arg.startsWith("--hostname=")) {
+        const value = arg.slice("--hostname=".length).trim();
         hostname = value || hostname;
         continue;
       }
@@ -1955,12 +2304,12 @@ module.exports = (async () => {
 
     try {
       const [{ NextDevServer }, { getServerBridge }] = await Promise.all([
-        import('../frameworks/next-dev-server'),
-        import('../server-bridge'),
+        import("../frameworks/next-dev-server"),
+        import("../server-bridge"),
       ]);
 
       const bridge = getServerBridge();
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
         try {
           await bridge.initServiceWorker();
         } catch {
@@ -1972,9 +2321,9 @@ module.exports = (async () => {
       const server = new NextDevServer(controller.vfs, {
         port,
         root,
-        pagesDir: `${root}/pages`.replace(/\/+/g, '/'),
-        appDir: `${root}/app`.replace(/\/+/g, '/'),
-        publicDir: `${root}/public`.replace(/\/+/g, '/'),
+        pagesDir: `${root}/pages`.replace(/\/+/g, "/"),
+        appDir: `${root}/app`.replace(/\/+/g, "/"),
+        publicDir: `${root}/public`.replace(/\/+/g, "/"),
         env: { ...env },
         deploymentBasePath: bridge.getBasePath(),
       });
@@ -1984,14 +2333,15 @@ module.exports = (async () => {
 
       const url = `${bridge.getServerUrl(port)}/`;
       const startup = `next dev server running at ${url} (host: ${hostname}, root: ${root})\n`;
-      emitStreamData(execution, startup, 'stdout');
+      emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
         key,
-        framework: 'next',
+        framework: "next",
         port,
         clearInstalledPackagesCache: () => server.clearInstalledPackagesCache(),
-        setHMRTarget: (targetWindow: Window) => server.setHMRTarget(targetWindow),
+        setHMRTarget: (targetWindow: Window) =>
+          server.setHMRTarget(targetWindow),
         stop: () => {
           try {
             server.stop();
@@ -2004,18 +2354,22 @@ module.exports = (async () => {
       if (execution?.signal) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
-        return { stdout: startup, stderr: '', exitCode: 130 };
+        return { stdout: startup, stderr: "", exitCode: 130 };
       }
 
-      return { stdout: startup, stderr: '', exitCode: 0 };
+      return { stdout: startup, stderr: "", exitCode: 0 };
     } catch (error) {
       stopManagedFrameworkServer(controller, key);
       const message = error instanceof Error ? error.message : String(error);
-      return { stdout: '', stderr: `next: failed to start dev server: ${message}\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `next: failed to start dev server: ${message}\n`,
+        exitCode: 1,
+      };
     }
   });
 
-  const viteCommand = defineCommand('vite', async (args, ctx) => {
+  const viteCommand = defineCommand("vite", async (args, ctx) => {
     const env = envToRecord(ctx.env);
     const execution = getExecutionContextFromEnv(controller, env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
@@ -2023,11 +2377,16 @@ module.exports = (async () => {
     let devArgs = args;
 
     const firstArg = args[0];
-    if (firstArg && !firstArg.startsWith('-')) {
-      if (firstArg === 'build' || firstArg === 'preview' || firstArg === 'optimize' || firstArg === 'optimizeDeps') {
-        return execInstalledPackageBin(controller, 'vite', 'vite', args, ctx);
+    if (firstArg && !firstArg.startsWith("-")) {
+      if (
+        firstArg === "build" ||
+        firstArg === "preview" ||
+        firstArg === "optimize" ||
+        firstArg === "optimizeDeps"
+      ) {
+        return execInstalledPackageBin(controller, "vite", "vite", args, ctx);
       }
-      if (firstArg === 'dev' || firstArg === 'serve') {
+      if (firstArg === "dev" || firstArg === "serve") {
         devArgs = args.slice(1);
       } else {
         root = resolveFromCwd(normalizedCwd, firstArg);
@@ -2036,53 +2395,65 @@ module.exports = (async () => {
     }
 
     let port = 5173;
-    let host = 'localhost';
+    let host = "localhost";
 
     for (let i = 0; i < devArgs.length; i++) {
       const arg = devArgs[i];
-      if (arg === '-p' || arg === '--port') {
+      if (arg === "-p" || arg === "--port") {
         const parsed = parsePortValue(devArgs[i + 1]);
         if (parsed == null) {
-          return { stdout: '', stderr: 'vite: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "vite: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         i++;
         continue;
       }
-      if (arg.startsWith('--port=')) {
-        const parsed = parsePortValue(arg.slice('--port='.length));
+      if (arg.startsWith("--port=")) {
+        const parsed = parsePortValue(arg.slice("--port=".length));
         if (parsed == null) {
-          return { stdout: '', stderr: 'vite: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "vite: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         continue;
       }
-      if (arg === '--host' || arg === '-H') {
+      if (arg === "--host" || arg === "-H") {
         const value = devArgs[i + 1];
-        if (!value || value.startsWith('-')) {
-          host = '0.0.0.0';
+        if (!value || value.startsWith("-")) {
+          host = "0.0.0.0";
           continue;
         }
         host = value;
         i++;
         continue;
       }
-      if (arg.startsWith('--host=')) {
-        const value = arg.slice('--host='.length).trim();
-        host = value || '0.0.0.0';
+      if (arg.startsWith("--host=")) {
+        const value = arg.slice("--host=".length).trim();
+        host = value || "0.0.0.0";
         continue;
       }
-      if (arg === '--root') {
+      if (arg === "--root") {
         const value = devArgs[i + 1];
-        if (!value || value.startsWith('-')) {
-          return { stdout: '', stderr: 'vite: missing --root value\n', exitCode: 1 };
+        if (!value || value.startsWith("-")) {
+          return {
+            stdout: "",
+            stderr: "vite: missing --root value\n",
+            exitCode: 1,
+          };
         }
         root = resolveFromCwd(normalizedCwd, value);
         i++;
         continue;
       }
-      if (arg.startsWith('--root=')) {
-        root = resolveFromCwd(normalizedCwd, arg.slice('--root='.length));
+      if (arg.startsWith("--root=")) {
+        root = resolveFromCwd(normalizedCwd, arg.slice("--root=".length));
       }
     }
 
@@ -2091,12 +2462,12 @@ module.exports = (async () => {
 
     try {
       const [{ ViteDevServer }, { getServerBridge }] = await Promise.all([
-        import('../frameworks/vite-dev-server'),
-        import('../server-bridge'),
+        import("../frameworks/vite-dev-server"),
+        import("../server-bridge"),
       ]);
 
       const bridge = getServerBridge();
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
         try {
           await bridge.initServiceWorker();
         } catch {
@@ -2109,18 +2480,22 @@ module.exports = (async () => {
       let aliases: Record<string, string> | undefined;
       let tanstackRouter = false;
       try {
-        const pkgPath = root === '/' ? '/package.json' : root + '/package.json';
-        const pkgJson = JSON.parse(controller.vfs.readFileSync(pkgPath, 'utf8') as string);
+        const pkgPath = root === "/" ? "/package.json" : root + "/package.json";
+        const pkgJson = JSON.parse(
+          controller.vfs.readFileSync(pkgPath, "utf8") as string,
+        );
         const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
-        if (allDeps['@tanstack/react-router'] || allDeps['@tanstack/start']) {
+        if (allDeps["@tanstack/react-router"] || allDeps["@tanstack/start"]) {
           spaFallback = true;
-          aliases = { '~/': 'src/', '@/': 'src/' };
+          aliases = { "~/": "src/", "@/": "src/" };
           tanstackRouter = true;
-          console.log('[vite] Detected TanStack Router — enabling SPA fallback and route tree generation');
-        } else if (allDeps['react-router-dom'] || allDeps['react-router']) {
+          console.log(
+            "[vite] Detected TanStack Router — enabling SPA fallback and route tree generation",
+          );
+        } else if (allDeps["react-router-dom"] || allDeps["react-router"]) {
           spaFallback = true;
-          aliases = { '@/': 'src/' };
-          console.log('[vite] Detected React Router — enabling SPA fallback');
+          aliases = { "@/": "src/" };
+          console.log("[vite] Detected React Router — enabling SPA fallback");
         }
       } catch {
         // No package.json or parse error, skip detection
@@ -2137,13 +2512,14 @@ module.exports = (async () => {
       // Generate initial route tree before server starts
       if (tanstackRouter) {
         try {
-          const { generateAndWriteRouteTree } = await import('../frameworks/tanstack-route-tree');
+          const { generateAndWriteRouteTree } =
+            await import("../frameworks/tanstack-route-tree");
           const wrote = generateAndWriteRouteTree(controller.vfs, root);
           if (wrote) {
-            console.log('[vite] Generated initial routeTree.gen.ts');
+            console.log("[vite] Generated initial routeTree.gen.ts");
           }
         } catch (error) {
-          console.warn('[vite] Failed to generate route tree:', error);
+          console.warn("[vite] Failed to generate route tree:", error);
         }
       }
 
@@ -2152,16 +2528,22 @@ module.exports = (async () => {
 
       const url = `${bridge.getServerUrl(port)}/`;
       const startup = `vite dev server running at ${url} (host: ${host}, root: ${root})\n`;
-      emitStreamData(execution, startup, 'stdout');
+      emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
         key,
-        framework: 'vite',
+        framework: "vite",
         port,
-        clearInstalledPackagesCache: typeof (server as { clearInstalledPackagesCache?: () => void }).clearInstalledPackagesCache === 'function'
-          ? () => (server as { clearInstalledPackagesCache: () => void }).clearInstalledPackagesCache()
-          : undefined,
-        setHMRTarget: (targetWindow: Window) => server.setHMRTarget(targetWindow),
+        clearInstalledPackagesCache:
+          typeof (server as { clearInstalledPackagesCache?: () => void })
+            .clearInstalledPackagesCache === "function"
+            ? () =>
+                (
+                  server as { clearInstalledPackagesCache: () => void }
+                ).clearInstalledPackagesCache()
+            : undefined,
+        setHMRTarget: (targetWindow: Window) =>
+          server.setHMRTarget(targetWindow),
         stop: () => {
           try {
             server.stop();
@@ -2174,28 +2556,36 @@ module.exports = (async () => {
       if (execution?.signal) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
-        return { stdout: startup, stderr: '', exitCode: 130 };
+        return { stdout: startup, stderr: "", exitCode: 130 };
       }
 
-      return { stdout: startup, stderr: '', exitCode: 0 };
+      return { stdout: startup, stderr: "", exitCode: 0 };
     } catch (error) {
       stopManagedFrameworkServer(controller, key);
       const message = error instanceof Error ? error.message : String(error);
-      return { stdout: '', stderr: `vite: failed to start dev server: ${message}\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `vite: failed to start dev server: ${message}\n`,
+        exitCode: 1,
+      };
     }
   });
 
-  const runWranglerWorkerDev = async (args: string[], ctx: CommandContext): Promise<JustBashExecResult> => {
+  const runWranglerWorkerDev = async (
+    args: string[],
+    ctx: CommandContext,
+  ): Promise<JustBashExecResult> => {
     const env = envToRecord(ctx.env);
     const execution = getExecutionContextFromEnv(controller, env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
-    const { readWranglerConfig, resolveWranglerWorkerEntry } = await import('./wrangler-config');
+    const { readWranglerConfig, resolveWranglerWorkerEntry } =
+      await import("./wrangler-config");
 
-    if (args.includes('--help') || args.includes('-h')) {
+    if (args.includes("--help") || args.includes("-h")) {
       return {
         stdout:
-          'Usage: wrangler dev [entry] [options]\n\nSupported:\n  -p, --port <n>\n      --ip <host>\n      --host <host>\n      --local-protocol <http|https>\n',
-        stderr: '',
+          "Usage: wrangler dev [entry] [options]\n\nSupported:\n  -p, --port <n>\n      --ip <host>\n      --host <host>\n      --local-protocol <http|https>\n",
+        stderr: "",
         exitCode: 0,
       };
     }
@@ -2203,80 +2593,110 @@ module.exports = (async () => {
     const config = readWranglerConfig(controller.vfs, normalizedCwd);
     let entryArg: string | null = null;
     let port = config.dev.port ?? 8787;
-    let host = config.dev.ip || 'localhost';
-    let localProtocol = config.dev.localProtocol ?? 'http';
+    let host = config.dev.ip || "localhost";
+    let localProtocol = config.dev.localProtocol ?? "http";
 
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
-      if (!arg.startsWith('-') && entryArg === null) {
+      if (!arg.startsWith("-") && entryArg === null) {
         entryArg = arg;
         continue;
       }
-      if (arg === '-p' || arg === '--port') {
+      if (arg === "-p" || arg === "--port") {
         const parsed = parsePortValue(args[i + 1]);
         if (parsed == null) {
-          return { stdout: '', stderr: 'wrangler dev: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "wrangler dev: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         i++;
         continue;
       }
-      if (arg.startsWith('--port=')) {
-        const parsed = parsePortValue(arg.slice('--port='.length));
+      if (arg.startsWith("--port=")) {
+        const parsed = parsePortValue(arg.slice("--port=".length));
         if (parsed == null) {
-          return { stdout: '', stderr: 'wrangler dev: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "wrangler dev: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         continue;
       }
-      if (arg === '--ip' || arg === '--host') {
+      if (arg === "--ip" || arg === "--host") {
         const value = args[i + 1];
-        if (!value || value.startsWith('-')) {
-          return { stdout: '', stderr: `wrangler dev: missing value for ${arg}\n`, exitCode: 1 };
+        if (!value || value.startsWith("-")) {
+          return {
+            stdout: "",
+            stderr: `wrangler dev: missing value for ${arg}\n`,
+            exitCode: 1,
+          };
         }
         host = value;
         i++;
         continue;
       }
-      if (arg.startsWith('--ip=')) {
-        host = arg.slice('--ip='.length).trim() || host;
+      if (arg.startsWith("--ip=")) {
+        host = arg.slice("--ip=".length).trim() || host;
         continue;
       }
-      if (arg.startsWith('--host=')) {
-        host = arg.slice('--host='.length).trim() || host;
+      if (arg.startsWith("--host=")) {
+        host = arg.slice("--host=".length).trim() || host;
         continue;
       }
-      if (arg === '--local-protocol') {
+      if (arg === "--local-protocol") {
         const value = args[i + 1];
-        if (value !== 'http' && value !== 'https') {
-          return { stdout: '', stderr: 'wrangler dev: --local-protocol must be http or https\n', exitCode: 1 };
+        if (value !== "http" && value !== "https") {
+          return {
+            stdout: "",
+            stderr: "wrangler dev: --local-protocol must be http or https\n",
+            exitCode: 1,
+          };
         }
         localProtocol = value;
         i++;
         continue;
       }
-      if (arg.startsWith('--local-protocol=')) {
-        const value = arg.slice('--local-protocol='.length);
-        if (value !== 'http' && value !== 'https') {
-          return { stdout: '', stderr: 'wrangler dev: --local-protocol must be http or https\n', exitCode: 1 };
+      if (arg.startsWith("--local-protocol=")) {
+        const value = arg.slice("--local-protocol=".length);
+        if (value !== "http" && value !== "https") {
+          return {
+            stdout: "",
+            stderr: "wrangler dev: --local-protocol must be http or https\n",
+            exitCode: 1,
+          };
         }
         localProtocol = value;
         continue;
       }
-      return { stdout: '', stderr: `wrangler dev: unknown argument '${arg}'\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `wrangler dev: unknown argument '${arg}'\n`,
+        exitCode: 1,
+      };
     }
 
-    const entry = resolveWranglerWorkerEntry(controller.vfs, normalizedCwd, config, entryArg);
+    const entry = resolveWranglerWorkerEntry(
+      controller.vfs,
+      normalizedCwd,
+      config,
+      entryArg,
+    );
     if (!entry) {
       return {
-        stdout: '',
-        stderr: 'wrangler dev: could not find a worker entrypoint. Add `main` to wrangler.toml/jsonc or create src/index.ts.\n',
+        stdout: "",
+        stderr:
+          "wrangler dev: could not find a worker entrypoint. Add `main` to wrangler.toml/jsonc or create src/index.ts.\n",
         exitCode: 1,
       };
     }
     if (!controller.vfs.existsSync(entry)) {
       return {
-        stdout: '',
+        stdout: "",
         stderr: `wrangler dev: worker entry ${entry} does not exist\n`,
         exitCode: 1,
       };
@@ -2286,13 +2706,14 @@ module.exports = (async () => {
     stopManagedFrameworkServersOnPort(controller, port);
 
     try {
-      const [{ CloudflareWorkerDevServer }, { getServerBridge }] = await Promise.all([
-        import('../frameworks/cloudflare-worker-dev-server'),
-        import('../server-bridge'),
-      ]);
+      const [{ CloudflareWorkerDevServer }, { getServerBridge }] =
+        await Promise.all([
+          import("../frameworks/cloudflare-worker-dev-server"),
+          import("../server-bridge"),
+        ]);
 
       const bridge = getServerBridge();
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
         try {
           await bridge.initServiceWorker();
         } catch {
@@ -2314,11 +2735,11 @@ module.exports = (async () => {
 
       const url = `${bridge.getServerUrl(port)}/`;
       const startup = `wrangler dev server running at ${url} (host: ${host}, entry: ${entry})\n`;
-      emitStreamData(execution, startup, 'stdout');
+      emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
         key,
-        framework: 'wrangler',
+        framework: "wrangler",
         port,
         stop: () => {
           try {
@@ -2332,28 +2753,36 @@ module.exports = (async () => {
       if (execution?.signal) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
-        return { stdout: startup, stderr: '', exitCode: 130 };
+        return { stdout: startup, stderr: "", exitCode: 130 };
       }
 
-      return { stdout: startup, stderr: '', exitCode: 0 };
+      return { stdout: startup, stderr: "", exitCode: 0 };
     } catch (error) {
       stopManagedFrameworkServer(controller, key);
       const message = error instanceof Error ? error.message : String(error);
-      return { stdout: '', stderr: `wrangler dev: failed to start dev server: ${message}\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `wrangler dev: failed to start dev server: ${message}\n`,
+        exitCode: 1,
+      };
     }
   };
 
-  const runWranglerPagesDev = async (args: string[], ctx: CommandContext): Promise<JustBashExecResult> => {
+  const runWranglerPagesDev = async (
+    args: string[],
+    ctx: CommandContext,
+  ): Promise<JustBashExecResult> => {
     const env = envToRecord(ctx.env);
     const execution = getExecutionContextFromEnv(controller, env);
     const normalizedCwd = normalizeCommandCwd(ctx.cwd);
-    const { readWranglerConfig, resolveWranglerPagesDirectory } = await import('./wrangler-config');
+    const { readWranglerConfig, resolveWranglerPagesDirectory } =
+      await import("./wrangler-config");
 
-    if (args.includes('--help') || args.includes('-h')) {
+    if (args.includes("--help") || args.includes("-h")) {
       return {
         stdout:
-          'Usage: wrangler pages dev [dir] [options]\n\nSupported:\n  -p, --port <n>\n      --ip <host>\n      --host <host>\n      --local-protocol <http|https>\n',
-        stderr: '',
+          "Usage: wrangler pages dev [dir] [options]\n\nSupported:\n  -p, --port <n>\n      --ip <host>\n      --host <host>\n      --local-protocol <http|https>\n",
+        stderr: "",
         exitCode: 0,
       };
     }
@@ -2361,74 +2790,106 @@ module.exports = (async () => {
     const config = readWranglerConfig(controller.vfs, normalizedCwd);
     let assetsArg: string | null = null;
     let port = config.dev.port ?? 8788;
-    let host = config.dev.ip || 'localhost';
-    let localProtocol = config.dev.localProtocol ?? 'http';
+    let host = config.dev.ip || "localhost";
+    let localProtocol = config.dev.localProtocol ?? "http";
 
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
-      if (!arg.startsWith('-') && assetsArg === null) {
+      if (!arg.startsWith("-") && assetsArg === null) {
         assetsArg = arg;
         continue;
       }
-      if (arg === '-p' || arg === '--port') {
+      if (arg === "-p" || arg === "--port") {
         const parsed = parsePortValue(args[i + 1]);
         if (parsed == null) {
-          return { stdout: '', stderr: 'wrangler pages dev: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "wrangler pages dev: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         i++;
         continue;
       }
-      if (arg.startsWith('--port=')) {
-        const parsed = parsePortValue(arg.slice('--port='.length));
+      if (arg.startsWith("--port=")) {
+        const parsed = parsePortValue(arg.slice("--port=".length));
         if (parsed == null) {
-          return { stdout: '', stderr: 'wrangler pages dev: invalid --port value\n', exitCode: 1 };
+          return {
+            stdout: "",
+            stderr: "wrangler pages dev: invalid --port value\n",
+            exitCode: 1,
+          };
         }
         port = parsed;
         continue;
       }
-      if (arg === '--ip' || arg === '--host') {
+      if (arg === "--ip" || arg === "--host") {
         const value = args[i + 1];
-        if (!value || value.startsWith('-')) {
-          return { stdout: '', stderr: `wrangler pages dev: missing value for ${arg}\n`, exitCode: 1 };
+        if (!value || value.startsWith("-")) {
+          return {
+            stdout: "",
+            stderr: `wrangler pages dev: missing value for ${arg}\n`,
+            exitCode: 1,
+          };
         }
         host = value;
         i++;
         continue;
       }
-      if (arg.startsWith('--ip=')) {
-        host = arg.slice('--ip='.length).trim() || host;
+      if (arg.startsWith("--ip=")) {
+        host = arg.slice("--ip=".length).trim() || host;
         continue;
       }
-      if (arg.startsWith('--host=')) {
-        host = arg.slice('--host='.length).trim() || host;
+      if (arg.startsWith("--host=")) {
+        host = arg.slice("--host=".length).trim() || host;
         continue;
       }
-      if (arg === '--local-protocol') {
+      if (arg === "--local-protocol") {
         const value = args[i + 1];
-        if (value !== 'http' && value !== 'https') {
-          return { stdout: '', stderr: 'wrangler pages dev: --local-protocol must be http or https\n', exitCode: 1 };
+        if (value !== "http" && value !== "https") {
+          return {
+            stdout: "",
+            stderr:
+              "wrangler pages dev: --local-protocol must be http or https\n",
+            exitCode: 1,
+          };
         }
         localProtocol = value;
         i++;
         continue;
       }
-      if (arg.startsWith('--local-protocol=')) {
-        const value = arg.slice('--local-protocol='.length);
-        if (value !== 'http' && value !== 'https') {
-          return { stdout: '', stderr: 'wrangler pages dev: --local-protocol must be http or https\n', exitCode: 1 };
+      if (arg.startsWith("--local-protocol=")) {
+        const value = arg.slice("--local-protocol=".length);
+        if (value !== "http" && value !== "https") {
+          return {
+            stdout: "",
+            stderr:
+              "wrangler pages dev: --local-protocol must be http or https\n",
+            exitCode: 1,
+          };
         }
         localProtocol = value;
         continue;
       }
-      return { stdout: '', stderr: `wrangler pages dev: unknown argument '${arg}'\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `wrangler pages dev: unknown argument '${arg}'\n`,
+        exitCode: 1,
+      };
     }
 
-    const assetsDir = resolveWranglerPagesDirectory(controller.vfs, normalizedCwd, config, assetsArg);
+    const assetsDir = resolveWranglerPagesDirectory(
+      controller.vfs,
+      normalizedCwd,
+      config,
+      assetsArg,
+    );
     if (!assetsDir) {
       return {
-        stdout: '',
-        stderr: 'wrangler pages dev: could not find a Pages assets directory. Pass one explicitly or set `pages_build_output_dir` in wrangler.toml/jsonc.\n',
+        stdout: "",
+        stderr:
+          "wrangler pages dev: could not find a Pages assets directory. Pass one explicitly or set `pages_build_output_dir` in wrangler.toml/jsonc.\n",
         exitCode: 1,
       };
     }
@@ -2441,7 +2902,7 @@ module.exports = (async () => {
     }
     if (!isDirectory) {
       return {
-        stdout: '',
+        stdout: "",
         stderr: `wrangler pages dev: assets directory ${assetsDir} does not exist\n`,
         exitCode: 1,
       };
@@ -2451,13 +2912,14 @@ module.exports = (async () => {
     stopManagedFrameworkServersOnPort(controller, port);
 
     try {
-      const [{ CloudflarePagesDevServer }, { getServerBridge }] = await Promise.all([
-        import('../frameworks/cloudflare-pages-dev-server'),
-        import('../server-bridge'),
-      ]);
+      const [{ CloudflarePagesDevServer }, { getServerBridge }] =
+        await Promise.all([
+          import("../frameworks/cloudflare-pages-dev-server"),
+          import("../server-bridge"),
+        ]);
 
       const bridge = getServerBridge();
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
         try {
           await bridge.initServiceWorker();
         } catch {
@@ -2476,11 +2938,11 @@ module.exports = (async () => {
 
       const url = `${bridge.getServerUrl(port)}/`;
       const startup = `wrangler pages dev server running at ${url} (host: ${host}, assets: ${assetsDir}, protocol: ${localProtocol})\n`;
-      emitStreamData(execution, startup, 'stdout');
+      emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
         key,
-        framework: 'wrangler-pages',
+        framework: "wrangler-pages",
         port,
         stop: () => {
           try {
@@ -2494,85 +2956,105 @@ module.exports = (async () => {
       if (execution?.signal) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
-        return { stdout: startup, stderr: '', exitCode: 130 };
+        return { stdout: startup, stderr: "", exitCode: 130 };
       }
 
-      return { stdout: startup, stderr: '', exitCode: 0 };
+      return { stdout: startup, stderr: "", exitCode: 0 };
     } catch (error) {
       stopManagedFrameworkServer(controller, key);
       const message = error instanceof Error ? error.message : String(error);
-      return { stdout: '', stderr: `wrangler pages dev: failed to start dev server: ${message}\n`, exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: `wrangler pages dev: failed to start dev server: ${message}\n`,
+        exitCode: 1,
+      };
     }
   };
 
-  const gitCommand = defineCommand('git', async (args, ctx) => {
-    const { runGitCommand } = await import('./git-command');
+  const gitCommand = defineCommand("git", async (args, ctx) => {
+    const { runGitCommand } = await import("./git-command");
     return runGitCommand(args, ctx, controller.vfs);
   });
 
-  const playwrightCliCommand = defineCommand('playwright-cli', async (args, ctx) => {
-    const { runPlaywrightCommand } = await import('./playwright-command');
-    return runPlaywrightCommand(args, ctx, controller.vfs);
-  });
+  const playwrightCliCommand = defineCommand(
+    "playwright-cli",
+    async (args, ctx) => {
+      const { runPlaywrightCommand } = await import("./playwright-command");
+      return runPlaywrightCommand(args, ctx, controller.vfs);
+    },
+  );
 
-  const pgliteCommand = defineCommand('pglite', async (args, ctx) => {
-    const { runPGliteCommand } = await import('./pglite-command');
+  const pgliteCommand = defineCommand("pglite", async (args, ctx) => {
+    const { runPGliteCommand } = await import("./pglite-command");
     return runPGliteCommand(args, ctx, controller.vfs);
   });
 
-  const pgCommand = defineCommand('pg', async (args, ctx) => {
-    const { runPgCommand } = await import('./pg-command');
+  const pgCommand = defineCommand("pg", async (args, ctx) => {
+    const { runPgCommand } = await import("./pg-command");
     return runPgCommand(args, ctx, controller.vfs);
   });
 
-  const curlCommand = defineCommand('curl', async (args, ctx) => {
-    const { runCurlCommand } = await import('./curl-command');
+  const curlCommand = defineCommand("curl", async (args, ctx) => {
+    const { runCurlCommand } = await import("./curl-command");
     return runCurlCommand(args, ctx, controller.vfs);
   });
 
-  const tailscaleCommand = defineCommand('tailscale', async (args, ctx) => {
-    const { runTailscaleCommand } = await import('./tailscale-command');
+  const tailscaleCommand = defineCommand("tailscale", async (args, ctx) => {
+    const { runTailscaleCommand } = await import("./tailscale-command");
     return runTailscaleCommand(args, ctx);
   });
 
-  const drizzleKitCommand = defineCommand('drizzle-kit', async (args, ctx) => {
-    const { runDrizzleKitCommand } = await import('./drizzle-kit-command');
+  const drizzleKitCommand = defineCommand("drizzle-kit", async (args, ctx) => {
+    const { runDrizzleKitCommand } = await import("./drizzle-kit-command");
     return runDrizzleKitCommand(args, ctx, controller.vfs);
   });
 
-  const tscCommand = defineCommand('tsc', async (args, ctx) => {
-    const { runTscCommand } = await import('./tsc-command');
+  const tscCommand = defineCommand("tsc", async (args, ctx) => {
+    const { runTscCommand } = await import("./tsc-command");
     return runTscCommand(args, ctx, controller.vfs);
   });
 
-  const claudeWrapperCommand = defineCommand('claude-wrapper', async (args, ctx) => {
-    if (!ctx.exec) {
+  const claudeWrapperCommand = defineCommand(
+    "claude-wrapper",
+    async (args, ctx) => {
+      if (!ctx.exec) {
+        return {
+          stdout: "",
+          stderr:
+            "claude-wrapper: command execution not available in this context\n",
+          exitCode: 1,
+        };
+      }
+
+      const env = envToRecord(ctx.env);
+      const packageSpec =
+        env.ALMOSTNODE_CLAUDE_CODE_PACKAGE?.trim() ||
+        DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE;
+      const fullCommand = ["npx", "--yes", packageSpec, ...args]
+        .map((value) => shellQuote(value))
+        .join(" ");
+
+      return ctx.exec(fullCommand, {
+        cwd: ctx.cwd,
+        env: {
+          ...env,
+          CLAUDE_CODE_NO_FLICKER: env.CLAUDE_CODE_NO_FLICKER || "1",
+        },
+      });
+    },
+  );
+
+  const oxfmtCommand = defineCommand("oxfmt", async (args, ctx) => {
+    if (args.length === 0) {
       return {
-        stdout: '',
-        stderr: 'claude-wrapper: command execution not available in this context\n',
+        stdout: "",
+        stderr: "Usage: oxfmt <file-or-directory> [...targets]\n",
         exitCode: 1,
       };
     }
 
-    const env = envToRecord(ctx.env);
-    const packageSpec = env.ALMOSTNODE_CLAUDE_CODE_PACKAGE?.trim() || DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE;
-    const fullCommand = ['npx', '--yes', packageSpec, ...args].map((value) => shellQuote(value)).join(' ');
-
-    return ctx.exec(fullCommand, {
-      cwd: ctx.cwd,
-      env: {
-        ...env,
-        CLAUDE_CODE_NO_FLICKER: env.CLAUDE_CODE_NO_FLICKER || '1',
-      },
-    });
-  });
-
-  const oxfmtCommand = defineCommand('oxfmt', async (args, ctx) => {
-    if (args.length === 0) {
-      return { stdout: '', stderr: 'Usage: oxfmt <file-or-directory> [...targets]\n', exitCode: 1 };
-    }
-
-    const { isSupportedOxcPath, resolveOxcConfigForFile, runOxcOnSource } = await import('../oxc/runtime');
+    const { isSupportedOxcPath, resolveOxcConfigForFile, runOxcOnSource } =
+      await import("../oxc/runtime");
     const accessor = createOxcFileAccessor(controller.vfs);
     const seenTargets = new Set<string>();
     const formatTargets: string[] = [];
@@ -2598,12 +3080,14 @@ module.exports = (async () => {
         continue;
       }
 
-      formatTargets.push(...collectSupportedOxcFiles(
-        controller.vfs,
-        targetPath,
-        isSupportedOxcPath,
-        seenTargets,
-      ));
+      formatTargets.push(
+        ...collectSupportedOxcFiles(
+          controller.vfs,
+          targetPath,
+          isSupportedOxcPath,
+          seenTargets,
+        ),
+      );
     }
 
     for (const targetPath of formatTargets) {
@@ -2635,15 +3119,19 @@ module.exports = (async () => {
     }
 
     return {
-      stdout: '',
-      stderr: stderrLines.length > 0 ? `${stderrLines.join('\n')}\n` : '',
+      stdout: "",
+      stderr: stderrLines.length > 0 ? `${stderrLines.join("\n")}\n` : "",
       exitCode: stderrLines.length > 0 ? 1 : 0,
     };
   });
 
-  const oxlintCommand = defineCommand('oxlint', async (args, ctx) => {
+  const oxlintCommand = defineCommand("oxlint", async (args, ctx) => {
     if (args.length === 0) {
-      return { stdout: '', stderr: 'Usage: oxlint <file-or-directory> [...targets]\n', exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: "Usage: oxlint <file-or-directory> [...targets]\n",
+        exitCode: 1,
+      };
     }
 
     const {
@@ -2651,7 +3139,7 @@ module.exports = (async () => {
       isSupportedOxcPath,
       resolveOxcConfigForFile,
       runOxcOnSource,
-    } = await import('../oxc/runtime');
+    } = await import("../oxc/runtime");
     const accessor = createOxcFileAccessor(controller.vfs);
     const seenTargets = new Set<string>();
     const lintTargets: string[] = [];
@@ -2679,12 +3167,14 @@ module.exports = (async () => {
         continue;
       }
 
-      lintTargets.push(...collectSupportedOxcFiles(
-        controller.vfs,
-        targetPath,
-        isSupportedOxcPath,
-        seenTargets,
-      ));
+      lintTargets.push(
+        ...collectSupportedOxcFiles(
+          controller.vfs,
+          targetPath,
+          isSupportedOxcPath,
+          seenTargets,
+        ),
+      );
     }
 
     for (const targetPath of lintTargets) {
@@ -2708,7 +3198,13 @@ module.exports = (async () => {
           continue;
         }
         hasDiagnostics = true;
-        stdoutLines.push(formatOxcDiagnosticsForTerminal(displayPath, sourceText, result.diagnostics));
+        stdoutLines.push(
+          formatOxcDiagnosticsForTerminal(
+            displayPath,
+            sourceText,
+            result.diagnostics,
+          ),
+        );
       } catch (error) {
         stderrLines.push(
           `oxlint: ${displayPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2717,166 +3213,177 @@ module.exports = (async () => {
     }
 
     return {
-      stdout: stdoutLines.length > 0 ? `${stdoutLines.join('\n')}\n` : '',
-      stderr: stderrLines.length > 0 ? `${stderrLines.join('\n')}\n` : '',
+      stdout: stdoutLines.length > 0 ? `${stdoutLines.join("\n")}\n` : "",
+      stderr: stderrLines.length > 0 ? `${stderrLines.join("\n")}\n` : "",
       exitCode: hasDiagnostics || stderrLines.length > 0 ? 1 : 0,
     };
   });
 
-  const almostnodeLspBridgeCommand = defineCommand('almostnode-lsp-bridge', async () => ({
-    stdout: '',
-    stderr: 'almostnode-lsp-bridge must be launched through child_process.spawn(..., { stdio: "pipe" }) or an interactive terminal session\n',
-    exitCode: 1,
-  }));
+  const almostnodeLspBridgeCommand = defineCommand(
+    "almostnode-lsp-bridge",
+    async () => ({
+      stdout: "",
+      stderr:
+        'almostnode-lsp-bridge must be launched through child_process.spawn(..., { stdio: "pipe" }) or an interactive terminal session\n',
+      exitCode: 1,
+    }),
+  );
 
-  const ghCommand = defineCommand('gh', async (args, ctx) => {
-    const { runGhCommand } = await import('./gh-command');
+  const ghCommand = defineCommand("gh", async (args, ctx) => {
+    const { runGhCommand } = await import("./gh-command");
     return runGhCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const awsCommand = defineCommand('aws', async (args, ctx) => {
-    const { runAwsCommand } = await import('./aws-command');
+  const awsCommand = defineCommand("aws", async (args, ctx) => {
+    const { runAwsCommand } = await import("./aws-command");
     return runAwsCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-
-  const replayioCommand = defineCommand('replayio', async (args, ctx) => {
-    const { runReplayioCommand } = await import('./replayio-command');
+  const replayioCommand = defineCommand("replayio", async (args, ctx) => {
+    const { runReplayioCommand } = await import("./replayio-command");
     return runReplayioCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const flyCommand = defineCommand('fly', async (args, ctx) => {
-    const { runFlyCommand } = await import('./fly-command');
+  const flyCommand = defineCommand("fly", async (args, ctx) => {
+    const { runFlyCommand } = await import("./fly-command");
     return runFlyCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const flyctlCommand = defineCommand('flyctl', async (args, ctx) => {
-    const { runFlyCommand } = await import('./fly-command');
+  const flyctlCommand = defineCommand("flyctl", async (args, ctx) => {
+    const { runFlyCommand } = await import("./fly-command");
     return runFlyCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const netlifyCommand = defineCommand('netlify', async (args, ctx) => {
-    const { runNetlifyCommand } = await import('./netlify-command');
+  const netlifyCommand = defineCommand("netlify", async (args, ctx) => {
+    const { runNetlifyCommand } = await import("./netlify-command");
     return runNetlifyCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const neonCommand = defineCommand('neon', async (args, ctx) => {
-    const { runNeonCommand } = await import('./neon-command');
+  const neonCommand = defineCommand("neon", async (args, ctx) => {
+    const { runNeonCommand } = await import("./neon-command");
     return runNeonCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const neonctlCommand = defineCommand('neonctl', async (args, ctx) => {
-    const { runNeonCommand } = await import('./neon-command');
+  const neonctlCommand = defineCommand("neonctl", async (args, ctx) => {
+    const { runNeonCommand } = await import("./neon-command");
     return runNeonCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const wranglerCommand = defineCommand('wrangler', async (args, ctx) => {
+  const wranglerCommand = defineCommand("wrangler", async (args, ctx) => {
     const firstArg = args[0];
-    if (firstArg === 'dev') {
+    if (firstArg === "dev") {
       return runWranglerWorkerDev(args.slice(1), ctx);
     }
-    if (firstArg === 'pages') {
+    if (firstArg === "pages") {
       const secondArg = args[1];
-      if (secondArg === 'dev') {
+      if (secondArg === "dev") {
         return runWranglerPagesDev(args.slice(2), ctx);
       }
     }
 
-    const { runWranglerCommand } = await import('./wrangler-command');
+    const { runWranglerCommand } = await import("./wrangler-command");
     return runWranglerCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
   // --- grep / egrep / fgrep / rg commands (delegate to search provider) ---
 
-  const grepCommand = defineCommand('grep', async (args, ctx) => {
+  const grepCommand = defineCommand("grep", async (args, ctx) => {
     return executeGrepCommand(args, ctx, controller, false, false);
   });
 
-  const egrepCommand = defineCommand('egrep', async (args, ctx) => {
+  const egrepCommand = defineCommand("egrep", async (args, ctx) => {
     return executeGrepCommand(args, ctx, controller, true, false);
   });
 
-  const fgrepCommand = defineCommand('fgrep', async (args, ctx) => {
+  const fgrepCommand = defineCommand("fgrep", async (args, ctx) => {
     return executeGrepCommand(args, ctx, controller, false, true);
   });
 
-  const rgCommand = defineCommand('rg', async (args, ctx) => {
+  const rgCommand = defineCommand("rg", async (args, ctx) => {
     return executeRgCommand(args, ctx, controller);
   });
 
-  const psCommand = defineCommand('ps', async (args, _ctx) => {
+  const psCommand = defineCommand("ps", async (args, _ctx) => {
     const lines: string[] = [];
-    lines.push('  PID TTY      STAT  COMMAND');
-    lines.push('    1 ?        Ss    bash');
+    lines.push("  PID TTY      STAT  COMMAND");
+    lines.push("    1 ?        Ss    bash");
 
     let pid = 3001;
     for (const [, server] of controller.frameworkDevServers) {
-      const cmd = server.framework === 'next'
-        ? `next dev (port ${server.port})`
-        : server.framework === 'vite'
-          ? `vite (port ${server.port})`
-          : server.framework === 'wrangler'
-            ? `wrangler dev (port ${server.port})`
-            : `wrangler pages dev (port ${server.port})`;
+      const cmd =
+        server.framework === "next"
+          ? `next dev (port ${server.port})`
+          : server.framework === "vite"
+            ? `vite (port ${server.port})`
+            : server.framework === "wrangler"
+              ? `wrangler dev (port ${server.port})`
+              : `wrangler pages dev (port ${server.port})`;
       lines.push(`${String(pid).padStart(5)} ?        Sl    ${cmd}`);
       pid += 1000;
     }
 
     for (const [id, exec] of controller.executions) {
       if (exec.activeProcessStdin) {
-        lines.push(`${String(pid).padStart(5)} ?        S+    node [interactive] (${id})`);
+        lines.push(
+          `${String(pid).padStart(5)} ?        S+    node [interactive] (${id})`,
+        );
         pid += 1;
       }
     }
 
-    return { stdout: lines.join('\n') + '\n', stderr: '', exitCode: 0 };
+    return { stdout: lines.join("\n") + "\n", stderr: "", exitCode: 0 };
   });
 
-  const jinaCommand = defineCommand('jina', async (args, ctx) => {
-    const { runJinaCommand } = await import('./jina-command');
+  const jinaCommand = defineCommand("jina", async (args, ctx) => {
+    const { runJinaCommand } = await import("./jina-command");
     return runJinaCommand(args, ctx, controller.vfs);
   });
 
-  const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map((commandName) => {
-    return defineCommand(commandName, async (args, ctx) => {
-      const shell = getSyntheticShellSpec(commandName);
-      const shellName = shell?.names[0] || path.basename(commandName);
+  const syntheticShellCommands = SYNTHETIC_SHELL_COMMAND_NAMES.map(
+    (commandName) => {
+      return defineCommand(commandName, async (args, ctx) => {
+        const shell = getSyntheticShellSpec(commandName);
+        const shellName = shell?.names[0] || path.basename(commandName);
 
-      if (args.includes('--version')) {
-        return {
-          stdout: getSyntheticShellVersion(commandName) || '',
-          stderr: '',
-          exitCode: 0,
-        };
-      }
-
-      const parsed = parseSyntheticShellExec(args);
-      if (parsed.error) {
-        return {
-          stdout: '',
-          stderr: `${shellName}: ${parsed.error}`,
-          exitCode: 2,
-        };
-      }
-
-      if (parsed.script) {
-        if (!ctx.exec) {
+        if (args.includes("--version")) {
           return {
-            stdout: '',
-            stderr: `${shellName}: execution context unavailable\n`,
-            exitCode: 1,
+            stdout: getSyntheticShellVersion(commandName) || "",
+            stderr: "",
+            exitCode: 0,
           };
         }
-        return ctx.exec(parsed.script, { cwd: ctx.cwd, env: envToRecord(ctx.env) });
-      }
 
-      return { stdout: '', stderr: '', exitCode: 0 };
-    });
-  });
+        const parsed = parseSyntheticShellExec(args);
+        if (parsed.error) {
+          return {
+            stdout: "",
+            stderr: `${shellName}: ${parsed.error}`,
+            exitCode: 2,
+          };
+        }
+
+        if (parsed.script) {
+          if (!ctx.exec) {
+            return {
+              stdout: "",
+              stderr: `${shellName}: execution context unavailable\n`,
+              exitCode: 1,
+            };
+          }
+          return ctx.exec(parsed.script, {
+            cwd: ctx.cwd,
+            env: envToRecord(ctx.env),
+          });
+        }
+
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+    },
+  );
 
   const bashInstance = new Bash({
     fs: vfsAdapter,
-    cwd: '/',
+    cwd: "/",
     env: DEFAULT_SHELL_ENV,
     logger: {
       info: emitBashLog,
@@ -2892,7 +3399,7 @@ module.exports = (async () => {
     const direct = maybeRunCustomCommandDirect(
       controller,
       normalized,
-      options?.cwd ?? '/',
+      options?.cwd ?? "/",
       options?.env ?? {},
     );
     if (direct) {
@@ -2906,7 +3413,7 @@ module.exports = (async () => {
     vfs,
     vfsAdapter,
     bashInstance,
-    installMode: options.installMode || 'auto',
+    installMode: options.installMode || "auto",
     onInstallMutation: options.onInstallMutation || null,
     frameworkDevServers: new Map(),
     executions: new Map(),
@@ -2916,8 +3423,10 @@ module.exports = (async () => {
     keychain: null,
     searchProvider: null,
     createExecution: (opts) => createExecutionContext(controller, opts),
-    destroyExecution: (executionId) => destroyExecutionContext(controller, executionId),
-    runCommand: (command, options, executionId) => runCommandInController(controller, command, options, executionId),
+    destroyExecution: (executionId) =>
+      destroyExecutionContext(controller, executionId),
+    runCommand: (command, options, executionId) =>
+      runCommandInController(controller, command, options, executionId),
     sendInput: (executionId, data) => {
       if (!executionId) return;
       const execution = controller.executions.get(executionId);
@@ -2933,6 +3442,11 @@ module.exports = (async () => {
       if (execution.activeProcess) {
         applyExecutionTerminalSize(execution, execution.activeProcess);
       }
+      execution.activeProcessStdin?.emit(
+        "resize",
+        execution.columns,
+        execution.rows,
+      );
     },
     registerShellCommand: (definition) => {
       const registered = adaptShellCommandDefinition(controller, definition);
@@ -2959,45 +3473,99 @@ module.exports = (async () => {
   defaultChildProcessController = controller;
 
   const infisicalCommand = adaptShellCommandDefinition(controller, {
-    name: 'infisical',
+    name: "infisical",
     interceptShellParsing: true,
     execute: async (args, shellCtx) => {
-      const { runInfisicalCommand } = await import('./infisical-command');
-      return runInfisicalCommand(args, shellCtx, controller.vfs, controller.keychain);
+      const { runInfisicalCommand } = await import("./infisical-command");
+      return runInfisicalCommand(
+        args,
+        shellCtx,
+        controller.vfs,
+        controller.keychain,
+      );
     },
   });
 
   const builtinShellCommands: RegisteredShellCommand[] = [
     ...syntheticShellCommands.map((command) =>
-      createRegisteredShellCommand(command.name, command)),
+      createRegisteredShellCommand(command.name, command),
+    ),
     createRegisteredShellCommand(nodeCommand.name, nodeCommand),
     createRegisteredShellCommand(npmCommand.name, npmCommand),
     createRegisteredShellCommand(npxCommand.name, npxCommand),
     createRegisteredShellCommand(tarCommand.name, tarCommand),
     createRegisteredShellCommand(nextCommand.name, nextCommand),
     createRegisteredShellCommand(viteCommand.name, viteCommand),
-    createRegisteredShellCommand(gitCommand.name, gitCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(playwrightCliCommand.name, playwrightCliCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(pgliteCommand.name, pgliteCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(pgCommand.name, pgCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(curlCommand.name, curlCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(tailscaleCommand.name, tailscaleCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(drizzleKitCommand.name, drizzleKitCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(tscCommand.name, tscCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(claudeWrapperCommand.name, claudeWrapperCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(oxfmtCommand.name, oxfmtCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(oxlintCommand.name, oxlintCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(almostnodeLspBridgeCommand.name, almostnodeLspBridgeCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(ghCommand.name, ghCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(awsCommand.name, awsCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(gitCommand.name, gitCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(
+      playwrightCliCommand.name,
+      playwrightCliCommand,
+      { interceptShellParsing: true },
+    ),
+    createRegisteredShellCommand(pgliteCommand.name, pgliteCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(pgCommand.name, pgCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(curlCommand.name, curlCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(tailscaleCommand.name, tailscaleCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(drizzleKitCommand.name, drizzleKitCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(tscCommand.name, tscCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(
+      claudeWrapperCommand.name,
+      claudeWrapperCommand,
+      { interceptShellParsing: true },
+    ),
+    createRegisteredShellCommand(oxfmtCommand.name, oxfmtCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(oxlintCommand.name, oxlintCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(
+      almostnodeLspBridgeCommand.name,
+      almostnodeLspBridgeCommand,
+      { interceptShellParsing: true },
+    ),
+    createRegisteredShellCommand(ghCommand.name, ghCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(awsCommand.name, awsCommand, {
+      interceptShellParsing: true,
+    }),
     infisicalCommand,
-    createRegisteredShellCommand(replayioCommand.name, replayioCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(flyCommand.name, flyCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(flyctlCommand.name, flyctlCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(netlifyCommand.name, netlifyCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(neonCommand.name, neonCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(neonctlCommand.name, neonctlCommand, { interceptShellParsing: true }),
-    createRegisteredShellCommand(wranglerCommand.name, wranglerCommand, { interceptShellParsing: true }),
+    createRegisteredShellCommand(replayioCommand.name, replayioCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(flyCommand.name, flyCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(flyctlCommand.name, flyctlCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(netlifyCommand.name, netlifyCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(neonCommand.name, neonCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(neonctlCommand.name, neonctlCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(wranglerCommand.name, wranglerCommand, {
+      interceptShellParsing: true,
+    }),
     createRegisteredShellCommand(grepCommand.name, grepCommand),
     createRegisteredShellCommand(egrepCommand.name, egrepCommand),
     createRegisteredShellCommand(fgrepCommand.name, fgrepCommand),
@@ -3019,28 +3587,32 @@ module.exports = (async () => {
  */
 function readPackageJson(
   controller: ChildProcessController,
-  cwd: string
-): { pkgJson: PackageJson; error?: undefined } | { pkgJson?: undefined; error: JustBashExecResult } {
-  const pkgJsonPath = `${cwd}/package.json`.replace(/\/+/g, '/');
+  cwd: string,
+):
+  | { pkgJson: PackageJson; error?: undefined }
+  | { pkgJson?: undefined; error: JustBashExecResult } {
+  const pkgJsonPath = `${cwd}/package.json`.replace(/\/+/g, "/");
 
   if (!controller.vfs.existsSync(pkgJsonPath)) {
     return {
       error: {
-        stdout: '',
-        stderr: 'npm ERR! no package.json found\n',
+        stdout: "",
+        stderr: "npm ERR! no package.json found\n",
         exitCode: 1,
       },
     };
   }
 
   try {
-    const pkgJson = JSON.parse(controller.vfs.readFileSync(pkgJsonPath, 'utf8')) as PackageJson;
+    const pkgJson = JSON.parse(
+      controller.vfs.readFileSync(pkgJsonPath, "utf8"),
+    ) as PackageJson;
     return { pkgJson };
   } catch {
     return {
       error: {
-        stdout: '',
-        stderr: 'npm ERR! Failed to parse package.json\n',
+        stdout: "",
+        stderr: "npm ERR! Failed to parse package.json\n",
         exitCode: 1,
       },
     };
@@ -3055,27 +3627,30 @@ function getPackageBinTarget(
   controller: ChildProcessController,
   pkgName: string,
   binName: string,
-  cwd: string
+  cwd: string,
 ): string | null {
   const searchDirs = [
-    `${cwd}/node_modules`.replace(/\/+/g, '/'),
-    '/node_modules',
+    `${cwd}/node_modules`.replace(/\/+/g, "/"),
+    "/node_modules",
   ];
 
   for (const dir of searchDirs) {
-    const packageDir = `${dir}/${pkgName}`.replace(/\/+/g, '/');
+    const packageDir = `${dir}/${pkgName}`.replace(/\/+/g, "/");
     const pkgJsonPath = `${packageDir}/package.json`;
     if (!controller.vfs.existsSync(pkgJsonPath)) continue;
 
     try {
-      const pkgJson = JSON.parse(controller.vfs.readFileSync(pkgJsonPath, 'utf8')) as { bin?: Record<string, string> | string };
+      const pkgJson = JSON.parse(
+        controller.vfs.readFileSync(pkgJsonPath, "utf8"),
+      ) as { bin?: Record<string, string> | string };
 
       const bins: Record<string, string> =
-        typeof pkgJson.bin === 'string'
+        typeof pkgJson.bin === "string"
           ? {
-            [pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName]: pkgJson.bin,
-          }
-          : pkgJson.bin && typeof pkgJson.bin === 'object'
+              [pkgName.includes("/") ? pkgName.split("/").pop()! : pkgName]:
+                pkgJson.bin,
+            }
+          : pkgJson.bin && typeof pkgJson.bin === "object"
             ? pkgJson.bin
             : {};
 
@@ -3099,57 +3674,87 @@ async function execInstalledPackageBin(
   pkgName: string,
   binName: string,
   args: string[],
-  ctx: CommandContext
+  ctx: CommandContext,
 ): Promise<JustBashExecResult> {
   if (!ctx.exec) {
-    return { stdout: '', stderr: `${binName}: execution context unavailable\n`, exitCode: 1 };
+    return {
+      stdout: "",
+      stderr: `${binName}: execution context unavailable\n`,
+      exitCode: 1,
+    };
   }
 
   const env = envToRecord(ctx.env);
   const normalizedCwd = normalizeCommandCwd(ctx.cwd);
-  const resolvedTarget = getPackageBinTarget(controller, pkgName, binName, normalizedCwd)
-    || getPackageBinTarget(controller, pkgName, binName, '/');
+  const resolvedTarget =
+    getPackageBinTarget(controller, pkgName, binName, normalizedCwd) ||
+    getPackageBinTarget(controller, pkgName, binName, "/");
 
   if (resolvedTarget) {
-    const fullCommand = ['node', resolvedTarget, ...args].map((value) => shellQuote(value)).join(' ');
+    const fullCommand = ["node", resolvedTarget, ...args]
+      .map((value) => shellQuote(value))
+      .join(" ");
     return ctx.exec(fullCommand, { cwd: normalizedCwd, env });
   }
 
   const binCandidates = [
-    `${normalizedCwd}/node_modules/.bin/${binName}`.replace(/\/+/g, '/'),
+    `${normalizedCwd}/node_modules/.bin/${binName}`.replace(/\/+/g, "/"),
     `/node_modules/.bin/${binName}`,
   ];
-  const binPath = binCandidates.find((candidate) => controller.vfs.existsSync(candidate));
+  const binPath = binCandidates.find((candidate) =>
+    controller.vfs.existsSync(candidate),
+  );
   if (!binPath) {
-    return { stdout: '', stderr: `bash: ${binName}: command not found\n`, exitCode: 127 };
+    return {
+      stdout: "",
+      stderr: `bash: ${binName}: command not found\n`,
+      exitCode: 127,
+    };
   }
 
-  const fullCommand = [binPath, ...args].map((value) => shellQuote(value)).join(' ');
+  const fullCommand = [binPath, ...args]
+    .map((value) => shellQuote(value))
+    .join(" ");
   return ctx.exec(fullCommand, { cwd: normalizedCwd, env });
 }
 
-function hasActiveStdinListeners(stdin: { listenerCount?: (event: string) => number }): boolean {
-  if (typeof stdin.listenerCount !== 'function') return false;
-  return stdin.listenerCount('data') > 0
-    || stdin.listenerCount('keypress') > 0
-    || stdin.listenerCount('readable') > 0;
+function hasActiveStdinListeners(stdin: {
+  listenerCount?: (event: string) => number;
+}): boolean {
+  if (typeof stdin.listenerCount !== "function") return false;
+  return (
+    stdin.listenerCount("data") > 0 ||
+    stdin.listenerCount("keypress") > 0 ||
+    stdin.listenerCount("readable") > 0
+  );
 }
 
 function isLikelyOneShotCliInvocation(args: string[]): boolean {
   if (args.length === 0) return false;
 
-  const helpOrVersionArgs = new Set(['--version', '-v', 'version', '--help', '-h', 'help']);
+  const helpOrVersionArgs = new Set([
+    "--version",
+    "-v",
+    "version",
+    "--help",
+    "-h",
+    "help",
+  ]);
   let sawHelpOrVersion = false;
 
   for (const arg of args) {
     if (!arg) continue;
 
-    if (helpOrVersionArgs.has(arg) || arg.startsWith('--version=') || arg.startsWith('--help=')) {
+    if (
+      helpOrVersionArgs.has(arg) ||
+      arg.startsWith("--version=") ||
+      arg.startsWith("--help=")
+    ) {
       sawHelpOrVersion = true;
       continue;
     }
 
-    if (arg.startsWith('-')) {
+    if (arg.startsWith("-")) {
       continue;
     }
 
@@ -3165,22 +3770,24 @@ interface ParsedTarOptions {
   verbose: boolean;
 }
 
-function parseTarOptions(args: string[], cwd: string): { options?: ParsedTarOptions; error?: string } {
+function parseTarOptions(
+  args: string[],
+  cwd: string,
+): { options?: ParsedTarOptions; error?: string } {
   let extractMode = false;
   let archivePath: string | null = null;
   let destPath = cwd;
   let verbose = false;
 
-  const resolvePath = (candidate: string): string => (
+  const resolvePath = (candidate: string): string =>
     path.isAbsolute(candidate)
       ? path.normalize(candidate)
-      : path.normalize(path.join(cwd, candidate))
-  );
+      : path.normalize(path.join(cwd, candidate));
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    if (arg === '-C' || arg === '--directory') {
+    if (arg === "-C" || arg === "--directory") {
       const next = args[i + 1];
       if (!next) return { error: "option requires an argument -- 'C'" };
       destPath = resolvePath(next);
@@ -3188,42 +3795,42 @@ function parseTarOptions(args: string[], cwd: string): { options?: ParsedTarOpti
       continue;
     }
 
-    if (arg === '--extract') {
+    if (arg === "--extract") {
       extractMode = true;
       continue;
     }
-    if (arg === '--verbose') {
+    if (arg === "--verbose") {
       verbose = true;
       continue;
     }
-    if (arg === '--file') {
+    if (arg === "--file") {
       const next = args[i + 1];
       if (!next) return { error: "option requires an argument -- 'f'" };
       archivePath = resolvePath(next);
       i++;
       continue;
     }
-    if (arg.startsWith('--file=')) {
-      archivePath = resolvePath(arg.slice('--file='.length));
+    if (arg.startsWith("--file=")) {
+      archivePath = resolvePath(arg.slice("--file=".length));
       continue;
     }
 
-    if (arg.startsWith('-') && arg.length > 1) {
+    if (arg.startsWith("-") && arg.length > 1) {
       const flags = arg.slice(1);
       for (let flagIndex = 0; flagIndex < flags.length; flagIndex++) {
         const flag = flags[flagIndex];
-        if (flag === 'x') {
+        if (flag === "x") {
           extractMode = true;
           continue;
         }
-        if (flag === 'v') {
+        if (flag === "v") {
           verbose = true;
           continue;
         }
-        if (flag === 'z') {
+        if (flag === "z") {
           continue;
         }
-        if (flag === 'f') {
+        if (flag === "f") {
           const inlineFile = flags.slice(flagIndex + 1);
           if (inlineFile) {
             archivePath = resolvePath(inlineFile);
@@ -3247,10 +3854,10 @@ function parseTarOptions(args: string[], cwd: string): { options?: ParsedTarOpti
   }
 
   if (!extractMode) {
-    return { error: 'only extract mode is supported (use -x)' };
+    return { error: "only extract mode is supported (use -x)" };
   }
   if (!archivePath) {
-    return { error: 'archive file is required (use -f <file>)' };
+    return { error: "archive file is required (use -f <file>)" };
   }
 
   return {
@@ -3263,10 +3870,10 @@ function parseTarOptions(args: string[], cwd: string): { options?: ParsedTarOpti
 }
 
 function isSafeTarEntryPath(entryPath: string): boolean {
-  if (!entryPath || entryPath.includes('\0')) return false;
-  const normalized = entryPath.replace(/\\/g, '/');
-  const segments = normalized.split('/').filter(Boolean);
-  return !segments.some((segment) => segment === '..');
+  if (!entryPath || entryPath.includes("\0")) return false;
+  const normalized = entryPath.replace(/\\/g, "/");
+  const segments = normalized.split("/").filter(Boolean);
+  return !segments.some((segment) => segment === "..");
 }
 
 /**
@@ -3275,7 +3882,7 @@ function isSafeTarEntryPath(entryPath: string): boolean {
 async function handleNpmRun(
   controller: ChildProcessController,
   args: string[],
-  ctx: CommandContext
+  ctx: CommandContext,
 ): Promise<JustBashExecResult> {
   const scriptName = args[0];
 
@@ -3295,19 +3902,19 @@ async function handleNpmRun(
     const available = Object.keys(scripts);
     let msg = `npm ERR! Missing script: "${scriptName}"\n`;
     if (available.length > 0) {
-      msg += '\nnpm ERR! Available scripts:\n';
+      msg += "\nnpm ERR! Available scripts:\n";
       for (const name of available) {
         msg += `npm ERR!   ${name}\n`;
         msg += `npm ERR!     ${scripts[name]}\n`;
       }
     }
-    return { stdout: '', stderr: msg, exitCode: 1 };
+    return { stdout: "", stderr: msg, exitCode: 1 };
   }
 
   if (!ctx.exec) {
     return {
-      stdout: '',
-      stderr: 'npm ERR! Script execution not available in this context\n',
+      stdout: "",
+      stderr: "npm ERR! Script execution not available in this context\n",
       exitCode: 1,
     };
   }
@@ -3320,9 +3927,9 @@ async function handleNpmRun(
   if (pkgJson.name) npmEnv.npm_package_name = pkgJson.name;
   if (pkgJson.version) npmEnv.npm_package_version = pkgJson.version;
 
-  let allStdout = '';
-  let allStderr = '';
-  const label = `${pkgJson.name || ''}@${pkgJson.version || ''}`;
+  let allStdout = "";
+  let allStderr = "";
+  const label = `${pkgJson.name || ""}@${pkgJson.version || ""}`;
 
   // Run pre<script> if it exists
   const preScript = scripts[`pre${scriptName}`];
@@ -3332,29 +3939,47 @@ async function handleNpmRun(
     allStdout += preResult.stdout;
     allStderr += preResult.stderr;
     if (preResult.exitCode !== 0) {
-      return { stdout: allStdout, stderr: allStderr, exitCode: preResult.exitCode };
+      return {
+        stdout: allStdout,
+        stderr: allStderr,
+        exitCode: preResult.exitCode,
+      };
     }
   }
 
   // Run the main script
   allStderr += `\n> ${label} ${scriptName}\n> ${scriptCommand}\n\n`;
-  const mainResult = await ctx.exec(scriptCommand, { cwd: ctx.cwd, env: npmEnv });
+  const mainResult = await ctx.exec(scriptCommand, {
+    cwd: ctx.cwd,
+    env: npmEnv,
+  });
   allStdout += mainResult.stdout;
   allStderr += mainResult.stderr;
 
   if (mainResult.exitCode !== 0) {
-    return { stdout: allStdout, stderr: allStderr, exitCode: mainResult.exitCode };
+    return {
+      stdout: allStdout,
+      stderr: allStderr,
+      exitCode: mainResult.exitCode,
+    };
   }
 
   // Run post<script> if it exists
   const postScript = scripts[`post${scriptName}`];
   if (postScript) {
     allStderr += `\n> ${label} post${scriptName}\n> ${postScript}\n\n`;
-    const postResult = await ctx.exec(postScript, { cwd: ctx.cwd, env: npmEnv });
+    const postResult = await ctx.exec(postScript, {
+      cwd: ctx.cwd,
+      env: npmEnv,
+    });
     allStdout += postResult.stdout;
     allStderr += postResult.stderr;
     if (postResult.exitCode !== 0) {
-      return { stdout: allStdout, stderr: allStderr, exitCode: postResult.exitCode };
+      return {
+        stdout: allStdout,
+        stderr: allStderr,
+        exitCode: postResult.exitCode,
+      };
     }
   }
 
@@ -3364,7 +3989,10 @@ async function handleNpmRun(
 /**
  * List available scripts from package.json (when `npm run` is called with no args)
  */
-function listScripts(controller: ChildProcessController, ctx: CommandContext): JustBashExecResult {
+function listScripts(
+  controller: ChildProcessController,
+  ctx: CommandContext,
+): JustBashExecResult {
   const result = readPackageJson(controller, ctx.cwd);
   if (result.error) return result.error;
   const pkgJson = result.pkgJson;
@@ -3373,25 +4001,35 @@ function listScripts(controller: ChildProcessController, ctx: CommandContext): J
   const names = Object.keys(scripts);
 
   if (names.length === 0) {
-    return { stdout: '', stderr: '', exitCode: 0 };
+    return { stdout: "", stderr: "", exitCode: 0 };
   }
 
-  const lifecycle = ['prestart', 'start', 'poststart', 'pretest', 'test', 'posttest', 'prestop', 'stop', 'poststop'];
-  const lifecyclePresent = names.filter(n => lifecycle.includes(n));
-  const customPresent = names.filter(n => !lifecycle.includes(n));
+  const lifecycle = [
+    "prestart",
+    "start",
+    "poststart",
+    "pretest",
+    "test",
+    "posttest",
+    "prestop",
+    "stop",
+    "poststop",
+  ];
+  const lifecyclePresent = names.filter((n) => lifecycle.includes(n));
+  const customPresent = names.filter((n) => !lifecycle.includes(n));
 
-  let output = `Lifecycle scripts included in ${pkgJson.name || ''}:\n`;
+  let output = `Lifecycle scripts included in ${pkgJson.name || ""}:\n`;
   for (const name of lifecyclePresent) {
     output += `  ${name}\n    ${scripts[name]}\n`;
   }
   if (customPresent.length > 0) {
-    output += '\navailable via `npm run-script`:\n';
+    output += "\navailable via `npm run-script`:\n";
     for (const name of customPresent) {
       output += `  ${name}\n    ${scripts[name]}\n`;
     }
   }
 
-  return { stdout: output, stderr: '', exitCode: 0 };
+  return { stdout: output, stderr: "", exitCode: 0 };
 }
 
 /**
@@ -3400,12 +4038,15 @@ function listScripts(controller: ChildProcessController, ctx: CommandContext): J
 async function handleNpmInstall(
   controller: ChildProcessController,
   args: string[],
-  ctx: CommandContext
+  ctx: CommandContext,
 ): Promise<JustBashExecResult> {
   const pm = await createPackageManager(controller, ctx.cwd);
 
-  let stdout = '';
-  const execution = getExecutionContextFromEnv(controller, envToRecord(ctx.env));
+  let stdout = "";
+  const execution = getExecutionContextFromEnv(
+    controller,
+    envToRecord(ctx.env),
+  );
   let suppressedDepCount = 0;
   const emitProgress = (message: string) => {
     // Suppress per-dep spam from resolver/installer:
@@ -3413,9 +4054,11 @@ async function handleNpmInstall(
     // - "  Downloading X@Y..." from core.ts installResolved
     // - "Skipping X@Y (already installed)" from core.ts
     // Keep top-level: "Resolving X@latest...", "Resolving dependencies...", "Installing N packages..."
-    if ((/^Resolving\s+/.test(message) && !message.endsWith('...')) ||
-        /^\s+Downloading\s+/.test(message) ||
-        /^Skipping\s+/.test(message)) {
+    if (
+      (/^Resolving\s+/.test(message) && !message.endsWith("...")) ||
+      /^\s+Downloading\s+/.test(message) ||
+      /^Skipping\s+/.test(message)
+    ) {
       suppressedDepCount++;
       return;
     }
@@ -3425,7 +4068,7 @@ async function handleNpmInstall(
   };
 
   try {
-    const pkgArgs = args.filter(a => !a.startsWith('-'));
+    const pkgArgs = args.filter((a) => !a.startsWith("-"));
     if (pkgArgs.length === 0) {
       // npm install (no package name) -> install from package.json
       const installResult = await pm.installFromPackageJson({
@@ -3450,7 +4093,7 @@ async function handleNpmInstall(
         stdout += `added ${installResult.added.length} packages\n`;
       }
     }
-    return { stdout, stderr: '', exitCode: 0 };
+    return { stdout, stderr: "", exitCode: 0 };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return { stdout, stderr: `npm ERR! ${msg}\n`, exitCode: 1 };
@@ -3462,28 +4105,28 @@ async function handleNpmInstall(
  */
 async function handleNpmList(
   controller: ChildProcessController,
-  ctx: CommandContext
+  ctx: CommandContext,
 ): Promise<JustBashExecResult> {
   const pm = await createPackageManager(controller, ctx.cwd);
   const packages = pm.list();
   const entries = Object.entries(packages);
 
   if (entries.length === 0) {
-    return { stdout: '(empty)\n', stderr: '', exitCode: 0 };
+    return { stdout: "(empty)\n", stderr: "", exitCode: 0 };
   }
 
   let output = `${ctx.cwd}\n`;
   for (const [name, version] of entries) {
     output += `+-- ${name}@${version}\n`;
   }
-  return { stdout: output, stderr: '', exitCode: 0 };
+  return { stdout: output, stderr: "", exitCode: 0 };
 }
 
 async function createPackageManager(
   controller: ChildProcessController,
   cwd: string,
 ) {
-  const { PackageManager } = await import('../npm/index');
+  const { PackageManager } = await import("../npm/index");
   return new PackageManager(controller.vfs, {
     cwd,
     installMode: controller.installMode,
@@ -3494,7 +4137,7 @@ async function createPackageManager(
 export interface ExecOptions {
   cwd?: string;
   env?: Record<string, string>;
-  encoding?: BufferEncoding | 'buffer';
+  encoding?: BufferEncoding | "buffer";
   timeout?: number;
   maxBuffer?: number;
   shell?: string | boolean;
@@ -3508,14 +4151,14 @@ export interface ExecResult {
 export type ExecCallback = (
   error: Error | null,
   stdout: string | Buffer,
-  stderr: string | Buffer
+  stderr: string | Buffer,
 ) => void;
 
 function normalizeExecSyncResult(
   stdout: string,
-  encoding?: BufferEncoding | 'buffer' | null
+  encoding?: BufferEncoding | "buffer" | null,
 ): string | Buffer {
-  if (encoding === 'buffer' || encoding == null) {
+  if (encoding === "buffer" || encoding == null) {
     return Buffer.from(stdout);
   }
   return Buffer.from(stdout).toString(encoding);
@@ -3523,27 +4166,27 @@ function normalizeExecSyncResult(
 
 function getCurrentProcessArch(): string {
   const proc = (globalThis as any).process as { arch?: unknown } | undefined;
-  return typeof proc?.arch === 'string' && proc.arch ? proc.arch : 'x64';
+  return typeof proc?.arch === "string" && proc.arch ? proc.arch : "x64";
 }
 
 const SYNTHETIC_WHICH_TARGETS: Record<string, string> = {
-  bash: '/bin/bash',
-  'claude-wrapper': DEFAULT_CLAUDE_WRAPPER_PATH,
-  node: '/usr/bin/node',
-  npm: '/usr/bin/npm',
-  npx: '/usr/bin/npx',
-  rec: '/usr/bin/rec',
-  sh: '/bin/sh',
-  sox: '/usr/bin/sox',
-  tar: '/usr/bin/tar',
-  zsh: '/bin/zsh',
+  bash: "/bin/bash",
+  "claude-wrapper": DEFAULT_CLAUDE_WRAPPER_PATH,
+  node: "/usr/bin/node",
+  npm: "/usr/bin/npm",
+  npx: "/usr/bin/npx",
+  rec: "/usr/bin/rec",
+  sh: "/bin/sh",
+  sox: "/usr/bin/sox",
+  tar: "/usr/bin/tar",
+  zsh: "/bin/zsh",
 };
 
 function normalizeSpawnSyncOutput(
   stdout: string,
-  encoding?: BufferEncoding | 'buffer' | null
+  encoding?: BufferEncoding | "buffer" | null,
 ): SpawnSyncOutput {
-  if (encoding === 'buffer' || encoding == null) {
+  if (encoding === "buffer" || encoding == null) {
     return Buffer.from(stdout);
   }
   return Buffer.from(stdout).toString(encoding);
@@ -3553,9 +4196,11 @@ function runSyntheticSyncCommand(
   controller: ChildProcessController | null,
   command: string,
   args: string[],
-  options: { cwd?: string; env?: Record<string, string> }
+  options: { cwd?: string; env?: Record<string, string> },
 ): { stdout: string; stderr: string; status: number } | null {
-  const normalizedCwd = normalizeCommandCwd(options.cwd ?? getDefaultProcessCwd());
+  const normalizedCwd = normalizeCommandCwd(
+    options.cwd ?? getDefaultProcessCwd(),
+  );
   const env = options.env || {};
 
   const shell = getSyntheticShellSpec(command);
@@ -3564,71 +4209,84 @@ function runSyntheticSyncCommand(
     if (parsed.error) {
       const shellName = shell.names[0] || path.basename(command);
       return {
-        stdout: '',
+        stdout: "",
         stderr: `${shellName}: ${parsed.error}`,
         status: 2,
       };
     }
     if (!parsed.script) {
-      return { stdout: '', stderr: '', status: 0 };
+      return { stdout: "", stderr: "", status: 0 };
     }
     const shellTokens = splitCommandArgs(parsed.script);
     if (shellTokens.length === 0) {
-      return { stdout: '', stderr: '', status: 0 };
+      return { stdout: "", stderr: "", status: 0 };
     }
-    return runSyntheticSyncCommand(controller, shellTokens[0], shellTokens.slice(1), {
-      cwd: normalizedCwd,
-      env,
-    });
+    return runSyntheticSyncCommand(
+      controller,
+      shellTokens[0],
+      shellTokens.slice(1),
+      {
+        cwd: normalizedCwd,
+        env,
+      },
+    );
   }
 
   const commandName = path.basename(command).toLowerCase();
   switch (commandName) {
-    case 'pwd':
-      return { stdout: `${normalizedCwd}\n`, stderr: '', status: 0 };
-    case 'echo':
-      return { stdout: `${args.join(' ')}\n`, stderr: '', status: 0 };
-    case 'uname':
-      return { stdout: 'Linux\n', stderr: '', status: 0 };
-    case 'whoami':
-      return { stdout: `${env.USER || 'user'}\n`, stderr: '', status: 0 };
-    case 'true':
-      return { stdout: '', stderr: '', status: 0 };
-    case 'cat': {
+    case "pwd":
+      return { stdout: `${normalizedCwd}\n`, stderr: "", status: 0 };
+    case "echo":
+      return { stdout: `${args.join(" ")}\n`, stderr: "", status: 0 };
+    case "uname":
+      return { stdout: "Linux\n", stderr: "", status: 0 };
+    case "whoami":
+      return { stdout: `${env.USER || "user"}\n`, stderr: "", status: 0 };
+    case "true":
+      return { stdout: "", stderr: "", status: 0 };
+    case "cat": {
       if (!controller) return null;
       const outputs: string[] = [];
       for (const arg of args) {
         const target = resolveFromCwd(normalizedCwd, arg);
         if (!controller.vfs.existsSync(target)) {
-          return { stdout: '', stderr: `cat: ${arg}: No such file or directory\n`, status: 1 };
+          return {
+            stdout: "",
+            stderr: `cat: ${arg}: No such file or directory\n`,
+            status: 1,
+          };
         }
-        outputs.push(String(controller.vfs.readFileSync(target, 'utf8')));
+        outputs.push(String(controller.vfs.readFileSync(target, "utf8")));
       }
       return {
-        stdout: outputs.join(outputs.length > 1 ? '\n' : ''),
-        stderr: '',
+        stdout: outputs.join(outputs.length > 1 ? "\n" : ""),
+        stderr: "",
         status: 0,
       };
     }
-    case 'ls': {
+    case "ls": {
       if (!controller) return null;
       const targetArg = args[0] || normalizedCwd;
       const target = resolveFromCwd(normalizedCwd, targetArg);
       if (!controller.vfs.existsSync(target)) {
-        return { stdout: '', stderr: `ls: cannot access '${targetArg}': No such file or directory\n`, status: 1 };
+        return {
+          stdout: "",
+          stderr: `ls: cannot access '${targetArg}': No such file or directory\n`,
+          status: 1,
+        };
       }
       const stats = controller.vfs.statSync(target);
       if (stats.isDirectory()) {
         const entries = controller.vfs.readdirSync(target).slice().sort();
         return {
-          stdout: entries.length > 0 ? `${entries.join('\n')}\n` : '',
-          stderr: '',
+          stdout: entries.length > 0 ? `${entries.join("\n")}\n` : "",
+          stderr: "",
           status: 0,
         };
       }
       return {
         stdout: `${path.basename(target)}\n`,
-        stderr: '',
+        stderr: "",
         status: 0,
       };
     }
@@ -3637,23 +4295,31 @@ function runSyntheticSyncCommand(
   }
 }
 
-function getSyntheticExecFileSyncOutput(file: string, args: string[]): string | null {
+function getSyntheticExecFileSyncOutput(
+  file: string,
+  args: string[],
+): string | null {
   const command = path.basename(file).toLowerCase();
   const arch = getCurrentProcessArch();
-  const bitness = ['x64', 'arm64', 'ppc64', 'riscv64'].includes(arch) ? '64' : '32';
+  const bitness = ["x64", "arm64", "ppc64", "riscv64"].includes(arch)
+    ? "64"
+    : "32";
 
   const shellVersion = getSyntheticShellVersion(file);
-  if (shellVersion && args.length > 0 && args[0] === '--version') {
+  if (shellVersion && args.length > 0 && args[0] === "--version") {
     return shellVersion;
   }
 
-  if (command === 'getconf' && args[0] === 'LONG_BIT') {
+  if (command === "getconf" && args[0] === "LONG_BIT") {
     return `${bitness}\n`;
   }
-  if (command === 'sysctl' && args.includes('sysctl.proc_translated')) {
-    return '0\n';
+  if (command === "sysctl" && args.includes("sysctl.proc_translated")) {
+    return "0\n";
   }
-  if (command === 'wmic' && args.join(' ').toLowerCase().includes('osarchitecture')) {
+  if (
+    command === "wmic" &&
+    args.join(" ").toLowerCase().includes("osarchitecture")
+  ) {
     return `OSArchitecture\n${bitness}-bit\n`;
   }
 
@@ -3664,22 +4330,20 @@ function resolveSyntheticWhichTarget(
   controller: ChildProcessController | null,
   target: string,
   cwd: string,
-  env: Record<string, string>
+  env: Record<string, string>,
 ): string | null {
   const trimmed = target.trim();
   if (!trimmed) return null;
 
-  if (trimmed.includes('/')) {
+  if (trimmed.includes("/")) {
     const resolved = resolveFromCwd(cwd, trimmed);
     return controller?.vfs.existsSync(resolved) ? resolved : null;
   }
 
   const normalizedCwd = normalizeCommandCwd(cwd);
   const resolvedBinTarget = controller
-    ? (
-      getPackageBinTarget(controller, trimmed, trimmed, normalizedCwd)
-      || getPackageBinTarget(controller, trimmed, trimmed, '/')
-    )
+    ? getPackageBinTarget(controller, trimmed, trimmed, normalizedCwd) ||
+      getPackageBinTarget(controller, trimmed, trimmed, "/")
     : null;
   if (resolvedBinTarget) {
     return resolvedBinTarget;
@@ -3690,10 +4354,12 @@ function resolveSyntheticWhichTarget(
     return syntheticTarget;
   }
 
-  const pathKey = Object.prototype.hasOwnProperty.call(env, 'PATH')
-    ? 'PATH'
-    : (Object.prototype.hasOwnProperty.call(env, 'Path') ? 'Path' : 'PATH');
-  const segments = (env[pathKey] || '').split(':').filter(Boolean);
+  const pathKey = Object.prototype.hasOwnProperty.call(env, "PATH")
+    ? "PATH"
+    : Object.prototype.hasOwnProperty.call(env, "Path")
+      ? "Path"
+      : "PATH";
+  const segments = (env[pathKey] || "").split(":").filter(Boolean);
 
   for (const segment of segments) {
     const candidate = path.normalize(path.join(segment, trimmed));
@@ -3709,30 +4375,30 @@ function getSyntheticSpawnSyncResult(
   controller: ChildProcessController | null,
   command: string,
   args: string[],
-  options: SpawnOptions
+  options: SpawnOptions,
 ): SpawnSyncResult | null {
   const commandName = path.basename(command).toLowerCase();
   const encoding = options.encoding;
 
-  if (commandName === 'which' && args[0]) {
+  if (commandName === "which" && args[0]) {
     const resolvedTarget = resolveSyntheticWhichTarget(
       controller,
       args[0],
       options.cwd ?? getDefaultProcessCwd(),
-      options.env || {}
+      options.env || {},
     );
 
     if (resolvedTarget) {
       return {
         stdout: normalizeSpawnSyncOutput(`${resolvedTarget}\n`, encoding),
-        stderr: normalizeSpawnSyncOutput('', encoding),
+        stderr: normalizeSpawnSyncOutput("", encoding),
         status: 0,
       };
     }
 
     return {
-      stdout: normalizeSpawnSyncOutput('', encoding),
-      stderr: normalizeSpawnSyncOutput('', encoding),
+      stdout: normalizeSpawnSyncOutput("", encoding),
+      stderr: normalizeSpawnSyncOutput("", encoding),
       status: 1,
     };
   }
@@ -3746,10 +4412,12 @@ function getSyntheticSpawnSyncResult(
       stdout: normalizeSpawnSyncOutput(syntheticResult.stdout, encoding),
       stderr: normalizeSpawnSyncOutput(syntheticResult.stderr, encoding),
       status: syntheticResult.status,
-      error: syntheticResult.status === 0 ? undefined : Object.assign(
-        new Error(`Command failed: ${command}`),
-        { code: syntheticResult.status }
-      ),
+      error:
+        syntheticResult.status === 0
+          ? undefined
+          : Object.assign(new Error(`Command failed: ${command}`), {
+              code: syntheticResult.status,
+            }),
     };
   }
 
@@ -3757,67 +4425,74 @@ function getSyntheticSpawnSyncResult(
 }
 
 function resolveStdioTarget(
-  stdio: SpawnOptions['stdio'] | undefined,
-  index: number
+  stdio: SpawnOptions["stdio"] | undefined,
+  index: number,
 ): StdioTarget {
   const entry = Array.isArray(stdio) ? stdio[index] : stdio;
 
-  if (typeof entry === 'number' && Number.isInteger(entry)) {
+  if (typeof entry === "number" && Number.isInteger(entry)) {
     return { fd: entry };
   }
 
-  if (entry === 'inherit' || entry === 'ignore') {
+  if (entry === "inherit" || entry === "ignore") {
     return entry;
   }
 
-  return 'pipe';
+  return "pipe";
 }
 
-function getParentProcessWritable(stream: 'stdout' | 'stderr'): { write?: (data: string) => unknown } | null {
-  const proc = (globalThis as any).process as {
-    stdout?: { write?: (data: string) => unknown };
-    stderr?: { write?: (data: string) => unknown };
-  } | undefined;
+function getParentProcessWritable(
+  stream: "stdout" | "stderr",
+): { write?: (data: string) => unknown } | null {
+  const proc = (globalThis as any).process as
+    | {
+        stdout?: { write?: (data: string) => unknown };
+        stderr?: { write?: (data: string) => unknown };
+      }
+    | undefined;
 
   return proc?.[stream] ?? null;
 }
 
 function applySpawnOutput(
   target: StdioTarget,
-  stream: 'stdout' | 'stderr',
+  stream: "stdout" | "stderr",
   childStream: Readable | null,
-  data: string
+  data: string,
 ): void {
   if (!data) return;
 
-  if (target === 'pipe') {
+  if (target === "pipe") {
     childStream?.push(Buffer.from(data));
     return;
   }
 
-  if (target === 'inherit') {
+  if (target === "inherit") {
     getParentProcessWritable(stream)?.write?.(data);
     return;
   }
 
-  if (target === 'ignore') {
+  if (target === "ignore") {
     return;
   }
 
   writeToFdSync(target.fd, data);
 }
 
-function closeSpawnOutput(target: StdioTarget, childStream: Readable | null): void {
-  if (target === 'pipe') {
+function closeSpawnOutput(
+  target: StdioTarget,
+  childStream: Readable | null,
+): void {
+  if (target === "pipe") {
     childStream?.push(null);
   }
 }
 
 function duplicateNumericStdioTarget(
   target: StdioTarget,
-  duplicatedByOriginalFd: Map<number, number>
+  duplicatedByOriginalFd: Map<number, number>,
 ): StdioTarget {
-  if (target === 'pipe' || target === 'inherit' || target === 'ignore') {
+  if (target === "pipe" || target === "inherit" || target === "ignore") {
     return target;
   }
 
@@ -3830,7 +4505,9 @@ function duplicateNumericStdioTarget(
   return { fd: duplicatedFd };
 }
 
-function releaseDuplicatedStdioTargets(duplicatedByOriginalFd: Map<number, number>): void {
+function releaseDuplicatedStdioTargets(
+  duplicatedByOriginalFd: Map<number, number>,
+): void {
   for (const duplicatedFd of duplicatedByOriginalFd.values()) {
     closeFdSync(duplicatedFd);
   }
@@ -3840,10 +4517,10 @@ function releaseDuplicatedStdioTargets(duplicatedByOriginalFd: Map<number, numbe
 function getSyntheticExecSyncOutput(
   controller: ChildProcessController | null,
   command: string,
-  options: ExecOptions
+  options: ExecOptions,
 ): string | null {
   const trimmed = command.trim();
-  if (!trimmed) return '';
+  if (!trimmed) return "";
 
   const whichMatch = trimmed.match(/^which\s+([^\s]+)$/);
   if (whichMatch) {
@@ -3851,7 +4528,7 @@ function getSyntheticExecSyncOutput(
       controller,
       whichMatch[1],
       options.cwd ?? getDefaultProcessCwd(),
-      options.env || {}
+      options.env || {},
     );
     if (resolvedTarget) {
       return `${resolvedTarget}\n`;
@@ -3869,10 +4546,15 @@ function getSyntheticExecSyncOutput(
 
   const tokens = splitCommandArgs(trimmed);
   if (tokens.length > 0) {
-    const syntheticResult = runSyntheticSyncCommand(controller, tokens[0], tokens.slice(1), {
-      cwd: options.cwd,
-      env: options.env,
-    });
+    const syntheticResult = runSyntheticSyncCommand(
+      controller,
+      tokens[0],
+      tokens.slice(1),
+      {
+        cwd: options.cwd,
+        env: options.env,
+      },
+    );
     if (syntheticResult) {
       if (syntheticResult.status !== 0) {
         const error = new Error(`Command failed: ${command}`);
@@ -3886,24 +4568,29 @@ function getSyntheticExecSyncOutput(
   return null;
 }
 
-function parseSyntheticShellExec(args: string[]): { script?: string; error?: string } {
+function parseSyntheticShellExec(args: string[]): {
+  script?: string;
+  error?: string;
+} {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '-l' || arg === '--login') {
+    if (arg === "-l" || arg === "--login") {
       continue;
     }
-    if (arg === '-lc' || arg === '-cl') {
+    if (arg === "-lc" || arg === "-cl") {
       const script = args[i + 1];
       return script
         ? { script }
-        : { error: 'option requires an argument -- c\n' };
+        : { error: "option requires an argument -- c\n" };
     }
-    if (arg === '-c') {
+    if (arg === "-c") {
       const remainder = args.slice(i + 1);
-      const script = remainder.find((candidate) => candidate !== '-l' && candidate !== '--login');
+      const script = remainder.find(
+        (candidate) => candidate !== "-l" && candidate !== "--login",
+      );
       return script
         ? { script }
-        : { error: 'option requires an argument -- c\n' };
+        : { error: "option requires an argument -- c\n" };
     }
   }
 
@@ -3917,11 +4604,11 @@ export function splitCommandArgs(command: string): string[] {
   let match: RegExpExecArray | null = null;
   while ((match = matcher.exec(command)) !== null) {
     if (match[1] !== undefined) {
-      tokens.push(match[1].replace(/\\(["\\$`!])/g, '$1'));
+      tokens.push(match[1].replace(/\\(["\\$`!])/g, "$1"));
       continue;
     }
     if (match[2] !== undefined) {
-      tokens.push(match[2].replace(/\\(['\\!])/g, '$1'));
+      tokens.push(match[2].replace(/\\(['\\!])/g, "$1"));
       continue;
     }
     if (match[3] !== undefined) {
@@ -3934,10 +4621,12 @@ export function splitCommandArgs(command: string): string[] {
 
 /** Filter out shell redirection tokens like `2>&1` from parsed args. */
 function filterRedirections(args: string[]): string[] {
-  return args.filter(t => !/^\d*>&\d+$/.test(t));
+  return args.filter((t) => !/^\d*>&\d+$/.test(t));
 }
 
-function getBindingDefaultEnv(binding?: ChildProcessModuleBinding): Record<string, string> {
+function getBindingDefaultEnv(
+  binding?: ChildProcessModuleBinding,
+): Record<string, string> {
   if (binding?.getDefaultEnv) {
     return {
       ...binding.getDefaultEnv(),
@@ -3954,7 +4643,7 @@ function maybeRunSyntheticShellCommand(
   controller: ChildProcessController,
   command: string,
   cwd: string,
-  env: Record<string, string>
+  env: Record<string, string>,
 ): Promise<JustBashExecResult> | null {
   const tokens = splitCommandArgs(command);
   if (tokens.length === 0) return null;
@@ -3965,10 +4654,10 @@ function maybeRunSyntheticShellCommand(
   const shellName = shell.names[0] || path.basename(tokens[0]);
   const args = tokens.slice(1);
 
-  if (args.includes('--version')) {
+  if (args.includes("--version")) {
     return Promise.resolve({
-      stdout: getSyntheticShellVersion(tokens[0]) || '',
-      stderr: '',
+      stdout: getSyntheticShellVersion(tokens[0]) || "",
+      stderr: "",
       exitCode: 0,
     });
   }
@@ -3976,31 +4665,36 @@ function maybeRunSyntheticShellCommand(
   const parsed = parseSyntheticShellExec(args);
   if (parsed.error) {
     return Promise.resolve({
-      stdout: '',
+      stdout: "",
       stderr: `${shellName}: ${parsed.error}`,
       exitCode: 2,
     });
   }
 
   if (!parsed.script) {
-    return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 });
+    return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
   }
 
   // Intercept custom commands before just-bash's broken lexer
-  return maybeRunCustomCommandDirect(controller, parsed.script, cwd, env)
-    ?? controller.bashInstance.exec(stripQuotesForBash(normalizeQuotes(parsed.script)), { cwd, env });
+  return (
+    maybeRunCustomCommandDirect(controller, parsed.script, cwd, env) ??
+    controller.bashInstance.exec(
+      stripQuotesForBash(normalizeQuotes(parsed.script)),
+      { cwd, env },
+    )
+  );
 }
 
 function execWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   command: string,
   optionsOrCallback?: ExecOptions | ExecCallback,
-  callback?: ExecCallback
+  callback?: ExecCallback,
 ): ChildProcess {
   let options: ExecOptions = {};
   let cb: ExecCallback | undefined;
 
-  if (typeof optionsOrCallback === 'function') {
+  if (typeof optionsOrCallback === "function") {
     cb = optionsOrCallback;
   } else if (optionsOrCallback) {
     options = optionsOrCallback;
@@ -4014,9 +4708,9 @@ function execWithBinding(
     const envHint = { ...baseEnv, ...(options.env || {}) };
     const controller = getActiveController(binding, envHint);
     if (!controller) {
-      const error = new Error('child_process not initialized');
-      child.emit('error', error);
-      if (cb) cb(error, '', '');
+      const error = new Error("child_process not initialized");
+      child.emit("error", error);
+      if (cb) cb(error, "", "");
       return;
     }
 
@@ -4024,18 +4718,29 @@ function execWithBinding(
     // child_process.exec captures output in result.stdout/stderr and returns
     // it via the callback — it should NOT stream live to the parent terminal
     // (which causes output to leak in Claude Code's UI).
-    const parentExecution = getActiveExecutionContext(controller, binding, envHint);
+    const parentExecution = getActiveExecutionContext(
+      controller,
+      binding,
+      envHint,
+    );
     const execution = createExecutionContext(controller, {
       signal: parentExecution?.signal || undefined,
     });
     const ownsExecution = true;
     try {
       const resolvedCwd = options.cwd ?? getBindingDefaultCwd(binding);
-      const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(options.env || {}) }, resolvedCwd);
-      const result = await controller.runCommand(command, { cwd: resolvedCwd, env: resolvedEnv }, execution.id);
+      const resolvedEnv = addNodeModuleBinPaths(
+        { ...baseEnv, ...(options.env || {}) },
+        resolvedCwd,
+      );
+      const result = await controller.runCommand(
+        command,
+        { cwd: resolvedCwd, env: resolvedEnv },
+        execution.id,
+      );
 
-      const stdout = result.stdout || '';
-      const stderr = result.stderr || '';
+      const stdout = result.stdout || "";
+      const stderr = result.stderr || "";
 
       // Emit data events
       if (stdout) {
@@ -4049,8 +4754,8 @@ function execWithBinding(
       child.stderr?.push(null);
 
       // Emit close/exit
-      child.emit('close', result.exitCode, null);
-      child.emit('exit', result.exitCode, null);
+      child.emit("close", result.exitCode, null);
+      child.emit("exit", result.exitCode, null);
 
       if (cb) {
         if (result.exitCode !== 0) {
@@ -4062,8 +4767,8 @@ function execWithBinding(
         }
       }
     } catch (error) {
-      child.emit('error', error);
-      if (cb) cb(error as Error, '', '');
+      child.emit("error", error);
+      if (cb) cb(error as Error, "", "");
     } finally {
       if (ownsExecution) {
         controller.destroyExecution(execution.id);
@@ -4080,7 +4785,7 @@ function execWithBinding(
 export function exec(
   command: string,
   optionsOrCallback?: ExecOptions | ExecCallback,
-  callback?: ExecCallback
+  callback?: ExecCallback,
 ): ChildProcess {
   return execWithBinding(undefined, command, optionsOrCallback, callback);
 }
@@ -4091,26 +4796,33 @@ export function exec(
 function execSyncWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   command: string,
-  options?: ExecOptions
+  options?: ExecOptions,
 ): string | Buffer {
-  const controller = getActiveController(binding, { ...getBindingDefaultEnv(binding), ...(options?.env || {}) });
+  const controller = getActiveController(binding, {
+    ...getBindingDefaultEnv(binding),
+    ...(options?.env || {}),
+  });
   if (!controller) {
-    throw new Error('child_process not initialized');
+    throw new Error("child_process not initialized");
   }
 
-  const syntheticOutput = getSyntheticExecSyncOutput(controller, command, options || {});
+  const syntheticOutput = getSyntheticExecSyncOutput(
+    controller,
+    command,
+    options || {},
+  );
   if (syntheticOutput !== null) {
     return normalizeExecSyncResult(syntheticOutput, options?.encoding);
   }
 
   throw new Error(
-    'execSync is not supported in browser environment. Use exec() with async/await or callbacks instead.'
+    "execSync is not supported in browser environment. Use exec() with async/await or callbacks instead.",
   );
 }
 
 export function execSync(
   command: string,
-  options?: ExecOptions
+  options?: ExecOptions,
 ): string | Buffer {
   return execSyncWithBinding(undefined, command, options);
 }
@@ -4119,15 +4831,19 @@ export interface SpawnOptions {
   cwd?: string;
   env?: Record<string, string>;
   shell?: boolean | string;
-  stdio?: 'pipe' | 'inherit' | 'ignore' | Array<'pipe' | 'inherit' | 'ignore' | number>;
-  encoding?: BufferEncoding | 'buffer' | null;
+  stdio?:
+    | "pipe"
+    | "inherit"
+    | "ignore"
+    | Array<"pipe" | "inherit" | "ignore" | number>;
+  encoding?: BufferEncoding | "buffer" | null;
   timeout?: number;
   detached?: boolean;
   windowsHide?: boolean;
 }
 
 type SpawnSyncOutput = string | Buffer;
-type StdioTarget = 'pipe' | 'inherit' | 'ignore' | { fd: number };
+type StdioTarget = "pipe" | "inherit" | "ignore" | { fd: number };
 
 type SpawnSyncResult = {
   stdout: SpawnSyncOutput;
@@ -4140,9 +4856,9 @@ type SpawnSyncResult = {
  * Inline check for rec/sox audio capture commands (avoids dynamic import on every spawn).
  */
 function isAudioCaptureCommand(command: string, args: string[]): boolean {
-  const basename = command.slice(command.lastIndexOf('/') + 1);
-  if (basename === 'rec') return true;
-  if (basename === 'sox' && args.includes('-d')) return true;
+  const basename = command.slice(command.lastIndexOf("/") + 1);
+  if (basename === "rec") return true;
+  if (basename === "sox" && args.includes("-d")) return true;
   return false;
 }
 
@@ -4161,11 +4877,19 @@ function debugRecLog(message: string, data?: unknown) {
  * Intercept rec/sox audio capture commands and use browser getUserMedia instead.
  * Returns true if the command was intercepted (caller should return child early).
  */
-function tryInterceptAudioCommand(command: string, args: string[], child: ChildProcess): boolean {
+function tryInterceptAudioCommand(
+  command: string,
+  args: string[],
+  child: ChildProcess,
+): boolean {
   if (!isAudioCaptureCommand(command, args)) return false;
 
-  console.log('%c[ALMOSTNODE] REC/SOX COMMAND INTERCEPTED!', 'background: #ff0; color: #000; font-size: 16px; padding: 4px;', { command, args });
-  debugRecLog('Intercepted audio command', { command, args });
+  console.log(
+    "%c[ALMOSTNODE] REC/SOX COMMAND INTERCEPTED!",
+    "background: #ff0; color: #000; font-size: 16px; padding: 4px;",
+    { command, args },
+  );
+  debugRecLog("Intercepted audio command", { command, args });
 
   let handle: { cleanup: () => void } | null = null;
   let totalBytes = 0;
@@ -4174,15 +4898,17 @@ function tryInterceptAudioCommand(command: string, args: string[], child: ChildP
 
   child.kill = (signal?: string): boolean => {
     const elapsedMs = Date.now() - startTime;
-    debugRecLog(`kill(${signal}) called — SUMMARY`, { 
-      totalBytes, 
-      chunkCount, 
+    debugRecLog(`kill(${signal}) called — SUMMARY`, {
+      totalBytes,
+      chunkCount,
       elapsedMs,
       stdoutBufferLength: (child.stdout as any)?._buffer?.length,
       stdoutFlowing: (child.stdout as any)?._flowing,
     });
     if (totalBytes === 0) {
-      debugRecLog('*** WARNING: NO AUDIO DATA WAS SENT! Silence detector may have filtered everything.');
+      debugRecLog(
+        "*** WARNING: NO AUDIO DATA WAS SENT! Silence detector may have filtered everything.",
+      );
     }
     if (handle) {
       handle.cleanup();
@@ -4191,9 +4917,11 @@ function tryInterceptAudioCommand(command: string, args: string[], child: ChildP
     child.stdout?.push(null);
     queueMicrotask(() => {
       queueMicrotask(() => {
-        debugRecLog('Emitting close/exit after kill', { signal: signal || 'SIGTERM' });
-        child.emit('close', null, signal || 'SIGTERM');
-        child.emit('exit', null, signal || 'SIGTERM');
+        debugRecLog("Emitting close/exit after kill", {
+          signal: signal || "SIGTERM",
+        });
+        child.emit("close", null, signal || "SIGTERM");
+        child.emit("exit", null, signal || "SIGTERM");
       });
     });
     return true;
@@ -4202,22 +4930,23 @@ function tryInterceptAudioCommand(command: string, args: string[], child: ChildP
   (async () => {
     try {
       if (child.killed) {
-        debugRecLog('Child already killed before async setup');
+        debugRecLog("Child already killed before async setup");
         return;
       }
 
-      const { parseSoxArgs, startAudioCapture } = await import('./sox-audio-capture');
+      const { parseSoxArgs, startAudioCapture } =
+        await import("./sox-audio-capture");
       if (child.killed) {
-        debugRecLog('Child killed during import');
+        debugRecLog("Child killed during import");
         return;
       }
 
       const config = parseSoxArgs(command, args);
-      debugRecLog('Parsed SoX config', config);
+      debugRecLog("Parsed SoX config", config);
 
       // Add listener to track if data is being consumed
       let dataEventsEmitted = 0;
-      child.stdout?.on('data', () => {
+      child.stdout?.on("data", () => {
         dataEventsEmitted++;
       });
 
@@ -4228,8 +4957,8 @@ function tryInterceptAudioCommand(command: string, args: string[], child: ChildP
             totalBytes += pcmBytes.length;
             chunkCount++;
             if (chunkCount <= 5 || chunkCount % 20 === 1) {
-              debugRecLog(`stdout.push chunk #${chunkCount}`, { 
-                bytes: pcmBytes.length, 
+              debugRecLog(`stdout.push chunk #${chunkCount}`, {
+                bytes: pcmBytes.length,
                 totalBytes,
                 dataEventsEmitted,
                 stdoutFlowing: (child.stdout as any)?._flowing,
@@ -4240,34 +4969,40 @@ function tryInterceptAudioCommand(command: string, args: string[], child: ChildP
         },
         () => {
           const elapsedMs = Date.now() - startTime;
-          debugRecLog('onEnd() called — natural recording end', { totalBytes, chunkCount, elapsedMs });
+          debugRecLog("onEnd() called — natural recording end", {
+            totalBytes,
+            chunkCount,
+            elapsedMs,
+          });
           child.stdout?.push(null);
           child.exitCode = 0;
-          child.emit('close', 0, null);
-          child.emit('exit', 0, null);
+          child.emit("close", 0, null);
+          child.emit("exit", 0, null);
         },
         (error: Error) => {
-          debugRecLog('onError() called', { error: error.message });
-          console.warn('[almostnode:rec] Audio capture error:', error.message);
-          child.stderr?.push(Buffer.from(error.message + '\n'));
+          debugRecLog("onError() called", { error: error.message });
+          console.warn("[almostnode:rec] Audio capture error:", error.message);
+          child.stderr?.push(Buffer.from(error.message + "\n"));
           child.stdout?.push(null);
           child.exitCode = 1;
-          child.emit('close', 1, null);
-          child.emit('exit', 1, null);
+          child.emit("close", 1, null);
+          child.emit("exit", 1, null);
         },
       );
 
       if (child.killed) {
-        debugRecLog('Child killed while startAudioCapture was running — cleaning up');
+        debugRecLog(
+          "Child killed while startAudioCapture was running — cleaning up",
+        );
         handle.cleanup();
         return;
       }
 
-      debugRecLog('Emitting spawn event');
-      child.emit('spawn');
+      debugRecLog("Emitting spawn event");
+      child.emit("spawn");
     } catch (error) {
-      debugRecLog('Async setup error', error);
-      child.emit('error', error);
+      debugRecLog("Async setup error", error);
+      child.emit("error", error);
     }
   })();
 
@@ -4278,7 +5013,7 @@ function spawnWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   command: string,
   args?: string[] | SpawnOptions,
-  options?: SpawnOptions
+  options?: SpawnOptions,
 ): ChildProcess {
   let spawnArgs: string[] = [];
   let spawnOptions: SpawnOptions = {};
@@ -4295,16 +5030,22 @@ function spawnWithBinding(
   const stdoutTarget = resolveStdioTarget(spawnOptions.stdio, 1);
   const stderrTarget = resolveStdioTarget(spawnOptions.stdio, 2);
   const duplicatedStdioFds = new Map<number, number>();
-  const ownedStdoutTarget = duplicateNumericStdioTarget(stdoutTarget, duplicatedStdioFds);
-  const ownedStderrTarget = duplicateNumericStdioTarget(stderrTarget, duplicatedStdioFds);
+  const ownedStdoutTarget = duplicateNumericStdioTarget(
+    stdoutTarget,
+    duplicatedStdioFds,
+  );
+  const ownedStderrTarget = duplicateNumericStdioTarget(
+    stderrTarget,
+    duplicatedStdioFds,
+  );
 
-  if (stdinTarget !== 'pipe') {
+  if (stdinTarget !== "pipe") {
     child.stdin = null;
   }
-  if (stdoutTarget !== 'pipe') {
+  if (stdoutTarget !== "pipe") {
     child.stdout = null;
   }
-  if (stderrTarget !== 'pipe') {
+  if (stderrTarget !== "pipe") {
     child.stderr = null;
   }
   child.stdio = [child.stdin, child.stdout, child.stderr];
@@ -4319,44 +5060,56 @@ function spawnWithBinding(
   // Build the full command — use shellQuote for args containing spaces or
   // quotes so inner double quotes are properly escaped (e.g. spawn('bash',
   // ['-c', 'echo "hello world"']) must NOT produce `bash -c "echo "hello world""`)
-  const fullCommand = spawnArgs.length > 0
-    ? `${command} ${spawnArgs.map(arg =>
-        /[\s"'\\]/.test(arg) ? shellQuote(arg) : arg
-      ).join(' ')}`
-    : command;
+  const fullCommand =
+    spawnArgs.length > 0
+      ? `${command} ${spawnArgs
+          .map((arg) => (/[\s"'\\]/.test(arg) ? shellQuote(arg) : arg))
+          .join(" ")}`
+      : command;
 
   (async () => {
     const baseEnv = getBindingDefaultEnv(binding);
     const envHint = { ...baseEnv, ...(spawnOptions.env || {}) };
     const controller = getActiveController(binding, envHint);
     if (!controller) {
-      const error = new Error('child_process not initialized');
-      child.emit('error', error);
+      const error = new Error("child_process not initialized");
+      child.emit("error", error);
       return;
     }
 
-    child.emit('spawn');
+    child.emit("spawn");
 
     // Create a dedicated child execution without streaming callbacks.
     // spawn captures output via child.stdout/child.stderr streams —
     // it should NOT stream live to the parent terminal.
-    const parentExecution = getActiveExecutionContext(controller, binding, envHint);
+    const parentExecution = getActiveExecutionContext(
+      controller,
+      binding,
+      envHint,
+    );
     const execution = createExecutionContext(controller, {
       signal: parentExecution?.signal || undefined,
     });
     const ownsExecution = true;
     try {
       const resolvedCwd = spawnOptions.cwd ?? getBindingDefaultCwd(binding);
-      const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(spawnOptions.env || {}) }, resolvedCwd);
-      const result = await controller.runCommand(fullCommand, { cwd: resolvedCwd, env: resolvedEnv }, execution.id);
+      const resolvedEnv = addNodeModuleBinPaths(
+        { ...baseEnv, ...(spawnOptions.env || {}) },
+        resolvedCwd,
+      );
+      const result = await controller.runCommand(
+        fullCommand,
+        { cwd: resolvedCwd, env: resolvedEnv },
+        execution.id,
+      );
 
-      const stdout = result.stdout || '';
-      const stderr = result.stderr || '';
+      const stdout = result.stdout || "";
+      const stderr = result.stderr || "";
 
-      applySpawnOutput(ownedStdoutTarget, 'stdout', child.stdout, stdout);
+      applySpawnOutput(ownedStdoutTarget, "stdout", child.stdout, stdout);
       closeSpawnOutput(ownedStdoutTarget, child.stdout);
 
-      applySpawnOutput(ownedStderrTarget, 'stderr', child.stderr, stderr);
+      applySpawnOutput(ownedStderrTarget, "stderr", child.stderr, stderr);
       closeSpawnOutput(ownedStderrTarget, child.stderr);
       releaseDuplicatedStdioTargets(duplicatedStdioFds);
 
@@ -4365,11 +5118,11 @@ function spawnWithBinding(
       // synchronously here would fire before the data reaches listeners.
       await new Promise<void>((resolve) => queueMicrotask(resolve));
       child.exitCode = result.exitCode;
-      child.emit('close', result.exitCode, null);
-      child.emit('exit', result.exitCode, null);
+      child.emit("close", result.exitCode, null);
+      child.emit("exit", result.exitCode, null);
     } catch (error) {
       releaseDuplicatedStdioTargets(duplicatedStdioFds);
-      child.emit('error', error);
+      child.emit("error", error);
     } finally {
       if (ownsExecution) {
         controller.destroyExecution(execution.id);
@@ -4386,7 +5139,7 @@ function spawnWithBinding(
 export function spawn(
   command: string,
   args?: string[] | SpawnOptions,
-  options?: SpawnOptions
+  options?: SpawnOptions,
 ): ChildProcess {
   return spawnWithBinding(undefined, command, args, options);
 }
@@ -4398,32 +5151,43 @@ function spawnSyncWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   command: string,
   args?: string[],
-  options?: SpawnOptions
+  options?: SpawnOptions,
 ): SpawnSyncResult {
   const spawnArgs = args || [];
   const baseEnv = getBindingDefaultEnv(binding);
-  const controller = getActiveController(binding, { ...baseEnv, ...(options?.env || {}) });
-  const resolvedCwd = options?.cwd ?? getBindingDefaultCwd(binding);
-  const resolvedEnv = addNodeModuleBinPaths({ ...baseEnv, ...(options?.env || {}) }, resolvedCwd);
-  const syntheticResult = getSyntheticSpawnSyncResult(controller, command, spawnArgs, {
-    ...options,
-    cwd: resolvedCwd,
-    env: resolvedEnv,
+  const controller = getActiveController(binding, {
+    ...baseEnv,
+    ...(options?.env || {}),
   });
+  const resolvedCwd = options?.cwd ?? getBindingDefaultCwd(binding);
+  const resolvedEnv = addNodeModuleBinPaths(
+    { ...baseEnv, ...(options?.env || {}) },
+    resolvedCwd,
+  );
+  const syntheticResult = getSyntheticSpawnSyncResult(
+    controller,
+    command,
+    spawnArgs,
+    {
+      ...options,
+      cwd: resolvedCwd,
+      env: resolvedEnv,
+    },
+  );
 
   if (syntheticResult) {
     return syntheticResult;
   }
 
   throw new Error(
-    'spawnSync is not supported in browser environment. Use spawn() instead.'
+    "spawnSync is not supported in browser environment. Use spawn() instead.",
   );
 }
 
 export function spawnSync(
   command: string,
   args?: string[],
-  options?: SpawnOptions
+  options?: SpawnOptions,
 ): SpawnSyncResult {
   return spawnSyncWithBinding(undefined, command, args, options);
 }
@@ -4436,7 +5200,7 @@ function execFileWithBinding(
   file: string,
   args?: string[] | ExecOptions | ExecCallback,
   options?: ExecOptions | ExecCallback,
-  callback?: ExecCallback
+  callback?: ExecCallback,
 ): ChildProcess {
   let execArgs: string[] = [];
   let execOptions: ExecOptions = {};
@@ -4444,22 +5208,23 @@ function execFileWithBinding(
 
   if (Array.isArray(args)) {
     execArgs = args;
-    if (typeof options === 'function') {
+    if (typeof options === "function") {
       cb = options;
     } else if (options) {
       execOptions = options;
       cb = callback;
     }
-  } else if (typeof args === 'function') {
+  } else if (typeof args === "function") {
     cb = args;
   } else if (args) {
     execOptions = args;
     cb = options as ExecCallback;
   }
 
-  const command = execArgs.length > 0
-    ? [file, ...execArgs.map((value) => shellQuote(value))].join(' ')
-    : file;
+  const command =
+    execArgs.length > 0
+      ? [file, ...execArgs.map((value) => shellQuote(value))].join(" ")
+      : file;
   return execWithBinding(binding, command, execOptions, cb);
 }
 
@@ -4467,7 +5232,7 @@ export function execFile(
   file: string,
   args?: string[] | ExecOptions | ExecCallback,
   options?: ExecOptions | ExecCallback,
-  callback?: ExecCallback
+  callback?: ExecCallback,
 ): ChildProcess {
   return execFileWithBinding(undefined, file, args, options, callback);
 }
@@ -4481,7 +5246,7 @@ function execFileSyncWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   file: string,
   argsOrOptions?: string[] | ExecOptions,
-  options?: ExecOptions
+  options?: ExecOptions,
 ): string | Buffer {
   let execArgs: string[] = [];
   let execOptions: ExecOptions = {};
@@ -4499,14 +5264,14 @@ function execFileSyncWithBinding(
   }
 
   throw new Error(
-    'execFileSync is not supported in browser environment. Use execFile() with async/await or callbacks instead.'
+    "execFileSync is not supported in browser environment. Use execFile() with async/await or callbacks instead.",
   );
 }
 
 export function execFileSync(
   file: string,
   argsOrOptions?: string[] | ExecOptions,
-  options?: ExecOptions
+  options?: ExecOptions,
 ): string | Buffer {
   return execFileSyncWithBinding(undefined, file, argsOrOptions, options);
 }
@@ -4522,15 +5287,17 @@ function forkWithBinding(
   binding: ChildProcessModuleBinding | undefined,
   modulePath: string,
   argsOrOptions?: string[] | Record<string, unknown>,
-  options?: Record<string, unknown>
+  options?: Record<string, unknown>,
 ): ChildProcess {
   const baseEnv = getBindingDefaultEnv(binding);
   const controller = getActiveController(binding, {
     ...baseEnv,
-    ...((!Array.isArray(argsOrOptions) && argsOrOptions?.env) ? argsOrOptions.env as Record<string, string> : {}),
+    ...(!Array.isArray(argsOrOptions) && argsOrOptions?.env
+      ? (argsOrOptions.env as Record<string, string>)
+      : {}),
     ...((options?.env as Record<string, string> | undefined) || {}),
   });
-  if (!controller) throw new Error('VFS not initialized');
+  if (!controller) throw new Error("VFS not initialized");
 
   // Parse overloaded arguments
   let args: string[] = [];
@@ -4545,23 +5312,24 @@ function forkWithBinding(
   const cwd = (opts.cwd as string) || getBindingDefaultCwd(binding);
   const env = {
     ...baseEnv,
-    ...(opts.env as Record<string, string> | undefined || {}),
+    ...((opts.env as Record<string, string> | undefined) || {}),
   };
   const execArgv = (opts.execArgv as string[]) || [];
 
   // Resolve the module path
-  const resolvedPath = modulePath.startsWith('/')
+  const resolvedPath = modulePath.startsWith("/")
     ? modulePath
-    : `${cwd}/${modulePath}`.replace(/\/+/g, '/');
+    : `${cwd}/${modulePath}`.replace(/\/+/g, "/");
 
   const child = new ChildProcess();
   child.connected = true;
-  child.spawnargs = ['node', ...execArgv, resolvedPath, ...args];
-  child.spawnfile = 'node';
+  child.spawnargs = ["node", ...execArgv, resolvedPath, ...args];
+  child.spawnfile = "node";
 
   // Create a Runtime for the child process
   const existingExecution = getActiveExecutionContext(controller, binding, env);
-  const execution = existingExecution ?? applyLegacyStreamingDefaults(controller, null);
+  const execution =
+    existingExecution ?? applyLegacyStreamingDefaults(controller, null);
   const ownsExecution = !existingExecution;
 
   const childRuntime = new Runtime(controller.vfs, {
@@ -4569,23 +5337,23 @@ function forkWithBinding(
     env: withExecutionEnv(controller, execution, env),
     childProcessController: controller,
     onConsole: (method, consoleArgs) => {
-      const msg = consoleArgs.map(a => String(a)).join(' ');
-      if (method === 'error' || method === 'warn') {
-        child.stderr?.emit('data', msg + '\n');
+      const msg = consoleArgs.map((a) => String(a)).join(" ");
+      if (method === "error" || method === "warn") {
+        child.stderr?.emit("data", msg + "\n");
       } else {
-        child.stdout?.emit('data', msg + '\n');
+        child.stdout?.emit("data", msg + "\n");
       }
     },
     onStdout: (data: string) => {
-      child.stdout?.emit('data', data);
+      child.stdout?.emit("data", data);
     },
     onStderr: (data: string) => {
-      child.stderr?.emit('data', data);
+      child.stderr?.emit("data", data);
     },
   });
 
   const childProc = childRuntime.getProcess();
-  childProc.argv = ['node', resolvedPath, ...args];
+  childProc.argv = ["node", resolvedPath, ...args];
 
   // Set up bidirectional IPC with serialized delivery.
   // In real Node.js, IPC messages cross a process boundary (pipe/fd), so there's
@@ -4598,15 +5366,22 @@ function forkWithBinding(
   // Without cloning, shared object references cause issues: vitest's child
   // modifies task objects after sending, and the parent sees stale/corrupted state.
   const cloneIpcMessage = (msg: unknown): unknown => {
-    try { return structuredClone(msg); } catch { return msg; }
+    try {
+      return structuredClone(msg);
+    } catch {
+      return msg;
+    }
   };
 
   // Parent sends → child process receives
-  child.send = (message: unknown, _callback?: (error: Error | null) => void): boolean => {
+  child.send = (
+    message: unknown,
+    _callback?: (error: Error | null) => void,
+  ): boolean => {
     if (!child.connected) return false;
     const cloned = cloneIpcMessage(message);
     setTimeout(() => {
-      childProc.emit('message', cloned);
+      childProc.emit("message", cloned);
     }, 0);
     return true;
   };
@@ -4618,15 +5393,21 @@ function forkWithBinding(
   // Instead, we directly invoke each 'message' listener and await any returned promises.
   // This ensures birpc's async onCollected finishes before onTaskUpdate starts.
   let ipcQueue: Promise<void> = Promise.resolve();
-  childProc.send = ((message: unknown, _callback?: (error: Error | null) => void): boolean => {
+  childProc.send = ((
+    message: unknown,
+    _callback?: (error: Error | null) => void,
+  ): boolean => {
     if (!child.connected) return false;
     const cloned = cloneIpcMessage(message);
     ipcQueue = ipcQueue.then(async () => {
-      const listeners = child.listeners('message');
+      const listeners = child.listeners("message");
       for (const listener of listeners) {
         try {
           const result = (listener as (...args: unknown[]) => unknown)(cloned);
-          if (result && typeof (result as Promise<unknown>).then === 'function') {
+          if (
+            result &&
+            typeof (result as Promise<unknown>).then === "function"
+          ) {
             await result;
           }
         } catch {
@@ -4642,7 +5423,10 @@ function forkWithBinding(
   execution.activeForkedChildren++;
 
   const notifyChildExit = () => {
-    execution.activeForkedChildren = Math.max(0, execution.activeForkedChildren - 1);
+    execution.activeForkedChildren = Math.max(
+      0,
+      execution.activeForkedChildren - 1,
+    );
     execution.onForkedChildExit?.();
     if (ownsExecution && !execution.activeForkedChildren) {
       controller.destroyExecution(execution.id);
@@ -4654,9 +5438,9 @@ function forkWithBinding(
     child.exitCode = code;
     child.connected = false;
     childProc.connected = false;
-    childProc.emit('exit', code);
-    child.emit('exit', code, null);
-    child.emit('close', code, null);
+    childProc.emit("exit", code);
+    child.emit("exit", code, null);
+    child.emit("close", code, null);
     notifyChildExit();
   }) as (code?: number) => never;
 
@@ -4665,9 +5449,9 @@ function forkWithBinding(
     child.killed = true;
     child.connected = false;
     childProc.connected = false;
-    childProc.emit('exit', null, signal || 'SIGTERM');
-    child.emit('exit', null, signal || 'SIGTERM');
-    child.emit('close', null, signal || 'SIGTERM');
+    childProc.emit("exit", null, signal || "SIGTERM");
+    child.emit("exit", null, signal || "SIGTERM");
+    child.emit("close", null, signal || "SIGTERM");
     notifyChildExit();
     return true;
   };
@@ -4675,25 +5459,31 @@ function forkWithBinding(
   child.disconnect = (): void => {
     child.connected = false;
     childProc.connected = false;
-    child.emit('disconnect');
+    child.emit("disconnect");
   };
 
   // Run the module asynchronously
   setTimeout(() => {
-    childRuntime.runFile(resolvedPath).catch((error) => {
-      // process.exit throws in sync mode — that's normal
-      if (error instanceof Error && error.message.startsWith('Process exited with code')) {
-        return;
-      }
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      child.stderr?.emit('data', `Error in forked process: ${errorMsg}\n`);
-      child.exitCode = 1;
-      child.emit('error', error);
-      child.emit('exit', 1, null);
-      child.emit('close', 1, null);
-    }).finally(() => {
-      childRuntime.clearCache();
-    });
+    childRuntime
+      .runFile(resolvedPath)
+      .catch((error) => {
+        // process.exit throws in sync mode — that's normal
+        if (
+          error instanceof Error &&
+          error.message.startsWith("Process exited with code")
+        ) {
+          return;
+        }
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        child.stderr?.emit("data", `Error in forked process: ${errorMsg}\n`);
+        child.exitCode = 1;
+        child.emit("error", error);
+        child.emit("exit", 1, null);
+        child.emit("close", 1, null);
+      })
+      .finally(() => {
+        childRuntime.clearCache();
+      });
   }, 0);
 
   return child;
@@ -4702,7 +5492,7 @@ function forkWithBinding(
 export function fork(
   modulePath: string,
   argsOrOptions?: string[] | Record<string, unknown>,
-  options?: Record<string, unknown>
+  options?: Record<string, unknown>,
 ): ChildProcess {
   return forkWithBinding(undefined, modulePath, argsOrOptions, options);
 }
@@ -4717,7 +5507,7 @@ export class ChildProcess extends EventEmitter {
   exitCode: number | null = null;
   signalCode: string | null = null;
   spawnargs: string[] = [];
-  spawnfile: string = '';
+  spawnfile: string = "";
 
   stdin: Writable | null;
   stdout: Readable | null;
@@ -4735,8 +5525,8 @@ export class ChildProcess extends EventEmitter {
 
   kill(signal?: string): boolean {
     this.killed = true;
-    this.emit('exit', null, signal || 'SIGTERM');
-    this.emit('close', null, signal || 'SIGTERM');
+    this.emit("exit", null, signal || "SIGTERM");
+    this.emit("close", null, signal || "SIGTERM");
     return true;
   }
 
@@ -4746,7 +5536,7 @@ export class ChildProcess extends EventEmitter {
 
   send(message: unknown, callback?: (error: Error | null) => void): boolean {
     // IPC not supported
-    if (callback) callback(new Error('IPC not supported'));
+    if (callback) callback(new Error("IPC not supported"));
     return false;
   }
 
@@ -4768,27 +5558,36 @@ export function createChildProcessModule(binding?: ChildProcessModuleBinding) {
     exec: (
       command: string,
       optionsOrCallback?: ExecOptions | ExecCallback,
-      callback?: ExecCallback
+      callback?: ExecCallback,
     ) => execWithBinding(binding, command, optionsOrCallback, callback),
-    execSync: (command: string, options?: ExecOptions) => execSyncWithBinding(binding, command, options),
+    execSync: (command: string, options?: ExecOptions) =>
+      execSyncWithBinding(binding, command, options),
     execFile: (
       file: string,
       args?: string[] | ExecOptions | ExecCallback,
       options?: ExecOptions | ExecCallback,
-      callback?: ExecCallback
+      callback?: ExecCallback,
     ) => execFileWithBinding(binding, file, args, options, callback),
     execFileSync: (
       file: string,
       argsOrOptions?: string[] | ExecOptions,
-      options?: ExecOptions
+      options?: ExecOptions,
     ) => execFileSyncWithBinding(binding, file, argsOrOptions, options),
-    spawn: (command: string, args?: string[] | SpawnOptions, options?: SpawnOptions) => {
+    spawn: (
+      command: string,
+      args?: string[] | SpawnOptions,
+      options?: SpawnOptions,
+    ) => {
       return spawnWithBinding(binding, command, args, options);
     },
     spawnSync: (command: string, args?: string[], options?: SpawnOptions) => {
       return spawnSyncWithBinding(binding, command, args, options);
     },
-    fork: (modulePath: string, argsOrOptions?: string[] | Record<string, unknown>, options?: Record<string, unknown>) => {
+    fork: (
+      modulePath: string,
+      argsOrOptions?: string[] | Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ) => {
       return forkWithBinding(binding, modulePath, argsOrOptions, options);
     },
     ChildProcess,
@@ -4824,7 +5623,11 @@ interface ParsedGrepArgs {
   excludeGlob: string | null;
 }
 
-function parseGrepArgs(args: string[], isEgrep: boolean, isFgrep: boolean): ParsedGrepArgs {
+function parseGrepArgs(
+  args: string[],
+  isEgrep: boolean,
+  isFgrep: boolean,
+): ParsedGrepArgs {
   const parsed: ParsedGrepArgs = {
     pattern: null,
     files: [],
@@ -4849,68 +5652,177 @@ function parseGrepArgs(args: string[], isEgrep: boolean, isFgrep: boolean): Pars
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
-    if (arg === '--' ) { i++; break; }
-    if (arg === '-e' || arg === '--regexp') {
-      parsed.pattern = args[++i] ?? '';
-      i++; continue;
+    if (arg === "--") {
+      i++;
+      break;
     }
-    if (arg.startsWith('--include=')) { parsed.includeGlob = arg.slice('--include='.length); i++; continue; }
-    if (arg === '--include') { parsed.includeGlob = args[++i] ?? ''; i++; continue; }
-    if (arg.startsWith('--exclude=')) { parsed.excludeGlob = arg.slice('--exclude='.length); i++; continue; }
-    if (arg === '--exclude') { parsed.excludeGlob = args[++i] ?? ''; i++; continue; }
-    if (arg === '-A' || arg === '--after-context') { parsed.afterContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('-A') && arg.length > 2) { parsed.afterContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
-    if (arg === '-B' || arg === '--before-context') { parsed.beforeContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('-B') && arg.length > 2) { parsed.beforeContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
-    if (arg === '-C' || arg === '--context') { const n = parseInt(args[++i] ?? '0', 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
-    if (arg.startsWith('-C') && arg.length > 2) { const n = parseInt(arg.slice(2), 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
-    if (arg === '-m' || arg === '--max-count') { parsed.maxCount = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('-m') && arg.length > 2 && /^\d/.test(arg.slice(2))) { parsed.maxCount = parseInt(arg.slice(2), 10) || 0; i++; continue; }
+    if (arg === "-e" || arg === "--regexp") {
+      parsed.pattern = args[++i] ?? "";
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--include=")) {
+      parsed.includeGlob = arg.slice("--include=".length);
+      i++;
+      continue;
+    }
+    if (arg === "--include") {
+      parsed.includeGlob = args[++i] ?? "";
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--exclude=")) {
+      parsed.excludeGlob = arg.slice("--exclude=".length);
+      i++;
+      continue;
+    }
+    if (arg === "--exclude") {
+      parsed.excludeGlob = args[++i] ?? "";
+      i++;
+      continue;
+    }
+    if (arg === "-A" || arg === "--after-context") {
+      parsed.afterContext = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-A") && arg.length > 2) {
+      parsed.afterContext = parseInt(arg.slice(2), 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg === "-B" || arg === "--before-context") {
+      parsed.beforeContext = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-B") && arg.length > 2) {
+      parsed.beforeContext = parseInt(arg.slice(2), 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg === "-C" || arg === "--context") {
+      const n = parseInt(args[++i] ?? "0", 10) || 0;
+      parsed.afterContext = n;
+      parsed.beforeContext = n;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-C") && arg.length > 2) {
+      const n = parseInt(arg.slice(2), 10) || 0;
+      parsed.afterContext = n;
+      parsed.beforeContext = n;
+      i++;
+      continue;
+    }
+    if (arg === "-m" || arg === "--max-count") {
+      parsed.maxCount = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-m") && arg.length > 2 && /^\d/.test(arg.slice(2))) {
+      parsed.maxCount = parseInt(arg.slice(2), 10) || 0;
+      i++;
+      continue;
+    }
 
-    if (arg.startsWith('-') && !arg.startsWith('--') && arg.length > 1) {
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.length > 1) {
       // combined short flags like -rin
       for (let j = 1; j < arg.length; j++) {
         const ch = arg[j];
         switch (ch) {
-          case 'i': parsed.caseInsensitive = true; break;
-          case 'r': case 'R': parsed.recursive = true; break;
-          case 'n': parsed.lineNumbers = true; break;
-          case 'l': parsed.filesOnly = true; break;
-          case 'c': parsed.countOnly = true; break;
-          case 'v': parsed.invert = true; break;
-          case 'w': parsed.wordMatch = true; break;
-          case 'E': parsed.extendedRegex = true; break;
-          case 'F': parsed.fixedStrings = true; break;
-          case 'q': parsed.quiet = true; break;
-          case 'o': parsed.onlyMatching = true; break;
-          case 'H': break; // with-filename (default for multi-file)
-          case 'h': break; // no-filename
-          default: break;
+          case "i":
+            parsed.caseInsensitive = true;
+            break;
+          case "r":
+          case "R":
+            parsed.recursive = true;
+            break;
+          case "n":
+            parsed.lineNumbers = true;
+            break;
+          case "l":
+            parsed.filesOnly = true;
+            break;
+          case "c":
+            parsed.countOnly = true;
+            break;
+          case "v":
+            parsed.invert = true;
+            break;
+          case "w":
+            parsed.wordMatch = true;
+            break;
+          case "E":
+            parsed.extendedRegex = true;
+            break;
+          case "F":
+            parsed.fixedStrings = true;
+            break;
+          case "q":
+            parsed.quiet = true;
+            break;
+          case "o":
+            parsed.onlyMatching = true;
+            break;
+          case "H":
+            break; // with-filename (default for multi-file)
+          case "h":
+            break; // no-filename
+          default:
+            break;
         }
       }
-      i++; continue;
+      i++;
+      continue;
     }
 
-    if (arg.startsWith('--')) {
+    if (arg.startsWith("--")) {
       // long flags
       switch (arg) {
-        case '--recursive': parsed.recursive = true; break;
-        case '--ignore-case': parsed.caseInsensitive = true; break;
-        case '--line-number': parsed.lineNumbers = true; break;
-        case '--files-with-matches': parsed.filesOnly = true; break;
-        case '--count': parsed.countOnly = true; break;
-        case '--invert-match': parsed.invert = true; break;
-        case '--word-regexp': parsed.wordMatch = true; break;
-        case '--extended-regexp': parsed.extendedRegex = true; break;
-        case '--fixed-strings': parsed.fixedStrings = true; break;
-        case '--quiet': case '--silent': parsed.quiet = true; break;
-        case '--only-matching': parsed.onlyMatching = true; break;
-        case '--color': case '--colour': break; // ignore
+        case "--recursive":
+          parsed.recursive = true;
+          break;
+        case "--ignore-case":
+          parsed.caseInsensitive = true;
+          break;
+        case "--line-number":
+          parsed.lineNumbers = true;
+          break;
+        case "--files-with-matches":
+          parsed.filesOnly = true;
+          break;
+        case "--count":
+          parsed.countOnly = true;
+          break;
+        case "--invert-match":
+          parsed.invert = true;
+          break;
+        case "--word-regexp":
+          parsed.wordMatch = true;
+          break;
+        case "--extended-regexp":
+          parsed.extendedRegex = true;
+          break;
+        case "--fixed-strings":
+          parsed.fixedStrings = true;
+          break;
+        case "--quiet":
+        case "--silent":
+          parsed.quiet = true;
+          break;
+        case "--only-matching":
+          parsed.onlyMatching = true;
+          break;
+        case "--color":
+        case "--colour":
+          break; // ignore
         default:
-          if (arg.startsWith('--color=') || arg.startsWith('--colour=')) break;
+          if (arg.startsWith("--color=") || arg.startsWith("--colour=")) break;
           break;
       }
-      i++; continue;
+      i++;
+      continue;
     }
 
     // Positional args: first is pattern, rest are files
@@ -4989,68 +5901,201 @@ function parseRgArgs(args: string[]): ParsedRgArgs {
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
-    if (arg === '--') { i++; break; }
-
-    if (arg === '-e' || arg === '--regexp') { parsed.pattern = args[++i] ?? ''; i++; continue; }
-    if (arg === '-g' || arg === '--glob') { parsed.globs.push(args[++i] ?? ''); i++; continue; }
-    if (arg.startsWith('--glob=')) { parsed.globs.push(arg.slice('--glob='.length)); i++; continue; }
-    if (arg === '-t' || arg === '--type') { parsed.typeFilters.push(args[++i] ?? ''); i++; continue; }
-    if (arg.startsWith('--type=')) { parsed.typeFilters.push(arg.slice('--type='.length)); i++; continue; }
-    if (arg === '-A' || arg === '--after-context') { parsed.afterContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('-A') && arg.length > 2) { parsed.afterContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
-    if (arg === '-B' || arg === '--before-context') { parsed.beforeContext = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('-B') && arg.length > 2) { parsed.beforeContext = parseInt(arg.slice(2), 10) || 0; i++; continue; }
-    if (arg === '-C' || arg === '--context') { const n = parseInt(args[++i] ?? '0', 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
-    if (arg.startsWith('-C') && arg.length > 2) { const n = parseInt(arg.slice(2), 10) || 0; parsed.afterContext = n; parsed.beforeContext = n; i++; continue; }
-    if (arg === '-m' || arg === '--max-count') { parsed.maxCount = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('-m') && arg.length > 2 && /^\d/.test(arg.slice(2))) { parsed.maxCount = parseInt(arg.slice(2), 10) || 0; i++; continue; }
-    if (arg === '--max-depth' || arg === '--maxdepth') { parsed.maxDepth = parseInt(args[++i] ?? '0', 10) || 0; i++; continue; }
-    if (arg.startsWith('--max-depth=')) { parsed.maxDepth = parseInt(arg.slice('--max-depth='.length), 10) || 0; i++; continue; }
-
-    if (arg.startsWith('-') && !arg.startsWith('--') && arg.length > 1) {
-      for (let j = 1; j < arg.length; j++) {
-        switch (arg[j]) {
-          case 'i': parsed.caseInsensitive = true; parsed.smartCase = false; break;
-          case 's': parsed.caseSensitive = true; parsed.smartCase = false; break;
-          case 'S': parsed.smartCase = true; break;
-          case 'F': parsed.fixedStrings = true; break;
-          case 'w': parsed.wordMatch = true; break;
-          case 'n': parsed.lineNumbers = true; parsed.noLineNumbers = false; break;
-          case 'N': parsed.noLineNumbers = true; parsed.lineNumbers = false; break;
-          case 'l': parsed.filesOnly = true; break;
-          case 'c': parsed.countOnly = true; break;
-          case 'v': parsed.invert = true; break;
-          case 'q': parsed.quiet = true; break;
-          case 'o': parsed.onlyMatching = true; break;
-          default: break;
-        }
-      }
-      i++; continue;
+    if (arg === "--") {
+      i++;
+      break;
     }
 
-    if (arg.startsWith('--')) {
+    if (arg === "-e" || arg === "--regexp") {
+      parsed.pattern = args[++i] ?? "";
+      i++;
+      continue;
+    }
+    if (arg === "-g" || arg === "--glob") {
+      parsed.globs.push(args[++i] ?? "");
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--glob=")) {
+      parsed.globs.push(arg.slice("--glob=".length));
+      i++;
+      continue;
+    }
+    if (arg === "-t" || arg === "--type") {
+      parsed.typeFilters.push(args[++i] ?? "");
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--type=")) {
+      parsed.typeFilters.push(arg.slice("--type=".length));
+      i++;
+      continue;
+    }
+    if (arg === "-A" || arg === "--after-context") {
+      parsed.afterContext = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-A") && arg.length > 2) {
+      parsed.afterContext = parseInt(arg.slice(2), 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg === "-B" || arg === "--before-context") {
+      parsed.beforeContext = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-B") && arg.length > 2) {
+      parsed.beforeContext = parseInt(arg.slice(2), 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg === "-C" || arg === "--context") {
+      const n = parseInt(args[++i] ?? "0", 10) || 0;
+      parsed.afterContext = n;
+      parsed.beforeContext = n;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-C") && arg.length > 2) {
+      const n = parseInt(arg.slice(2), 10) || 0;
+      parsed.afterContext = n;
+      parsed.beforeContext = n;
+      i++;
+      continue;
+    }
+    if (arg === "-m" || arg === "--max-count") {
+      parsed.maxCount = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-m") && arg.length > 2 && /^\d/.test(arg.slice(2))) {
+      parsed.maxCount = parseInt(arg.slice(2), 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg === "--max-depth" || arg === "--maxdepth") {
+      parsed.maxDepth = parseInt(args[++i] ?? "0", 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--max-depth=")) {
+      parsed.maxDepth = parseInt(arg.slice("--max-depth=".length), 10) || 0;
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.length > 1) {
+      for (let j = 1; j < arg.length; j++) {
+        switch (arg[j]) {
+          case "i":
+            parsed.caseInsensitive = true;
+            parsed.smartCase = false;
+            break;
+          case "s":
+            parsed.caseSensitive = true;
+            parsed.smartCase = false;
+            break;
+          case "S":
+            parsed.smartCase = true;
+            break;
+          case "F":
+            parsed.fixedStrings = true;
+            break;
+          case "w":
+            parsed.wordMatch = true;
+            break;
+          case "n":
+            parsed.lineNumbers = true;
+            parsed.noLineNumbers = false;
+            break;
+          case "N":
+            parsed.noLineNumbers = true;
+            parsed.lineNumbers = false;
+            break;
+          case "l":
+            parsed.filesOnly = true;
+            break;
+          case "c":
+            parsed.countOnly = true;
+            break;
+          case "v":
+            parsed.invert = true;
+            break;
+          case "q":
+            parsed.quiet = true;
+            break;
+          case "o":
+            parsed.onlyMatching = true;
+            break;
+          default:
+            break;
+        }
+      }
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--")) {
       switch (arg) {
-        case '--ignore-case': parsed.caseInsensitive = true; parsed.smartCase = false; break;
-        case '--case-sensitive': parsed.caseSensitive = true; parsed.smartCase = false; break;
-        case '--smart-case': parsed.smartCase = true; break;
-        case '--fixed-strings': parsed.fixedStrings = true; break;
-        case '--word-regexp': parsed.wordMatch = true; break;
-        case '--line-number': parsed.lineNumbers = true; parsed.noLineNumbers = false; break;
-        case '--no-line-number': parsed.noLineNumbers = true; parsed.lineNumbers = false; break;
-        case '--files-with-matches': parsed.filesOnly = true; break;
-        case '--files': parsed.listFiles = true; break;
-        case '--count': parsed.countOnly = true; break;
-        case '--invert-match': parsed.invert = true; break;
-        case '--quiet': parsed.quiet = true; break;
-        case '--only-matching': parsed.onlyMatching = true; break;
-        case '--hidden': parsed.hidden = true; break;
-        case '--no-ignore': break; // ignore
-        case '--color': case '--colour': break;
+        case "--ignore-case":
+          parsed.caseInsensitive = true;
+          parsed.smartCase = false;
+          break;
+        case "--case-sensitive":
+          parsed.caseSensitive = true;
+          parsed.smartCase = false;
+          break;
+        case "--smart-case":
+          parsed.smartCase = true;
+          break;
+        case "--fixed-strings":
+          parsed.fixedStrings = true;
+          break;
+        case "--word-regexp":
+          parsed.wordMatch = true;
+          break;
+        case "--line-number":
+          parsed.lineNumbers = true;
+          parsed.noLineNumbers = false;
+          break;
+        case "--no-line-number":
+          parsed.noLineNumbers = true;
+          parsed.lineNumbers = false;
+          break;
+        case "--files-with-matches":
+          parsed.filesOnly = true;
+          break;
+        case "--files":
+          parsed.listFiles = true;
+          break;
+        case "--count":
+          parsed.countOnly = true;
+          break;
+        case "--invert-match":
+          parsed.invert = true;
+          break;
+        case "--quiet":
+          parsed.quiet = true;
+          break;
+        case "--only-matching":
+          parsed.onlyMatching = true;
+          break;
+        case "--hidden":
+          parsed.hidden = true;
+          break;
+        case "--no-ignore":
+          break; // ignore
+        case "--color":
+        case "--colour":
+          break;
         default:
-          if (arg.startsWith('--color=') || arg.startsWith('--colour=')) break;
+          if (arg.startsWith("--color=") || arg.startsWith("--colour=")) break;
           break;
       }
-      i++; continue;
+      i++;
+      continue;
     }
 
     if (parsed.pattern === null) {
@@ -5074,14 +6119,22 @@ function parseRgArgs(args: string[]): ParsedRgArgs {
 }
 
 function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildRegex(pattern: string, flags: { caseInsensitive: boolean; wordMatch: boolean; fixedStrings: boolean; extendedRegex?: boolean }): RegExp | null {
+function buildRegex(
+  pattern: string,
+  flags: {
+    caseInsensitive: boolean;
+    wordMatch: boolean;
+    fixedStrings: boolean;
+    extendedRegex?: boolean;
+  },
+): RegExp | null {
   try {
     let src = flags.fixedStrings ? escapeRegExp(pattern) : pattern;
     if (flags.wordMatch) src = `\\b${src}\\b`;
-    const regexFlags = flags.caseInsensitive ? 'gi' : 'g';
+    const regexFlags = flags.caseInsensitive ? "gi" : "g";
     return new RegExp(src, regexFlags);
   } catch {
     return null;
@@ -5098,26 +6151,29 @@ function isBinaryContent(content: string): boolean {
 }
 
 function resolvePath(base: string, p: string): string {
-  if (p.startsWith('/')) return p;
-  return `${base}/${p}`.replace(/\/+/g, '/');
+  if (p.startsWith("/")) return p;
+  return `${base}/${p}`.replace(/\/+/g, "/");
 }
 
 function relativizePath(absPath: string, cwd: string): string {
-  if (absPath.startsWith(cwd + '/')) {
+  if (absPath.startsWith(cwd + "/")) {
     return absPath.slice(cwd.length + 1);
   }
-  if (absPath === cwd) return '.';
+  if (absPath === cwd) return ".";
   return absPath;
 }
 
 function simpleGlobMatch(pattern: string, name: string): boolean {
   // Convert simple glob pattern to regex (supports * and ?)
-  const src = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+  const src = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
   return new RegExp(`^${src}$`).test(name);
 }
 
 async function collectFiles(
-  fs: import('just-bash').CommandContext['fs'],
+  fs: import("just-bash").CommandContext["fs"],
   dir: string,
   recursive: boolean,
   includeGlob: string | null,
@@ -5133,10 +6189,10 @@ async function collectFiles(
       return;
     }
     for (const name of entries) {
-      if (name === '.' || name === '..') continue;
+      if (name === "." || name === "..") continue;
       // skip hidden dirs and node_modules by default in recursive mode
-      if (recursive && (name === 'node_modules' || name === '.git')) continue;
-      const fullPath = `${dirPath}/${name}`.replace(/\/+/g, '/');
+      if (recursive && (name === "node_modules" || name === ".git")) continue;
+      const fullPath = `${dirPath}/${name}`.replace(/\/+/g, "/");
       let stat;
       try {
         stat = await fs.stat(fullPath);
@@ -5168,7 +6224,11 @@ async function grepViaVfs(
     extendedRegex: parsed.extendedRegex,
   });
   if (!regex) {
-    return { stdout: '', stderr: `grep: Invalid regular expression: '${parsed.pattern}'\n`, exitCode: 2 };
+    return {
+      stdout: "",
+      stderr: `grep: Invalid regular expression: '${parsed.pattern}'\n`,
+      exitCode: 2,
+    };
   }
 
   // Determine files to search
@@ -5179,7 +6239,13 @@ async function grepViaVfs(
   }
 
   if (parsed.files.length === 0 && parsed.recursive) {
-    filePaths = await collectFiles(ctx.fs, ctx.cwd, true, parsed.includeGlob, parsed.excludeGlob);
+    filePaths = await collectFiles(
+      ctx.fs,
+      ctx.cwd,
+      true,
+      parsed.includeGlob,
+      parsed.excludeGlob,
+    );
   } else {
     for (const f of parsed.files) {
       const abs = resolvePath(ctx.cwd, f);
@@ -5191,7 +6257,13 @@ async function grepViaVfs(
       }
       if (stat.isDirectory) {
         if (parsed.recursive) {
-          const subFiles = await collectFiles(ctx.fs, abs, true, parsed.includeGlob, parsed.excludeGlob);
+          const subFiles = await collectFiles(
+            ctx.fs,
+            abs,
+            true,
+            parsed.includeGlob,
+            parsed.excludeGlob,
+          );
           filePaths.push(...subFiles);
         }
       } else {
@@ -5223,9 +6295,9 @@ async function grepViaVfs(
       continue;
     }
 
-    const lines = content.split('\n');
+    const lines = content.split("\n");
     // Remove trailing empty line from split
-    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 
     const display = relativizePath(fp, ctx.cwd);
     let fileMatchCount = 0;
@@ -5248,28 +6320,44 @@ async function grepViaVfs(
     if (fileMatchCount === 0) continue;
     anyMatch = true;
 
-    if (parsed.quiet) return { stdout: '', stderr: '', exitCode: 0 };
-    if (parsed.filesOnly) { outputLines.push(display); continue; }
-    if (parsed.countOnly) { outputLines.push(multiFile ? `${display}:${fileMatchCount}` : `${fileMatchCount}`); continue; }
+    if (parsed.quiet) return { stdout: "", stderr: "", exitCode: 0 };
+    if (parsed.filesOnly) {
+      outputLines.push(display);
+      continue;
+    }
+    if (parsed.countOnly) {
+      outputLines.push(
+        multiFile ? `${display}:${fileMatchCount}` : `${fileMatchCount}`,
+      );
+      continue;
+    }
 
     // Compute context lines
     for (const idx of matchedLineIndices) {
-      for (let b = Math.max(0, idx - parsed.beforeContext); b < idx; b++) contextLineIndices.add(b);
-      for (let a = idx + 1; a <= Math.min(lines.length - 1, idx + parsed.afterContext); a++) contextLineIndices.add(a);
+      for (let b = Math.max(0, idx - parsed.beforeContext); b < idx; b++)
+        contextLineIndices.add(b);
+      for (
+        let a = idx + 1;
+        a <= Math.min(lines.length - 1, idx + parsed.afterContext);
+        a++
+      )
+        contextLineIndices.add(a);
     }
 
     // Output
     let lastPrintedIdx = -2;
-    const allIndices = [...matchedLineIndices, ...contextLineIndices].sort((a, b) => a - b);
+    const allIndices = [...matchedLineIndices, ...contextLineIndices].sort(
+      (a, b) => a - b,
+    );
     const uniqueIndices = [...new Set(allIndices)];
     for (const idx of uniqueIndices) {
       if (lastPrintedIdx >= 0 && idx > lastPrintedIdx + 1) {
-        outputLines.push('--');
+        outputLines.push("--");
       }
       const line = lines[idx];
       const lineNum = idx + 1;
       const isMatch = matchedLineIndices.has(idx);
-      const sep = isMatch ? ':' : '-';
+      const sep = isMatch ? ":" : "-";
 
       let text: string;
       if (parsed.onlyMatching && isMatch) {
@@ -5280,16 +6368,25 @@ async function grepViaVfs(
           allMatches.push(m[0]);
           if (!regex.global) break;
         }
-        text = allMatches.join('\n');
+        text = allMatches.join("\n");
       } else {
         text = line;
       }
 
-      if (multiFile && (parsed.lineNumbers || parsed.beforeContext > 0 || parsed.afterContext > 0)) {
+      if (
+        multiFile &&
+        (parsed.lineNumbers ||
+          parsed.beforeContext > 0 ||
+          parsed.afterContext > 0)
+      ) {
         outputLines.push(`${display}${sep}${lineNum}${sep}${text}`);
       } else if (multiFile) {
         outputLines.push(`${display}${sep}${text}`);
-      } else if (parsed.lineNumbers || parsed.beforeContext > 0 || parsed.afterContext > 0) {
+      } else if (
+        parsed.lineNumbers ||
+        parsed.beforeContext > 0 ||
+        parsed.afterContext > 0
+      ) {
         outputLines.push(`${lineNum}${sep}${text}`);
       } else {
         outputLines.push(text);
@@ -5298,9 +6395,10 @@ async function grepViaVfs(
     }
   }
 
-  if (parsed.quiet) return { stdout: '', stderr: '', exitCode: anyMatch ? 0 : 1 };
-  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
-  return { stdout, stderr: '', exitCode: anyMatch ? 0 : 1 };
+  if (parsed.quiet)
+    return { stdout: "", stderr: "", exitCode: anyMatch ? 0 : 1 };
+  const stdout = outputLines.length > 0 ? outputLines.join("\n") + "\n" : "";
+  return { stdout, stderr: "", exitCode: anyMatch ? 0 : 1 };
 }
 
 function grepStdin(
@@ -5308,8 +6406,8 @@ function grepStdin(
   regex: RegExp,
   stdin: string,
 ): { stdout: string; stderr: string; exitCode: number } {
-  const lines = stdin.split('\n');
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const lines = stdin.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   const outputLines: string[] = [];
   let matchCount = 0;
 
@@ -5320,9 +6418,10 @@ function grepStdin(
     const isMatch = parsed.invert ? !matches : matches;
     if (!isMatch) continue;
     matchCount++;
-    if (parsed.quiet) return { stdout: '', stderr: '', exitCode: 0 };
-    if (parsed.countOnly) { /* count at end */ }
-    else if (parsed.onlyMatching) {
+    if (parsed.quiet) return { stdout: "", stderr: "", exitCode: 0 };
+    if (parsed.countOnly) {
+      /* count at end */
+    } else if (parsed.onlyMatching) {
       regex.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = regex.exec(line)) !== null) {
@@ -5335,10 +6434,16 @@ function grepStdin(
     if (parsed.maxCount > 0 && matchCount >= parsed.maxCount) break;
   }
 
-  if (parsed.quiet) return { stdout: '', stderr: '', exitCode: matchCount > 0 ? 0 : 1 };
-  if (parsed.countOnly) return { stdout: `${matchCount}\n`, stderr: '', exitCode: matchCount > 0 ? 0 : 1 };
-  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
-  return { stdout, stderr: '', exitCode: matchCount > 0 ? 0 : 1 };
+  if (parsed.quiet)
+    return { stdout: "", stderr: "", exitCode: matchCount > 0 ? 0 : 1 };
+  if (parsed.countOnly)
+    return {
+      stdout: `${matchCount}\n`,
+      stderr: "",
+      exitCode: matchCount > 0 ? 0 : 1,
+    };
+  const stdout = outputLines.length > 0 ? outputLines.join("\n") + "\n" : "";
+  return { stdout, stderr: "", exitCode: matchCount > 0 ? 0 : 1 };
 }
 
 async function executeGrepCommand(
@@ -5351,8 +6456,12 @@ async function executeGrepCommand(
   const parsed = parseGrepArgs(args, isEgrep, isFgrep);
 
   if (parsed.pattern === null) {
-    const cmd = isFgrep ? 'fgrep' : isEgrep ? 'egrep' : 'grep';
-    return { stdout: '', stderr: `Usage: ${cmd} [OPTION]... PATTERN [FILE]...\n`, exitCode: 2 };
+    const cmd = isFgrep ? "fgrep" : isEgrep ? "egrep" : "grep";
+    return {
+      stdout: "",
+      stderr: `Usage: ${cmd} [OPTION]... PATTERN [FILE]...\n`,
+      exitCode: 2,
+    };
   }
 
   // Stdin mode — always handle locally
@@ -5364,7 +6473,11 @@ async function executeGrepCommand(
       extendedRegex: parsed.extendedRegex,
     });
     if (!regex) {
-      return { stdout: '', stderr: `grep: Invalid regular expression: '${parsed.pattern}'\n`, exitCode: 2 };
+      return {
+        stdout: "",
+        stderr: `grep: Invalid regular expression: '${parsed.pattern}'\n`,
+        exitCode: 2,
+      };
     }
     return grepStdin(parsed, regex, ctx.stdin);
   }
@@ -5377,7 +6490,11 @@ async function executeGrepCommand(
   // Try search provider
   if (controller.searchProvider) {
     try {
-      return await grepViaSearchProvider(parsed, ctx, controller.searchProvider);
+      return await grepViaSearchProvider(
+        parsed,
+        ctx,
+        controller.searchProvider,
+      );
     } catch {
       // Fall back to VFS
     }
@@ -5418,16 +6535,21 @@ async function grepViaSearchProvider(
   });
 
   if (parsed.quiet) {
-    return { stdout: '', stderr: '', exitCode: result.files.length > 0 ? 0 : 1 };
+    return {
+      stdout: "",
+      stderr: "",
+      exitCode: result.files.length > 0 ? 0 : 1,
+    };
   }
 
-  const multiFile = parsed.files.length !== 1 || parsed.recursive || result.files.length > 1;
+  const multiFile =
+    parsed.files.length !== 1 || parsed.recursive || result.files.length > 1;
   const outputLines: string[] = [];
 
   // If specific non-directory files were given, filter results to those
   let allowedPaths: Set<string> | null = null;
   if (parsed.files.length > 0 && !parsed.recursive) {
-    allowedPaths = new Set(parsed.files.map(f => resolvePath(ctx.cwd, f)));
+    allowedPaths = new Set(parsed.files.map((f) => resolvePath(ctx.cwd, f)));
   }
 
   for (const fileResult of result.files) {
@@ -5471,8 +6593,8 @@ async function grepViaSearchProvider(
     }
   }
 
-  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
-  return { stdout, stderr: '', exitCode: outputLines.length > 0 ? 0 : 1 };
+  const stdout = outputLines.length > 0 ? outputLines.join("\n") + "\n" : "";
+  return { stdout, stderr: "", exitCode: outputLines.length > 0 ? 0 : 1 };
 }
 
 async function executeRgCommand(
@@ -5487,7 +6609,12 @@ async function executeRgCommand(
   }
 
   if (parsed.pattern === null) {
-    return { stdout: '', stderr: 'error: The following required arguments were not provided:\n  <PATTERN>\n\nUsage:\n  rg <PATTERN> [PATH ...]\n', exitCode: 2 };
+    return {
+      stdout: "",
+      stderr:
+        "error: The following required arguments were not provided:\n  <PATTERN>\n\nUsage:\n  rg <PATTERN> [PATH ...]\n",
+      exitCode: 2,
+    };
   }
 
   // Stdin mode
@@ -5503,7 +6630,7 @@ async function executeRgCommand(
       fixedStrings: parsed.fixedStrings,
     });
     if (!regex) {
-      return { stdout: '', stderr: `rg: regex parse error\n`, exitCode: 2 };
+      return { stdout: "", stderr: `rg: regex parse error\n`, exitCode: 2 };
     }
     const grepParsed: ParsedGrepArgs = {
       pattern: parsed.pattern,
@@ -5557,12 +6684,29 @@ function rgSmartCaseSensitive(parsed: ParsedRgArgs): boolean {
 
 function rgTypeToGlob(typeFilter: string): string | null {
   const typeMap: Record<string, string> = {
-    js: '*.js', ts: '*.ts', tsx: '*.tsx', jsx: '*.jsx',
-    py: '*.py', rust: '*.rs', go: '*.go', java: '*.java',
-    html: '*.html', css: '*.css', json: '*.json', md: '*.md',
-    yaml: '*.yaml', yml: '*.yml', xml: '*.xml', toml: '*.toml',
-    txt: '*.txt', sh: '*.sh', rb: '*.rb', php: '*.php',
-    c: '*.c', cpp: '*.cpp', h: '*.h',
+    js: "*.js",
+    ts: "*.ts",
+    tsx: "*.tsx",
+    jsx: "*.jsx",
+    py: "*.py",
+    rust: "*.rs",
+    go: "*.go",
+    java: "*.java",
+    html: "*.html",
+    css: "*.css",
+    json: "*.json",
+    md: "*.md",
+    yaml: "*.yaml",
+    yml: "*.yml",
+    xml: "*.xml",
+    toml: "*.toml",
+    txt: "*.txt",
+    sh: "*.sh",
+    rb: "*.rb",
+    php: "*.php",
+    c: "*.c",
+    cpp: "*.cpp",
+    h: "*.h",
   };
   return typeMap[typeFilter] ?? null;
 }
@@ -5578,7 +6722,7 @@ function buildRgGlobFilters(parsed: ParsedRgArgs): {
   }
 
   for (const g of parsed.globs) {
-    if (!g.startsWith('!')) {
+    if (!g.startsWith("!")) {
       includeGlob = g;
       break;
     }
@@ -5586,7 +6730,7 @@ function buildRgGlobFilters(parsed: ParsedRgArgs): {
 
   let excludeGlob: string | null = null;
   for (const g of parsed.globs) {
-    if (g.startsWith('!')) {
+    if (g.startsWith("!")) {
       excludeGlob = g.slice(1);
       break;
     }
@@ -5613,7 +6757,15 @@ async function rgFilesViaVfs(
     }
 
     if (stat.isDirectory) {
-      files.push(...await collectFiles(ctx.fs, absPath, true, includeGlob, excludeGlob));
+      files.push(
+        ...(await collectFiles(
+          ctx.fs,
+          absPath,
+          true,
+          includeGlob,
+          excludeGlob,
+        )),
+      );
       continue;
     }
 
@@ -5625,10 +6777,11 @@ async function rgFilesViaVfs(
     }
   }
 
-  const stdout = files.length > 0
-    ? `${files.map((file) => relativizePath(file, ctx.cwd)).join('\n')}\n`
-    : '';
-  return { stdout, stderr: '', exitCode: 0 };
+  const stdout =
+    files.length > 0
+      ? `${files.map((file) => relativizePath(file, ctx.cwd)).join("\n")}\n`
+      : "";
+  return { stdout, stderr: "", exitCode: 0 };
 }
 
 async function rgViaSearchProvider(
@@ -5636,7 +6789,8 @@ async function rgViaSearchProvider(
   ctx: CommandContext,
   provider: WorkspaceSearchProvider,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const searchFolder = parsed.paths.length > 0 ? resolvePath(ctx.cwd, parsed.paths[0]) : ctx.cwd;
+  const searchFolder =
+    parsed.paths.length > 0 ? resolvePath(ctx.cwd, parsed.paths[0]) : ctx.cwd;
   const caseSensitive = rgSmartCaseSensitive(parsed);
   const contextLines = Math.max(parsed.afterContext, parsed.beforeContext);
 
@@ -5648,16 +6802,16 @@ async function rgViaSearchProvider(
     if (g) includePatterns.push(g);
   }
   for (const g of parsed.globs) {
-    if (!g.startsWith('!')) includePatterns.push(g);
+    if (!g.startsWith("!")) includePatterns.push(g);
   }
-  if (includePatterns.length > 0) includePattern = includePatterns.join(',');
+  if (includePatterns.length > 0) includePattern = includePatterns.join(",");
 
   let excludePattern: string | undefined;
   const excludePatterns: string[] = [];
   for (const g of parsed.globs) {
-    if (g.startsWith('!')) excludePatterns.push(g.slice(1));
+    if (g.startsWith("!")) excludePatterns.push(g.slice(1));
   }
-  if (excludePatterns.length > 0) excludePattern = excludePatterns.join(',');
+  if (excludePatterns.length > 0) excludePattern = excludePatterns.join(",");
 
   const result = await provider.search({
     pattern: parsed.pattern!,
@@ -5672,7 +6826,11 @@ async function rgViaSearchProvider(
   });
 
   if (parsed.quiet) {
-    return { stdout: '', stderr: '', exitCode: result.files.length > 0 ? 0 : 1 };
+    return {
+      stdout: "",
+      stderr: "",
+      exitCode: result.files.length > 0 ? 0 : 1,
+    };
   }
 
   const showLineNumbers = parsed.lineNumbers && !parsed.noLineNumbers;
@@ -5712,13 +6870,16 @@ async function rgViaSearchProvider(
     }
 
     // rg separates files with blank line when multiple files have matches
-    if (fileResult.matches.length > 0 && result.files.indexOf(fileResult) < result.files.length - 1) {
-      outputLines.push('');
+    if (
+      fileResult.matches.length > 0 &&
+      result.files.indexOf(fileResult) < result.files.length - 1
+    ) {
+      outputLines.push("");
     }
   }
 
-  const stdout = outputLines.length > 0 ? outputLines.join('\n') + '\n' : '';
-  return { stdout, stderr: '', exitCode: result.files.length > 0 ? 0 : 1 };
+  const stdout = outputLines.length > 0 ? outputLines.join("\n") + "\n" : "";
+  return { stdout, stderr: "", exitCode: result.files.length > 0 ? 0 : 1 };
 }
 
 async function rgViaVfs(

@@ -30,6 +30,7 @@ export interface ShellCommandContext {
   env: Record<string, string>;
   stdin: string;
   signal?: AbortSignal;
+  interactive?: boolean;
   vfs: VirtualFS;
   writeStdout: (data: string) => void;
   writeStderr: (data: string) => void;
@@ -53,6 +54,14 @@ export interface ShellCommandContext {
    */
   onKeypress?: (
     handler: (ch: string | undefined, key: ShellCommandKeyEvent) => void,
+  ) => () => void;
+  /**
+   * Subscribe to terminal resize changes while the command owns the terminal.
+   * Mirrors SIGWINCH-style notifications for browser shell commands that render
+   * their own TUI frame.
+   */
+  onResize?: (
+    handler: (size: { columns: number; rows: number }) => void,
   ) => () => void;
   /**
    * Terminal dimensions reported to the running command (columns, rows). Mirrors

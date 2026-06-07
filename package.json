@@ -1,5 +1,5 @@
 {
-  "name": "almostnode-workspace",
+  "name": "agent-wasm-workspace",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,6 +11,7 @@
     "dev:sdk-showcase": "pnpm vendor:install:opencode && pnpm nx dev sdk-showcase",
     "dev:mobile-ide": "pnpm nx dev mobile-ide",
     "vendor:install:opencode": "node scripts/vendor-install-opencode.js",
+    "vendor:install:codex": "node scripts/vendor-install-codex.js",
     "build": "pnpm nx run-many -t build",
     "build:lib": "pnpm nx build almostnode",
     "build:mobile-ide": "pnpm nx build mobile-ide",

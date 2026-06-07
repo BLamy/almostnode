@@ -129,7 +129,7 @@ describe("webide workspace seed", () => {
       };
     };
 
-    expect(pkg.name).toBe("almostnode-webide-tailwind-starter");
+    expect(pkg.name).toBe("agent-wasm-tailwind-starter");
     expect(pkg.scripts?.dev).toBe("vite --port 3000");
     expect(pkg.scripts?.typecheck).toBe("tsc --noEmit && npx --yes tsgo-wasm --noEmit");
     expect(pkg.scripts?.lint).toBe("oxlint .");
@@ -213,7 +213,7 @@ describe("webide workspace seed", () => {
     const pkg = JSON.parse(
       container.vfs.readFileSync(`${WORKSPACE_ROOT}/package.json`, "utf8"),
     ) as { name?: string };
-    expect(pkg.name).toBe("almostnode-app-building-control-plane");
+    expect(pkg.name).toBe("agent-wasm-app-building-control-plane");
     expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`)).toBe(false);
   });
 

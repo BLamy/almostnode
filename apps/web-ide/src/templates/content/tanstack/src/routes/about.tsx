@@ -12,8 +12,9 @@ function AboutPage() {
       </h1>
       <p style={{ color: '#6b7280', fontSize: '1.1rem', lineHeight: 1.7 }}>
         This is a TanStack Router project running entirely in the browser
-        using almostnode. The virtual filesystem, npm package manager, and
-        Vite dev server all run client-side — no backend needed.
+        using the internal almostnode runtime. The virtual filesystem, npm
+        package manager, and Vite dev server all run client-side — no backend
+        needed.
       </p>
       <p style={{ color: '#6b7280', fontSize: '1.1rem', lineHeight: 1.7 }}>
         Try adding a new route file (e.g. <code>src/routes/contact.tsx</code>)

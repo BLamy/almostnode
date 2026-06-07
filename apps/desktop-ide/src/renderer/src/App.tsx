@@ -100,7 +100,7 @@ function SplashScreen({
   return (
     <div className="desktop-splash">
       <section className="desktop-panel">
-        <div className="desktop-eyebrow">almostnode desktop</div>
+        <div className="desktop-eyebrow">agent-wasm desktop</div>
         <h1 className="desktop-title">Persisted projects with host-side agents.</h1>
         <p className="desktop-subtitle">
           Projects live on your filesystem, reopen from recents, and load into the in-memory VFS when a project window boots.
@@ -194,7 +194,7 @@ export default function App(): ReactElement {
         try {
           const host = hostRef.current;
           if (!host) {
-            throw new Error('almostnode workbench host is not ready yet.');
+            throw new Error('agent-wasm workbench host is not ready yet.');
           }
 
           switch (operation) {
@@ -204,7 +204,7 @@ export default function App(): ReactElement {
               return;
             }
             default:
-              throw new Error(`Unsupported almostnode bridge operation: ${operation}`);
+              throw new Error(`Unsupported agent-wasm bridge operation: ${operation}`);
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

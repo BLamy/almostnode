@@ -13,7 +13,7 @@ import type { ContainerInstance } from 'almostnode';
 
 export const CLAUDE_IDE_SERVER_NAME = 'ide';
 export const CLAUDE_IDE_TRANSPORT_TYPE = 'sse-ide';
-export const CLAUDE_IDE_NAME = 'almostnode Web IDE';
+export const CLAUDE_IDE_NAME = 'agent-wasm Web IDE';
 
 const CLAUDE_IDE_DEFAULT_PORT = 43127;
 const CLAUDE_IDE_PROTOCOL_VERSION = '2024-11-05';

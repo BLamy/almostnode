@@ -1,0 +1,39 @@
+{
+  "name": "codex-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./cli-browser-worker": {
+      "types": "./src/cli-browser-worker.ts",
+      "default": "./src/cli-browser-worker.ts"
+    },
+    "./app-server-browser-worker": {
+      "types": "./src/app-server-browser-worker.ts",
+      "default": "./src/app-server-browser-worker.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json --noEmit",
+    "build:adapter": "node scripts/build-adapter.mjs",
+    "smoke:adapter": "node tests/browser-wasm-smoke.mjs && node tests/app-server-browser-wasm-smoke.mjs",
+    "test": "vitest run",
+    "type-check": "tsc --project tsconfig.json --noEmit",
+    "check:codex-wasm": "node scripts/check-codex-wasm.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "typescript": "^5.9.3",
+    "vitest": "4.0.18"
+  },
+  "dependencies": {
+    "@bokuweb/zstd-wasm": "^0.0.27"
+  }
+}

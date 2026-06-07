@@ -11,7 +11,7 @@ function HomePage() {
         Welcome to TanStack Router
       </h1>
       <p style={{ color: '#6b7280', fontSize: '1.1rem', marginBottom: '1.5rem' }}>
-        File-based routing with type-safe navigation, running in the browser via almostnode.
+        File-based routing with type-safe navigation, running in the browser via the internal almostnode runtime.
       </p>
       <div style={{
         padding: '1.25rem',

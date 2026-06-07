@@ -20,7 +20,7 @@ const buildClaudeIdeMcpConfigMock = vi.fn((url: string) =>
       ide: {
         type: "sse-ide",
         url,
-        ideName: "almostnode Web IDE",
+        ideName: "agent-wasm Web IDE",
       },
     },
   }),
@@ -87,12 +87,16 @@ vi.mock("../src/features/keychain", () => ({
   CLAUDE_AUTH_CONFIG_PATH: "/home/user/.claude/.config.json",
   CLAUDE_AUTH_CREDENTIALS_PATH: "/home/user/.claude/.credentials.json",
   CLAUDE_LEGACY_CONFIG_PATH: "/home/user/.claude.json",
+  CODEX_AUTH_PATH: "/home/user/.codex/auth.json",
+  CODEX_CONFIG_JSON_PATH: "/home/user/.codex/config.json",
+  CODEX_CONFIG_TOML_PATH: "/home/user/.codex/config.toml",
   OPENCODE_AUTH_PATH: "/opencode/data/opencode/auth.json",
   OPENCODE_MCP_AUTH_PATH: "/opencode/data/opencode/mcp-auth.json",
   OPENCODE_CONFIG_PATH: "/opencode/config/opencode/opencode.json",
   OPENCODE_CONFIG_JSONC_PATH: "/opencode/config/opencode/opencode.jsonc",
   OPENCODE_LEGACY_CONFIG_PATH: "/opencode/config/opencode/config.json",
-  TAILSCALE_SESSION_KEYCHAIN_PATH: "/__almostnode/keychain/tailscale-session.json",
+  TAILSCALE_SESSION_KEYCHAIN_PATH:
+    "/__almostnode/keychain/tailscale-session.json",
 }));
 vi.mock("../src/features/network-session", () => ({
   clearStoredWorkbenchNetworkConfig: vi.fn(),
@@ -217,10 +221,9 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {},
 }));
-vi.mock(
-  "monaco-editor/esm/vs/editor/editor.worker.js?worker&url",
-  () => ({ default: "editor-worker.js" }),
-);
+vi.mock("monaco-editor/esm/vs/editor/editor.worker.js?worker&url", () => ({
+  default: "editor-worker.js",
+}));
 vi.mock(
   "@codingame/monaco-vscode-textmate-service-override/worker?worker&url",
   () => ({ default: "textmate-worker.js" }),
@@ -229,10 +232,16 @@ vi.mock(
   "@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url",
   () => ({ default: "extension-worker.js" }),
 );
-vi.mock("@codingame/monaco-vscode-theme-defaults-default-extension", () => ({}));
+vi.mock(
+  "@codingame/monaco-vscode-theme-defaults-default-extension",
+  () => ({}),
+);
 vi.mock("@codingame/monaco-vscode-javascript-default-extension", () => ({}));
 vi.mock("@codingame/monaco-vscode-json-default-extension", () => ({}));
-vi.mock("@codingame/monaco-vscode-typescript-basics-default-extension", () => ({}));
+vi.mock(
+  "@codingame/monaco-vscode-typescript-basics-default-extension",
+  () => ({}),
+);
 vi.mock("@codingame/monaco-vscode-html-default-extension", () => ({}));
 vi.mock("@codingame/monaco-vscode-css-default-extension", () => ({}));
 vi.mock("@codingame/monaco-vscode-sql-default-extension", () => ({}));
@@ -315,9 +324,11 @@ describe("WebIDEHost AI launcher behavior", () => {
       openEditor,
     });
 
-    await (WebIDEHost.prototype as unknown as {
-      revealPreviewEditor: (this: unknown) => Promise<void>;
-    }).revealPreviewEditor.call({
+    await (
+      WebIDEHost.prototype as unknown as {
+        revealPreviewEditor: (this: unknown) => Promise<void>;
+      }
+    ).revealPreviewEditor.call({
       workbenchSurfaces: {
         previewInput: {
           resource: { toString: () => "almostnode-preview:/workspace" },
@@ -353,9 +364,11 @@ describe("WebIDEHost AI launcher behavior", () => {
       openEditor,
     });
 
-    await (WebIDEHost.prototype as unknown as {
-      revealPreviewEditor: (this: unknown) => Promise<void>;
-    }).revealPreviewEditor.call({
+    await (
+      WebIDEHost.prototype as unknown as {
+        revealPreviewEditor: (this: unknown) => Promise<void>;
+      }
+    ).revealPreviewEditor.call({
       workbenchSurfaces: {
         previewInput,
       },
@@ -376,15 +389,15 @@ describe("WebIDEHost AI launcher behavior", () => {
           options?: { resumeToken?: string },
         ) => string;
       }
-    ).buildClaudeLaunchCommand.call({
-      claudeIdeBridge: {
-        getSseUrl: () => "http://localhost/__virtual__/43127/sse",
-      },
-      quoteShellArg(value: string): string {
-        return `'${value}'`;
-      },
-      augmentClaudeLaunchCommand:
-        (
+    ).buildClaudeLaunchCommand.call(
+      {
+        claudeIdeBridge: {
+          getSseUrl: () => "http://localhost/__virtual__/43127/sse",
+        },
+        quoteShellArg(value: string): string {
+          return `'${value}'`;
+        },
+        augmentClaudeLaunchCommand: (
           WebIDEHost.prototype as unknown as {
             augmentClaudeLaunchCommand: (
               this: {
@@ -395,15 +408,17 @@ describe("WebIDEHost AI launcher behavior", () => {
             ) => string;
           }
         ).augmentClaudeLaunchCommand,
-    }, {
-      resumeToken: "resume-123",
-    });
+      },
+      {
+        resumeToken: "resume-123",
+      },
+    );
 
     expect(buildClaudeIdeMcpConfigMock).toHaveBeenCalledWith(
       "http://localhost/__virtual__/43127/sse",
     );
     expect(command).toContain(
-      "--mcp-config '{\"mcpServers\":{\"ide\":{\"type\":\"sse-ide\",\"url\":\"http://localhost/__virtual__/43127/sse\",\"ideName\":\"almostnode Web IDE\"}}}'",
+      '--mcp-config \'{"mcpServers":{"ide":{"type":"sse-ide","url":"http://localhost/__virtual__/43127/sse","ideName":"agent-wasm Web IDE"}}}\'',
     );
     expect(command).toContain("--resume 'resume-123'");
     expect(command.match(/--mcp-config/g)).toHaveLength(1);
@@ -424,13 +439,15 @@ describe("WebIDEHost AI launcher behavior", () => {
       },
     });
 
-    await (WebIDEHost.prototype as unknown as {
-      openWorkspaceFileAsText: (
-        this: unknown,
-        path: string,
-        lineNumber?: number | null,
-      ) => Promise<void>;
-    }).openWorkspaceFileAsText.call({}, "/project/src/pages/Home.tsx", 42);
+    await (
+      WebIDEHost.prototype as unknown as {
+        openWorkspaceFileAsText: (
+          this: unknown,
+          path: string,
+          lineNumber?: number | null,
+        ) => Promise<void>;
+      }
+    ).openWorkspaceFileAsText.call({}, "/project/src/pages/Home.tsx", 42);
 
     expect(openEditor).toHaveBeenCalledWith({
       resource: expect.objectContaining({
@@ -477,14 +494,16 @@ describe("WebIDEHost AI launcher behavior", () => {
       },
     });
 
-    await (WebIDEHost.prototype as unknown as {
-      openWorkspaceFileAsText: (
-        this: unknown,
-        path: string,
-        lineNumber?: number | null,
-        columnNumber?: number | null,
-      ) => Promise<void>;
-    }).openWorkspaceFileAsText.call({}, "/project/src/pages/Home.tsx", 42, 7);
+    await (
+      WebIDEHost.prototype as unknown as {
+        openWorkspaceFileAsText: (
+          this: unknown,
+          path: string,
+          lineNumber?: number | null,
+          columnNumber?: number | null,
+        ) => Promise<void>;
+      }
+    ).openWorkspaceFileAsText.call({}, "/project/src/pages/Home.tsx", 42, 7);
 
     expect(openEditor).toHaveBeenCalledWith({
       resource: expect.objectContaining({
@@ -635,14 +654,11 @@ describe("WebIDEHost AI launcher behavior", () => {
       }
     ).normalizePreviewSourcePath;
 
+    expect(normalizePreviewSourcePath.call({}, "3000/src/pages/Home.tsx")).toBe(
+      "/project/src/pages/Home.tsx",
+    );
     expect(
-      normalizePreviewSourcePath.call({}, "3000/src/pages/Home.tsx"),
-    ).toBe("/project/src/pages/Home.tsx");
-    expect(
-      normalizePreviewSourcePath.call(
-        {},
-        "localhost:3000/src/pages/Home.tsx",
-      ),
+      normalizePreviewSourcePath.call({}, "localhost:3000/src/pages/Home.tsx"),
     ).toBe("/project/src/pages/Home.tsx");
     expect(
       normalizePreviewSourcePath.call(
@@ -702,7 +718,10 @@ describe("WebIDEHost AI launcher behavior", () => {
       disposeClaudeImagePasteGuard(id: string): void {
         (
           WebIDEHost.prototype as unknown as {
-            disposeClaudeImagePasteGuard: (this: unknown, targetId: string) => void;
+            disposeClaudeImagePasteGuard: (
+              this: unknown,
+              targetId: string,
+            ) => void;
           }
         ).disposeClaudeImagePasteGuard.call(this, id);
       },
@@ -726,7 +745,7 @@ describe("WebIDEHost AI launcher behavior", () => {
             tab: {
               id: string;
               terminal: { element: HTMLElement | null };
-              agentHarness: "claude" | "opencode" | null;
+              agentHarness: "claude" | "opencode" | "codex" | null;
             },
           ) => void;
         }
@@ -790,14 +809,16 @@ describe("WebIDEHost AI launcher behavior", () => {
     const initialTab = { id: "terminal-1" };
     const openWorkspaceFile = vi.fn();
 
-    await (WebIDEHost.prototype as unknown as {
-      reloadWorkbenchForNewProject: (
-        this: unknown,
-        newTemplateId: "vite" | "nextjs" | "tanstack",
-        dbPrefix?: string,
-        defaultDatabaseName?: string,
-      ) => Promise<void>;
-    }).reloadWorkbenchForNewProject.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        reloadWorkbenchForNewProject: (
+          this: unknown,
+          newTemplateId: "vite" | "nextjs" | "tanstack",
+          dbPrefix?: string,
+          defaultDatabaseName?: string,
+        ) => Promise<void>;
+      }
+    ).reloadWorkbenchForNewProject.call(
       {
         templateId: "vite",
         normalizeProjectDatabaseNamespace: vi.fn(
@@ -878,6 +899,10 @@ describe("WebIDEHost AI launcher behavior", () => {
       clear: vi.fn(),
       setSelectActive: vi.fn(),
     };
+    host.appBuildingPreviewOpenedJobs = new Set();
+    host.appBuildingPreviewSurface = {
+      clear: vi.fn(),
+    };
     host.databaseSurface = {
       update: vi.fn(),
     };
@@ -929,14 +954,16 @@ describe("WebIDEHost AI launcher behavior", () => {
       },
     ];
 
-    await (host as unknown as {
-      switchProjectWorkspace: (
-        templateId: "vite" | "nextjs" | "tanstack",
-        files: Array<{ path: string; contentBase64: string }>,
-        dbPrefix?: string,
-        defaultDatabaseName?: string,
-      ) => Promise<void>;
-    }).switchProjectWorkspace("nextjs", files, "project-b");
+    await (
+      host as unknown as {
+        switchProjectWorkspace: (
+          templateId: "vite" | "nextjs" | "tanstack",
+          files: Array<{ path: string; contentBase64: string }>,
+          dbPrefix?: string,
+          defaultDatabaseName?: string,
+        ) => Promise<void>;
+      }
+    ).switchProjectWorkspace("nextjs", files, "project-b");
 
     expect(replaceProjectFilesInVfsMock).toHaveBeenCalledWith(vfs, files, {
       includeGit: true,
@@ -992,13 +1019,15 @@ describe("WebIDEHost AI launcher behavior", () => {
       order.push(`opencode:${String(focus)}`);
     });
 
-    await (host as unknown as {
-      attachProjectContext: (
-        templateId: "vite" | "nextjs" | "tanstack",
-        dbPrefix?: string,
-        defaultDatabaseName?: string,
-      ) => Promise<void>;
-    }).attachProjectContext("nextjs", "project-b", "project-b");
+    await (
+      host as unknown as {
+        attachProjectContext: (
+          templateId: "vite" | "nextjs" | "tanstack",
+          dbPrefix?: string,
+          defaultDatabaseName?: string,
+        ) => Promise<void>;
+      }
+    ).attachProjectContext("nextjs", "project-b", "project-b");
 
     expect(order).toEqual([
       "close-db",
@@ -1035,6 +1064,10 @@ describe("WebIDEHost AI launcher behavior", () => {
       clear: vi.fn(),
       setSelectActive: vi.fn(),
     };
+    host.appBuildingPreviewOpenedJobs = new Set();
+    host.appBuildingPreviewSurface = {
+      clear: vi.fn(),
+    };
     host.databaseSurface = {
       update: vi.fn(),
     };
@@ -1068,14 +1101,16 @@ describe("WebIDEHost AI launcher behavior", () => {
       order.push(`opencode:${String(focus)}`);
     });
 
-    await (host as unknown as {
-      switchProjectWorkspace: (
-        templateId: "vite" | "nextjs" | "tanstack",
-        files: Array<{ path: string; contentBase64: string }>,
-        dbPrefix?: string,
-        defaultDatabaseName?: string,
-      ) => Promise<void>;
-    }).switchProjectWorkspace("nextjs", [], "project-b");
+    await (
+      host as unknown as {
+        switchProjectWorkspace: (
+          templateId: "vite" | "nextjs" | "tanstack",
+          files: Array<{ path: string; contentBase64: string }>,
+          dbPrefix?: string,
+          defaultDatabaseName?: string,
+        ) => Promise<void>;
+      }
+    ).switchProjectWorkspace("nextjs", [], "project-b");
 
     expect(order).toEqual([
       "preview",
@@ -1089,7 +1124,8 @@ describe("WebIDEHost AI launcher behavior", () => {
   });
 
   it("initializes project git with git add . and restores the configured origin", async () => {
-    const run = vi.fn()
+    const run = vi
+      .fn()
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
@@ -1113,17 +1149,19 @@ describe("WebIDEHost AI launcher behavior", () => {
       quoteShellArg: WebIDEHost.prototype["quoteShellArg"],
     };
 
-    await (WebIDEHost.prototype as unknown as {
-      ensureGitInitialized: (
-        this: typeof host,
-        project?: {
-          gitRemote?: {
-            name: string;
-            url: string;
-          };
-        },
-      ) => Promise<void>;
-    }).ensureGitInitialized.call(host, {
+    await (
+      WebIDEHost.prototype as unknown as {
+        ensureGitInitialized: (
+          this: typeof host,
+          project?: {
+            gitRemote?: {
+              name: string;
+              url: string;
+            };
+          },
+        ) => Promise<void>;
+      }
+    ).ensureGitInitialized.call(host, {
       gitRemote: {
         name: "origin",
         url: "https://github.com/example/demo.git",
@@ -1166,23 +1204,27 @@ describe("WebIDEHost AI launcher behavior", () => {
       const host = {
         container: { vfs: {} },
         getGitHubAuthToken: WebIDEHost.prototype["getGitHubAuthToken"],
+        getGitHubApiErrorMessage: WebIDEHost.prototype["getGitHubApiErrorMessage"],
         toGitHubRepositoryName: WebIDEHost.prototype["toGitHubRepositoryName"],
+        toGitHubRepositorySummary: WebIDEHost.prototype["toGitHubRepositorySummary"],
         fetchGitHubApi: WebIDEHost.prototype["fetchGitHubApi"],
         resolveGitHubCorsProxy: vi.fn(() => null),
       };
 
-      const remote = await (WebIDEHost.prototype as unknown as {
-        createGitHubRemote: (
-          this: typeof host,
-          projectName: string,
-        ) => Promise<{
-          name: string;
-          url: string;
-          provider?: string;
-          repositoryFullName?: string;
-          repositoryUrl?: string;
-        }>;
-      }).createGitHubRemote.call(host, "Demo App");
+      const remote = await (
+        WebIDEHost.prototype as unknown as {
+          createGitHubRemote: (
+            this: typeof host,
+            projectName: string,
+          ) => Promise<{
+            name: string;
+            url: string;
+            provider?: string;
+            repositoryFullName?: string;
+            repositoryUrl?: string;
+          }>;
+        }
+      ).createGitHubRemote.call(host, "Demo App");
 
       expect(fetchMock).toHaveBeenCalledWith(
         "https://api.github.com/user/repos",
@@ -1211,9 +1253,11 @@ describe("WebIDEHost AI launcher behavior", () => {
     const createOpenCodeSidebarTab = vi.fn();
     const setActiveAiSidebarTab = vi.fn();
 
-    await (WebIDEHost.prototype as unknown as {
-      revealOpenCodePanel: (this: unknown, focus: boolean) => Promise<void>;
-    }).revealOpenCodePanel.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        revealOpenCodePanel: (this: unknown, focus: boolean) => Promise<void>;
+      }
+    ).revealOpenCodePanel.call(
       {
         agentMode: "browser",
         revealOpenCodeSidebarView,
@@ -1237,12 +1281,14 @@ describe("WebIDEHost AI launcher behavior", () => {
     const revealTerminalPanel = vi.fn();
     const createUserTerminalTab = vi.fn();
 
-    await (WebIDEHost.prototype as unknown as {
-      launchAiSession: (
-        this: unknown,
-        kind: "opencode" | "terminal" | "claude",
-      ) => Promise<void>;
-    }).launchAiSession.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        launchAiSession: (
+          this: unknown,
+          kind: "opencode" | "terminal" | "claude" | "codex",
+        ) => Promise<void>;
+      }
+    ).launchAiSession.call(
       {
         agentMode: "browser",
         revealOpenCodeSidebarView,
@@ -1257,6 +1303,75 @@ describe("WebIDEHost AI launcher behavior", () => {
     expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(true);
     expect(revealTerminalPanel).not.toHaveBeenCalled();
     expect(createUserTerminalTab).not.toHaveBeenCalled();
+  });
+
+  it("launches Codex from the AI sidebar dropdown with restored keychain auth", async () => {
+    const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
+    const tab = { id: "codex-sidebar-1" };
+    const createAiSidebarTerminalTab = vi.fn(() => tab);
+    const runCommand = vi.fn().mockResolvedValue(undefined);
+    const prepareForCommand = vi.fn().mockResolvedValue(true);
+
+    await (
+      WebIDEHost.prototype as unknown as {
+        launchAiSession: (
+          this: unknown,
+          kind: "opencode" | "terminal" | "claude" | "codex",
+        ) => Promise<void>;
+      }
+    ).launchAiSession.call(
+      {
+        agentMode: "browser",
+        revealOpenCodeSidebarView,
+        createAiSidebarTerminalTab,
+        runCommand,
+        getAiLaunchCommand: WebIDEHost.prototype["getAiLaunchCommand"],
+        buildCodexShellEnv: WebIDEHost.prototype["buildCodexShellEnv"],
+        readCodexAuth: WebIDEHost.prototype["readCodexAuth"],
+        keychain: { prepareForCommand },
+        codexSidebarCounter: 0,
+        container: {
+          vfs: {
+            existsSync: (path: string) =>
+              path === "/home/user/.codex/auth.json",
+            readFileSync: (path: string) => {
+              if (path !== "/home/user/.codex/auth.json") {
+                throw new Error(`unexpected path ${path}`);
+              }
+              return JSON.stringify({
+                OPENAI_API_KEY: "sk-codex",
+                tokens: {
+                  access_token: "chatgpt-access-token",
+                  account_id: "account-123",
+                  id_token: {
+                    chatgpt_account_is_fedramp: true,
+                  },
+                },
+              });
+            },
+          },
+        },
+      },
+      "codex",
+    );
+
+    expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(true);
+    expect(prepareForCommand).toHaveBeenCalledWith("codex");
+    expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(true, {
+      title: "Codex 1",
+      agentHarness: "codex",
+      env: {
+        OPENAI_API_KEY: "sk-codex",
+        CODEX_API_KEY: "sk-codex",
+        CODEX_ACCESS_TOKEN: "chatgpt-access-token",
+        CODEX_CHATGPT_ACCOUNT_ID: "account-123",
+        CODEX_CHATGPT_ACCOUNT_IS_FEDRAMP: "true",
+      },
+    });
+    expect(runCommand).toHaveBeenCalledWith(tab, "codex", {
+      echoCommand: true,
+      interceptAgentLaunch: false,
+    });
   });
 
   it("reroutes typed opencode launches into the AI sidebar instead of running npx in the terminal", async () => {
@@ -1289,14 +1404,16 @@ describe("WebIDEHost AI launcher behavior", () => {
       surface: "panel",
     };
 
-    await (WebIDEHost.prototype as unknown as {
-      runCommand: (
-        this: unknown,
-        tab: unknown,
-        command: string,
-        options?: { echoCommand?: boolean },
-      ) => Promise<void>;
-    }).runCommand.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        runCommand: (
+          this: unknown,
+          tab: unknown,
+          command: string,
+          options?: { echoCommand?: boolean },
+        ) => Promise<void>;
+      }
+    ).runCommand.call(
       {
         agentMode: "browser",
         keychain: { prepareForCommand },
@@ -1332,25 +1449,28 @@ describe("WebIDEHost AI launcher behavior", () => {
     const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
     const createOpenCodeSidebarTab = vi.fn().mockResolvedValue(undefined);
 
-    await (WebIDEHost.prototype as unknown as {
-      launchAiSession: (
-        this: unknown,
-        kind: "opencode" | "terminal" | "claude",
-        options?: {
-          title?: string;
-          args?: {
-            continue?: boolean;
-            sessionID?: string;
-            fork?: boolean;
-          };
-        },
-      ) => Promise<void>;
-    }).launchAiSession.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        launchAiSession: (
+          this: unknown,
+          kind: "opencode" | "terminal" | "claude" | "codex",
+          options?: {
+            title?: string;
+            args?: {
+              continue?: boolean;
+              sessionID?: string;
+              fork?: boolean;
+            };
+          },
+        ) => Promise<void>;
+      }
+    ).launchAiSession.call(
       {
         agentMode: "browser",
         revealOpenCodeSidebarView,
         createOpenCodeSidebarTab,
-        normalizeOpenCodeSidebarArgs: WebIDEHost.prototype["normalizeOpenCodeSidebarArgs"],
+        normalizeOpenCodeSidebarArgs:
+          WebIDEHost.prototype["normalizeOpenCodeSidebarArgs"],
         createAiSidebarTerminalTab: vi.fn(),
         revealTerminalPanel: vi.fn(),
         createUserTerminalTab: vi.fn(),
@@ -1384,20 +1504,22 @@ describe("WebIDEHost AI launcher behavior", () => {
         "/usr/local/bin/claude-wrapper --plugin-dir '/project/.claude-plugin' --resume 'session-1'",
     );
 
-    await (WebIDEHost.prototype as unknown as {
-      resumeResumableThread: (
-        this: unknown,
-        thread: {
-          id: string;
-          projectId: string;
-          harness: "claude" | "opencode";
-          title: string;
-          resumeToken: string;
-          createdAt: number;
-          updatedAt: number;
-        },
-      ) => Promise<void>;
-    }).resumeResumableThread.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        resumeResumableThread: (
+          this: unknown,
+          thread: {
+            id: string;
+            projectId: string;
+            harness: "claude" | "opencode" | "codex";
+            title: string;
+            resumeToken: string;
+            createdAt: number;
+            updatedAt: number;
+          },
+        ) => Promise<void>;
+      }
+    ).resumeResumableThread.call(
       {
         revealOpenCodeSidebarView,
         createAiSidebarTerminalTab,
@@ -1439,20 +1561,22 @@ describe("WebIDEHost AI launcher behavior", () => {
   it("resumes OpenCode threads directly into the OpenCode AI panel", async () => {
     const launchAiSession = vi.fn().mockResolvedValue(undefined);
 
-    await (WebIDEHost.prototype as unknown as {
-      resumeResumableThread: (
-        this: unknown,
-        thread: {
-          id: string;
-          projectId: string;
-          harness: "claude" | "opencode";
-          title: string;
-          resumeToken: string;
-          createdAt: number;
-          updatedAt: number;
-        },
-      ) => Promise<void>;
-    }).resumeResumableThread.call(
+    await (
+      WebIDEHost.prototype as unknown as {
+        resumeResumableThread: (
+          this: unknown,
+          thread: {
+            id: string;
+            projectId: string;
+            harness: "claude" | "opencode" | "codex";
+            title: string;
+            resumeToken: string;
+            createdAt: number;
+            updatedAt: number;
+          },
+        ) => Promise<void>;
+      }
+    ).resumeResumableThread.call(
       {
         launchAiSession,
         claudeSidebarCounter: 0,
@@ -1490,18 +1614,24 @@ describe("WebIDEHost AI launcher behavior", () => {
     };
 
     expect(
-      getAction.getTailscaleSidebarAuthAction.call({}, {
-        provider: "tailscale",
-        state: "needs-login",
-        canLogout: false,
-      }),
+      getAction.getTailscaleSidebarAuthAction.call(
+        {},
+        {
+          provider: "tailscale",
+          state: "needs-login",
+          canLogout: false,
+        },
+      ),
     ).toBe("login:tailscale");
     expect(
-      getAction.getTailscaleSidebarAuthAction.call({}, {
-        provider: "tailscale",
-        state: "running",
-        canLogout: false,
-      }),
+      getAction.getTailscaleSidebarAuthAction.call(
+        {},
+        {
+          provider: "tailscale",
+          state: "running",
+          canLogout: false,
+        },
+      ),
     ).toBe("logout:tailscale");
   });
 

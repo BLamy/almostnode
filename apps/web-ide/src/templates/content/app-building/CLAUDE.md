@@ -31,7 +31,7 @@ app-building stop <job-id>
 
 ## Runtime notes
 
-This still runs inside almostnode:
+This is an agent-wasm workspace running on the internal almostnode runtime:
 
 - browser-based filesystem
 - browser-safe shell commands

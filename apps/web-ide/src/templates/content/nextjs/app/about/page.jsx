@@ -14,7 +14,7 @@ export default function AboutPage() {
         </span>
         <h1 style={{ fontSize: '2rem', fontWeight: 600, margin: '1rem 0', color: '#fff' }}>About</h1>
         <p style={{ color: '#999', lineHeight: 1.7 }}>
-          This is a Next.js App Router project running entirely in the browser using almostnode.
+          This is a Next.js App Router project running entirely in the browser using the internal almostnode runtime.
           Navigate between pages using the nav bar above to see client-side routing in action.
         </p>
       </div>

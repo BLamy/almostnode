@@ -231,7 +231,7 @@ function readBridgeState() {
   try {
     raw = fs.readFileSync(STATE_FILE_PATH, 'utf8');
   } catch (error) {
-    fail(\`Unable to read \${COMMAND_NAME} state. Is almostnode desktop running? (\${error instanceof Error ? error.message : String(error)})\`);
+    fail(\`Unable to read \${COMMAND_NAME} state. Is agent-wasm desktop running? (\${error instanceof Error ? error.message : String(error)})\`);
   }
 
   try {
@@ -294,7 +294,7 @@ function requestJson(urlString, token, payload) {
     );
 
     request.on('error', (error) => {
-      reject(new Error(\`Unable to reach almostnode desktop bridge: \${error instanceof Error ? error.message : String(error)}\`));
+      reject(new Error(\`Unable to reach agent-wasm desktop bridge: \${error instanceof Error ? error.message : String(error)}\`));
     });
 
     request.write(body);

@@ -76,7 +76,7 @@ function main() {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'allow',
-      permissionDecisionReason: 'Route Bash through the almostnode desktop VFS bridge',
+      permissionDecisionReason: 'Route Bash through the agent-wasm desktop VFS bridge',
       updatedInput: {
         ...toolInput,
         command: rewritten,

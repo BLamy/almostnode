@@ -1,6 +1,7 @@
 import type { VirtualFS, FSWatcher } from 'almostnode';
 import {
   matchesClaudeLaunchCommand,
+  matchesCodexLaunchCommand,
   matchesOpenCodeLaunchCommand,
 } from './terminal-command-routing';
 import {
@@ -13,6 +14,9 @@ export { APP_BUILDING_CONFIG_PATH } from './app-building-setup';
 export const CLAUDE_AUTH_CREDENTIALS_PATH = '/home/user/.claude/.credentials.json';
 export const CLAUDE_AUTH_CONFIG_PATH = '/home/user/.claude/.config.json';
 export const CLAUDE_LEGACY_CONFIG_PATH = '/home/user/.claude.json';
+export const CODEX_AUTH_PATH = '/home/user/.codex/auth.json';
+export const CODEX_CONFIG_TOML_PATH = '/home/user/.codex/config.toml';
+export const CODEX_CONFIG_JSON_PATH = '/home/user/.codex/config.json';
 export const FLY_CONFIG_PATH = '/home/user/.fly/config.yml';
 export const NETLIFY_CONFIG_PATH = '/home/user/.config/netlify/config.json';
 export const NETLIFY_LEGACY_CONFIG_PATH = '/home/user/.netlify/config.json';
@@ -49,7 +53,7 @@ const V1_VERSION = 1;
 const KEYCHAIN_BANNER_ID = 'almostnodeKeychainBanner';
 const KEYCHAIN_STYLE_ID = 'almostnodeKeychainBannerStyles';
 const KEYCHAIN_WATCH_DEBOUNCE_MS = 150;
-const KEYCHAIN_PRF_INFO = 'almostnode claude auth vault';
+const KEYCHAIN_PRF_INFO = 'agent-wasm keychain vault';
 const INVALID_STORED_PAYLOAD_MESSAGE = 'The saved credentials payload is invalid.';
 
 type BannerMode = 'save' | 'unlock' | null;
@@ -318,13 +322,13 @@ async function registerVaultCredential(prfSalt: ArrayBuffer): Promise<{ credenti
   const createOptions: PublicKeyCredentialCreationOptionsWithPrf = {
     challenge,
     rp: {
-      name: 'almostnode Keychain',
+      name: 'agent-wasm Keychain',
       id: window.location.hostname,
     },
     user: {
       id: userId,
-      name: 'keychain@almostnode.local',
-      displayName: 'almostnode Keychain',
+      name: 'keychain@agent-wasm.local',
+      displayName: 'agent-wasm Keychain',
     },
     pubKeyCredParams: [
       { type: 'public-key', alg: -7 },
@@ -363,7 +367,7 @@ async function registerVaultCredential(prfSalt: ArrayBuffer): Promise<{ credenti
   return { credentialId, key };
 }
 
-async function unlockVaultKey(credentialId: string, prfSalt: ArrayBuffer): Promise<CryptoKey> {
+export async function unlockVaultKey(credentialId: string, prfSalt: ArrayBuffer): Promise<CryptoKey> {
   await ensureWebAuthnSupport();
 
   const challenge = crypto.getRandomValues(new Uint8Array(32));
@@ -750,6 +754,7 @@ export class Keychain {
     const normalized = command.trim().toLowerCase();
     const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
       || matchesClaudeLaunchCommand(command)
+      || matchesCodexLaunchCommand(command)
       || /\b(gh|replayio|tailscale|aws|infisical|fly|netlify|neon)\b/.test(normalized)
       || /\bapp-building(?=\s|$)/.test(normalized);
     if (!shouldAutoRestore) {

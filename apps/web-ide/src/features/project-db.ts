@@ -35,7 +35,7 @@ export interface ProjectFilesRecord {
   savedAt: number;
 }
 
-export type AgentHarness = 'claude' | 'opencode';
+export type AgentHarness = 'claude' | 'opencode' | 'codex';
 
 export interface ProjectAgentStateSnapshot {
   claudeFiles: SerializedFile[];

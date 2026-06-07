@@ -11,6 +11,13 @@
     "baseUrl": ".",
     "paths": {
       "almostnode": ["packages/almostnode/src/index.ts"],
+      "codex-wasm": ["packages/codex-wasm/src/index.ts"],
+      "codex-wasm/cli-browser-worker": [
+        "packages/codex-wasm/src/cli-browser-worker.ts"
+      ],
+      "codex-wasm/app-server-browser-worker": [
+        "packages/codex-wasm/src/app-server-browser-worker.ts"
+      ],
       "almostnode-sdk": ["packages/almostnode-sdk/src/index.ts"],
       "almostnode-react": ["packages/almostnode-react/src/index.ts"],
       "almostnode/internal": ["packages/almostnode/src/internal.ts"],

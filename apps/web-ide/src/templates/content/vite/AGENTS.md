@@ -20,7 +20,7 @@ This is a React + TypeScript app running on Vite with an in-browser PostgreSQL d
 
 ## Runtime Environment
 
-You are running inside **almostnode** - a browser-based Node.js runtime with a virtual filesystem, npm package manager, and service worker-backed dev servers. This is not a real OS.
+You are running inside the internal **almostnode** runtime that powers agent-wasm: a browser-based Node.js runtime with a virtual filesystem, npm package manager, and service worker-backed dev servers. This is not a real OS.
 
 - Filesystem: in-memory virtual FS
 - Package manager: real npm packages installed and bundled in-browser

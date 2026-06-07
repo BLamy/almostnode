@@ -11,22 +11,94 @@ import type {
 } from "../../surface-model-types";
 import { AddOAuthServiceModal } from "./add-oauth-service-modal";
 
-const ICON_GITHUB = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
-const ICON_REPLAY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM6.5 4.5l5 3.5-5 3.5v-7z"/></svg>`;
-const ICON_CLAUDE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7 5a1 1 0 112 0 1 1 0 01-2 0zm-.25 2.5h2.5v4.25h-2.5V7.5z"/></svg>`;
-const ICON_KEY = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 1a4.5 4.5 0 00-3.83 6.84L2 13.5V16h2.5l.5-.5v-1.5H6.5l.5-.5v-1.5H8.5l1.17-1.17A4.5 4.5 0 1011.5 1zm1 3a1 1 0 110-2 1 1 0 010 2z"/></svg>`;
+const LOGO_APP_BUILDING = new URL(
+  "../../../../readme-assets/logos/app-building.svg",
+  import.meta.url,
+).href;
+const LOGO_AWS = new URL(
+  "../../../../readme-assets/logos/aws.svg",
+  import.meta.url,
+).href;
+const LOGO_CLAUDE = new URL(
+  "../../../../readme-assets/logos/claude.svg",
+  import.meta.url,
+).href;
+const LOGO_CLOUDFLARE = new URL(
+  "../../../../readme-assets/logos/cloudflare.svg",
+  import.meta.url,
+).href;
+const LOGO_CODEX = new URL(
+  "../../../../readme-assets/logos/codex.svg",
+  import.meta.url,
+).href;
+const LOGO_FLY = new URL(
+  "../../../../readme-assets/logos/fly.svg",
+  import.meta.url,
+).href;
+const LOGO_GITHUB = new URL(
+  "../../../../readme-assets/logos/github.svg",
+  import.meta.url,
+).href;
+const LOGO_INFISICAL = new URL(
+  "../../../../readme-assets/logos/infisical.svg",
+  import.meta.url,
+).href;
+const LOGO_KEYCHAIN = new URL(
+  "../../../../readme-assets/logos/keychain.svg",
+  import.meta.url,
+).href;
+const LOGO_NEON = new URL(
+  "../../../../readme-assets/logos/neon.svg",
+  import.meta.url,
+).href;
+const LOGO_NETLIFY = new URL(
+  "../../../../readme-assets/logos/netlify.svg",
+  import.meta.url,
+).href;
+const LOGO_OAUTH = new URL(
+  "../../../../readme-assets/logos/oauth.svg",
+  import.meta.url,
+).href;
+const LOGO_OPENCODE = new URL(
+  "../../../../readme-assets/logos/opencode.svg",
+  import.meta.url,
+).href;
+const LOGO_REPLAY = new URL(
+  "../../../../readme-assets/logos/replay.svg",
+  import.meta.url,
+).href;
+const LOGO_TAILSCALE = new URL(
+  "../../../../readme-assets/logos/tailscale.svg",
+  import.meta.url,
+).href;
 
-function getSlotIcon(name: string): string {
-  switch (name) {
-    case "github":
-      return ICON_GITHUB;
-    case "replay":
-      return ICON_REPLAY;
-    case "claude":
-      return ICON_CLAUDE;
-    default:
-      return ICON_KEY;
+interface SlotLogo {
+  src: string;
+  alt: string;
+}
+
+const SLOT_LOGOS: Record<string, SlotLogo> = {
+  "app-building": { src: LOGO_APP_BUILDING, alt: "App Building" },
+  aws: { src: LOGO_AWS, alt: "AWS" },
+  claude: { src: LOGO_CLAUDE, alt: "Claude Code" },
+  cloudflare: { src: LOGO_CLOUDFLARE, alt: "Cloudflare" },
+  codex: { src: LOGO_CODEX, alt: "Codex" },
+  fly: { src: LOGO_FLY, alt: "Fly.io" },
+  github: { src: LOGO_GITHUB, alt: "GitHub" },
+  infisical: { src: LOGO_INFISICAL, alt: "Infisical" },
+  neon: { src: LOGO_NEON, alt: "Neon" },
+  netlify: { src: LOGO_NETLIFY, alt: "Netlify" },
+  opencode: { src: LOGO_OPENCODE, alt: "OpenCode" },
+  oauth: { src: LOGO_OAUTH, alt: "OAuth service" },
+  replay: { src: LOGO_REPLAY, alt: "Replay.io" },
+  tailscale: { src: LOGO_TAILSCALE, alt: "Tailscale" },
+};
+
+function getSlotLogo(name: string): SlotLogo {
+  if (name.startsWith("oauth:")) {
+    return SLOT_LOGOS.oauth;
   }
+  return SLOT_LOGOS[name] ?? SLOT_LOGOS.oauth;
 }
 
 function ServiceCard(props: {
@@ -39,6 +111,7 @@ function ServiceCard(props: {
     (slot.active ? `logout:${slot.name}` : `login:${slot.name}`);
   const isLogout = action.startsWith("logout:");
   const isDisabled = Boolean(slot.authDisabled);
+  const logo = getSlotLogo(slot.name);
 
   return (
     <div
@@ -53,7 +126,7 @@ function ServiceCard(props: {
       }}
     >
       <span
-        dangerouslySetInnerHTML={{ __html: getSlotIcon(slot.name) }}
+        title={logo.alt}
         style={{
           display: "flex",
           alignItems: "center",
@@ -62,14 +135,29 @@ function ServiceCard(props: {
           height: "28px",
           borderRadius: "6px",
           flexShrink: 0,
-          background: slot.active
-            ? "color-mix(in srgb, var(--almostnode-success) 18%, transparent)"
-            : "var(--almostnode-button-bg)",
-          color: slot.active
-            ? "var(--almostnode-success)"
-            : "var(--almostnode-quiet)",
+          background: "rgba(255, 255, 255, 0.94)",
+          border: slot.active
+            ? "1px solid color-mix(in srgb, var(--almostnode-success) 35%, rgba(255, 255, 255, 0.7))"
+            : "1px solid rgba(255, 255, 255, 0.12)",
+          boxShadow: slot.active
+            ? "0 0 0 2px color-mix(in srgb, var(--almostnode-success) 14%, transparent)"
+            : "none",
         }}
-      />
+      >
+        <img
+          src={logo.src}
+          alt=""
+          aria-hidden="true"
+          style={{
+            display: "block",
+            width: "20px",
+            height: "20px",
+            objectFit: "contain",
+            opacity: slot.active ? 1 : 0.7,
+            filter: slot.active ? "none" : "grayscale(0.35) saturate(0.8)",
+          }}
+        />
+      </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
@@ -531,12 +619,15 @@ export default function KeychainSidebarView(props: {
           borderBottom: "1px solid var(--almostnode-toolbar-border)",
         }}
       >
-        <span
-          dangerouslySetInnerHTML={{ __html: ICON_KEY }}
+        <img
+          src={LOGO_KEYCHAIN}
+          alt=""
+          aria-hidden="true"
           style={{
-            color: "var(--accent)",
-            display: "flex",
-            alignItems: "center",
+            display: "block",
+            width: "18px",
+            height: "18px",
+            objectFit: "contain",
           }}
         />
         <span

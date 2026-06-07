@@ -1,4 +1,4 @@
-# almostnode webide starter
+# agent-wasm webide starter
 
 This seeded workspace is already wired for Tailwind-style utility classes and shadcn aliases.
 

@@ -1,0 +1,39 @@
+[package]
+name = "almostnode-codex-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["real-codex"]
+real-codex = ["codex-app-server", "codex-cli/real-tui-wasm"]
+
+[dependencies]
+allocative = "=0.3.4"
+async-trait = "0.1"
+codex-app-server = { path = "../../../vendor/codex/codex-rs/app-server", optional = true }
+codex-cli = { path = "../../../vendor/codex/codex-rs/cli" }
+codex-core = { path = "../../../vendor/codex/codex-rs/core" }
+codex-exec-server = { path = "../../../vendor/codex/codex-rs/exec-server" }
+codex-extension-api = { path = "../../../vendor/codex/codex-rs/ext/extension-api" }
+codex-login = { path = "../../../vendor/codex/codex-rs/login" }
+codex-protocol = { path = "../../../vendor/codex/codex-rs/protocol" }
+codex-utils-absolute-path = { path = "../../../vendor/codex/codex-rs/utils/absolute-path" }
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+serde = "1"
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+uuid = { version = "1", features = ["v4", "js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["MessageEvent", "MessagePort"] }
+
+[patch.crates-io]
+crossterm = { path = "../../../vendor/crossterm-wasm" }
+tokio = { path = "../../../vendor/tokio-wasm" }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }

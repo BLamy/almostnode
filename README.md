@@ -1,14 +1,16 @@
-# almostnode
+# agent-wasm
 
-**Node.js in your browser. Just like that.**
+**Browser-native AI agent workspaces powered by WASM.**
 
-A lightweight, browser-native Node.js runtime environment. Run Node.js code, install npm packages, and develop with Vite or Next.js - all without a server.
+agent-wasm is a monorepo for running coding agents, terminals, dev servers,
+package installs, databases, keychains, and browser previews inside a portable
+browser workspace. The core browser Node.js runtime remains the internal
+`almostnode` package, so existing runtime imports and package contracts stay
+stable while the repo and applications use the agent-wasm brand.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green.svg)](https://nodejs.org/)
-
-Built by the creators of [Macaly.com](https://macaly.com) — a tool that lets anyone build websites and web apps, even without coding experience. Think Claude Code for non-developers.
 
 > **Warning:** This project is experimental and may contain bugs. Use with caution in production environments.
 
@@ -119,7 +121,7 @@ graph TB
 - **Node.js 20+** - Required for development and building
 - **Modern browser** - Chrome, Firefox, Safari, or Edge with ES2020+ support
 
-> **Note:** almostnode runs in the browser and emulates Node.js 20 APIs. The Node.js requirement is only for development tooling (Vite, Vitest, TypeScript).
+> **Note:** The internal `almostnode` runtime runs in the browser and emulates Node.js 20 APIs. The Node.js requirement is only for development tooling (Vite, Vitest, TypeScript).
 
 ---
 
@@ -462,7 +464,7 @@ fs.copyFileSync(getServiceWorkerPath(), './public/__sw__.js');
 
 ---
 
-## Comparison with WebContainers
+## Internal Runtime Comparison
 
 | Feature | almostnode | WebContainers |
 |---------|-----------|---------------|
@@ -474,7 +476,7 @@ fs.copyFileSync(getServiceWorkerPath(), './public/__sw__.js');
 | **Networking** | Virtual ports | Real TCP/IP |
 | **Use Case** | Lightweight playgrounds, demos | Full development environments |
 
-### When to use almostnode
+### When to use the internal almostnode runtime
 
 - Building code playgrounds or tutorials
 - Creating interactive documentation
@@ -1062,8 +1064,8 @@ Start the dev server with `npm run dev` and open any demo at `http://localhost:5
 ### Setup
 
 ```bash
-git clone https://github.com/macaly/almostnode.git
-cd almostnode
+git clone https://github.com/BLamy/agent-wasm.git
+cd agent-wasm
 npm install
 ```
 
@@ -1115,5 +1117,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  Built by the creators of <a href="https://macaly.com">Macaly.com</a>
+  agent-wasm keeps the browser runtime package internally named <code>almostnode</code>.
 </p>

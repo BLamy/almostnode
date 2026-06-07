@@ -54,7 +54,7 @@ function IDEWorkspace() {
 
 function IDEWorkspaceFallback() {
   return (
-    <div className="webide-shell ide-route-loading-shell" aria-label="Loading replayio-agents IDE">
+    <div className="webide-shell ide-route-loading-shell" aria-label="Loading agent-wasm IDE">
       <header className="webide-header" />
       <main className="webide-body">
         <aside className="ide-route-loading__sidebar" aria-hidden="true">
@@ -96,7 +96,7 @@ function IDEWorkspaceFallback() {
             <div className="ide-route-loading__center-cta ide-route-loading__skeleton-block" />
           </div>
           <div className="ide-route-loading__live-region" role="status" aria-live="polite">
-            Loading replayio-agents IDE
+            Loading agent-wasm IDE
           </div>
         </div>
       </main>

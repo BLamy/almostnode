@@ -756,7 +756,7 @@ function createManagedWindow(
     .then((targetUrl) => win.loadURL(targetUrl))
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      const fallbackHtml = `<!doctype html><html><body><pre>Failed to load almostnode desktop renderer.\n\n${message}</pre></body></html>`;
+      const fallbackHtml = `<!doctype html><html><body><pre>Failed to load agent-wasm desktop renderer.\n\n${message}</pre></body></html>`;
       return win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fallbackHtml)}`);
     });
 

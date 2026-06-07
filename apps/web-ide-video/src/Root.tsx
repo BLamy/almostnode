@@ -22,7 +22,7 @@ export const RemotionRoot = () => {
           {
             headline: 'Auth strategy',
             subheadline: 'Passkeys, trust tiers, and tailnet-executed credential use.',
-            siteUrl: 'almostnode.dev',
+            siteUrl: 'agent-wasm.dev',
           } satisfies AuthStrategyExplainerProps
         }
       />
@@ -36,7 +36,7 @@ export const RemotionRoot = () => {
         defaultProps={
           {
             headline: 'Auth strategy',
-            siteUrl: 'almostnode.dev',
+            siteUrl: 'agent-wasm.dev',
             paceMultiplier: 10,
           } satisfies AuthStrategyWithImagesProps
         }

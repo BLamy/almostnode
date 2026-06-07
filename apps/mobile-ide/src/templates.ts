@@ -15,7 +15,7 @@ export const TEMPLATE_OPTIONS: TemplateOption[] = [
   {
     id: "vite",
     label: "Vite",
-    description: "Fast React starter with the full AlmostNode demo stack.",
+    description: "Fast React starter with the full agent-wasm demo stack.",
   },
   {
     id: "nextjs",

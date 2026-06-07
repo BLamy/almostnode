@@ -148,6 +148,10 @@ const opentuiWasmSourcePath = resolveFirstExistingPath([
   resolve(opentuiCoreSrc, "zig/lib/wasm32-freestanding/opentui.wasm"),
 ]);
 const opentuiWasmPath = `${appBase}opentui/opentui.wasm`;
+const codexWasmPkgRoot = resolve(workspaceRoot, "packages/codex-wasm/dist/pkg");
+const codexWasmModuleFileName = "codex_wasm.js";
+const codexWasmBgFileName = "codex_wasm_bg.wasm";
+const codexWasmModulePath = `${appBase}codex-wasm/${codexWasmModuleFileName}`;
 
 function migrationTimestamp(tag: string): number {
   const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(tag);
@@ -198,6 +202,60 @@ function opentuiWasmAsset(): Plugin {
         fileName: "opentui/opentui.wasm",
         source: readFileSync(opentuiWasmSourcePath),
       });
+    },
+  };
+}
+
+function codexWasmAssets(): Plugin {
+  const publicPrefix = "/codex-wasm/";
+  const assets = new Map([
+    [
+      `${publicPrefix}${codexWasmModuleFileName}`,
+      {
+        fileName: `codex-wasm/${codexWasmModuleFileName}`,
+        sourcePath: resolve(codexWasmPkgRoot, codexWasmModuleFileName),
+        contentType: "application/javascript",
+      },
+    ],
+    [
+      `${publicPrefix}${codexWasmBgFileName}`,
+      {
+        fileName: `codex-wasm/${codexWasmBgFileName}`,
+        sourcePath: resolve(codexWasmPkgRoot, codexWasmBgFileName),
+        contentType: "application/wasm",
+      },
+    ],
+  ]);
+
+  return {
+    name: "codex-wasm-assets",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const requestUrl = req.url;
+        if (!requestUrl) {
+          next();
+          return;
+        }
+
+        const pathname = new URL(requestUrl, "http://127.0.0.1").pathname;
+        const asset = assets.get(pathname);
+        if (!asset) {
+          next();
+          return;
+        }
+
+        res.setHeader("Content-Type", asset.contentType);
+        res.end(readFileSync(asset.sourcePath));
+      });
+    },
+    generateBundle() {
+      for (const asset of assets.values()) {
+        this.emitFile({
+          type: "asset",
+          fileName: asset.fileName,
+          source: readFileSync(asset.sourcePath),
+        });
+      }
     },
   };
 }
@@ -565,6 +623,7 @@ export default defineConfig(async ({ mode }) => {
       }),
       workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, "src/templates/content") }),
       opentuiWasmAsset(),
+      codexWasmAssets(),
       opentuiSolidTransform(),
       treeSitterQueryLoader(),
       commonJsNodeModulesInterop(),
@@ -828,6 +887,7 @@ export default defineConfig(async ({ mode }) => {
       OPENCODE_CHANNEL: JSON.stringify("browser"),
       OPENCODE_MIGRATIONS: JSON.stringify(opencodeMigrations),
       __OPENTUI_WASM_URL__: JSON.stringify(opentuiWasmPath),
+      __CODEX_WASM_MODULE_URL__: JSON.stringify(codexWasmModulePath),
     },
     server: {
       headers: {
@@ -840,6 +900,7 @@ export default defineConfig(async ({ mode }) => {
           resolve(__dirname, "node_modules"),
           resolve(__dirname, "../../node_modules"),
           resolve(__dirname, "../../packages/almostnode/src"),
+          resolve(__dirname, "../../packages/codex-wasm/src"),
           opencodeRoot,
           opentuiRoot,
         ],
@@ -855,6 +916,18 @@ export default defineConfig(async ({ mode }) => {
         {
           find: /^almostnode$/,
           replacement: resolve(__dirname, "../../packages/almostnode/src/browser.ts"),
+        },
+        {
+          find: /^codex-wasm\/cli-browser-worker$/,
+          replacement: resolve(__dirname, "../../packages/codex-wasm/src/cli-browser-worker.ts"),
+        },
+        {
+          find: /^codex-wasm\/app-server-browser-worker$/,
+          replacement: resolve(__dirname, "../../packages/codex-wasm/src/app-server-browser-worker.ts"),
+        },
+        {
+          find: /^codex-wasm$/,
+          replacement: resolve(__dirname, "../../packages/codex-wasm/src/index.ts"),
         },
         {
           find: /^@napi-rs\/wasm-runtime$/,
@@ -1320,6 +1393,7 @@ export default defineConfig(async ({ mode }) => {
       noDiscovery: true,
       include: isTest ? [] : ["debug", "isomorphic-git", "process", "pako", "source-map-js", "sprintf-js", "style-to-js"],
       exclude: [
+        "@bokuweb/zstd-wasm",
         "buffer",
         "brotli-wasm",
         "bun:sqlite",

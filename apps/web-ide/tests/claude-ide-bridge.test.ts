@@ -73,7 +73,7 @@ describe('Claude IDE bridge helpers', () => {
         ide: {
           type: 'sse-ide',
           url: 'http://localhost/__virtual__/43127/sse',
-          ideName: 'almostnode Web IDE',
+          ideName: 'agent-wasm Web IDE',
         },
       },
     });
@@ -246,7 +246,7 @@ describe('Claude IDE virtual transport', () => {
           id: 1,
           result: expect.objectContaining({
             serverInfo: expect.objectContaining({
-              name: 'almostnode Web IDE',
+              name: 'agent-wasm Web IDE',
             }),
           }),
         }),

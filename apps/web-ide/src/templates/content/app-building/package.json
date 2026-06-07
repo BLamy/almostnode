@@ -1,5 +1,5 @@
 {
-  "name": "almostnode-app-building-control-plane",
+  "name": "agent-wasm-app-building-control-plane",
   "private": true,
   "version": "0.0.1",
   "type": "module",

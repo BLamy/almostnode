@@ -284,5 +284,5 @@ export const SANDBOX_SETUP_INSTRUCTIONS = `
      sandbox: 'https://your-sandbox.vercel.app'
    });
 
-For more details, see: https://github.com/anthropics/almostnode#sandbox-setup
+For more details, see: https://github.com/BLamy/agent-wasm#sandbox-setup
 `.trim();

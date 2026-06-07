@@ -55,6 +55,52 @@ beforeAll(async () => {
 });
 
 describe("KeychainSidebarSurface", () => {
+  it("renders local logo images for built-in and user-added OAuth slots", () => {
+    const surface = new KeychainSidebarSurface();
+    surface.setActionHandler(() => {});
+
+    const container = document.createElement("div");
+    surface.attach(container);
+    surface.update(
+      [
+        {
+          name: "github",
+          label: "GitHub",
+          active: true,
+        },
+        {
+          name: "cloudflare",
+          label: "Cloudflare",
+          active: false,
+        },
+        {
+          name: "opencode",
+          label: "OpenCode",
+          active: true,
+        },
+        {
+          name: "oauth:linear-test",
+          label: "Linear",
+          active: false,
+          userOAuthServiceId: "linear-test",
+        },
+      ],
+      { hasStoredVault: false, supported: true },
+    );
+
+    const srcs = Array.from(
+      container.querySelectorAll("img[aria-hidden='true']"),
+    )
+      .map((img) => (img as HTMLImageElement).getAttribute("src") ?? "")
+      .filter((src) => !src.includes("keychain.svg"));
+
+    expect(srcs).toHaveLength(4);
+    expect(srcs.some((src) => src.includes("github.svg"))).toBe(true);
+    expect(srcs.some((src) => src.includes("cloudflare.svg"))).toBe(true);
+    expect(srcs.some((src) => src.includes("opencode.svg"))).toBe(true);
+    expect(srcs.some((src) => src.includes("oauth.svg"))).toBe(true);
+  });
+
   it("renders exit node choices and emits selection actions", () => {
     const surface = new KeychainSidebarSurface();
     const actions: string[] = [];

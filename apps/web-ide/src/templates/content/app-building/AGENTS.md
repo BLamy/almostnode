@@ -35,9 +35,9 @@ app-building stop <job-id>
 - `src/lib/app-building-dashboard.ts` — IndexedDB reader for builder jobs/config
 - `.claude/skills/app-building-orchestration/SKILL.md` — orchestration workflow
 
-## almostnode runtime
+## Internal almostnode runtime
 
-This is still an almostnode workspace:
+This is an agent-wasm workspace running on the internal almostnode runtime:
 
 - browser-based filesystem and shell
 - Vite preview in-browser

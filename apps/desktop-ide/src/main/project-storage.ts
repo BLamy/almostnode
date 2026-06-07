@@ -365,7 +365,7 @@ export async function promptForProjectRootDirectory(
   window?: BrowserWindow,
 ): Promise<string | null> {
   const dialogOptions: OpenDialogOptions = {
-    title: 'Choose a folder for almostnode desktop projects',
+    title: 'Choose a folder for agent-wasm desktop projects',
     buttonLabel: 'Use Folder',
     properties: ['openDirectory', 'createDirectory'],
   };

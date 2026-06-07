@@ -206,7 +206,7 @@ function OpenCodePane(): React.ReactElement {
             copy: async (text) => navigator.clipboard.writeText(text),
             openUrl: (url) => window.open(url, "_blank", "noopener,noreferrer"),
             setTitle: (title) => {
-              document.title = title || "almostnode SDK Showcase"
+              document.title = title || "agent-wasm SDK Showcase"
             },
             themeMode: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
           },
@@ -302,7 +302,7 @@ export function App(
         <section className="hero">
           <div>
             <p className="eyebrow">Sandpack-like SDK</p>
-            <h1>almostnode with the real OpenCode TUI running in-browser.</h1>
+            <h1>agent-wasm with the real OpenCode TUI running in-browser.</h1>
             <p className="lede">
               The editor and preview are backed by <code>almostnode-sdk</code>, and the bottom pane is the actual
               OpenCode terminal UI mounted through OpenTUI’s browser renderer against the same in-memory workspace.

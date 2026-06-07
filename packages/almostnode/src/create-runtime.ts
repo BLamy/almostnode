@@ -71,7 +71,7 @@ export async function createRuntime(
       'Same-origin execution allows code to access cookies, localStorage, and IndexedDB.\n' +
       'Only use dangerouslyAllowSameOrigin for trusted code or demos.\n' +
       '\n' +
-      'For sandbox setup instructions, see: https://github.com/anthropics/almostnode#sandbox-setup'
+      'For sandbox setup instructions, see: https://github.com/BLamy/agent-wasm#sandbox-setup'
     );
   }
 

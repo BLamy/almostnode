@@ -96,6 +96,7 @@ export function inferTemplateIdFromProjectFiles(
 
   if (
     hasAnyPath(paths, ['/project/src/lib/app-building-dashboard.ts'])
+    || packageJson?.name === 'agent-wasm-app-building-control-plane'
     || packageJson?.name === 'almostnode-app-building-control-plane'
   ) {
     return 'app-building';

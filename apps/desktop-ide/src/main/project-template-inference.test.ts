@@ -79,6 +79,14 @@ describe('project template inference', () => {
       inferTemplateIdFromProjectFiles(
         ['/project/src/lib/app-building-dashboard.ts'],
         createReader({
+          '/project/package.json': JSON.stringify({ name: 'agent-wasm-app-building-control-plane' }),
+        }),
+      ),
+    ).toBe('app-building');
+    expect(
+      inferTemplateIdFromProjectFiles(
+        [],
+        createReader({
           '/project/package.json': JSON.stringify({ name: 'almostnode-app-building-control-plane' }),
         }),
       ),

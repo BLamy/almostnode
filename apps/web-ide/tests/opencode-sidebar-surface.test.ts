@@ -91,7 +91,7 @@ describe("OpenCodeTerminalSurface", () => {
     expect(launches).toEqual(["opencode"]);
   });
 
-  it("shows OpenCode and Empty Terminal in the dropdown, with Claude Code only when available", () => {
+  it("shows OpenCode, Codex, and Empty Terminal in the dropdown, with Claude Code only when available", () => {
     const launches: AgentLaunchKind[] = [];
     const surface = new OpenCodeTerminalSurface({
       onLaunch: (kind) => launches.push(kind),
@@ -107,13 +107,22 @@ describe("OpenCodeTerminalSurface", () => {
 
     expect(toggle).not.toBeNull();
     toggle?.click();
-    expect(getMenuLabels(container)).toEqual(["OpenCode", "Empty Terminal"]);
+    expect(getMenuLabels(container)).toEqual(["OpenCode", "Codex", "Empty Terminal"]);
+
+    const codexItem = Array.from(
+      container.querySelectorAll(".almostnode-opencode-surface__menu-item"),
+    ).find((node) => node.textContent?.includes("Codex")) as
+      | HTMLButtonElement
+      | undefined;
+    codexItem?.click();
+    expect(launches).toEqual(["codex"]);
 
     document.body.click();
     surface.setClaudeAvailable(true);
     toggle?.click();
     expect(getMenuLabels(container)).toEqual([
       "OpenCode",
+      "Codex",
       "Empty Terminal",
       "Claude Code",
     ]);
@@ -125,7 +134,7 @@ describe("OpenCodeTerminalSurface", () => {
       | undefined;
     claudeItem?.click();
 
-    expect(launches).toEqual(["claude"]);
+    expect(launches).toEqual(["codex", "claude"]);
   });
 
   it("does not render the old launcher-only splash copy", () => {

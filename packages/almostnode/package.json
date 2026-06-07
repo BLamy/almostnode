@@ -17,11 +17,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/macaly/almostnode.git"
+    "url": "https://github.com/BLamy/agent-wasm.git"
   },
-  "homepage": "https://github.com/macaly/almostnode#readme",
+  "homepage": "https://github.com/BLamy/agent-wasm#readme",
   "bugs": {
-    "url": "https://github.com/macaly/almostnode/issues"
+    "url": "https://github.com/BLamy/agent-wasm/issues"
   },
   "author": "",
   "engines": {

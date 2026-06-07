@@ -83,6 +83,10 @@ function queueTerminalFit(callback: () => void): void {
   }
 }
 
+function refreshTerminalViewport(terminal: Terminal): void {
+  terminal.refresh(0, Math.max(0, terminal.rows - 1));
+}
+
 function normalizeWorkbenchPath(path: string): string {
   if (!path) return "/";
   return path.startsWith("/")
@@ -152,10 +156,7 @@ export interface RegisteredWorkbenchSurfaces {
 export class FilesSidebarSurface {
   private readonly root = document.createElement("div");
   readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
-    createStaticSurfaceModel(
-      { slot: createDomSlot(this.root) },
-      {},
-    );
+    createStaticSurfaceModel({ slot: createDomSlot(this.root) }, {});
   private readonly directoryOpenState = new Map<string, boolean>();
   private selectedPath: string | null = null;
   private contextMenu: HTMLDivElement | null = null;
@@ -1119,7 +1120,11 @@ export class PreviewSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    return mountStaticSlotSurface(container, PREVIEW_EDITOR_TYPE_ID, this.model);
+    return mountStaticSlotSurface(
+      container,
+      PREVIEW_EDITOR_TYPE_ID,
+      this.model,
+    );
   }
 
   setStatus(text: string): void {
@@ -1398,9 +1403,11 @@ export class TerminalPanelSurface {
   private readonly root = document.createElement("div");
   readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
     createStaticSurfaceModel(
-      { slot: createDomSlot(this.root, {
-        onAttach: () => this.handleSlotAttach(),
-      }) },
+      {
+        slot: createDomSlot(this.root, {
+          onAttach: () => this.handleSlotAttach(),
+        }),
+      },
       {
         focus: () => this.focus(),
       },
@@ -1477,7 +1484,11 @@ export class TerminalPanelSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    const mount = mountStaticSlotSurface(container, TERMINAL_VIEW_ID, this.model);
+    const mount = mountStaticSlotSurface(
+      container,
+      TERMINAL_VIEW_ID,
+      this.model,
+    );
     return {
       dispose: () => {
         mount.dispose();
@@ -1497,7 +1508,13 @@ export class TerminalPanelSurface {
     const active = this.activeTabId
       ? this.terminals.get(this.activeTabId)
       : null;
-    active?.terminal.focus();
+    if (!active) {
+      return;
+    }
+
+    this.fit();
+    queueTerminalFit(() => this.fit());
+    active.terminal.focus();
   }
 
   addTab(tab: {
@@ -1666,6 +1683,7 @@ export class TerminalPanelSurface {
     this.status.textContent = this.tabStatuses.get(id) || "Idle";
     this.fit();
     queueTerminalFit(() => this.fit());
+    this.focus();
   }
 
   private fit(): void {
@@ -1691,19 +1709,22 @@ export class TerminalPanelSurface {
       activeTerminal.terminal.cols,
       activeTerminal.terminal.rows,
     );
+    refreshTerminalViewport(activeTerminal.terminal);
     activeTerminal.terminal.scrollToBottom();
   }
 }
 
-export type AgentLaunchKind = "opencode" | "terminal" | "claude";
+export type AgentLaunchKind = "opencode" | "terminal" | "claude" | "codex";
 
 export class OpenCodeTerminalSurface {
   private readonly root = document.createElement("div");
   readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
     createStaticSurfaceModel(
-      { slot: createDomSlot(this.root, {
-        onAttach: () => this.handleSlotAttach(),
-      }) },
+      {
+        slot: createDomSlot(this.root, {
+          onAttach: () => this.handleSlotAttach(),
+        }),
+      },
       {
         focus: () => this.focus(),
       },
@@ -1765,8 +1786,7 @@ export class OpenCodeTerminalSurface {
     this.dropdownLaunchButton.setAttribute("aria-label", "Choose chat type");
     this.dropdownLaunchButton.setAttribute("aria-haspopup", "menu");
     this.dropdownLaunchButton.setAttribute("aria-expanded", "false");
-    this.dropdownLaunchButton.innerHTML =
-      '<span aria-hidden="true">▾</span>';
+    this.dropdownLaunchButton.innerHTML = '<span aria-hidden="true">▾</span>';
     this.dropdownLaunchButton.addEventListener("click", (event) => {
       event.stopPropagation();
       if (this.menu) {
@@ -1821,7 +1841,11 @@ export class OpenCodeTerminalSurface {
   }
 
   attach(container: HTMLElement): IDisposable {
-    const mount = mountStaticSlotSurface(container, OPEN_CODE_VIEW_ID, this.model);
+    const mount = mountStaticSlotSurface(
+      container,
+      OPEN_CODE_VIEW_ID,
+      this.model,
+    );
     return {
       dispose: () => {
         this.dismissMenu();
@@ -1835,6 +1859,8 @@ export class OpenCodeTerminalSurface {
       ? this.terminals.get(this.activeTabId)
       : null;
     if (active) {
+      this.fit();
+      queueTerminalFit(() => this.fit());
       active.terminal.focus();
       return;
     }
@@ -1903,6 +1929,11 @@ export class OpenCodeTerminalSurface {
         kind: "opencode",
         label: "OpenCode",
         detail: "Start OpenCode in this panel",
+      },
+      {
+        kind: "codex",
+        label: "Codex",
+        detail: "Run Codex CLI in this panel",
       },
       {
         kind: "terminal",
@@ -2117,6 +2148,7 @@ export class OpenCodeTerminalSurface {
     }
     this.fit();
     queueTerminalFit(() => this.fit());
+    this.focus();
   }
 
   private fit(): void {
@@ -2141,6 +2173,7 @@ export class OpenCodeTerminalSurface {
       activeTerminal.terminal.cols,
       activeTerminal.terminal.rows,
     );
+    refreshTerminalViewport(activeTerminal.terminal);
     activeTerminal.terminal.scrollToBottom();
   }
 }
@@ -2538,7 +2571,10 @@ export interface TestsSidebarCallbacks {
 }
 
 export class TestsSidebarSurface {
-  readonly model = new MutableSurfaceModel<TestsSidebarState, TestsSidebarActions>(
+  readonly model = new MutableSurfaceModel<
+    TestsSidebarState,
+    TestsSidebarActions
+  >(
     {
       tests: [],
     },

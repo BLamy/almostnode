@@ -22,6 +22,9 @@ import {
 import {
   Keychain,
   KEYCHAIN_STORAGE_KEY,
+  CODEX_AUTH_PATH,
+  CODEX_CONFIG_JSON_PATH,
+  CODEX_CONFIG_TOML_PATH,
   OPENCODE_AUTH_PATH,
   OPENCODE_CONFIG_JSONC_PATH,
   OPENCODE_CONFIG_PATH,
@@ -54,6 +57,11 @@ const OPENCODE_SLOT_PATHS = [
   OPENCODE_CONFIG_JSONC_PATH,
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
+];
+const CODEX_SLOT_PATHS = [
+  CODEX_AUTH_PATH,
+  CODEX_CONFIG_TOML_PATH,
+  CODEX_CONFIG_JSON_PATH,
 ];
 const AWS_SLOT_PATHS = [AWS_CONFIG_PATH, AWS_AUTH_PATH];
 
@@ -184,6 +192,7 @@ function createKeychain(vfs = new VirtualFS()): Keychain {
   kc.registerSlot('aws', AWS_SLOT_PATHS);
   kc.registerSlot('neon', [NEON_CREDENTIALS_PATH]);
   kc.registerSlot('opencode', OPENCODE_SLOT_PATHS);
+  kc.registerSlot('codex', CODEX_SLOT_PATHS);
   return kc;
 }
 
@@ -295,6 +304,16 @@ function writeOpenCodeAuth(vfs: VirtualFS, apiKey: string): string {
   });
   vfs.mkdirSync(OPENCODE_AUTH_PATH.slice(0, OPENCODE_AUTH_PATH.lastIndexOf('/')), { recursive: true });
   vfs.writeFileSync(OPENCODE_AUTH_PATH, raw);
+  return raw;
+}
+
+function writeCodexAuth(vfs: VirtualFS, apiKey: string): string {
+  const raw = JSON.stringify({
+    auth_mode: 'api_key',
+    OPENAI_API_KEY: apiKey,
+  });
+  vfs.mkdirSync(CODEX_AUTH_PATH.slice(0, CODEX_AUTH_PATH.lastIndexOf('/')), { recursive: true });
+  vfs.writeFileSync(CODEX_AUTH_PATH, raw);
   return raw;
 }
 
@@ -764,6 +783,7 @@ describe('Keychain', () => {
     expect(kc.hasSlotData('claude')).toBe(false);
     expect(kc.hasSlotData('github')).toBe(false);
     expect(kc.hasSlotData('aws')).toBe(false);
+    expect(kc.hasSlotData('codex')).toBe(false);
 
     writeTailscaleSession({ control: 'tailscale' });
     expect(kc.hasSlotData('tailscale')).toBe(true);
@@ -777,6 +797,9 @@ describe('Keychain', () => {
 
     writeAwsConfig(vfs);
     expect(kc.hasSlotData('aws')).toBe(true);
+
+    writeCodexAuth(vfs, 'sk-codex-test');
+    expect(kc.hasSlotData('codex')).toBe(true);
   });
 
   it('migrates v1 vault to v2 on first access', async () => {
@@ -997,6 +1020,30 @@ describe('Keychain', () => {
     await expect(freshKc.prepareForCommand('opencode')).resolves.toBe(true);
 
     expect(freshVfs.readFileSync(OPENCODE_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshKc.getState().hasLiveCredentials).toBe(true);
+  });
+
+  it('auto-restores saved Codex auth before codex commands run', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    const auth = writeCodexAuth(setupVfs, 'sk-codex-prepare');
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    expect(freshKc.getState().hasLiveCredentials).toBe(false);
+
+    await expect(freshKc.prepareForCommand('npx @openai/codex')).resolves.toBe(true);
+
+    expect(freshVfs.readFileSync(CODEX_AUTH_PATH, 'utf8')).toBe(auth);
     expect(freshKc.getState().hasLiveCredentials).toBe(true);
   });
 

@@ -6,6 +6,28 @@ dist/
 dist-site/
 .output/
 
+# Rust build output and local Cargo caches
+target/
+*.rlib
+*.rmeta
+*.profraw
+*.profdata
+*.dSYM/
+**/*.rs.bk
+.cargo-ok
+.cargo_vcs_info.json
+.cargo/registry/
+.cargo/git/
+.cargo/.package-cache
+cargo-timing*.html
+
+# Local vendor checkouts recreated by release scripts
+/vendor/codex/
+
+# Stale split Codex wasm package experiments; use packages/codex-wasm instead.
+/packages/codex-cli-wasm/
+/packages/codex-app-server-wasm/
+
 # Nx
 .nx/
 node_modules/.cache/nx

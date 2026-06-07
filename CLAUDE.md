@@ -1,16 +1,16 @@
-# almostnode
+# agent-wasm
 
 ## What This Is
 
-almostnode is a **real competitor to WebContainers (StackBlitz)**. It runs Node.js natively in the browser — virtual filesystem, npm package installation, dev servers, the works.
+agent-wasm is a browser-native AI agent workspace monorepo. It keeps the core browser Node.js runtime in the internal `almostnode` package, then layers the web IDE, desktop bridge, agent integrations, keychain, templates, and WASM adapters around it.
 
 ## Monorepo Structure
 
-This is an **Nx monorepo** with two projects:
+This is an **Nx monorepo** with the internal runtime and IDE apps:
 
 ```
-almostnode/
-├── packages/almostnode/     # npm-publishable library
+agent-wasm/
+├── packages/almostnode/     # internal browser runtime package
 │   ├── src/                 # Library source code
 │   ├── tests/               # Unit tests (~2250)
 │   ├── e2e/                 # Library E2E tests

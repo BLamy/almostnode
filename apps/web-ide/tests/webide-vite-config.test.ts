@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 describe("web-ide vite config", () => {
-  it("keeps the OpenCode browser tree-sitter and opentui shims wired for dev", { timeout: 15000 }, async () => {
+  it("keeps browser CLI and OpenCode/OpenTUI assets wired for dev", { timeout: 45000 }, async () => {
     const originalVitest = process.env.VITEST;
     delete process.env.VITEST;
     const configUrl = new URL(`../vite.config.ts?test=${Date.now()}`, import.meta.url).href;
@@ -51,6 +51,42 @@ describe("web-ide vite config", () => {
           && entry.find.test("almostnode")
           && typeof entry.replacement === "string"
           && entry.replacement.endsWith("packages/almostnode/src/browser.ts"),
+      ),
+    ).toBe(true);
+
+    expect(
+      aliases.some(
+        (entry) =>
+          typeof entry === "object"
+          && "find" in entry
+          && entry.find instanceof RegExp
+          && entry.find.test("codex-wasm")
+          && typeof entry.replacement === "string"
+          && entry.replacement.endsWith("packages/codex-wasm/src/index.ts"),
+      ),
+    ).toBe(true);
+
+    expect(
+      aliases.some(
+        (entry) =>
+          typeof entry === "object"
+          && "find" in entry
+          && entry.find instanceof RegExp
+          && entry.find.test("codex-wasm/cli-browser-worker")
+          && typeof entry.replacement === "string"
+          && entry.replacement.endsWith("packages/codex-wasm/src/cli-browser-worker.ts"),
+      ),
+    ).toBe(true);
+
+    expect(
+      aliases.some(
+        (entry) =>
+          typeof entry === "object"
+          && "find" in entry
+          && entry.find instanceof RegExp
+          && entry.find.test("codex-wasm/app-server-browser-worker")
+          && typeof entry.replacement === "string"
+          && entry.replacement.endsWith("packages/codex-wasm/src/app-server-browser-worker.ts"),
       ),
     ).toBe(true);
 
@@ -143,6 +179,20 @@ describe("web-ide vite config", () => {
           && plugin.name === "patch-opencode-bash-tool",
       ),
     ).toBe(true);
+
+    expect(
+      config.plugins?.some(
+        (plugin) =>
+          plugin
+          && typeof plugin === "object"
+          && "name" in plugin
+            && plugin.name === "codex-wasm-assets",
+      ),
+    ).toBe(true);
+
+    expect(config.define?.__CODEX_WASM_MODULE_URL__).toBe(
+      JSON.stringify("/codex-wasm/codex_wasm.js"),
+    );
 
     expect(stubPlugin && typeof stubPlugin === "object" && "resolveId" in stubPlugin).toBe(true);
     expect(
