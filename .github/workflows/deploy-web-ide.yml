@@ -43,6 +43,14 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Setup Rust for Codex wasm
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --target wasm32-unknown-unknown
+          rustup default 1.95.0
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
