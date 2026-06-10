@@ -67,6 +67,65 @@ function allocateProcessId(): number {
   return nextProcessId;
 }
 
+const VALID_SIGNALS = new Set([
+  'SIGHUP',
+  'SIGINT',
+  'SIGQUIT',
+  'SIGILL',
+  'SIGTRAP',
+  'SIGABRT',
+  'SIGIOT',
+  'SIGBUS',
+  'SIGFPE',
+  'SIGKILL',
+  'SIGUSR1',
+  'SIGSEGV',
+  'SIGUSR2',
+  'SIGPIPE',
+  'SIGALRM',
+  'SIGTERM',
+  'SIGCHLD',
+  'SIGCONT',
+  'SIGSTOP',
+  'SIGTSTP',
+  'SIGTTIN',
+  'SIGTTOU',
+  'SIGURG',
+  'SIGXCPU',
+  'SIGXFSZ',
+  'SIGVTALRM',
+  'SIGPROF',
+  'SIGWINCH',
+  'SIGIO',
+  'SIGPOLL',
+  'SIGPWR',
+  'SIGSYS',
+]);
+
+function normalizeSignal(signal: string | number | undefined): string | number {
+  if (signal === undefined) {
+    return 'SIGTERM';
+  }
+  if (typeof signal === 'number') {
+    if (!Number.isInteger(signal) || signal < 0) {
+      throw new TypeError(`Invalid signal: ${signal}`);
+    }
+    return signal;
+  }
+  if (/^\d+$/.test(signal)) {
+    return Number(signal);
+  }
+  const normalized = signal.toUpperCase();
+  if (!VALID_SIGNALS.has(normalized)) {
+    const error = new Error(`Unknown signal: ${signal}`) as Error & {
+      code?: string;
+    };
+    error.code = 'ERR_UNKNOWN_SIGNAL';
+    throw error;
+  }
+  return normalized;
+}
+
 export interface Process {
   env: ProcessEnv;
   cwd: () => string;
@@ -86,6 +145,7 @@ export interface Process {
   geteuid: () => number;
   getegid: () => number;
   exit: (code?: number) => never;
+  kill: (pid: number, signal?: string | number) => boolean;
   nextTick: (callback: (...args: unknown[]) => void, ...args: unknown[]) => void;
   stdout: ProcessWritableStream;
   stderr: ProcessWritableStream;
@@ -382,6 +442,19 @@ export function createProcess(options?: {
         options.onExit(code);
       }
       throw new Error(`Process exited with code ${code}`);
+    },
+
+    kill(targetPid: number, signal?: string | number) {
+      if (!Number.isInteger(targetPid)) {
+        throw new TypeError('pid must be an integer');
+      }
+      const normalizedSignal = normalizeSignal(signal);
+      if (normalizedSignal !== 0 && (targetPid === 0 || targetPid === pid)) {
+        queueMicrotask(() => {
+          emitter.emit(String(normalizedSignal));
+        });
+      }
+      return true;
     },
 
     nextTick(callback, ...args) {

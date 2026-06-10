@@ -4,6 +4,7 @@ export type CodexHostOperation =
   | "auth/env"
   | "fs/readFile"
   | "fs/writeFile"
+  | "fs/applyPatch"
   | "fs/createDirectory"
   | "fs/readDirectory"
   | "fs/getMetadata"
@@ -64,6 +65,7 @@ export interface CodexHostVirtualFileSystem {
   readFileSync(path: string, encoding: "utf8" | "utf-8"): string;
   writeFileSync(path: string, data: string | Uint8Array): void;
   mkdirSync(path: string, options?: { recursive?: boolean }): void;
+  unlinkSync(path: string): void;
   readdirSync(path: string): string[];
   statSync(path: string): CodexHostStats;
 }
@@ -259,6 +261,8 @@ export class CodexHostBridge {
         return this.readFile(request.params);
       case "fs/writeFile":
         return this.writeFile(request.params);
+      case "fs/applyPatch":
+        return this.applyPatch(request.params);
       case "fs/createDirectory":
         return this.createDirectory(request.params);
       case "fs/readDirectory":
@@ -312,11 +316,27 @@ export class CodexHostBridge {
     const filePath = assertString(path, "path");
     const fileContent = assertString(content, "content");
 
+    ensureParentDirectory(this.options.container.vfs, filePath);
     this.options.container.vfs.writeFileSync(
       filePath,
       encoding === "base64" ? base64ToBytes(fileContent) : fileContent,
     );
     return { path: filePath };
+  }
+
+  private applyPatch(params: unknown): unknown {
+    const { cwd, patch } = assertRecord(params, "fs/applyPatch params");
+    const result = applyCodexPatch(
+      this.options.container.vfs,
+      assertString(patch, "patch"),
+      cwd == null ? "/" : assertString(cwd, "cwd"),
+    );
+    return {
+      stdout: renderApplyPatchSuccess(result.changes),
+      stderr: "",
+      exitCode: 0,
+      changes: result.changes,
+    };
   }
 
   private createDirectory(params: unknown): unknown {
@@ -622,6 +642,327 @@ export function createCodexHostBridge(
   options: CreateCodexHostBridgeOptions,
 ): CodexHostBridge {
   return new CodexHostBridge(options);
+}
+
+interface ApplyPatchChange {
+  kind: "add" | "update" | "delete";
+  path: string;
+  movePath?: string;
+}
+
+interface ParsedApplyPatchAdd {
+  type: "add";
+  path: string;
+  lines: string[];
+}
+
+interface ParsedApplyPatchDelete {
+  type: "delete";
+  path: string;
+}
+
+interface ParsedApplyPatchUpdate {
+  type: "update";
+  path: string;
+  movePath?: string;
+  chunks: Array<{
+    oldLines: string[];
+    newLines: string[];
+  }>;
+}
+
+type ParsedApplyPatchHunk =
+  | ParsedApplyPatchAdd
+  | ParsedApplyPatchDelete
+  | ParsedApplyPatchUpdate;
+
+function applyCodexPatch(
+  vfs: CodexHostVirtualFileSystem,
+  patch: string,
+  cwd: string,
+): { changes: ApplyPatchChange[] } {
+  const hunks = parseCodexPatch(patch);
+  const changes: ApplyPatchChange[] = [];
+
+  for (const hunk of hunks) {
+    if (hunk.type === "add") {
+      const filePath = resolveCodexPath(cwd, hunk.path);
+      if (pathExists(vfs, filePath)) {
+        throw new Error(`apply_patch verification failed: File already exists: ${hunk.path}`);
+      }
+      ensureParentDirectory(vfs, filePath);
+      vfs.writeFileSync(filePath, linesToText(hunk.lines, true));
+      changes.push({ kind: "add", path: hunk.path });
+      continue;
+    }
+
+    if (hunk.type === "delete") {
+      const filePath = resolveCodexPath(cwd, hunk.path);
+      if (!pathExists(vfs, filePath)) {
+        throw new Error(
+          `apply_patch verification failed: Failed to delete file ${hunk.path}: No such file or directory`,
+        );
+      }
+      vfs.unlinkSync(filePath);
+      changes.push({ kind: "delete", path: hunk.path });
+      continue;
+    }
+
+    const sourcePath = resolveCodexPath(cwd, hunk.path);
+    if (!pathExists(vfs, sourcePath)) {
+      throw new Error(
+        `apply_patch verification failed: Failed to read file to update ${hunk.path}: No such file or directory`,
+      );
+    }
+
+    const original = vfs.readFileSync(sourcePath, "utf8");
+    const updated = applyUpdateChunks(original, hunk);
+    const destinationPath = hunk.movePath
+      ? resolveCodexPath(cwd, hunk.movePath)
+      : sourcePath;
+
+    ensureParentDirectory(vfs, destinationPath);
+    vfs.writeFileSync(destinationPath, updated);
+    if (destinationPath !== sourcePath) {
+      vfs.unlinkSync(sourcePath);
+    }
+    changes.push({
+      kind: "update",
+      path: hunk.path,
+      ...(hunk.movePath ? { movePath: hunk.movePath } : {}),
+    });
+  }
+
+  return { changes };
+}
+
+function parseCodexPatch(patch: string): ParsedApplyPatchHunk[] {
+  const lines = patch.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  if (lines[0] !== "*** Begin Patch") {
+    throw new Error("apply_patch handler received invalid patch input");
+  }
+
+  const hunks: ParsedApplyPatchHunk[] = [];
+  let index = 1;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line === "*** End Patch") {
+      return hunks;
+    }
+
+    if (line.startsWith("*** Add File: ")) {
+      const path = line.slice("*** Add File: ".length);
+      index += 1;
+      const addLines: string[] = [];
+      while (index < lines.length && !isPatchControlLine(lines[index])) {
+        const addLine = lines[index];
+        if (!addLine.startsWith("+")) {
+          throw new Error("apply_patch verification failed: Add file lines must start with +");
+        }
+        addLines.push(addLine.slice(1));
+        index += 1;
+      }
+      if (addLines.length === 0) {
+        throw new Error("apply_patch verification failed: Add file requires content");
+      }
+      hunks.push({ type: "add", path, lines: addLines });
+      continue;
+    }
+
+    if (line.startsWith("*** Delete File: ")) {
+      hunks.push({
+        type: "delete",
+        path: line.slice("*** Delete File: ".length),
+      });
+      index += 1;
+      continue;
+    }
+
+    if (line.startsWith("*** Update File: ")) {
+      const path = line.slice("*** Update File: ".length);
+      index += 1;
+      let movePath: string | undefined;
+      if (lines[index]?.startsWith("*** Move to: ")) {
+        movePath = lines[index].slice("*** Move to: ".length);
+        index += 1;
+      }
+
+      const chunks: ParsedApplyPatchUpdate["chunks"] = [];
+      let current = createPatchChunk();
+      while (index < lines.length && !isPatchControlLine(lines[index])) {
+        const changeLine = lines[index];
+        if (changeLine === "@@" || changeLine.startsWith("@@ ")) {
+          pushPatchChunk(chunks, current);
+          current = createPatchChunk();
+          index += 1;
+          continue;
+        }
+        if (changeLine === "*** End of File") {
+          index += 1;
+          continue;
+        }
+        if (changeLine.startsWith(" ")) {
+          const text = changeLine.slice(1);
+          current.oldLines.push(text);
+          current.newLines.push(text);
+          index += 1;
+          continue;
+        }
+        if (changeLine.startsWith("-")) {
+          current.oldLines.push(changeLine.slice(1));
+          index += 1;
+          continue;
+        }
+        if (changeLine.startsWith("+")) {
+          current.newLines.push(changeLine.slice(1));
+          index += 1;
+          continue;
+        }
+        throw new Error(`apply_patch verification failed: Invalid update line: ${changeLine}`);
+      }
+      pushPatchChunk(chunks, current);
+      hunks.push({ type: "update", path, movePath, chunks });
+      continue;
+    }
+
+    throw new Error(`apply_patch handler received invalid patch input near: ${line}`);
+  }
+
+  throw new Error("apply_patch handler received invalid patch input");
+}
+
+function applyUpdateChunks(
+  original: string,
+  hunk: ParsedApplyPatchUpdate,
+): string {
+  let lines = textToLines(original);
+  let searchFrom = 0;
+
+  for (const chunk of hunk.chunks) {
+    if (chunk.oldLines.length === 0 && chunk.newLines.length === 0) {
+      continue;
+    }
+    const index = findLineSequence(lines, chunk.oldLines, searchFrom);
+    if (index < 0) {
+      throw new Error(
+        `apply_patch verification failed: Failed to find expected context in ${hunk.path}`,
+      );
+    }
+    lines = [
+      ...lines.slice(0, index),
+      ...chunk.newLines,
+      ...lines.slice(index + chunk.oldLines.length),
+    ];
+    searchFrom = index + chunk.newLines.length;
+  }
+
+  return linesToText(lines, original.endsWith("\n"));
+}
+
+function createPatchChunk(): ParsedApplyPatchUpdate["chunks"][number] {
+  return { oldLines: [], newLines: [] };
+}
+
+function pushPatchChunk(
+  chunks: ParsedApplyPatchUpdate["chunks"],
+  chunk: ParsedApplyPatchUpdate["chunks"][number],
+): void {
+  if (chunk.oldLines.length > 0 || chunk.newLines.length > 0) {
+    chunks.push(chunk);
+  }
+}
+
+function isPatchControlLine(line: string | undefined): boolean {
+  return (
+    line == null ||
+    line === "*** End Patch" ||
+    line.startsWith("*** Add File: ") ||
+    line.startsWith("*** Delete File: ") ||
+    line.startsWith("*** Update File: ")
+  );
+}
+
+function findLineSequence(
+  lines: string[],
+  expected: string[],
+  searchFrom: number,
+): number {
+  if (expected.length === 0) return searchFrom;
+  for (let index = searchFrom; index <= lines.length - expected.length; index += 1) {
+    let matches = true;
+    for (let offset = 0; offset < expected.length; offset += 1) {
+      if (lines[index + offset] !== expected[offset]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return index;
+  }
+  return -1;
+}
+
+function textToLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function linesToText(lines: string[], trailingNewline: boolean): string {
+  return `${lines.join("\n")}${trailingNewline ? "\n" : ""}`;
+}
+
+function renderApplyPatchSuccess(changes: ApplyPatchChange[]): string {
+  const labels = changes.map((change) => {
+    if (change.kind === "add") return `A ${change.path}`;
+    if (change.kind === "delete") return `D ${change.path}`;
+    if (change.movePath) return `M ${change.path} -> ${change.movePath}`;
+    return `M ${change.path}`;
+  });
+  return `Success. Updated the following files:\n${labels.join("\n")}\n`;
+}
+
+function resolveCodexPath(cwd: string, maybePath: string): string {
+  if (maybePath.startsWith("/")) return normalizeCodexPath(maybePath);
+  return normalizeCodexPath(`${cwd.replace(/\/+$/, "")}/${maybePath}`);
+}
+
+function normalizeCodexPath(input: string): string {
+  const parts: string[] = [];
+  for (const part of input.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+
+function ensureParentDirectory(
+  vfs: CodexHostVirtualFileSystem,
+  filePath: string,
+): void {
+  const parent = parentPath(filePath);
+  if (parent !== "/") {
+    vfs.mkdirSync(parent, { recursive: true });
+  }
+}
+
+function parentPath(filePath: string): string {
+  const normalized = normalizeCodexPath(filePath);
+  const index = normalized.lastIndexOf("/");
+  return index <= 0 ? "/" : normalized.slice(0, index);
+}
+
+function pathExists(vfs: CodexHostVirtualFileSystem, path: string): boolean {
+  try {
+    vfs.statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isCodexHostRequest(value: unknown): value is CodexHostRequest {

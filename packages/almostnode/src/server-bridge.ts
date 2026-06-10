@@ -34,13 +34,21 @@ export interface VirtualServer {
   server: Server | IVirtualServer;
   port: number;
   hostname: string;
+  metadata?: ServerRegistrationMetadata;
+}
+
+export interface ServerRegistrationMetadata {
+  purpose?: 'workspace-preview' | 'auxiliary';
+  framework?: 'next' | 'vite' | 'wrangler' | 'wrangler-pages' | string;
+  root?: string;
+  name?: string;
 }
 
 export interface BridgeOptions {
   baseUrl?: string;
   /** Base path prefix for subpath deployments (e.g. '/almostnode' for GitHub Pages) */
   basePath?: string;
-  onServerReady?: (port: number, url: string) => void;
+  onServerReady?: (port: number, url: string, metadata?: ServerRegistrationMetadata) => void;
 }
 
 type ModuleRequestHandler = (url: string) => Promise<ResponseData>;
@@ -102,15 +110,20 @@ export class ServerBridge extends EventEmitter {
   /**
    * Register a server on a port
    */
-  registerServer(server: Server | IVirtualServer, port: number, hostname: string = '0.0.0.0'): void {
-    this.servers.set(port, { server, port, hostname });
+  registerServer(
+    server: Server | IVirtualServer,
+    port: number,
+    hostname: string = '0.0.0.0',
+    metadata?: ServerRegistrationMetadata,
+  ): void {
+    this.servers.set(port, { server, port, hostname, metadata });
 
     // Emit server-ready event
     const url = this.getServerUrl(port);
-    this.emit('server-ready', port, url);
+    this.emit('server-ready', port, url, metadata);
 
     if (this.options.onServerReady) {
-      this.options.onServerReady(port, url);
+      this.options.onServerReady(port, url, metadata);
     }
 
     // Notify service worker if connected

@@ -85,6 +85,19 @@ describe('browser process shim', () => {
     expect(() => processShim.exit(1)).toThrow('Process exited with code 1');
   });
 
+  it('exposes process.kill for browser TUI packages', () => {
+    configureBrowserProcess({
+      cwd: '/workspace',
+    });
+
+    expect(typeof processShim.kill).toBe('function');
+    expect(processShim.kill(processShim.pid, 0)).toBe(true);
+    expect(processShim.kill(0, 'SIGTSTP')).toBe(true);
+    expect(() => processShim.kill(processShim.pid, 'SIGNOPE')).toThrow(
+      /Unknown signal: SIGNOPE/,
+    );
+  });
+
   it('forwards imported process access to the active almostnode-managed process', () => {
     const setEncoding = vi.fn(() => runtimeProcess.stdin);
     const runtimeProcess = {
@@ -115,9 +128,12 @@ describe('browser process shim', () => {
     expect(setEncoding).toHaveBeenCalledWith('utf8');
   });
 
-  it('prefers the active almostnode process slot even when the global process is the browser proxy', () => {
+  it('does not let the active almostnode process slot hijack the browser process proxy', () => {
     configureBrowserProcess({
       cwd: '/workspace',
+      env: {
+        BROWSER_ONLY: '1',
+      },
     });
 
     const activeProcess = {
@@ -141,8 +157,9 @@ describe('browser process shim', () => {
       __almostnodeActiveProcess?: typeof activeProcess;
     }).__almostnodeActiveProcess = activeProcess;
 
-    expect(processShim.cwd()).toBe('/active');
-    expect(processShim.env.ACTIVE_ONLY).toBe('1');
+    expect(processShim.cwd()).toBe('/workspace');
+    expect(processShim.env.BROWSER_ONLY).toBe('1');
+    expect(processShim.env.ACTIVE_ONLY).toBeUndefined();
     expect(processShim.stdin.isTTY).toBe(true);
   });
 });

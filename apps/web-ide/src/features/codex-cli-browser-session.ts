@@ -7,6 +7,7 @@ import {
   type CodexCliBrowserSessionOptions,
 } from "codex-wasm";
 import { createWebIdeCodexBrowserSession } from "./codex-browser-session";
+import { codexConversationBus } from "../chat/codex-conversation-bus";
 
 declare const __CODEX_WASM_MODULE_URL__: string;
 
@@ -67,7 +68,7 @@ export function createWebIdeCodexCliShellCommand(
     wasmInitInput: options.wasmInitInput,
     requestBrowserLogin: options.requestBrowserLogin,
     createAppServerSession(context) {
-      return createWebIdeCodexBrowserSession({
+      const session = createWebIdeCodexBrowserSession({
         container: options.container,
         cwd: context.cwd,
         env: context.getEnv(),
@@ -75,6 +76,29 @@ export function createWebIdeCodexCliShellCommand(
           options.wasmModuleUrl ?? getDefaultCodexCliWasmModuleUrl(),
         wasmInitInput: options.wasmInitInput,
       });
+      // Tee the app-server traffic into the chat conversation bus — the WASM
+      // build writes no rollout files, so this is the chat surface's only
+      // window into the codex conversation.
+      codexConversationBus.reset();
+      const unsubscribe = session.peer.onNotification((notification) => {
+        codexConversationBus.emitNotification(notification);
+      });
+      return {
+        ready: session.ready,
+        dispose() {
+          unsubscribe();
+          session.dispose();
+        },
+        peer: {
+          initialize: session.peer.initialize.bind(session.peer),
+          onNotification: session.peer.onNotification.bind(session.peer),
+          request: async (method: string, params?: unknown) => {
+            const result = await session.peer.request(method, params);
+            codexConversationBus.emitRequest(method, params, result);
+            return result;
+          },
+        },
+      };
     },
   });
 }

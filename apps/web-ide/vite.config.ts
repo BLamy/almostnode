@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { transformAsync } from "@babel/core";
 import ts from "@babel/preset-typescript";
@@ -58,6 +59,20 @@ const opencodePluginSrc = resolve(opencodeRoot, "packages/plugin/src");
 const opencodeNodeModules = resolve(opencodeRoot, "node_modules");
 const opentuiSpinnerSolidPath = resolve(opencodeNodeModules, "opentui-spinner/dist/solid.mjs");
 const almostnodeShimsRoot = resolve(workspaceRoot, "packages/almostnode/src/shims");
+// Real jsdiff entry for @pierre/diffs (everything else gets the opencode
+// diff shim via the resolve.alias below). Resolved from @pierre/diffs'
+// own dependency tree so pnpm isolation is respected.
+const realJsDiffEntry = (() => {
+  // @pierre/diffs is ESM-only (no "require" export condition), so resolve
+  // its jsdiff dependency from the package's real directory on disk (the
+  // realpath matters under pnpm so we get the package's own diff version,
+  // not a hoisted one).
+  const pierreRequire = createRequire(
+    realpathSync(resolve(__dirname, "node_modules/@pierre/diffs/package.json")),
+  );
+  // require.resolve returns the CJS entry; swap to the ESM build.
+  return pierreRequire.resolve("diff").replace(/libcjs\/index\.js$/, "libesm/index.js");
+})();
 const streamBrowserifyPath = resolve(almostnodeShimsRoot, "stream.ts");
 const webIdeEventsShimPath = resolve(almostnodeShimsRoot, "events.ts");
 const webIdeBufferShimPath = resolve(__dirname, "src/shims/node-buffer.ts");
@@ -327,11 +342,22 @@ function opentuiSolidTransform() {
   };
 }
 
-function stubModulePrefixes(stubPath: string, prefixes: string[]) {
+function stubModulePrefixes(
+  stubPath: string,
+  prefixes: string[],
+  options?: { excludeImporterPrefix?: string },
+) {
   return {
     name: "stub-module-prefixes",
     enforce: "pre" as const,
-    resolveId(source: string) {
+    resolveId(source: string, importer?: string) {
+      if (
+        options?.excludeImporterPrefix &&
+        importer &&
+        sourcePath(importer).startsWith(options.excludeImporterPrefix)
+      ) {
+        return null;
+      }
       for (const prefix of prefixes) {
         if (source === prefix || source.startsWith(`${prefix}/`)) {
           return stubPath;
@@ -693,7 +719,6 @@ export default defineConfig(async ({ mode }) => {
         "vscode-jsonrpc",
         "vscode-languageserver-types",
         "turndown",
-        "@pierre/diffs",
         "@octokit/rest",
         "@octokit/graphql",
         "@modelcontextprotocol/sdk",
@@ -708,6 +733,14 @@ export default defineConfig(async ({ mode }) => {
         "gitlab-ai-provider",
         "opencode-gitlab-auth",
       ]),
+      // OpenCode's build stubs @pierre/diffs, but the web-ide chat surface
+      // uses the real package for tool-call diff rendering — only stub it for
+      // imports coming from outside our own source tree.
+      stubModulePrefixes(
+        resolve(opencodeBrowserSrc, "shims/stubs.ts"),
+        ["@pierre/diffs"],
+        { excludeImporterPrefix: resolve(__dirname, "src") },
+      ),
       stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/bun-bundle.browser.ts"), [
         "bun:bundle",
       ]),
@@ -1349,6 +1382,15 @@ export default defineConfig(async ({ mode }) => {
         {
           find: "diff",
           replacement: resolve(opencodeBrowserSrc, "shims/diff.browser.ts"),
+          // @pierre/diffs (chat tool-call diff rendering) needs the real
+          // jsdiff package — the opencode shim only fakes the few functions
+          // opencode itself touches.
+          customResolver(_source: string, importer?: string) {
+            if (importer && importer.includes("@pierre")) {
+              return realJsDiffEntry;
+            }
+            return null;
+          },
         },
         {
           find: "semver",
@@ -1391,7 +1433,7 @@ export default defineConfig(async ({ mode }) => {
     },
     optimizeDeps: {
       noDiscovery: true,
-      include: isTest ? [] : ["debug", "isomorphic-git", "process", "pako", "source-map-js", "sprintf-js", "style-to-js"],
+      include: isTest ? [] : ["debug", "isomorphic-git", "lru_map", "process", "pako", "source-map-js", "sprintf-js", "style-to-js"],
       exclude: [
         "@bokuweb/zstd-wasm",
         "buffer",

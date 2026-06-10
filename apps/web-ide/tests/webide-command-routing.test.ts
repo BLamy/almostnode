@@ -4,6 +4,7 @@ import {
   matchesClaudeLaunchCommand,
   matchesCodexLaunchCommand,
   matchesOpenCodeLaunchCommand,
+  matchesPiLaunchCommand,
   matchesShadcnLaunchCommand,
   parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
@@ -68,6 +69,22 @@ describe("webide terminal command routing", () => {
     ).toBe(true);
   });
 
+  it("matches Pi launch commands across wrappers", () => {
+    expect(matchesPiLaunchCommand("pi")).toBe(true);
+    expect(matchesPiLaunchCommand("pi-coding-agent --help")).toBe(true);
+    expect(matchesPiLaunchCommand("npx @earendil-works/pi-coding-agent")).toBe(
+      true,
+    );
+    expect(
+      matchesPiLaunchCommand("env OPENAI_API_KEY=test npm exec -- pi"),
+    ).toBe(true);
+    expect(
+      matchesPiLaunchCommand(
+        "time ./node_modules/.bin/pi-coding-agent --help",
+      ),
+    ).toBe(true);
+  });
+
   it("appends one Claude IDE MCP config to launcher commands", () => {
     const augmented = augmentClaudeLaunchCommand(
       "/usr/local/bin/claude-wrapper --plugin-dir /project/.claude-plugin",
@@ -111,7 +128,7 @@ describe("webide terminal command routing", () => {
     ).toBe(true);
   });
 
-  it("treats shadcn and OpenCode as interactive in the regular workbench terminal", () => {
+  it("treats shadcn and agent CLIs as interactive in the regular workbench terminal", () => {
     expect(
       shouldRunWorkbenchCommandInteractively(
         "npx shadcn@latest add dropdown-menu",
@@ -122,6 +139,12 @@ describe("webide terminal command routing", () => {
       shouldRunWorkbenchCommandInteractively("npx opencode-ai", "user"),
     ).toBe(true);
     expect(shouldRunWorkbenchCommandInteractively("codex", "user")).toBe(true);
+    expect(
+      shouldRunWorkbenchCommandInteractively(
+        "npx @earendil-works/pi-coding-agent",
+        "user",
+      ),
+    ).toBe(true);
     expect(
       shouldRunWorkbenchCommandInteractively(
         "/usr/local/bin/claude-wrapper --plugin-dir /project/.claude-plugin",

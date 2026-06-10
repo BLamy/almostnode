@@ -333,6 +333,35 @@ describe('git CLI command', () => {
     expect(result.stdout).toContain('A  src/app/page.tsx');
   });
 
+  it('accepts git global -c options before the subcommand', async () => {
+    const container = createContainer();
+
+    container.vfs.mkdirSync('/repo', { recursive: true });
+    container.vfs.writeFileSync('/repo/file.txt', 'hello\n');
+
+    let result = await container.run('git init', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git -c core.quotepath=false status --porcelain=v1 -z', {
+      cwd: '/repo',
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('?? file.txt');
+
+    result = await container.run('git add file.txt', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run(
+      'git -c user.name=Configured -c user.email=configured@example.com commit -m "configured identity"',
+      { cwd: '/repo' },
+    );
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git log -n 1', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Author: Configured <configured@example.com>');
+  });
+
   it('respects .gitignore patterns for workspace-only directories', async () => {
     const container = createContainer({
       git: {

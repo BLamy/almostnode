@@ -16,6 +16,7 @@ interface ProjectItemProps {
   onToggleExpanded: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
+  onNewThread: (projectId: string) => void;
   children?: ReactNode;
 }
 
@@ -27,10 +28,15 @@ export function ProjectItem({
   onToggleExpanded,
   onRename,
   onDelete,
+  onNewThread,
   children,
 }: ProjectItemProps) {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(project.name);
+  const [contextMenuPosition, setContextMenuPosition] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const isGitHubProject = project.gitRemote?.provider === 'github';
 
@@ -54,6 +60,11 @@ export function ProjectItem({
       <div
         className={`almostnode-project-item ${isActive ? 'is-active' : ''}`}
         onClick={() => !isRenaming && onSelect(project.id)}
+        onContextMenu={(event) => {
+          if (isRenaming) return;
+          event.preventDefault();
+          setContextMenuPosition({ x: event.clientX, y: event.clientY });
+        }}
       >
         <button
           className="almostnode-project-item__chevron"
@@ -105,37 +116,67 @@ export function ProjectItem({
         )}
 
         {!isRenaming && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                className="almostnode-project-item__menu-trigger"
-                onClick={(event) => event.stopPropagation()}
-                type="button"
-              >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                  <circle cx="8" cy="3" r="1.5" />
-                  <circle cx="8" cy="8" r="1.5" />
-                  <circle cx="8" cy="13" r="1.5" />
-                </svg>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                onSelect={() => {
-                  setRenameValue(project.name);
-                  setIsRenaming(true);
-                }}
-              >
-                Rename
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem destructive onSelect={() => onDelete(project.id)}>
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <button
+            className="almostnode-project-item__menu-trigger"
+            onClick={(event) => {
+              event.stopPropagation();
+              onNewThread(project.id);
+            }}
+            type="button"
+            aria-label={`New thread in ${project.name}`}
+            title="New thread"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M8 3.5v9M3.5 8h9"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
         )}
       </div>
+
+      {contextMenuPosition && (
+        <DropdownMenu
+          open
+          onOpenChange={(open) => {
+            if (!open) setContextMenuPosition(null);
+          }}
+        >
+          <DropdownMenuTrigger asChild>
+            {/* Invisible anchor at the cursor so the menu opens in place. */}
+            <span
+              aria-hidden="true"
+              style={{
+                position: 'fixed',
+                left: contextMenuPosition.x,
+                top: contextMenuPosition.y,
+                width: 0,
+                height: 0,
+              }}
+            />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" sideOffset={0}>
+            <DropdownMenuItem onSelect={() => onNewThread(project.id)}>
+              New thread
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => {
+                setRenameValue(project.name);
+                setIsRenaming(true);
+              }}
+            >
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem destructive onSelect={() => onDelete(project.id)}>
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
       {isExpanded ? children : null}
     </div>

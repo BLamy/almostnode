@@ -1,7 +1,4 @@
-import type {
-  CodexHostOperation,
-  CodexHostResponse,
-} from "./host-bridge";
+import type { CodexHostOperation, CodexHostResponse } from "./host-bridge";
 import { runBrowserExecPlan } from "./browser-exec";
 import { installCodexZstdCompression } from "./zstd-compression";
 import type {
@@ -290,6 +287,10 @@ function normalizeBrowserExecPlan(
         ? record.outputLastMessagePath
         : undefined,
     cwd: typeof record.cwd === "string" ? record.cwd : undefined,
+    applyPatchGrammar:
+      typeof record.applyPatchGrammar === "string"
+        ? record.applyPatchGrammar
+        : undefined,
     warnings: Array.isArray(rawWarnings)
       ? rawWarnings.filter(
           (entry): entry is string => typeof entry === "string",
@@ -309,7 +310,9 @@ function normalizeBrowserLoginRequest(
   if (record.type === "deviceCode") {
     return { type: "deviceCode" };
   }
-  throw new Error("Codex CLI browserLogin request must include a supported type.");
+  throw new Error(
+    "Codex CLI browserLogin request must include a supported type.",
+  );
 }
 
 function normalizeBrowserTuiResult(
@@ -321,9 +324,15 @@ function normalizeBrowserTuiResult(
     throw new Error("Codex CLI browserTui result must include ansi output.");
   }
   const cursor = normalizeBrowserTuiCursor(record.cursor);
+  const scrollbackAnsi =
+    typeof record.scrollbackAnsi === "string" &&
+    record.scrollbackAnsi.length > 0
+      ? record.scrollbackAnsi
+      : undefined;
   return {
     ansi: record.ansi,
     action: normalizeBrowserTuiAction(record.action),
+    ...(scrollbackAnsi ? { scrollbackAnsi } : {}),
     ...(cursor ? { cursor } : {}),
   };
 }

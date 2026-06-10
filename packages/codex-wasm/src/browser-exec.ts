@@ -8,6 +8,27 @@ import type {
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com";
 const DEFAULT_CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const MAX_BROWSER_TOOL_ROUNDS = 8;
+const DEFAULT_APPLY_PATCH_GRAMMAR = [
+  "start: begin_patch hunk+ end_patch",
+  'begin_patch: "*** Begin Patch" LF',
+  'end_patch: "*** End Patch" LF?',
+  "",
+  "hunk: add_hunk | delete_hunk | update_hunk",
+  'add_hunk: "*** Add File: " filename LF add_line+',
+  'delete_hunk: "*** Delete File: " filename LF',
+  'update_hunk: "*** Update File: " filename LF change_move? change?',
+  "",
+  "filename: /(.+)/",
+  'add_line: "+" /(.*)/ LF -> line',
+  "",
+  'change_move: "*** Move to: " filename LF',
+  "change: (change_context | change_line)+ eof_line?",
+  'change_context: ("@@" | "@@ " /(.+)/) LF',
+  'change_line: ("+" | "-" | " ") /(.*)/ LF',
+  'eof_line: "*** End of File" LF',
+  "",
+  "%import common.LF",
+].join("\n");
 
 export interface BrowserExecHost {
   request(op: CodexHostOperation, params?: unknown): Promise<unknown>;
@@ -50,6 +71,10 @@ type BrowserToolRequest =
   | {
       type: "local_shell_call";
       command: string[];
+    }
+  | {
+      type: "apply_patch";
+      patch: string;
     };
 
 interface BrowserCommandExecResult {
@@ -171,8 +196,14 @@ async function runBrowserResponsesRequest(
     for (const toolCall of toolCalls) {
       const toolResult = await runBrowserToolCall(toolCall, options, host);
       input.push(toolCall.inputItem, {
-        type: "function_call_output",
+        type:
+          toolCall.request.type === "apply_patch"
+            ? "custom_tool_call_output"
+            : "function_call_output",
         call_id: toolCall.callId,
+        ...(toolCall.request.type === "apply_patch"
+          ? { name: "apply_patch" }
+          : {}),
         output: toolResult.output,
       });
       toolEvents.push({
@@ -204,7 +235,7 @@ async function fetchBrowserResponses(
     input: request.input,
   };
   if (request.toolsEnabled) {
-    body.tools = browserHostTools();
+    body.tools = browserHostTools(command);
   }
 
   const response = await fetchBrowserResponsesTransport(browserResponsesUrl(credential), {
@@ -458,6 +489,16 @@ async function collectBrowserResponsesStream(
       return;
     }
     if (
+      type === "response.custom_tool_call_input.delta" &&
+      typeof record.delta === "string"
+    ) {
+      const item = streamedOutputItemFor(record);
+      if (item) {
+        item.input = `${typeof item.input === "string" ? item.input : ""}${record.delta}`;
+      }
+      return;
+    }
+    if (
       type === "response.function_call_arguments.done" &&
       typeof record.arguments === "string"
     ) {
@@ -510,6 +551,15 @@ async function collectBrowserResponsesStream(
       return (
         [...outputItemsByIndex.values(), ...unindexedOutputItems].find(
           (item) => item.id === itemId,
+        ) ?? undefined
+      );
+    }
+
+    const callId = record.call_id;
+    if (typeof callId === "string") {
+      return (
+        [...outputItemsByIndex.values(), ...unindexedOutputItems].find(
+          (item) => item.call_id === callId,
         ) ?? undefined
       );
     }
@@ -599,8 +649,12 @@ function cloneStreamedOutputItem(value: unknown): Record<string, unknown> | null
   return { ...(value as Record<string, unknown>) };
 }
 
-function browserHostTools(): Record<string, unknown>[] {
-  return [browserShellCommandTool(), browserPlaywrightCliTool()];
+function browserHostTools(command: ParsedBrowserExec): Record<string, unknown>[] {
+  return [
+    browserShellCommandTool(),
+    browserPlaywrightCliTool(),
+    browserApplyPatchTool(command.applyPatchGrammar),
+  ];
 }
 
 function browserShellCommandTool(): Record<string, unknown> {
@@ -664,6 +718,20 @@ function browserPlaywrightCliTool(): Record<string, unknown> {
   };
 }
 
+function browserApplyPatchTool(grammar: string | undefined): Record<string, unknown> {
+  return {
+    type: "custom",
+    name: "apply_patch",
+    description:
+      "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    format: {
+      type: "grammar",
+      syntax: "lark",
+      definition: grammar ?? DEFAULT_APPLY_PATCH_GRAMMAR,
+    },
+  };
+}
+
 function extractResponsesToolCalls(
   payload: unknown,
 ): BrowserResponsesToolCall[] {
@@ -696,6 +764,17 @@ function extractResponsesToolCalls(
       toolCalls.push({
         callId,
         name: "playwright_cli",
+        inputItem: record,
+        request,
+      });
+      continue;
+    }
+
+    if (type === "custom_tool_call" && record.name === "apply_patch") {
+      const request = parseApplyPatchToolCall(record.input);
+      toolCalls.push({
+        callId,
+        name: "apply_patch",
         inputItem: record,
         request,
       });
@@ -770,6 +849,17 @@ function parseShellCommandToolCall(
   };
 }
 
+function parseApplyPatchToolCall(inputValue: unknown): BrowserToolRequest {
+  if (typeof inputValue !== "string" || !inputValue.trim()) {
+    throw new Error("apply_patch custom tool call requires non-empty patch input.");
+  }
+
+  return {
+    type: "apply_patch",
+    patch: inputValue,
+  };
+}
+
 function parseLocalShellCall(
   record: Record<string, unknown>,
 ): BrowserToolRequest | null {
@@ -797,6 +887,21 @@ async function runBrowserToolCall(
   host: BrowserExecHost,
 ): Promise<{ command: string; exitCode: number; output: string }> {
   const startedAt = Date.now();
+  if (toolCall.request.type === "apply_patch") {
+    const result = normalizeCommandExecResult(
+      await host.request("fs/applyPatch", {
+        cwd: options.cwd ?? "/",
+        patch: toolCall.request.patch,
+      }),
+    );
+    const durationSeconds = (Date.now() - startedAt) / 1000;
+    return {
+      command: "apply_patch",
+      exitCode: result.exitCode,
+      output: formatBrowserShellOutput(result, durationSeconds),
+    };
+  }
+
   const params = browserToolCallExecParams(toolCall.request, options);
   const result = normalizeCommandExecResult(
     await host.request("command/exec", params),
@@ -814,6 +919,10 @@ function browserToolCallExecParams(
   request: BrowserToolRequest,
   options: CodexCliRunOptions,
 ): Record<string, unknown> {
+  if (request.type === "apply_patch") {
+    throw new Error("apply_patch is routed through fs/applyPatch.");
+  }
+
   if (request.type === "playwright_cli") {
     return {
       command: ["sh", "-lc", playwrightShimCommand(request.command)],
@@ -885,6 +994,9 @@ function commandForDisplay(request: BrowserToolRequest): string {
   }
   if (request.type === "playwright_cli") {
     return `playwright-cli ${request.command}`;
+  }
+  if (request.type === "apply_patch") {
+    return "apply_patch";
   }
   return request.command;
 }

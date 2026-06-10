@@ -10,10 +10,12 @@ import { readGhToken } from './gh-auth';
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+type GitHttpRequestOptions = Parameters<typeof httpClient.request>[0];
+type GitHttpResponse = Awaited<ReturnType<typeof httpClient.request>>;
 
 function createProxiedHttp(corsProxy: string) {
   return {
-    async request(options: { url: string; method?: string; headers?: Record<string, string>; body?: AsyncIterableIterator<Uint8Array> }) {
+    async request(options: GitHttpRequestOptions): Promise<GitHttpResponse> {
       const attempts = corsProxy
         ? [
           `${corsProxy}${encodeURIComponent(options.url)}`,
@@ -25,7 +27,7 @@ function createProxiedHttp(corsProxy: string) {
       for (let index = 0; index < attempts.length; index++) {
         const url = attempts[index];
         try {
-          const response = await httpClient.request({ ...options, url }) as { statusCode?: number };
+          const response = await httpClient.request({ ...options, url });
           if (
             index < attempts.length - 1 &&
             typeof response.statusCode === 'number' &&
@@ -775,7 +777,13 @@ export async function runGitCommand(
   ctx: CommandContext,
   vfs: VirtualFS
 ): Promise<JustBashExecResult> {
-  const subcommand = args[0];
+  const normalized = normalizeGitGlobalOptions(args, ctx);
+  if ('error' in normalized) {
+    return normalized.error;
+  }
+
+  const subcommand = normalized.args[0];
+  const commandCtx = normalized.ctx;
 
   if (!subcommand || subcommand === 'help' || subcommand === '--help') {
     return {
@@ -795,45 +803,126 @@ export async function runGitCommand(
   try {
     switch (subcommand) {
       case 'init':
-        return handleInit(args.slice(1), ctx, vfs);
+        return handleInit(normalized.args.slice(1), commandCtx, vfs);
       case 'clone':
-        return handleClone(args.slice(1), ctx, vfs);
+        return handleClone(normalized.args.slice(1), commandCtx, vfs);
       case 'status':
-        return handleStatus(args.slice(1), ctx, vfs);
+        return handleStatus(normalized.args.slice(1), commandCtx, vfs);
       case 'add':
-        return handleAdd(args.slice(1), ctx, vfs);
+        return handleAdd(normalized.args.slice(1), commandCtx, vfs);
       case 'commit':
-        return handleCommit(args.slice(1), ctx, vfs);
+        return handleCommit(normalized.args.slice(1), commandCtx, vfs);
       case 'log':
-        return handleLog(args.slice(1), ctx, vfs);
+        return handleLog(normalized.args.slice(1), commandCtx, vfs);
       case 'branch':
-        return handleBranch(args.slice(1), ctx, vfs);
+        return handleBranch(normalized.args.slice(1), commandCtx, vfs);
       case 'checkout':
-        return handleCheckout(args.slice(1), ctx, vfs);
+        return handleCheckout(normalized.args.slice(1), commandCtx, vfs);
       case 'remote':
-        return handleRemote(args.slice(1), ctx, vfs);
+        return handleRemote(normalized.args.slice(1), commandCtx, vfs);
       case 'diff':
-        return handleDiff(args.slice(1), ctx, vfs);
+        return handleDiff(normalized.args.slice(1), commandCtx, vfs);
       case 'reset':
-        return handleReset(args.slice(1), ctx, vfs);
+        return handleReset(normalized.args.slice(1), commandCtx, vfs);
       case 'rebase':
-        return handleRebase(args.slice(1), ctx, vfs);
+        return handleRebase(normalized.args.slice(1), commandCtx, vfs);
       case 'fetch':
-        return handleFetch(args.slice(1), ctx, vfs);
+        return handleFetch(normalized.args.slice(1), commandCtx, vfs);
       case 'pull':
-        return handlePull(args.slice(1), ctx, vfs);
+        return handlePull(normalized.args.slice(1), commandCtx, vfs);
       case 'push':
-        return handlePush(args.slice(1), ctx, vfs);
+        return handlePush(normalized.args.slice(1), commandCtx, vfs);
       case 'rev-parse':
-        return handleRevParse(args.slice(1), ctx, vfs);
+        return handleRevParse(normalized.args.slice(1), commandCtx, vfs);
       case 'rev-list':
-        return handleRevList(args.slice(1), ctx, vfs);
+        return handleRevList(normalized.args.slice(1), commandCtx, vfs);
       default:
         return failure(`git: unsupported subcommand '${subcommand}'`, 2);
     }
   } catch (error) {
     return mapGitError(error);
   }
+}
+
+function normalizeGitGlobalOptions(
+  args: string[],
+  ctx: CommandContext,
+): { args: string[]; ctx: CommandContext } | { error: JustBashExecResult } {
+  let cwd = ctx.cwd;
+  let env: Map<string, string> | undefined;
+  const remaining: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === '--') {
+      remaining.push(...args.slice(index + 1));
+      break;
+    }
+
+    if (arg === '-c') {
+      const value = args[index + 1];
+      if (!value) {
+        return { error: failure('git: option -c requires an argument', 129) };
+      }
+      env = applyGitConfigToEnv(value, ctx.env, env);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('-c') && arg.length > 2) {
+      env = applyGitConfigToEnv(arg.slice(2), ctx.env, env);
+      continue;
+    }
+
+    if (arg === '-C') {
+      const value = args[index + 1];
+      if (!value) {
+        return { error: failure('git: option -C requires an argument', 129) };
+      }
+      cwd = resolvePath(cwd, value);
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--no-pager' || arg === '--no-optional-locks') {
+      continue;
+    }
+
+    remaining.push(...args.slice(index));
+    break;
+  }
+
+  const nextCtx: CommandContext = { ...ctx, cwd };
+  if (env) {
+    nextCtx.env = env;
+  }
+  return { args: remaining, ctx: nextCtx };
+}
+
+function applyGitConfigToEnv(
+  config: string,
+  baseEnv: Map<string, string> | Record<string, string> | undefined,
+  currentEnv: Map<string, string> | undefined,
+): Map<string, string> {
+  const env =
+    currentEnv ??
+    (baseEnv instanceof Map
+      ? new Map(baseEnv)
+      : new Map(Object.entries(toEnvRecord(baseEnv))));
+  const [rawKey, ...valueParts] = config.split('=');
+  const key = rawKey.trim().toLowerCase();
+  const value = valueParts.join('=');
+
+  if (key === 'user.name') {
+    env.set('GIT_AUTHOR_NAME', value);
+    env.set('GIT_COMMITTER_NAME', value);
+  } else if (key === 'user.email') {
+    env.set('GIT_AUTHOR_EMAIL', value);
+    env.set('GIT_COMMITTER_EMAIL', value);
+  }
+
+  return env;
 }
 
 // ── Local handlers ──────────────────────────────────────────────────────────
@@ -890,8 +979,11 @@ async function handleStatus(args: string[], ctx: CommandContext, vfs: VirtualFS)
   let short = false;
 
   for (const arg of args) {
-    if (arg === '--short' || arg === '--porcelain') {
+    if (arg === '--short' || arg === '--porcelain' || arg.startsWith('--porcelain=')) {
       short = true;
+      continue;
+    }
+    if (arg === '-z') {
       continue;
     }
     if (arg.startsWith('-')) {

@@ -8,6 +8,10 @@ async function loadWebIDE(page: Page) {
   await page.waitForFunction(() => Boolean((window as any).__almostnodeWebIDE), {
     timeout: 20000,
   });
+  // The workbench drawer starts closed by default — bring it on screen.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('webide:open-workbench-drawer'));
+  });
 }
 
 async function getHostTerminalText(page: Page): Promise<string> {

@@ -459,6 +459,47 @@ async function withOpenCodeBrowserRuntime<T>(
   }
 }
 
+export interface OpenCodeBrowserClientHandle {
+  client: ReturnType<typeof createOpencodeClient>;
+  /** Fetch bound to the in-browser opencode server (supports SSE bodies). */
+  fetch: typeof fetch;
+  dispose: () => void;
+}
+
+/**
+ * Long-lived client against the shared in-browser opencode server — the same
+ * server instance the mounted TUI uses, so reads/writes and Bus events are
+ * fully shared. Caller owns disposal (unlike withOpenCodeBrowserRuntime).
+ */
+export async function createOpenCodeBrowserClient(
+  options: Pick<OpenCodeBrowserSessionOptions, "container" | "cwd" | "env">,
+): Promise<OpenCodeBrowserClientHandle> {
+  const bridgeSession = options.container.createTerminalSession({
+    cwd: options.cwd,
+    env: options.env,
+  });
+  const workspaceBridge = createWorkspaceBridge(options.container);
+  const processBridge = createProcessBridge(options.container, bridgeSession);
+
+  ensureBrowserProcess(options.cwd, options.env);
+  setWorkspaceRoot(options.cwd);
+  await initBrowserDB();
+
+  const internalFetch = createInternalFetch(workspaceBridge, processBridge);
+  const client = createOpencodeClient({
+    baseUrl: "http://opencode.internal",
+    directory: toOpenCodePath(options.cwd),
+    fetch: internalFetch,
+  });
+  return {
+    client,
+    fetch: internalFetch,
+    dispose: () => {
+      bridgeSession.dispose();
+    },
+  };
+}
+
 export async function listOpenCodeBrowserSessions(
   options: Pick<OpenCodeBrowserSessionOptions, "container" | "cwd" | "env">,
 ): Promise<OpenCodeBrowserSessionSummary[]> {

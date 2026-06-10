@@ -3,6 +3,7 @@ import {
   matchesClaudeLaunchCommand,
   matchesCodexLaunchCommand,
   matchesOpenCodeLaunchCommand,
+  matchesPiLaunchCommand,
 } from './terminal-command-routing';
 import {
   parseStoredTailscaleSessionSnapshot,
@@ -17,6 +18,10 @@ export const CLAUDE_LEGACY_CONFIG_PATH = '/home/user/.claude.json';
 export const CODEX_AUTH_PATH = '/home/user/.codex/auth.json';
 export const CODEX_CONFIG_TOML_PATH = '/home/user/.codex/config.toml';
 export const CODEX_CONFIG_JSON_PATH = '/home/user/.codex/config.json';
+export const PI_AGENT_DIR = '/home/user/.pi/agent';
+export const PI_AUTH_PATH = `${PI_AGENT_DIR}/auth.json`;
+export const PI_SETTINGS_PATH = `${PI_AGENT_DIR}/settings.json`;
+export const PI_MODELS_PATH = `${PI_AGENT_DIR}/models.json`;
 export const FLY_CONFIG_PATH = '/home/user/.fly/config.yml';
 export const NETLIFY_CONFIG_PATH = '/home/user/.config/netlify/config.json';
 export const NETLIFY_LEGACY_CONFIG_PATH = '/home/user/.netlify/config.json';
@@ -755,6 +760,7 @@ export class Keychain {
     const shouldAutoRestore = matchesOpenCodeLaunchCommand(command)
       || matchesClaudeLaunchCommand(command)
       || matchesCodexLaunchCommand(command)
+      || matchesPiLaunchCommand(command)
       || /\b(gh|replayio|tailscale|aws|infisical|fly|netlify|neon)\b/.test(normalized)
       || /\bapp-building(?=\s|$)/.test(normalized);
     if (!shouldAutoRestore) {

@@ -4,6 +4,7 @@
  */
 
 export { createNodeError } from './virtual-fs';
+export { DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE } from './shims/child_process';
 export type { PlaywrightCommandListener, PlaywrightSelectorContext } from './shims/playwright-command';
 export type { RequestMiddleware } from './server-bridge';
 export type {

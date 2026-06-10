@@ -33,7 +33,7 @@ vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {},
 }));
 
-let FilesSidebarSurface: typeof import('../src/webide/workbench-surfaces').FilesSidebarSurface;
+let FilesSidebarSurface: typeof import('../src/workbench/workbench-surfaces').FilesSidebarSurface;
 
 beforeAll(async () => {
   const dom = new JSDOM('<!doctype html><html><body></body></html>');
@@ -56,7 +56,7 @@ beforeAll(async () => {
     clearTimeout(handle);
   }) as typeof window.cancelAnimationFrame;
 
-  ({ FilesSidebarSurface } = await import('../src/webide/workbench-surfaces'));
+  ({ FilesSidebarSurface } = await import('../src/workbench/workbench-surfaces'));
 });
 
 async function waitForUiFlush(): Promise<void> {

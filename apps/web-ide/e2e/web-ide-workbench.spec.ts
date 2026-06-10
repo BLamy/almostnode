@@ -52,13 +52,26 @@ async function loadWebIDE(page: Page) {
       timeout: 90000,
     },
   );
+  // The workbench drawer and its inner sidebar start closed by default —
+  // these tests exercise the workbench directly, so bring both on screen.
+  await page.evaluate(async () => {
+    window.dispatchEvent(new Event("webide:open-workbench-drawer"));
+    await (
+      window as unknown as {
+        __almostnodeWebIDE: {
+          setWorkbenchSidebarVisible(visible: boolean): Promise<void>;
+        };
+      }
+    ).__almostnodeWebIDE.setWorkbenchSidebarVisible(true);
+  });
 }
 
-async function expectPreviewApp(page: Page) {
+async function expectPreviewApp(page: Page, options?: { timeout?: number }) {
+  const timeout = options?.timeout ?? 30000;
   await expect(page.locator("#webidePreviewStatus")).toContainText(
     "/__virtual__/3000/",
     {
-      timeout: 30000,
+      timeout,
     },
   );
   await expect(page.locator("#webidePreview")).toBeVisible();
@@ -66,9 +79,11 @@ async function expectPreviewApp(page: Page) {
 
   const previewFrame = page.frameLocator("#webidePreview");
   await expect(
-    previewFrame.getByRole("heading", { name: "Project ready!" }),
+    previewFrame.getByRole("heading", {
+      name: /Style the Web IDE app immediately/,
+    }),
   ).toBeVisible({
-    timeout: 30000,
+    timeout,
   });
 
   return previewFrame;
@@ -486,11 +501,12 @@ test.describe("web-ide workbench", () => {
   test("starts the seeded workspace app and renders it in the preview iframe", async ({
     page,
   }) => {
+    test.setTimeout(120000);
     await loadWebIDE(page);
 
-    const previewFrame = await expectPreviewApp(page);
+    const previewFrame = await expectPreviewApp(page, { timeout: 60000 });
     await expect(
-      previewFrame.getByRole("button", { name: "Toggle theme" }),
+      previewFrame.getByRole("button", { name: "Switch to light mode" }),
     ).toBeVisible();
   });
 
@@ -886,7 +902,7 @@ test.describe("web-ide workbench", () => {
     );
     expect(result.commandOutput).toBe("42");
     expect(result.previewSrc).toContain("/__virtual__/");
-    expect(result.previewBody).toContain("Project ready!");
+    expect(result.previewBody).toContain("Tailwind + shadcn starter");
     expect(result.installed).toContainEqual({
       id: "almostnode-fixtures.sunburst-paper",
       enabled: true,

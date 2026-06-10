@@ -8,12 +8,24 @@ import { simpleHash } from './utils/hash';
 import { uint8ToBase64 } from './utils/binary-encoding';
 import * as pathShim from './shims/path';
 import { getServerBridge } from './server-bridge';
+import { almostnodeDebugLog } from './utils/debug';
 
 const MODULE_ROUTE_PREFIX = '/__modules__/r';
 const MODULE_SOURCE_HASH_VERSION = 'module-source-v2';
 const VALID_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
-type TransportMode = 'service-worker' | 'data';
+type TransportMode = 'service-worker' | 'node-file' | 'data';
+
+interface NodeFileRecord {
+  filePath: string;
+  url: string;
+}
+
+type ESMRewriteResult = {
+  code: string;
+  metaNeedsPreamble: boolean;
+  topLevelBindings: Set<string>;
+};
 
 export interface LoadedModuleRecord {
   format: ModuleFormat;
@@ -44,6 +56,7 @@ interface InteropRegistry {
   moduleUrls: Map<string, Map<string, string>>;
   runtimeGlobals: Map<string, Record<string, unknown>>;
   processes: Map<string, Record<string, unknown>>;
+  hasBuiltin: (runtimeId: string, builtinId: string) => boolean;
   getRuntimeGlobal: (runtimeId: string) => Record<string, unknown>;
   getProcess: (runtimeId: string) => Record<string, unknown> | undefined;
 }
@@ -52,6 +65,10 @@ const dynamicImport = new Function(
   'specifier',
   'return import(specifier)',
 ) as (specifier: string) => Promise<Record<string, unknown>>;
+
+function importNodeModule(specifier: string): Promise<any> {
+  return import(/* @vite-ignore */ specifier);
+}
 
 export class ModuleGraphLoader {
   private vfs: VirtualFS;
@@ -65,6 +82,9 @@ export class ModuleGraphLoader {
   private revision = 0;
   private bridgeRegistered = false;
   private bridgeReadyPromise: Promise<void> | null = null;
+  private nodeModuleDirPromise: Promise<string> | null = null;
+  private nodeFileRecordCache = new Map<string, Promise<NodeFileRecord>>();
+  private buildingNodeFiles = new Set<string>();
   private urlCache = new Map<string, Promise<string>>();
   private sourceCache = new Map<string, Promise<string>>();
   private moduleCache = new Map<string, Promise<LoadedModuleRecord>>();
@@ -149,8 +169,23 @@ export class ModuleGraphLoader {
   }
 
   private async importResolved(descriptor: ResolvedModuleDescriptor): Promise<LoadedModuleRecord> {
+    almostnodeDebugLog(
+      'modules',
+      `[almostnode DEBUG] module import start: ${descriptor.format} ${descriptor.resolvedPath}`,
+    );
     const url = await this.getModuleUrl(descriptor);
-    const namespace = await dynamicImport(url);
+    almostnodeDebugLog(
+      'modules',
+      `[almostnode DEBUG] module import evaluate: ${descriptor.format} ${descriptor.resolvedPath}`,
+    );
+    const namespace =
+      this.transportMode === 'node-file'
+        ? await importNodeModule(url)
+        : await dynamicImport(url);
+    almostnodeDebugLog(
+      'modules',
+      `[almostnode DEBUG] module import done: ${descriptor.format} ${descriptor.resolvedPath}`,
+    );
 
     return {
       format: descriptor.format,
@@ -179,6 +214,20 @@ export class ModuleGraphLoader {
           const url = this.createServiceWorkerUrl(descriptor, hash);
           registry.moduleUrls.get(this.runtimeId)?.set(url, descriptor.resolvedPath);
           resolve(url);
+          return;
+        }
+
+        if (this.transportMode === 'node-file') {
+          const record = await this.reserveNodeFileRecord(descriptor);
+          registry.moduleUrls.get(this.runtimeId)?.set(record.url, descriptor.resolvedPath);
+          this.buildingNodeFiles.add(cacheKey);
+          try {
+            const source = await this.buildModuleSource(descriptor);
+            await this.writeNodeFileSource(record, source);
+          } finally {
+            this.buildingNodeFiles.delete(cacheKey);
+          }
+          resolve(record.url);
           return;
         }
 
@@ -246,7 +295,7 @@ export class ModuleGraphLoader {
     }
 
     const rewritten = await this.rewriteEsmSpecifiers(code, descriptor.resolvedPath);
-    const runtimePreamble = this.createRuntimePreamble();
+    const runtimePreamble = this.createRuntimePreamble(rewritten.topLevelBindings);
     if (!rewritten.metaNeedsPreamble) {
       return [runtimePreamble, rewritten.code].join('\n');
     }
@@ -265,16 +314,31 @@ export class ModuleGraphLoader {
     ].join('\n');
   }
 
-  private createRuntimePreamble(): string {
-    return [
+  private createRuntimePreamble(topLevelBindings?: Set<string>): string {
+    const lines = [
       'const __almostnode_hostGlobal = Function("return globalThis")();',
       `const __almostnode_global = __almostnode_hostGlobal.__almostnodeModuleInterop.getRuntimeGlobal(${JSON.stringify(this.runtimeId)});`,
       'const globalThis = __almostnode_global;',
       'const global = __almostnode_global;',
-      'const console = __almostnode_global.console;',
-      'const process = __almostnode_global.process;',
-      'const Buffer = __almostnode_global.Buffer;',
-    ].join('\n');
+      `const __almostnode_dynamic_import = (specifier) => {`,
+      `  if (typeof specifier === "string") {`,
+      `    const builtinId = specifier.startsWith("node:") ? specifier.slice(5) : specifier;`,
+      `    if (__almostnode_hostGlobal.__almostnodeModuleInterop.hasBuiltin(${JSON.stringify(this.runtimeId)}, builtinId)) {`,
+      `      const mod = __almostnode_hostGlobal.__almostnodeModuleInterop.getBuiltin(${JSON.stringify(this.runtimeId)}, builtinId);`,
+      `      return Promise.resolve({ default: mod, ...(mod && typeof mod === "object" ? mod : {}) });`,
+      `    }`,
+      `  }`,
+      `  return import(specifier);`,
+      `};`,
+    ];
+
+    for (const name of ['console', 'process', 'Buffer']) {
+      if (!topLevelBindings?.has(name)) {
+        lines.push(`const ${name} = __almostnode_global.${name};`);
+      }
+    }
+
+    return lines.join('\n');
   }
 
   private buildJsonModuleSource(descriptor: ResolvedModuleDescriptor): string {
@@ -343,7 +407,7 @@ export class ModuleGraphLoader {
   private async rewriteEsmSpecifiers(
     code: string,
     filename: string,
-  ): Promise<{ code: string; metaNeedsPreamble: boolean }> {
+  ): Promise<ESMRewriteResult> {
     const ast = acorn.parse(code, {
       ecmaVersion: 'latest',
       sourceType: 'module',
@@ -351,11 +415,68 @@ export class ModuleGraphLoader {
 
     const replacements: Array<[number, number, string]> = [];
     let metaNeedsPreamble = false;
+    const topLevelBindings = new Set<string>();
+
+    const collectPatternBindings = (node: any) => {
+      if (!node || typeof node !== 'object') return;
+      switch (node.type) {
+        case 'Identifier':
+          topLevelBindings.add(node.name);
+          return;
+        case 'ObjectPattern':
+          for (const property of node.properties || []) {
+            if (property.type === 'RestElement') {
+              collectPatternBindings(property.argument);
+            } else {
+              collectPatternBindings(property.value || property.argument);
+            }
+          }
+          return;
+        case 'ArrayPattern':
+          for (const element of node.elements || []) {
+            collectPatternBindings(element);
+          }
+          return;
+        case 'AssignmentPattern':
+          collectPatternBindings(node.left);
+          return;
+        case 'RestElement':
+          collectPatternBindings(node.argument);
+          return;
+        default:
+          return;
+      }
+    };
+
+    for (const statement of ast.body || []) {
+      switch (statement.type) {
+        case 'ImportDeclaration':
+          for (const specifier of statement.specifiers || []) {
+            if (specifier.local?.name) {
+              topLevelBindings.add(specifier.local.name);
+            }
+          }
+          break;
+        case 'VariableDeclaration':
+          for (const declaration of statement.declarations || []) {
+            collectPatternBindings(declaration.id);
+          }
+          break;
+        case 'FunctionDeclaration':
+        case 'ClassDeclaration':
+          if (statement.id?.name) {
+            topLevelBindings.add(statement.id.name);
+          }
+          break;
+        default:
+          break;
+      }
+    }
 
     const addSpecifierReplacement = async (sourceNode: { start: number; end: number; value?: string }) => {
       if (typeof sourceNode.value !== 'string') return;
       const descriptor = this.resolve(sourceNode.value, filename);
-      const targetUrl = await this.getModuleUrl(descriptor);
+      const targetUrl = await this.getImportUrl(descriptor);
       replacements.push([sourceNode.start, sourceNode.end, JSON.stringify(targetUrl)]);
     };
 
@@ -371,6 +492,7 @@ export class ModuleGraphLoader {
           }
           break;
         case 'ImportExpression':
+          replacements.push([node.start, node.start + 'import'.length, '__almostnode_dynamic_import']);
           if (node.source?.type === 'Literal') {
             await addSpecifierReplacement(node.source);
           }
@@ -408,7 +530,19 @@ export class ModuleGraphLoader {
       rewritten = rewritten.slice(0, start) + value + rewritten.slice(end);
     }
 
-    return { code: rewritten, metaNeedsPreamble };
+    return { code: rewritten, metaNeedsPreamble, topLevelBindings };
+  }
+
+  private async getImportUrl(descriptor: ResolvedModuleDescriptor): Promise<string> {
+    if (this.transportMode === 'node-file') {
+      const cacheKey = this.getCacheKey(descriptor);
+      if (this.buildingNodeFiles.has(cacheKey)) {
+        const record = await this.reserveNodeFileRecord(descriptor);
+        return record.url;
+      }
+    }
+
+    return this.getModuleUrl(descriptor);
   }
 
   private async ensureBridgeReady(): Promise<void> {
@@ -480,12 +614,70 @@ export class ModuleGraphLoader {
   private detectTransportMode(): TransportMode {
     const isLikelyJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
     const hasSW = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+    const isNodeRuntime =
+      typeof process !== 'undefined' &&
+      typeof process.versions?.node === 'string' &&
+      typeof window === 'undefined';
 
     if (hasSW && !isLikelyJsdom) {
       return 'service-worker';
     }
 
+    if (isNodeRuntime) {
+      return 'node-file';
+    }
+
     return 'data';
+  }
+
+  private async reserveNodeFileRecord(
+    descriptor: ResolvedModuleDescriptor,
+  ): Promise<NodeFileRecord> {
+    const cacheKey = this.getCacheKey(descriptor);
+    const cached = this.nodeFileRecordCache.get(cacheKey);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const [fs, os, nodePath, nodeUrl] = await Promise.all([
+        importNodeModule('node:fs/promises'),
+        importNodeModule('node:os'),
+        importNodeModule('node:path'),
+        importNodeModule('node:url'),
+      ]);
+      const dir = await this.getNodeModuleDir(fs, os, nodePath);
+      const filename = `${simpleHash(cacheKey)}.mjs`;
+      const filePath = nodePath.join(dir, filename);
+      return {
+        filePath,
+        url: nodeUrl.pathToFileURL(filePath).href,
+      };
+    })();
+    this.nodeFileRecordCache.set(cacheKey, pending);
+    return pending;
+  }
+
+  private async writeNodeFileSource(
+    record: NodeFileRecord,
+    source: string,
+  ): Promise<void> {
+    const fs = await importNodeModule('node:fs/promises');
+    await fs.writeFile(record.filePath, source, 'utf8');
+  }
+
+  private async getNodeModuleDir(
+    fs: any,
+    os: any,
+    nodePath: any,
+  ): Promise<string> {
+    if (!this.nodeModuleDirPromise) {
+      this.nodeModuleDirPromise = (async () => {
+        const dir = await fs.mkdtemp(
+          nodePath.join(os.tmpdir(), `almostnode-${this.runtimeId}-`),
+        );
+        return dir;
+      })();
+    }
+    return this.nodeModuleDirPromise;
   }
 
   private notFound(message: string): ResponseData {
@@ -514,6 +706,9 @@ function getInteropRegistry(): InteropRegistry {
       moduleUrls,
       runtimeGlobals,
       processes,
+      hasBuiltin(runtimeId: string, builtinId: string): boolean {
+        return Object.prototype.hasOwnProperty.call(builtins.get(runtimeId) || {}, builtinId);
+      },
       getBuiltin(runtimeId: string, builtinId: string): unknown {
         return builtins.get(runtimeId)?.[builtinId];
       },

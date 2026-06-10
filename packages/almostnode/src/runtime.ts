@@ -51,6 +51,7 @@ import * as inspectorShim from './shims/inspector';
 import * as asyncHooksShim from './shims/async_hooks';
 import * as domainShim from './shims/domain';
 import * as diagnosticsChannelShim from './shims/diagnostics_channel';
+import * as undiciShim from './shims/undici';
 import { ModuleGraphLoader } from './module-graph-loader';
 import { ModuleResolver, type ModuleFormat } from './module-resolution';
 
@@ -784,6 +785,7 @@ const builtinModules: Record<string, unknown> = {
   async_hooks: asyncHooksShim,
   domain: domainShim,
   diagnostics_channel: diagnosticsChannelShim,
+  undici: undiciShim,
   execa: createExecaModule(),
   // Node.js 'constants' module (deprecated alias for os.constants + fs.constants)
   // Used by graceful-fs and other packages for file open flags

@@ -70,6 +70,88 @@ describe("CodexHostBridge", () => {
     channel.port2.close();
   });
 
+  it("applies Codex patches through the host filesystem bridge", async () => {
+    const vfs = new FakeVfs();
+    const bridge = createCodexHostBridge({
+      container: {
+        vfs,
+        createTerminalSession: createFakeTerminalSession,
+      },
+    });
+    const channel = new MessageChannel();
+    const clientPort = channel.port2 as unknown as MessagePortLike;
+    bridge.attach(channel.port1 as unknown as MessagePortLike);
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "patch-add",
+        op: "fs/applyPatch",
+        params: {
+          cwd: "/workspace",
+          patch:
+            "*** Begin Patch\n*** Add File: src/index.ts\n+export const value = 1;\n*** End Patch\n",
+        },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        exitCode: 0,
+        stdout:
+          "Success. Updated the following files:\nA src/index.ts\n",
+      },
+    });
+    expect(vfs.readFileSync("/workspace/src/index.ts", "utf8")).toBe(
+      "export const value = 1;\n",
+    );
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "patch-update",
+        op: "fs/applyPatch",
+        params: {
+          cwd: "/workspace",
+          patch:
+            "*** Begin Patch\n*** Update File: src/index.ts\n@@\n-export const value = 1;\n+export const value = 2;\n*** End Patch\n",
+        },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        exitCode: 0,
+        stdout:
+          "Success. Updated the following files:\nM src/index.ts\n",
+      },
+    });
+    expect(vfs.readFileSync("/workspace/src/index.ts", "utf8")).toBe(
+      "export const value = 2;\n",
+    );
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "patch-delete",
+        op: "fs/applyPatch",
+        params: {
+          cwd: "/workspace",
+          patch:
+            "*** Begin Patch\n*** Delete File: src/index.ts\n*** End Patch\n",
+        },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        exitCode: 0,
+        stdout:
+          "Success. Updated the following files:\nD src/index.ts\n",
+      },
+    });
+    expect(() => vfs.readFileSync("/workspace/src/index.ts", "utf8")).toThrow(
+      "ENOENT",
+    );
+
+    bridge.dispose();
+    channel.port2.close();
+  });
+
   it("runs commands through TerminalSession and streams output deltas", async () => {
     const vfs = new FakeVfs();
     const bridge = createCodexHostBridge({
@@ -429,6 +511,12 @@ class FakeVfs {
       path,
       typeof data === "string" ? this.encoder.encode(data) : data,
     );
+  }
+
+  unlinkSync(path: string): void {
+    if (!this.files.delete(path)) {
+      throw new Error(`ENOENT: ${path}`);
+    }
   }
 
   mkdirSync(path: string, options?: { recursive?: boolean }): void {

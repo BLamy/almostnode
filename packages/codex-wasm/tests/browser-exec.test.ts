@@ -144,6 +144,14 @@ describe("runBrowserExecPlan", () => {
         type: "function",
         name: "playwright_cli",
       }),
+      expect.objectContaining({
+        type: "custom",
+        name: "apply_patch",
+        format: expect.objectContaining({
+          type: "grammar",
+          syntax: "lark",
+        }),
+      }),
     ]);
     const headers = new Headers(init!.headers);
     expect(headers.get("Authorization")).toBe("Bearer test-key");
@@ -351,6 +359,93 @@ describe("runBrowserExecPlan", () => {
     ]);
   });
 
+  it("uses streamed custom apply_patch input when response.completed has empty output", async () => {
+    const patch =
+      "*** Begin Patch\n*** Add File: streamed.txt\n+hello\n*** End Patch";
+    let responseIndex = 0;
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      if (responseIndex++ > 0) {
+        return new Response(JSON.stringify({ output_text: "patch complete" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return sseResponse([
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: {
+            id: "patch_item",
+            type: "custom_tool_call",
+            call_id: "call_stream_patch",
+            name: "apply_patch",
+            input: "",
+          },
+        },
+        {
+          type: "response.custom_tool_call_input.delta",
+          call_id: "call_stream_patch",
+          delta: "*** Begin Patch\n",
+        },
+        {
+          type: "response.custom_tool_call_input.delta",
+          call_id: "call_stream_patch",
+          delta: "*** Add File: streamed.txt\n+hello\n*** End Patch",
+        },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            id: "patch_item",
+            type: "custom_tool_call",
+            call_id: "call_stream_patch",
+            name: "apply_patch",
+            input: patch,
+          },
+        },
+        {
+          type: "response.completed",
+          response: {
+            id: "resp_streamed_patch",
+            status: "completed",
+            output: [],
+          },
+        },
+      ]);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const hostCalls: unknown[] = [];
+    const result = await runBrowserExecPlan(
+      execPlan({ cwd: "/workspace", prompt: "create file" }),
+      { cwd: "/workspace", env: { OPENAI_API_KEY: "test-key" } },
+      createHost(hostCalls, async (op) => {
+        if (op !== "fs/applyPatch") return {};
+        return {
+          stdout: "Success. Updated the following files:\nA streamed.txt\n",
+          stderr: "",
+          exitCode: 0,
+        };
+      }),
+    );
+
+    expect(result).toEqual({
+      stdout: "patch complete\n",
+      stderr: "",
+      exitCode: 0,
+    });
+    expect(hostCalls).toEqual([
+      {
+        op: "fs/applyPatch",
+        params: {
+          cwd: "/workspace",
+          patch,
+        },
+      },
+    ]);
+  });
+
   it("routes host-backed Responses API requests through network/fetch", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => {
       return new Response(JSON.stringify({ output_text: "network ok" }), {
@@ -513,6 +608,10 @@ describe("runBrowserExecPlan", () => {
         type: "function",
         name: "playwright_cli",
       }),
+      expect.objectContaining({
+        type: "custom",
+        name: "apply_patch",
+      }),
     ]);
 
     const secondBody = JSON.parse(
@@ -600,6 +699,102 @@ describe("runBrowserExecPlan", () => {
           timeoutMs: 3000,
           streamStdoutStderr: false,
         },
+      },
+    ]);
+  });
+
+  it("services apply_patch custom tool calls through the browser host bridge", async () => {
+    const patch =
+      "*** Begin Patch\n*** Add File: src/new-file.ts\n+export const created = true;\n*** End Patch\n";
+    const toolCall = {
+      type: "custom_tool_call",
+      call_id: "call_patch",
+      name: "apply_patch",
+      input: patch,
+    };
+    let responseIndex = 0;
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      const response =
+        responseIndex++ === 0
+          ? { id: "resp_1", output: [toolCall] }
+          : { id: "resp_2", output_text: "patched" };
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const hostCalls: unknown[] = [];
+    const result = await runBrowserExecPlan(
+      execPlan({
+        cwd: "/workspace",
+        applyPatchGrammar: "start: begin_patch hunk+ end_patch",
+      }),
+      {
+        cwd: "/workspace",
+        env: {
+          OPENAI_API_KEY: "test-key",
+        },
+      },
+      createHost(hostCalls, async (op) => {
+        if (op !== "fs/applyPatch") return {};
+        return {
+          stdout:
+            "Success. Updated the following files:\nA src/new-file.ts\n",
+          stderr: "",
+          exitCode: 0,
+        };
+      }),
+    );
+
+    expect(result).toEqual({
+      stdout: "patched\n",
+      stderr: "",
+      exitCode: 0,
+    });
+    expect(hostCalls).toEqual([
+      {
+        op: "fs/applyPatch",
+        params: {
+          cwd: "/workspace",
+          patch,
+        },
+      },
+    ]);
+
+    const firstBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit).body),
+    );
+    expect(firstBody.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "custom",
+          name: "apply_patch",
+          format: expect.objectContaining({
+            definition: "start: begin_patch hunk+ end_patch",
+          }),
+        }),
+      ]),
+    );
+
+    const secondBody = JSON.parse(
+      String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+    );
+    expect(secondBody.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+      },
+      toolCall,
+      {
+        type: "custom_tool_call_output",
+        name: "apply_patch",
+        call_id: "call_patch",
+        output: expect.stringMatching(
+          /^Exit code: 0\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\nSuccess\. Updated the following files:\nA src\/new-file\.ts\n?$/,
+        ),
       },
     ]);
   });

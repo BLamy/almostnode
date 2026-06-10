@@ -91,7 +91,7 @@ describe("OpenCodeTerminalSurface", () => {
     expect(launches).toEqual(["opencode"]);
   });
 
-  it("shows OpenCode, Codex, and Empty Terminal in the dropdown, with Claude Code only when available", () => {
+  it("shows OpenCode, Codex, Pi, and Empty Terminal in the dropdown, with Claude Code only when available", () => {
     const launches: AgentLaunchKind[] = [];
     const surface = new OpenCodeTerminalSurface({
       onLaunch: (kind) => launches.push(kind),
@@ -107,15 +107,20 @@ describe("OpenCodeTerminalSurface", () => {
 
     expect(toggle).not.toBeNull();
     toggle?.click();
-    expect(getMenuLabels(container)).toEqual(["OpenCode", "Codex", "Empty Terminal"]);
+    expect(getMenuLabels(container)).toEqual([
+      "OpenCode",
+      "Codex",
+      "Pi",
+      "Empty Terminal",
+    ]);
 
-    const codexItem = Array.from(
+    const piItem = Array.from(
       container.querySelectorAll(".almostnode-opencode-surface__menu-item"),
-    ).find((node) => node.textContent?.includes("Codex")) as
+    ).find((node) => node.textContent?.includes("Pi")) as
       | HTMLButtonElement
       | undefined;
-    codexItem?.click();
-    expect(launches).toEqual(["codex"]);
+    piItem?.click();
+    expect(launches).toEqual(["pi"]);
 
     document.body.click();
     surface.setClaudeAvailable(true);
@@ -123,6 +128,7 @@ describe("OpenCodeTerminalSurface", () => {
     expect(getMenuLabels(container)).toEqual([
       "OpenCode",
       "Codex",
+      "Pi",
       "Empty Terminal",
       "Claude Code",
     ]);
@@ -134,7 +140,7 @@ describe("OpenCodeTerminalSurface", () => {
       | undefined;
     claudeItem?.click();
 
-    expect(launches).toEqual(["codex", "claude"]);
+    expect(launches).toEqual(["pi", "claude"]);
   });
 
   it("does not render the old launcher-only splash copy", () => {

@@ -90,6 +90,65 @@ const DEFAULT_BROWSER_PROCESS_ENV: ProcessEnv = {
   FORCE_COLOR: "3",
 };
 
+const VALID_SIGNALS = new Set([
+  "SIGHUP",
+  "SIGINT",
+  "SIGQUIT",
+  "SIGILL",
+  "SIGTRAP",
+  "SIGABRT",
+  "SIGIOT",
+  "SIGBUS",
+  "SIGFPE",
+  "SIGKILL",
+  "SIGUSR1",
+  "SIGSEGV",
+  "SIGUSR2",
+  "SIGPIPE",
+  "SIGALRM",
+  "SIGTERM",
+  "SIGCHLD",
+  "SIGCONT",
+  "SIGSTOP",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGURG",
+  "SIGXCPU",
+  "SIGXFSZ",
+  "SIGVTALRM",
+  "SIGPROF",
+  "SIGWINCH",
+  "SIGIO",
+  "SIGPOLL",
+  "SIGPWR",
+  "SIGSYS",
+]);
+
+function normalizeSignal(signal: string | number | undefined): string | number {
+  if (signal === undefined) {
+    return "SIGTERM";
+  }
+  if (typeof signal === "number") {
+    if (!Number.isInteger(signal) || signal < 0) {
+      throw new TypeError(`Invalid signal: ${signal}`);
+    }
+    return signal;
+  }
+  if (/^\d+$/.test(signal)) {
+    return Number(signal);
+  }
+  const normalized = signal.toUpperCase();
+  if (!VALID_SIGNALS.has(normalized)) {
+    const error = new Error(`Unknown signal: ${signal}`) as Error & {
+      code?: string;
+    };
+    error.code = "ERR_UNKNOWN_SIGNAL";
+    throw error;
+  }
+  return normalized;
+}
+
 interface BrowserProcess {
   env: ProcessEnv;
   argv: string[];
@@ -112,6 +171,7 @@ interface BrowserProcess {
   cwd: () => string;
   chdir: (directory: string) => void;
   exit: (_code?: number) => never;
+  kill: (pid: number, signal?: string | number) => boolean;
   nextTick: (callback: (...args: unknown[]) => void, ...args: unknown[]) => void;
   stdout: ProcessStream;
   stderr: ProcessStream;
@@ -338,6 +398,13 @@ const fallbackProcess = markManagedProcess({
   exit: (code = 0): never => {
     throw new Error(`Process exited with code ${code}`);
   },
+  kill: (targetPid: number, signal?: string | number) => {
+    if (!Number.isInteger(targetPid)) {
+      throw new TypeError("pid must be an integer");
+    }
+    normalizeSignal(signal);
+    return true;
+  },
   nextTick(callback: (...args: unknown[]) => void, ...args: unknown[]) {
     queueMicrotask(() => callback(...args));
   },
@@ -408,12 +475,6 @@ function isManagedProcess(value: unknown): value is BrowserProcess {
 }
 
 function resolveProcessTarget(): BrowserProcess {
-  const activeProcess = (globalThis as { __almostnodeActiveProcess?: unknown })
-    .__almostnodeActiveProcess;
-  if (activeProcess && activeProcess !== processProxy && isManagedProcess(activeProcess)) {
-    return activeProcess as BrowserProcess;
-  }
-
   const globalProcess = globalThis.process;
   if (globalProcess && globalProcess !== processProxy && isManagedProcess(globalProcess)) {
     return globalProcess as unknown as BrowserProcess;

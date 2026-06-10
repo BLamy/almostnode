@@ -422,23 +422,36 @@ exec('node /node_modules/cli/cli.js', (error, stdout, stderr) => {
     it('should support which-style dependency probes used by CLIs', async () => {
       const { exports } = await runtime.execute(`
         const cp = require('child_process');
-        const found = cp.spawnSync('which', ['node'], { encoding: 'utf8' });
-        const missing = cp.spawnSync('which', ['rg'], { encoding: 'utf8' });
+        const node = cp.spawnSync('which', ['node'], { encoding: 'utf8' });
+        const rg = cp.spawnSync('which', ['rg'], { encoding: 'utf8' });
+        const fd = cp.spawnSync('which', ['fd'], { encoding: 'utf8' });
+        const rgVersion = cp.spawnSync('rg', ['--version'], { encoding: 'utf8' });
+        const fdVersion = cp.spawnSync('fd', ['--version'], { encoding: 'utf8' });
         module.exports = {
-          foundStatus: found.status,
-          foundStdout: found.stdout.trim(),
-          missingStatus: missing.status,
-          missingStdout: missing.stdout,
-          missingStderr: missing.stderr,
+          nodeStatus: node.status,
+          nodeStdout: node.stdout.trim(),
+          rgStatus: rg.status,
+          rgStdout: rg.stdout.trim(),
+          fdStatus: fd.status,
+          fdStdout: fd.stdout.trim(),
+          rgVersionStatus: rgVersion.status,
+          rgVersionStdout: rgVersion.stdout.trim(),
+          fdVersionStatus: fdVersion.status,
+          fdVersionStdout: fdVersion.stdout.trim(),
         };
       `, '/test.js');
 
       expect(exports).toEqual({
-        foundStatus: 0,
-        foundStdout: '/usr/bin/node',
-        missingStatus: 1,
-        missingStdout: '',
-        missingStderr: '',
+        nodeStatus: 0,
+        nodeStdout: '/usr/bin/node',
+        rgStatus: 0,
+        rgStdout: '/usr/bin/rg',
+        fdStatus: 0,
+        fdStdout: '/usr/bin/fd',
+        rgVersionStatus: 0,
+        rgVersionStdout: 'ripgrep 14.1.1',
+        fdVersionStatus: 0,
+        fdVersionStdout: 'fd 10.2.0',
       });
     });
   });
@@ -677,6 +690,35 @@ execFile(
 
       expect(consoleOutput.some(o => o.includes('STDOUT:/workspace/.claude/agents/reviewer.md'))).toBe(true);
       expect(consoleOutput.some(o => o.includes('STDERR:'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('No such file or directory'))).toBe(false);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
+
+    it('should route absolute fd paths to the builtin fd command', async () => {
+      vfs.mkdirSync('/workspace/src', { recursive: true });
+      vfs.writeFileSync('/workspace/src/index.ts', 'export const value = 1;\n');
+      vfs.writeFileSync('/workspace/src/readme.md', '# docs\n');
+
+      const code = `
+const { execFile } = require('child_process');
+
+execFile(
+  '/usr/bin/fd',
+  ['--type', 'f', '--extension', 'ts', '.', '/workspace'],
+  { cwd: '/workspace' },
+  (error, stdout, stderr) => {
+    console.log('STDOUT:' + stdout.trim());
+    console.log('STDERR:' + stderr.trim());
+    if (error) console.log('ERROR:' + error.message);
+  }
+);
+      `;
+
+      await runtime.execute(code, '/test-fd-path.js');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(consoleOutput.some(o => o.includes('STDOUT:src/index.ts'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('readme.md'))).toBe(false);
       expect(consoleOutput.some(o => o.includes('No such file or directory'))).toBe(false);
       expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
     });

@@ -160,6 +160,164 @@ describe('Claude command environment', () => {
     expect(parsed.noFlicker).toBe('1');
   });
 
+  it('lets npx package CLIs exit from an unawaited async main', async () => {
+    const container = createContainer({ cwd: '/project' });
+    const packageDir = '/project/node_modules/@earendil-works/pi-coding-agent';
+
+    container.vfs.mkdirSync(`${packageDir}/dist`, { recursive: true });
+    container.vfs.writeFileSync(
+      `${packageDir}/package.json`,
+      JSON.stringify({
+        name: '@earendil-works/pi-coding-agent',
+        version: '0.0.0-test',
+        type: 'module',
+        bin: {
+          pi: './dist/cli.js',
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      `${packageDir}/dist/cli.js`,
+      [
+        "import { EnvHttpProxyAgent, getGlobalDispatcher, install, setGlobalDispatcher } from 'undici';",
+        "import process from 'node:process';",
+        '',
+        'setGlobalDispatcher(new EnvHttpProxyAgent({ bodyTimeout: 300000 }));',
+        'install();',
+        '',
+        'async function main(args) {',
+        '  await Promise.resolve();',
+        "  if (args.includes('--version')) {",
+        "    if (!getGlobalDispatcher()) throw new Error('missing undici dispatcher');",
+        "    console.log('0.0.0-pi-fixture');",
+        '    process.exit(0);',
+        "    console.error('process.exit returned');",
+        '    process.exit(1);',
+        '  }',
+        "  console.error('missing version flag');",
+        '  process.exit(1);',
+        '}',
+        '',
+        'main(process.argv.slice(2)).catch((error) => {',
+        "  if (!error || !String(error.message || error).startsWith('Process exited with code')) {",
+        '    throw error;',
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error('Timed out waiting for npx async process.exit'));
+      }, 4000);
+    });
+
+    const result = await Promise.race([
+      container.run('npx @earendil-works/pi-coding-agent --version'),
+      timeoutPromise,
+    ]);
+    if (timeoutId) clearTimeout(timeoutId);
+
+    expect(result.exitCode, JSON.stringify(result, null, 2)).toBe(0);
+    expect(result.stdout.trim()).toBe('0.0.0-pi-fixture');
+    expect(result.stderr).toBe('');
+  });
+
+  it('lets npx package TUIs probe process.kill during startup', async () => {
+    const container = createContainer({ cwd: '/project' });
+    const packageDir = '/project/node_modules/@earendil-works/pi-coding-agent';
+
+    container.vfs.mkdirSync(`${packageDir}/dist`, { recursive: true });
+    container.vfs.writeFileSync(
+      `${packageDir}/package.json`,
+      JSON.stringify({
+        name: '@earendil-works/pi-coding-agent',
+        version: '0.0.0-test',
+        type: 'module',
+        bin: {
+          pi: './dist/cli.js',
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      `${packageDir}/dist/cli.js`,
+      [
+        "import process from 'node:process';",
+        '',
+        'console.log(JSON.stringify({',
+        "  killType: typeof process.kill,",
+        '  selfProbe: process.kill(process.pid, 0),',
+        "  groupSignal: process.kill(0, 'SIGTSTP'),",
+        '}));',
+      ].join('\n'),
+    );
+
+    const result = await container.run('npx @earendil-works/pi-coding-agent');
+    const parsed = JSON.parse(result.stdout.trim()) as {
+      killType: string;
+      selfProbe: boolean;
+      groupSignal: boolean;
+    };
+
+    expect(result.exitCode, JSON.stringify(result, null, 2)).toBe(0);
+    expect(parsed).toEqual({
+      killType: 'function',
+      selfProbe: true,
+      groupSignal: true,
+    });
+    expect(result.stderr).toBe('');
+  });
+
+  it('marks interactive npx package CLIs as long-running node processes', async () => {
+    const container = createContainer({ cwd: '/project' });
+    const packageDir = '/project/node_modules/@earendil-works/pi-coding-agent';
+
+    container.vfs.mkdirSync(`${packageDir}/dist`, { recursive: true });
+    container.vfs.writeFileSync(
+      `${packageDir}/package.json`,
+      JSON.stringify({
+        name: '@earendil-works/pi-coding-agent',
+        version: '0.0.0-test',
+        type: 'module',
+        bin: {
+          pi: './dist/cli.js',
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      `${packageDir}/dist/cli.js`,
+      [
+        "import process from 'node:process';",
+        '',
+        'console.log(JSON.stringify({',
+        '  longIdle: process.env.ALMOSTNODE_LONG_NODE_IDLE,',
+        '  npxExec: process.env.ALMOSTNODE_NPX_EXEC,',
+        '  stdinTty: process.stdin.isTTY,',
+        '}));',
+        'process.exit(0);',
+      ].join('\n'),
+    );
+
+    const session = container.createTerminalSession({ cwd: '/project' });
+    const result = await session.run('npx @earendil-works/pi-coding-agent', {
+      interactive: true,
+    });
+    const parsed = JSON.parse(result.stdout.trim()) as {
+      longIdle: string;
+      npxExec: string;
+      stdinTty: boolean;
+    };
+
+    expect(result.exitCode, JSON.stringify(result, null, 2)).toBe(0);
+    expect(parsed).toEqual({
+      longIdle: '1',
+      npxExec: '1',
+      stdinTty: true,
+    });
+    expect(result.stderr).toBe('');
+  });
+
   it('reads Claude history transcripts one JSON line at a time', async () => {
     const container = createContainer();
 

@@ -26,6 +26,13 @@ const CODEX_LAUNCH_PATTERNS = [
   /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@openai\/codex|\s+codex)(?:\s|$)/,
 ];
 
+const PI_LAUNCH_PATTERNS = [
+  /^(?:\.\/)?(?:node_modules\/\.bin\/)?pi(?:\s|$)/,
+  /^(?:\.\/)?(?:node_modules\/\.bin\/)?pi-coding-agent(?:\s|$)/,
+  /^npx(?:\s+[-\w=]+)*(?:\s+@earendil-works\/pi-coding-agent|\s+pi-coding-agent|\s+pi)(?:\s|$)/,
+  /^npm\s+exec(?:\s+(?:[-\w=]+|--))*(?:\s+@earendil-works\/pi-coding-agent|\s+pi-coding-agent|\s+pi)(?:\s|$)/,
+];
+
 function normalizeCommandSegment(segment: string): string {
   let normalized = segment.trim();
 
@@ -189,6 +196,24 @@ export function matchesOpenCodeLaunchCommand(command: string): boolean {
   return matchesSegment(command, OPEN_CODE_LAUNCH_PATTERNS);
 }
 
+export function matchesPiLaunchCommand(command: string): boolean {
+  return matchesSegment(command, PI_LAUNCH_PATTERNS);
+}
+
+/**
+ * Pull the session id out of a `--resume <id>` / `--resume=<id>` argument
+ * so chat can bind directly to the resumed transcript.
+ */
+export function extractResumeToken(command: string): string | null {
+  const match = command.match(
+    /--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s"']+))/,
+  );
+  if (!match) {
+    return null;
+  }
+  return match[1] ?? match[2] ?? match[3] ?? null;
+}
+
 export function matchesShadcnLaunchCommand(command: string): boolean {
   const patterns = [
     /^(?:\.\/)?(?:node_modules\/\.bin\/)?shadcn(?:\s|$)/,
@@ -263,6 +288,7 @@ export function shouldRunWorkbenchCommandInteractively(
     matchesClaudeLaunchCommand(command) ||
     matchesCodexLaunchCommand(command) ||
     matchesOpenCodeLaunchCommand(command) ||
+    matchesPiLaunchCommand(command) ||
     matchesShadcnLaunchCommand(command)
   );
 }

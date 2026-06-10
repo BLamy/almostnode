@@ -33,7 +33,7 @@ function parseTimestamp(value: string | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function extractClaudeMessageText(content: unknown): string {
+export function extractClaudeMessageText(content: unknown): string {
   if (typeof content === 'string') {
     return content.trim();
   }

@@ -280,6 +280,13 @@ fn browser_exec_to_js(plan: BrowserExecPlan) -> Result<JsValue, JsValue> {
             &JsValue::from_str(&path),
         )?;
     }
+    if let Some(grammar) = plan.apply_patch_grammar {
+        Reflect::set(
+            &value,
+            &JsValue::from_str("applyPatchGrammar"),
+            &JsValue::from_str(&grammar),
+        )?;
+    }
     if let Some(cwd) = plan.cwd {
         Reflect::set(&value, &JsValue::from_str("cwd"), &JsValue::from_str(&cwd))?;
     }
@@ -338,6 +345,15 @@ fn browser_tui_to_js(result: BrowserTuiRunResult) -> Result<JsValue, JsValue> {
             &JsValue::from_f64(cursor.y as f64),
         )?;
         Reflect::set(&value, &JsValue::from_str("cursor"), &cursor_value)?;
+    }
+    if let Some(scrollback_ansi) = result.scrollback_ansi {
+        if !scrollback_ansi.is_empty() {
+            Reflect::set(
+                &value,
+                &JsValue::from_str("scrollbackAnsi"),
+                &JsValue::from_str(&scrollback_ansi),
+            )?;
+        }
     }
     Ok(value.into())
 }

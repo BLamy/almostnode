@@ -392,6 +392,42 @@ h1 {
 
       expect(response.statusCode).toBe(404);
     });
+
+    it('should serve public directory assets from URL root', async () => {
+      vfs.mkdirSync('/public', { recursive: true });
+      vfs.writeFileSync('/public/lottie.json', '{"v":"5.12.2","layers":[]}');
+
+      const response = await server.handleRequest('GET', '/lottie.json', {});
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['Content-Type']).toBe('application/json; charset=utf-8');
+      expect(response.body.toString()).toContain('"layers"');
+    });
+
+    it('should serve public assets added after a rooted Vite server starts', async () => {
+      const rootedVfs = new VirtualFS();
+      rootedVfs.mkdirSync('/project', { recursive: true });
+      rootedVfs.writeFileSync('/project/index.html', '<div id="root"></div>');
+      const rootedServer = new ViteDevServer(rootedVfs, { port: 3001, root: '/project' });
+
+      try {
+        const missing = await rootedServer.handleRequest('GET', '/lottie.json', {});
+        expect(missing.statusCode).toBe(404);
+
+        rootedVfs.mkdirSync('/project/public', { recursive: true });
+        rootedVfs.writeFileSync('/project/public/lottie.json', '{"ok":true}');
+
+        const response = await rootedServer.handleRequest('GET', '/lottie.json', {
+          'sec-fetch-dest': 'empty',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.headers['Content-Type']).toBe('application/json; charset=utf-8');
+        expect(response.body.toString()).toBe('{"ok":true}');
+      } finally {
+        rootedServer.stop();
+      }
+    });
   });
 
   describe('HMR client injection', () => {
@@ -667,6 +703,21 @@ export default Button;`
       vfs.writeFileSync('/src/lib/index.ts', 'export const cn = (...parts: string[]) => parts.join(" ");');
 
       const response = await server.handleRequest('GET', '/src/lib', {});
+
+      expect(response.statusCode).toBe(301);
+      expect(response.headers.Location).toBe('lib/');
+
+      const redirected = await server.handleRequest('GET', '/src/lib/', {});
+
+      expect(redirected.statusCode).toBe(200);
+      expect(redirected.headers['Content-Type']).toBe('application/javascript; charset=utf-8');
+    });
+
+    it('should resolve extensionless index modules with trailing slash', async () => {
+      vfs.mkdirSync('/src/lib', { recursive: true });
+      vfs.writeFileSync('/src/lib/index.ts', 'export const cn = (...parts: string[]) => parts.join(" ");');
+
+      const response = await server.handleRequest('GET', '/src/lib/', {});
 
       expect(response.statusCode).toBe(200);
       expect(response.headers['Content-Type']).toBe('application/javascript; charset=utf-8');

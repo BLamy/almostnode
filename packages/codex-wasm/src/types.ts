@@ -32,6 +32,7 @@ export interface CodexCliBrowserExecPlan {
   outputLastMessagePath?: string;
   warnings: string[];
   cwd?: string;
+  applyPatchGrammar?: string;
 }
 
 export type CodexCliBrowserLoginRequest =
@@ -41,6 +42,7 @@ export type CodexCliBrowserLoginRequest =
 export interface CodexCliBrowserTuiResult {
   ansi: string;
   action: CodexCliBrowserTuiAction;
+  scrollbackAnsi?: string;
   cursor?: {
     x: number;
     y: number;

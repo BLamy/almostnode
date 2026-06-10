@@ -131,6 +131,11 @@ export interface ViteDevServerOptions extends DevServerOptions {
    * Enable TanStack Router route tree auto-generation (default: false)
    */
   tanstackRouter?: boolean;
+
+  /**
+   * Public directory for static assets mounted at the URL root (default: '<root>/public')
+   */
+  publicDir?: string | false;
 }
 
 /**
@@ -507,6 +512,7 @@ export class ViteDevServer extends DevServer {
   private tailwindConfigLoaded: boolean = false;
   private _dependencies: Record<string, string> | undefined;
   private _installedPackages: Set<string> | undefined;
+  private publicDir: string | null = null;
 
   constructor(vfs: VirtualFS, options: ViteDevServerOptions) {
     super(vfs, options);
@@ -517,6 +523,9 @@ export class ViteDevServer extends DevServer {
       jsxAutoImport: true,
       ...options,
     };
+    this.publicDir = this.options.publicDir === false
+      ? null
+      : this.resolvePath(this.options.publicDir ?? '/public');
   }
 
   /**
@@ -594,6 +603,11 @@ export class ViteDevServer extends DevServer {
           // Fall through to normal handling
         }
       }
+    }
+
+    const publicResponse = this.servePublicFile(pathname);
+    if (publicResponse) {
+      return publicResponse;
     }
 
     // Handle root path - serve index.html
@@ -887,6 +901,20 @@ export class ViteDevServer extends DevServer {
     }
 
     return filePath;
+  }
+
+  private servePublicFile(pathname: string): ResponseData | null {
+    if (!this.publicDir || !pathname.startsWith('/')) {
+      return null;
+    }
+
+    const publicDir = this.publicDir === '/' ? '' : this.publicDir.replace(/\/+$/, '');
+    const publicPath = `${publicDir}${pathname}`;
+    if (this.exists(publicPath) && !this.isDirectory(publicPath)) {
+      return this.serveFile(publicPath);
+    }
+
+    return null;
   }
 
   /**

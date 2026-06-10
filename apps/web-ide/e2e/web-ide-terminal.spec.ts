@@ -10,6 +10,11 @@ async function loadWebIDE(page: Page, query = "?marketplace=mock") {
       timeout: 90000,
     },
   );
+  // The workbench drawer starts closed by default — these tests interact
+  // with workbench surfaces directly, so bring it on screen.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("webide:open-workbench-drawer"));
+  });
 }
 
 async function getHostTerminalText(page: Page): Promise<string> {

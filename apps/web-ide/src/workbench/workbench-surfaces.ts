@@ -1714,7 +1714,12 @@ export class TerminalPanelSurface {
   }
 }
 
-export type AgentLaunchKind = "opencode" | "terminal" | "claude" | "codex";
+export type AgentLaunchKind =
+  | "opencode"
+  | "terminal"
+  | "claude"
+  | "codex"
+  | "pi";
 
 export class OpenCodeTerminalSurface {
   private readonly root = document.createElement("div");
@@ -1934,6 +1939,11 @@ export class OpenCodeTerminalSurface {
         kind: "codex",
         label: "Codex",
         detail: "Run Codex CLI in this panel",
+      },
+      {
+        kind: "pi",
+        label: "Pi",
+        detail: "Run Pi coding agent in this panel",
       },
       {
         kind: "terminal",

@@ -227,6 +227,34 @@ describe('process module (Node.js compat)', () => {
     });
   });
 
+  describe('process.kill()', () => {
+    it('should expose a Node-like kill helper for CLI signal checks', () => {
+      const proc = createProcess();
+      expect(typeof proc.kill).toBe('function');
+      expect(proc.kill(proc.pid, 0)).toBe(true);
+      expect(proc.kill(0, 'SIGTSTP')).toBe(true);
+      expect(proc.kill(-1234, 'SIGKILL')).toBe(true);
+    });
+
+    it('should emit self-directed nonzero signals asynchronously', async () => {
+      const proc = createProcess();
+      const handler = vi.fn();
+      proc.on('SIGTERM', handler);
+
+      expect(proc.kill(proc.pid, 'SIGTERM')).toBe(true);
+      await Promise.resolve();
+
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reject unknown signal names', () => {
+      const proc = createProcess();
+      expect(() => proc.kill(proc.pid, 'SIGNOPE')).toThrow(
+        /Unknown signal: SIGNOPE/,
+      );
+    });
+  });
+
   describe('process.nextTick()', () => {
     it('should execute callback asynchronously', async () => {
       const proc = createProcess();

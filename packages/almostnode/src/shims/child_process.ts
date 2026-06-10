@@ -51,7 +51,11 @@ import { VirtualFSAdapter } from "./vfs-adapter";
 import { Runtime } from "../runtime";
 import type { InstallMode, PackageManagerMutationSummary } from "../npm";
 import type { PackageJson } from "../types/package-json";
-import { almostnodeDebugError, almostnodeDebugLog } from "../utils/debug";
+import {
+  almostnodeDebugError,
+  almostnodeDebugLog,
+  isAlmostnodeDebugEnabled,
+} from "../utils/debug";
 import * as path from "./path";
 import { extractTarball } from "../npm/tarball";
 import type { OxcFileAccessor } from "../oxc/runtime";
@@ -137,7 +141,8 @@ const DEFAULT_SHELL_ENV: Record<string, string> = {
 };
 
 const DEFAULT_CLAUDE_WRAPPER_PATH = "/usr/local/bin/claude-wrapper";
-const DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code@2.1.52";
+export const DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE =
+  "@anthropic-ai/claude-code@2.1.52";
 
 interface ActiveProcessStdin {
   emit: (event: string, ...args: unknown[]) => void;
@@ -1546,7 +1551,6 @@ export function initChildProcess(
 
     let exitCalled = false;
     let exitCode = 0;
-    let syncExecution = true;
     let exitResolve: ((code: number) => void) | null = null;
     const exitPromise = new Promise<number>((resolve) => {
       exitResolve = resolve;
@@ -1593,9 +1597,7 @@ export function initChildProcess(
         proc.emit("exit", code);
         exitResolve!(code);
       }
-      if (syncExecution) {
-        throw new Error(`Process exited with code ${code}`);
-      }
+      throw new Error(`Process exited with code ${code}`);
     }) as (code?: number) => never;
     proc.argv = ["node", resolvedPath, ...args.slice(1)];
 
@@ -1655,29 +1657,6 @@ module.exports = (async () => {
       }
     };
 
-    try {
-      await preloadYogaLayout();
-      await runtime.runFile(resolvedPath);
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.startsWith("Process exited with code")
-      ) {
-        return { stdout, stderr, exitCode };
-      }
-      const errorMsg =
-        error instanceof Error
-          ? `${error.message}\n${error.stack || ""}`
-          : String(error);
-      return { stdout, stderr: stderr + `Error: ${errorMsg}\n`, exitCode: 1 };
-    } finally {
-      syncExecution = false;
-    }
-
-    if (exitCalled) {
-      return { stdout, stderr, exitCode };
-    }
-
     const rejectionHandler = (event: PromiseRejectionEvent) => {
       const reason = event.reason;
       if (
@@ -1700,6 +1679,71 @@ module.exports = (async () => {
     if (hasGlobalRejectionEvents) {
       globalThis.addEventListener("unhandledrejection", rejectionHandler);
     }
+    const nodeProcessForRejections = (globalThis as {
+      process?: {
+        on?: (event: string, listener: (reason: unknown) => void) => void;
+        off?: (event: string, listener: (reason: unknown) => void) => void;
+      };
+    }).process;
+    const nodeRejectionHandler = (reason: unknown) => {
+      if (
+        reason instanceof Error &&
+        reason.message.startsWith("Process exited with code")
+      ) {
+        return;
+      }
+      const msg =
+        reason instanceof Error
+          ? `Unhandled rejection: ${reason.message}\n${reason.stack || ""}\n`
+          : `Unhandled rejection: ${String(reason)}\n`;
+      appendStderr(msg);
+    };
+    const hasNodeRejectionEvents =
+      !hasGlobalRejectionEvents &&
+      typeof nodeProcessForRejections?.on === "function" &&
+      typeof nodeProcessForRejections?.off === "function";
+    if (hasNodeRejectionEvents) {
+      nodeProcessForRejections!.on!("unhandledRejection", nodeRejectionHandler);
+    }
+
+    const drainPostExitRejections = async (): Promise<void> => {
+      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    };
+
+    const runInitialFile = async (): Promise<"runFile" | "exit" | "abort"> => {
+      const runFilePromise = (async () => {
+        await preloadYogaLayout();
+        await runtime.runFile(resolvedPath);
+      })();
+
+      const raceEntries: Array<Promise<"runFile" | "exit" | "abort">> = [
+        runFilePromise.then(() => "runFile" as const),
+        exitPromise.then(() => "exit" as const),
+      ];
+
+      let removeAbortListener = () => {};
+      if (execution.signal) {
+        if (execution.signal.aborted) return "abort";
+        raceEntries.push(
+          new Promise<"abort">((resolve) => {
+            const onAbort = () => resolve("abort");
+            execution.signal!.addEventListener("abort", onAbort, {
+              once: true,
+            });
+            removeAbortListener = () => {
+              execution.signal!.removeEventListener("abort", onAbort);
+            };
+          }),
+        );
+      }
+
+      try {
+        return await Promise.race(raceEntries);
+      } finally {
+        removeAbortListener();
+      }
+    };
 
     const vfsActivityHandler = () => {
       lastActivityAt = Date.now();
@@ -1716,6 +1760,37 @@ module.exports = (async () => {
     };
 
     try {
+      let startupResult: "runFile" | "exit" | "abort";
+      try {
+        startupResult = await runInitialFile();
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.startsWith("Process exited with code")
+        ) {
+          await drainPostExitRejections();
+          return { stdout, stderr, exitCode };
+        }
+        const errorMsg =
+          error instanceof Error
+            ? `${error.message}\n${error.stack || ""}`
+            : String(error);
+        return {
+          stdout,
+          stderr: stderr + `Error: ${errorMsg}\n`,
+          exitCode: 1,
+        };
+      }
+
+      if (startupResult === "abort") {
+        return { stdout, stderr, exitCode: exitCalled ? exitCode : 130 };
+      }
+
+      if (startupResult === "exit" || exitCalled) {
+        await drainPostExitRejections();
+        return { stdout, stderr, exitCode };
+      }
+
       const MAX_TOTAL_MS = isLongIdleNodeModulesCli ? 5 * 60 * 1000 : 60_000;
       const IDLE_TIMEOUT_MS = isLongIdleNodeModulesCli
         ? 10_000
@@ -1823,6 +1898,9 @@ module.exports = (async () => {
       }
 
       const aborted = execution.signal?.aborted;
+      if (exitCalled) {
+        await drainPostExitRejections();
+      }
       return {
         stdout,
         stderr,
@@ -1839,6 +1917,9 @@ module.exports = (async () => {
       execution.onForkedChildExit = prevChildExitHandler;
       if (hasGlobalRejectionEvents) {
         globalThis.removeEventListener("unhandledrejection", rejectionHandler);
+      }
+      if (hasNodeRejectionEvents) {
+        nodeProcessForRejections!.off!("unhandledRejection", nodeRejectionHandler);
       }
       controller.vfs.off("change", vfsActivityHandler);
       controller.vfs.off("delete", vfsActivityHandler);
@@ -2022,7 +2103,16 @@ module.exports = (async () => {
       if (firstStderrLine) {
         diagnostic += `npx: first stderr line: ${firstStderrLine}\n`;
       }
-      if (!stderrText.trim()) {
+      if (isAlmostnodeDebugEnabled("npx")) {
+        const stderrTail = formatOutputTail(stderrText, 40, 4000);
+        if (stderrTail && stderrTail !== firstStderrLine) {
+          diagnostic += `npx: stderr tail:\n${stderrTail}\n`;
+        }
+        const stdoutTail = formatOutputTail(result.stdout || "", 40, 4000);
+        if (stdoutTail) {
+          diagnostic += `npx: stdout tail:\n${stdoutTail}\n`;
+        }
+      } else if (!stderrText.trim()) {
         const stdoutTail = formatOutputTail(result.stdout || "");
         if (stdoutTail) {
           diagnostic += `npx: stdout tail:\n${stdoutTail}\n`;
@@ -2142,11 +2232,13 @@ module.exports = (async () => {
       };
     }
 
+    const shouldUseExtendedNodeIdle =
+      execution?.interactive ||
+      useExtendedNodeIdle ||
+      LONG_RUNNING_NPX_COMMANDS.has(commandName);
     const execEnv = {
       ...env,
-      ...(useExtendedNodeIdle || LONG_RUNNING_NPX_COMMANDS.has(commandName)
-        ? { ALMOSTNODE_LONG_NODE_IDLE: "1" }
-        : {}),
+      ...(shouldUseExtendedNodeIdle ? { ALMOSTNODE_LONG_NODE_IDLE: "1" } : {}),
       ALMOSTNODE_NPX_EXEC: "1",
     };
 
@@ -2328,7 +2420,12 @@ module.exports = (async () => {
         deploymentBasePath: bridge.getBasePath(),
       });
 
-      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
+      bridge.registerServer(
+        createBridgeServerWrapper(server) as any,
+        port,
+        "0.0.0.0",
+        { purpose: "workspace-preview", framework: "next", root },
+      );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
@@ -2504,6 +2601,7 @@ module.exports = (async () => {
       const server = new ViteDevServer(controller.vfs, {
         port,
         root,
+        publicDir: `${root}/public`.replace(/\/+/g, "/"),
         spaFallback,
         aliases,
         tanstackRouter,
@@ -2523,7 +2621,12 @@ module.exports = (async () => {
         }
       }
 
-      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
+      bridge.registerServer(
+        createBridgeServerWrapper(server) as any,
+        port,
+        "0.0.0.0",
+        { purpose: "workspace-preview", framework: "vite", root },
+      );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
@@ -2730,7 +2833,16 @@ module.exports = (async () => {
         runtimeEnv: { ...env },
       });
 
-      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
+      bridge.registerServer(
+        createBridgeServerWrapper(server) as any,
+        port,
+        "0.0.0.0",
+        {
+          purpose: "workspace-preview",
+          framework: "wrangler",
+          root: normalizedCwd,
+        },
+      );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
@@ -2933,7 +3045,16 @@ module.exports = (async () => {
         assetsDir,
       });
 
-      bridge.registerServer(createBridgeServerWrapper(server) as any, port);
+      bridge.registerServer(
+        createBridgeServerWrapper(server) as any,
+        port,
+        "0.0.0.0",
+        {
+          purpose: "workspace-preview",
+          framework: "wrangler-pages",
+          root: normalizedCwd,
+        },
+      );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
@@ -3303,6 +3424,44 @@ module.exports = (async () => {
     return executeRgCommand(args, ctx, controller);
   });
 
+  const fdCommand = defineCommand("fd", async (args, ctx) => {
+    return executeFdCommand(args, ctx);
+  });
+
+  const whichCommand = defineCommand("which", async (args, ctx) => {
+    const env = envToRecord(ctx.env);
+    const targets = args.filter((arg) => arg && !arg.startsWith("-"));
+    if (targets.length === 0) {
+      return {
+        stdout: "",
+        stderr: "usage: which command ...\n",
+        exitCode: 1,
+      };
+    }
+
+    const output: string[] = [];
+    let missing = false;
+    for (const target of targets) {
+      const resolved = resolveSyntheticWhichTarget(
+        controller,
+        target,
+        ctx.cwd,
+        env,
+      );
+      if (resolved) {
+        output.push(resolved);
+      } else {
+        missing = true;
+      }
+    }
+
+    return {
+      stdout: output.length > 0 ? `${output.join("\n")}\n` : "",
+      stderr: "",
+      exitCode: missing ? 1 : 0,
+    };
+  });
+
   const psCommand = defineCommand("ps", async (args, _ctx) => {
     const lines: string[] = [];
     lines.push("  PID TTY      STAT  COMMAND");
@@ -3494,8 +3653,12 @@ module.exports = (async () => {
     createRegisteredShellCommand(npmCommand.name, npmCommand),
     createRegisteredShellCommand(npxCommand.name, npxCommand),
     createRegisteredShellCommand(tarCommand.name, tarCommand),
-    createRegisteredShellCommand(nextCommand.name, nextCommand),
-    createRegisteredShellCommand(viteCommand.name, viteCommand),
+    createRegisteredShellCommand(nextCommand.name, nextCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(viteCommand.name, viteCommand, {
+      interceptShellParsing: true,
+    }),
     createRegisteredShellCommand(gitCommand.name, gitCommand, {
       interceptShellParsing: true,
     }),
@@ -3570,6 +3733,8 @@ module.exports = (async () => {
     createRegisteredShellCommand(egrepCommand.name, egrepCommand),
     createRegisteredShellCommand(fgrepCommand.name, fgrepCommand),
     createRegisteredShellCommand(rgCommand.name, rgCommand),
+    createRegisteredShellCommand(fdCommand.name, fdCommand),
+    createRegisteredShellCommand(whichCommand.name, whichCommand),
     createRegisteredShellCommand(psCommand.name, psCommand),
     createRegisteredShellCommand(jinaCommand.name, jinaCommand),
   ];
@@ -4172,15 +4337,24 @@ function getCurrentProcessArch(): string {
 const SYNTHETIC_WHICH_TARGETS: Record<string, string> = {
   bash: "/bin/bash",
   "claude-wrapper": DEFAULT_CLAUDE_WRAPPER_PATH,
+  fd: "/usr/bin/fd",
   node: "/usr/bin/node",
   npm: "/usr/bin/npm",
   npx: "/usr/bin/npx",
   rec: "/usr/bin/rec",
+  rg: "/usr/bin/rg",
   sh: "/bin/sh",
   sox: "/usr/bin/sox",
   tar: "/usr/bin/tar",
   zsh: "/bin/zsh",
 };
+
+function getSyntheticToolVersion(command: string): string | null {
+  const commandName = path.basename(command).toLowerCase();
+  if (commandName === "fd") return "fd 10.2.0\n";
+  if (commandName === "rg") return "ripgrep 14.1.1\n";
+  return null;
+}
 
 function normalizeSpawnSyncOutput(
   stdout: string,
@@ -4244,6 +4418,17 @@ function runSyntheticSyncCommand(
       return { stdout: `${env.USER || "user"}\n`, stderr: "", status: 0 };
     case "true":
       return { stdout: "", stderr: "", status: 0 };
+    case "fd":
+    case "rg": {
+      if (args.includes("--version") || args.includes("-V")) {
+        return {
+          stdout: getSyntheticToolVersion(commandName) || "",
+          stderr: "",
+          status: 0,
+        };
+      }
+      return null;
+    }
     case "cat": {
       if (!controller) return null;
       const outputs: string[] = [];
@@ -4541,7 +4726,10 @@ function getSyntheticExecSyncOutput(
 
   const versionMatch = trimmed.match(/^(\S+)\s+--version$/);
   if (versionMatch) {
-    return getSyntheticShellVersion(versionMatch[1]);
+    return (
+      getSyntheticToolVersion(versionMatch[1]) ||
+      getSyntheticShellVersion(versionMatch[1])
+    );
   }
 
   const tokens = splitCommandArgs(trimmed);
@@ -6118,6 +6306,217 @@ function parseRgArgs(args: string[]): ParsedRgArgs {
   return parsed;
 }
 
+interface ParsedFdArgs {
+  pattern: string;
+  paths: string[];
+  type: "file" | "directory" | null;
+  hidden: boolean;
+  noIgnore: boolean;
+  glob: boolean;
+  fullPath: boolean;
+  absolutePath: boolean;
+  stripCwdPrefix: boolean;
+  caseInsensitive: boolean;
+  caseSensitive: boolean;
+  extensions: string[];
+  excludes: string[];
+  maxDepth: number;
+  version: boolean;
+  help: boolean;
+}
+
+function parseFdArgs(args: string[]): ParsedFdArgs {
+  const parsed: ParsedFdArgs = {
+    pattern: "",
+    paths: [],
+    type: null,
+    hidden: false,
+    noIgnore: false,
+    glob: false,
+    fullPath: false,
+    absolutePath: false,
+    stripCwdPrefix: false,
+    caseInsensitive: false,
+    caseSensitive: false,
+    extensions: [],
+    excludes: [],
+    maxDepth: 0,
+    version: false,
+    help: false,
+  };
+  const positional: string[] = [];
+  const readValue = (index: number): string => args[index + 1] ?? "";
+
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === "--") {
+      positional.push(...args.slice(i + 1));
+      break;
+    }
+
+    switch (arg) {
+      case "--version":
+      case "-V":
+        parsed.version = true;
+        i++;
+        continue;
+      case "--help":
+      case "-h":
+        parsed.help = true;
+        i++;
+        continue;
+      case "--type":
+      case "-t": {
+        const value = readValue(i);
+        if (value === "f" || value === "file") parsed.type = "file";
+        if (value === "d" || value === "directory") {
+          parsed.type = "directory";
+        }
+        i += 2;
+        continue;
+      }
+      case "--extension":
+      case "-e":
+        parsed.extensions.push(readValue(i).replace(/^\./, ""));
+        i += 2;
+        continue;
+      case "--exclude":
+      case "-E":
+        parsed.excludes.push(readValue(i));
+        i += 2;
+        continue;
+      case "--max-depth":
+      case "-d":
+        parsed.maxDepth = parseInt(readValue(i), 10) || 0;
+        i += 2;
+        continue;
+      case "--glob":
+      case "-g":
+        parsed.glob = true;
+        i++;
+        continue;
+      case "--full-path":
+      case "-p":
+        parsed.fullPath = true;
+        i++;
+        continue;
+      case "--absolute-path":
+      case "-a":
+        parsed.absolutePath = true;
+        i++;
+        continue;
+      case "--strip-cwd-prefix":
+        parsed.stripCwdPrefix = true;
+        i++;
+        continue;
+      case "--hidden":
+      case "-H":
+        parsed.hidden = true;
+        i++;
+        continue;
+      case "--no-ignore":
+      case "--no-ignore-vcs":
+      case "--no-require-git":
+        parsed.noIgnore = true;
+        i++;
+        continue;
+      case "--ignore-case":
+      case "-i":
+        parsed.caseInsensitive = true;
+        parsed.caseSensitive = false;
+        i++;
+        continue;
+      case "--case-sensitive":
+      case "-s":
+        parsed.caseSensitive = true;
+        parsed.caseInsensitive = false;
+        i++;
+        continue;
+      case "--follow":
+      case "-L":
+      case "--one-file-system":
+        i++;
+        continue;
+      case "--color":
+      case "--threads":
+      case "-j":
+      case "--base-directory":
+      case "--max-results":
+        i += 2;
+        continue;
+      default:
+        break;
+    }
+
+    if (arg.startsWith("--type=")) {
+      const value = arg.slice("--type=".length);
+      if (value === "f" || value === "file") parsed.type = "file";
+      if (value === "d" || value === "directory") parsed.type = "directory";
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--extension=")) {
+      parsed.extensions.push(arg.slice("--extension=".length).replace(/^\./, ""));
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--exclude=")) {
+      parsed.excludes.push(arg.slice("--exclude=".length));
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--max-depth=")) {
+      parsed.maxDepth = parseInt(arg.slice("--max-depth=".length), 10) || 0;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--color=") || arg.startsWith("--threads=")) {
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.length > 1) {
+      for (let j = 1; j < arg.length; j++) {
+        switch (arg[j]) {
+          case "H":
+            parsed.hidden = true;
+            break;
+          case "L":
+            break;
+          case "a":
+            parsed.absolutePath = true;
+            break;
+          case "g":
+            parsed.glob = true;
+            break;
+          case "p":
+            parsed.fullPath = true;
+            break;
+          case "i":
+            parsed.caseInsensitive = true;
+            parsed.caseSensitive = false;
+            break;
+          case "s":
+            parsed.caseSensitive = true;
+            parsed.caseInsensitive = false;
+            break;
+          default:
+            break;
+        }
+      }
+      i++;
+      continue;
+    }
+
+    positional.push(arg);
+    i++;
+  }
+
+  parsed.pattern = positional[0] ?? "";
+  parsed.paths = positional.slice(1);
+  return parsed;
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -6211,6 +6610,184 @@ async function collectFiles(
 
   await walk(dir);
   return result;
+}
+
+function fdShouldSkipEntry(
+  name: string,
+  isDirectory: boolean,
+  parsed: ParsedFdArgs,
+): boolean {
+  if (!parsed.hidden && name.startsWith(".")) return true;
+  if (!parsed.noIgnore && isDirectory && (name === "node_modules" || name === ".git")) {
+    return true;
+  }
+  return false;
+}
+
+function fdExtensionMatches(absPath: string, parsed: ParsedFdArgs): boolean {
+  if (parsed.extensions.length === 0) return true;
+  const ext = path.extname(absPath).replace(/^\./, "");
+  return parsed.extensions.includes(ext);
+}
+
+function fdExcludeMatches(absPath: string, cwd: string, parsed: ParsedFdArgs): boolean {
+  const name = path.basename(absPath);
+  const relative = relativizePath(absPath, cwd);
+  return parsed.excludes.some((exclude) => {
+    return simpleGlobMatch(exclude, name) || simpleGlobMatch(exclude, relative);
+  });
+}
+
+function fdPatternMatches(
+  absPath: string,
+  cwd: string,
+  regex: RegExp | null,
+  parsed: ParsedFdArgs,
+): boolean {
+  if (!parsed.pattern) return true;
+  const target = parsed.fullPath
+    ? relativizePath(absPath, cwd)
+    : path.basename(absPath);
+  if (parsed.glob) {
+    return simpleGlobMatch(parsed.pattern, target);
+  }
+  if (!regex) return false;
+  regex.lastIndex = 0;
+  return regex.test(target);
+}
+
+function formatFdPath(absPath: string, cwd: string, parsed: ParsedFdArgs): string {
+  if (parsed.absolutePath) return absPath;
+  return relativizePath(absPath, cwd);
+}
+
+async function collectFdMatches(
+  fs: import("just-bash").CommandContext["fs"],
+  root: string,
+  cwd: string,
+  parsed: ParsedFdArgs,
+  regex: RegExp | null,
+): Promise<string[]> {
+  const matches: string[] = [];
+
+  async function visit(absPath: string, depth: number): Promise<void> {
+    let stat;
+    try {
+      stat = await fs.stat(absPath);
+    } catch {
+      return;
+    }
+
+    const name = path.basename(absPath);
+    const isDirectory = !!stat.isDirectory;
+    const isFile = !!stat.isFile;
+    if (depth > 0 && fdShouldSkipEntry(name, isDirectory, parsed)) return;
+    if (parsed.maxDepth > 0 && depth > parsed.maxDepth) return;
+
+    const typeMatches =
+      parsed.type === null ||
+      (parsed.type === "file" && isFile) ||
+      (parsed.type === "directory" && isDirectory);
+    if (
+      depth > 0 &&
+      typeMatches &&
+      fdExtensionMatches(absPath, parsed) &&
+      !fdExcludeMatches(absPath, cwd, parsed) &&
+      fdPatternMatches(absPath, cwd, regex, parsed)
+    ) {
+      matches.push(absPath);
+    }
+
+    if (!isDirectory) return;
+    if (parsed.maxDepth > 0 && depth >= parsed.maxDepth) return;
+
+    let entries: string[];
+    try {
+      entries = await fs.readdir(absPath);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry === "." || entry === "..") continue;
+      await visit(`${absPath}/${entry}`.replace(/\/+/g, "/"), depth + 1);
+    }
+  }
+
+  await visit(root, 0);
+  return matches;
+}
+
+async function executeFdCommand(
+  args: string[],
+  ctx: CommandContext,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const parsed = parseFdArgs(args);
+
+  if (parsed.version) {
+    return {
+      stdout: getSyntheticToolVersion("fd") || "",
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
+  if (parsed.help) {
+    return {
+      stdout:
+        "fd 10.2.0\n\nUsage: fd [OPTIONS] [pattern] [path]...\n\nCommon options: --type, --extension, --glob, --hidden, --exclude, --max-depth\n",
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
+  let pattern = parsed.pattern;
+  let roots = parsed.paths;
+  if (roots.length === 0 && pattern && (pattern.startsWith("/") || pattern.startsWith("."))) {
+    const maybeRoot = resolvePath(ctx.cwd, pattern);
+    try {
+      const stat = await ctx.fs.stat(maybeRoot);
+      if (stat.isDirectory) {
+        pattern = "";
+        roots = [pattern || maybeRoot];
+      }
+    } catch {
+      // Treat the positional value as the search pattern.
+    }
+  }
+  parsed.pattern = pattern;
+
+  const regex =
+    parsed.pattern && !parsed.glob
+      ? buildRegex(parsed.pattern, {
+          caseInsensitive: parsed.caseInsensitive,
+          wordMatch: false,
+          fixedStrings: false,
+        })
+      : null;
+  if (parsed.pattern && !parsed.glob && !regex) {
+    return {
+      stdout: "",
+      stderr: `fd: regex parse error\n`,
+      exitCode: 2,
+    };
+  }
+
+  const searchRoots = roots.length > 0 ? roots : [ctx.cwd];
+  const files: string[] = [];
+  for (const root of searchRoots) {
+    const absPath = resolvePath(ctx.cwd, root);
+    files.push(...(await collectFdMatches(ctx.fs, absPath, ctx.cwd, parsed, regex)));
+  }
+
+  const stdout =
+    files.length > 0
+      ? `${files
+          .sort()
+          .map((file) => formatFdPath(file, ctx.cwd, parsed))
+          .join("\n")}\n`
+      : "";
+  return { stdout, stderr: "", exitCode: 0 };
 }
 
 async function grepViaVfs(
@@ -6602,6 +7179,14 @@ async function executeRgCommand(
   ctx: CommandContext,
   controller: ChildProcessController,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (args.includes("--version") || args.includes("-V")) {
+    return {
+      stdout: getSyntheticToolVersion("rg") || "",
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
   const parsed = parseRgArgs(args);
 
   if (parsed.listFiles) {

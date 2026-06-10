@@ -30,6 +30,9 @@ import {
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
   OPENCODE_MCP_AUTH_PATH,
+  PI_AUTH_PATH,
+  PI_MODELS_PATH,
+  PI_SETTINGS_PATH,
   TAILSCALE_SESSION_KEYCHAIN_PATH,
   deriveVaultKeyFromPrf,
   parseStoredKeychain,
@@ -62,6 +65,11 @@ const CODEX_SLOT_PATHS = [
   CODEX_AUTH_PATH,
   CODEX_CONFIG_TOML_PATH,
   CODEX_CONFIG_JSON_PATH,
+];
+const PI_SLOT_PATHS = [
+  PI_AUTH_PATH,
+  PI_SETTINGS_PATH,
+  PI_MODELS_PATH,
 ];
 const AWS_SLOT_PATHS = [AWS_CONFIG_PATH, AWS_AUTH_PATH];
 
@@ -193,6 +201,7 @@ function createKeychain(vfs = new VirtualFS()): Keychain {
   kc.registerSlot('neon', [NEON_CREDENTIALS_PATH]);
   kc.registerSlot('opencode', OPENCODE_SLOT_PATHS);
   kc.registerSlot('codex', CODEX_SLOT_PATHS);
+  kc.registerSlot('pi', PI_SLOT_PATHS);
   return kc;
 }
 
@@ -314,6 +323,28 @@ function writeCodexAuth(vfs: VirtualFS, apiKey: string): string {
   });
   vfs.mkdirSync(CODEX_AUTH_PATH.slice(0, CODEX_AUTH_PATH.lastIndexOf('/')), { recursive: true });
   vfs.writeFileSync(CODEX_AUTH_PATH, raw);
+  return raw;
+}
+
+function writePiAuth(vfs: VirtualFS, apiKey: string): string {
+  const raw = JSON.stringify({
+    openai: {
+      type: 'api_key',
+      key: apiKey,
+    },
+  });
+  vfs.mkdirSync(PI_AUTH_PATH.slice(0, PI_AUTH_PATH.lastIndexOf('/')), { recursive: true });
+  vfs.writeFileSync(PI_AUTH_PATH, raw);
+  return raw;
+}
+
+function writePiSettings(vfs: VirtualFS): string {
+  const raw = `${JSON.stringify({
+    defaultProvider: 'openai',
+    defaultModel: 'gpt-4o-mini',
+  }, null, 2)}\n`;
+  vfs.mkdirSync(PI_SETTINGS_PATH.slice(0, PI_SETTINGS_PATH.lastIndexOf('/')), { recursive: true });
+  vfs.writeFileSync(PI_SETTINGS_PATH, raw);
   return raw;
 }
 
@@ -1044,6 +1075,34 @@ describe('Keychain', () => {
     await expect(freshKc.prepareForCommand('npx @openai/codex')).resolves.toBe(true);
 
     expect(freshVfs.readFileSync(CODEX_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshKc.getState().hasLiveCredentials).toBe(true);
+  });
+
+  it('auto-restores saved Pi auth and settings before pi commands run', async () => {
+    vi.useFakeTimers();
+    installWebAuthnMock();
+
+    const setupVfs = new VirtualFS();
+    const setupKc = createKeychain(setupVfs);
+    await setupKc.init();
+
+    const auth = writePiAuth(setupVfs, 'sk-pi-prepare');
+    const settings = writePiSettings(setupVfs);
+    await flushWatcher();
+    await setupKc.handlePrimaryAction();
+
+    const freshVfs = new VirtualFS();
+    const freshKc = createKeychain(freshVfs);
+    await freshKc.init();
+
+    expect(freshKc.getState().hasLiveCredentials).toBe(false);
+
+    await expect(
+      freshKc.prepareForCommand('npx @earendil-works/pi-coding-agent'),
+    ).resolves.toBe(true);
+
+    expect(freshVfs.readFileSync(PI_AUTH_PATH, 'utf8')).toBe(auth);
+    expect(freshVfs.readFileSync(PI_SETTINGS_PATH, 'utf8')).toBe(settings);
     expect(freshKc.getState().hasLiveCredentials).toBe(true);
   });
 

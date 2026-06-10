@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { SidebarProvider, useSidebar } from './sidebar-context';
 import { ProjectList } from './project-list';
+import { agentSessionRegistry } from '../chat/agent-session-registry';
 import { NewProjectDialog } from './new-project-dialog';
 import { Button } from '../ui/button';
 import { TooltipProvider } from '../ui/tooltip';
@@ -34,18 +35,19 @@ function writeExpandedProjectIds(projectIds: string[]): void {
 
 interface SidebarInnerProps {
   manager: ProjectManager;
-  onToggle: () => void;
   projectLaunchDialogOpen: boolean;
   onProjectLaunchDialogOpenChange: (open: boolean) => void;
   onActiveProjectChange?: (projectId: string | null) => void;
+  /** Reports the active thread's title (null when no thread is selected). */
+  onActiveThreadChange?: (title: string | null) => void;
 }
 
 function SidebarInner({
   manager,
-  onToggle,
   projectLaunchDialogOpen,
   onProjectLaunchDialogOpenChange,
   onActiveProjectChange,
+  onActiveThreadChange,
 }: SidebarInnerProps) {
   const { state, dispatch } = useSidebar();
   const [hasGitHubCredentials, setHasGitHubCredentials] = useState(() => manager.hasGitHubCredentials());
@@ -91,9 +93,10 @@ function SidebarInner({
   const handleSelectProject = useCallback(
     (id: string) => {
       dispatch({ type: 'SET_ACTIVE_THREAD', threadId: null });
+      onActiveThreadChange?.(null);
       void manager.switchProject(id);
     },
-    [dispatch, manager],
+    [dispatch, manager, onActiveThreadChange],
   );
 
   const handleToggleProject = useCallback(
@@ -137,9 +140,27 @@ function SidebarInner({
   const handleSelectThread = useCallback(
     (id: string) => {
       dispatch({ type: 'SET_ACTIVE_THREAD', threadId: id });
+      const thread = Object.values(state.projectThreads)
+        .flat()
+        .find((candidate) => candidate.id === id);
+      onActiveThreadChange?.(thread?.title?.trim() || null);
       void manager.resumeThread(id);
     },
-    [dispatch, manager],
+    [dispatch, manager, onActiveThreadChange, state.projectThreads],
+  );
+
+  // Start a fresh thread in a project: detach the chat from the running
+  // session so the next message launches a new one.
+  const handleNewThread = useCallback(
+    (projectId: string) => {
+      dispatch({ type: 'SET_ACTIVE_THREAD', threadId: null });
+      onActiveThreadChange?.(null);
+      agentSessionRegistry.deactivate();
+      if (projectId !== state.activeProjectId) {
+        void manager.switchProject(projectId);
+      }
+    },
+    [dispatch, manager, onActiveThreadChange, state.activeProjectId],
   );
 
   const handleGitHubLogin = useCallback(async () => {
@@ -164,6 +185,7 @@ function SidebarInner({
         type: 'SET_EXPANDED_PROJECTS',
         projectIds: Array.from(new Set([...state.expandedProjectIds, project.id])),
       });
+      return project;
     },
     [dispatch, manager, state.expandedProjectIds],
   );
@@ -184,11 +206,6 @@ function SidebarInner({
               <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
           </Button>
-          <button className="almostnode-sidebar__toggle" onClick={onToggle} type="button">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M3 4h10M3 8h10M3 12h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-          </button>
         </div>
       </div>
 
@@ -198,6 +215,7 @@ function SidebarInner({
         onRenameProject={handleRenameProject}
         onDeleteProject={handleDeleteProject}
         onSelectThread={handleSelectThread}
+        onNewThread={handleNewThread}
       />
 
       {state.isSwitching && (
@@ -222,19 +240,19 @@ function SidebarInner({
 export interface ProjectSidebarProps {
   manager: ProjectManager;
   isCollapsed: boolean;
-  onToggle: () => void;
   projectLaunchDialogOpen: boolean;
   onProjectLaunchDialogOpenChange: (open: boolean) => void;
   onActiveProjectChange?: (projectId: string | null) => void;
+  onActiveThreadChange?: (title: string | null) => void;
 }
 
 export function ProjectSidebar({
   manager,
   isCollapsed,
-  onToggle,
   projectLaunchDialogOpen,
   onProjectLaunchDialogOpenChange,
   onActiveProjectChange,
+  onActiveThreadChange,
 }: ProjectSidebarProps) {
   return (
     <TooltipProvider>
@@ -242,10 +260,10 @@ export function ProjectSidebar({
         <SidebarSyncCollapsed isCollapsed={isCollapsed} />
         <SidebarInner
           manager={manager}
-          onToggle={onToggle}
           projectLaunchDialogOpen={projectLaunchDialogOpen}
           onProjectLaunchDialogOpenChange={onProjectLaunchDialogOpenChange}
           onActiveProjectChange={onActiveProjectChange}
+          onActiveThreadChange={onActiveThreadChange}
         />
       </SidebarProvider>
     </TooltipProvider>

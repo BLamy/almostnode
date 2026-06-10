@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.15] - 2026-06-09
+
+### Added
+- **Chat-first Web IDE layout**: the `/ide` screen is now a chat surface over the in-browser CLI coding agents; the full VS Code workbench moved into a resizable right-side drawer (`⌘⇧.` to toggle) that never unmounts Monaco
+- **Bidirectional conversation sync** (no backend): a single shared agent session backs both chat and terminal — Claude via transcript tailing + bracketed-paste stdin injection, Codex via an app-server JSON-RPC tee, OpenCode via the shared in-browser server's `/event` stream and TUI prompt routes
+- **Tool-call visualization in chat**: Edit/Write/MultiEdit render as syntax-highlighted unified diffs via `@pierre/diffs`; Bash shows the command with collapsible output and run/done/failed status; Codex `commandExecution`/`fileChange` items and OpenCode tool parts render the same cards
+- **GitHub-focused sidebar**: groups imported GitHub projects separately from "No source control" local projects; repositories are imported from the New Project dialog
+- **Claude Code pre-warm**: the CLI package downloads in the background when a project attaches, removing the cold-install delay from first launch (`DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE` now exported from almostnode internals)
+- **OpenCode browser SDK shim**: added missing `session.messages`, `tui.appendPrompt`, and `tui.submitPrompt` routes
+- **Chat header**: hamburger toggling the project sidebar, the active thread title, and a workbench toggle icon button in the top right (replaces the floating drawer chevron)
+- **Composer launch controls**: searchable Claude model picker, thinking-effort picker, plan-mode toggle (`--permission-mode plan`), and a context-window occupancy marker fed by transcript usage
+- **New thread button** on sidebar projects (replaces the kebab menu); Rename/Delete moved to a right-click context menu
+
+### Changed
+- **Workbench starts offscreen**: the drawer opens closed by default, the inner VS Code sidebar starts collapsed, and chat-initiated agent launches mount the TUI without revealing or focusing it (the keychain panel still summons the drawer when credentials are needed)
+
+### Fixed
+- **First chat message no longer lost**: input injection now waits for Claude's MCP client to connect to the IDE bridge (raw-mode init used to flush queued stdin)
+- **Agent launch failures surface in chat** (missing network/keychain credentials) instead of hanging silently
+- **Chat page scrolling**: the timeline scrolls internally with a pinned composer instead of growing the page
+- **Thread switches no longer leak messages to the previous thread**: switching detaches the chat from the old session immediately, queued sends resolve their target session at execution time, and chat sends during a resume wait for the new session instead of launching a duplicate
+
 ## [0.2.14] - 2026-02-14
 
 ### Added

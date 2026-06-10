@@ -44,6 +44,10 @@ async function loadWebIDE(page: Page): Promise<void> {
       timeout: 90000,
     },
   );
+  // The workbench drawer starts closed by default — bring it on screen.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("webide:open-workbench-drawer"));
+  });
 }
 
 async function openKeychainSidebar(page: Page): Promise<void> {

@@ -95,6 +95,10 @@ vi.mock("../src/features/keychain", () => ({
   OPENCODE_CONFIG_PATH: "/opencode/config/opencode/opencode.json",
   OPENCODE_CONFIG_JSONC_PATH: "/opencode/config/opencode/opencode.jsonc",
   OPENCODE_LEGACY_CONFIG_PATH: "/opencode/config/opencode/config.json",
+  PI_AGENT_DIR: "/home/user/.pi/agent",
+  PI_AUTH_PATH: "/home/user/.pi/agent/auth.json",
+  PI_SETTINGS_PATH: "/home/user/.pi/agent/settings.json",
+  PI_MODELS_PATH: "/home/user/.pi/agent/models.json",
   TAILSCALE_SESSION_KEYCHAIN_PATH:
     "/__almostnode/keychain/tailscale-session.json",
 }));
@@ -745,7 +749,7 @@ describe("WebIDEHost AI launcher behavior", () => {
             tab: {
               id: string;
               terminal: { element: HTMLElement | null };
-              agentHarness: "claude" | "opencode" | "codex" | null;
+              agentHarness: "claude" | "opencode" | "codex" | "pi" | null;
             },
           ) => void;
         }
@@ -1044,6 +1048,134 @@ describe("WebIDEHost AI launcher behavior", () => {
     expect(host.pendingProjectLaunch).toBe(false);
   });
 
+  it("does not treat the auxiliary Claude IDE bridge as the app preview server", async () => {
+    const order: string[] = [];
+    const host = Object.create(WebIDEHost.prototype) as Record<string, unknown>;
+    host.pendingProjectLaunch = true;
+    host.previewPort = null;
+    host.previewUrl = null;
+    host.previewStartRequested = false;
+    host.previewMode = "workbench";
+    host.previewTerminalTabId = null;
+    host.terminalTabs = new Map();
+    host.previewSurface = {
+      setUrl: vi.fn(() => {
+        order.push("set-url");
+      }),
+    };
+    host.clearScheduledPreviewStartRetry = vi.fn(() => {
+      order.push("clear-preview-retry");
+    });
+    host.registerPreviewHmrTargets = vi.fn(() => {
+      order.push("hmr");
+    });
+    host.revealPreviewEditor = vi.fn(async () => {
+      order.push("preview");
+    });
+    host.updatePreviewStatus = vi.fn((text: string) => {
+      order.push(`preview-status:${text}`);
+    });
+    host.ensurePreviewServerRunning = vi.fn(() => {
+      order.push("preview-start");
+      host.previewStartRequested = true;
+    });
+    host.schedulePreviewStartRetry = vi.fn(() => {
+      order.push("preview-retry");
+    });
+    host.shouldAutoLaunchOpenCode = vi.fn(() => false);
+
+    (
+      host as unknown as {
+        handleServerReady: (
+          port: unknown,
+          url: unknown,
+          metadata?: { purpose?: string; name?: string },
+        ) => void;
+      }
+    ).handleServerReady(43127, "http://localhost/__virtual__/43127", {
+      purpose: "auxiliary",
+      name: "claude-ide-bridge",
+    });
+
+    expect(host.previewPort).toBe(null);
+    expect(host.previewUrl).toBe(null);
+
+    await (
+      host as unknown as {
+        resumePendingProjectLaunch: () => Promise<void>;
+      }
+    ).resumePendingProjectLaunch();
+
+    expect(order).toEqual([
+      "preview",
+      "preview-status:Waiting for a preview server",
+      "preview-start",
+      "preview-retry",
+    ]);
+    expect(host.pendingProjectLaunch).toBe(false);
+  });
+
+  it("uses tagged workspace preview servers for the preview iframe", () => {
+    const order: string[] = [];
+    const iframe = {
+      addEventListener: vi.fn(),
+    };
+    const previewTab = {};
+    const host = Object.create(WebIDEHost.prototype) as Record<string, unknown>;
+    host.previewPort = null;
+    host.previewUrl = null;
+    host.previewStartRequested = true;
+    host.previewMode = "workbench";
+    host.previewTerminalTabId = "preview";
+    host.terminalTabs = new Map([["preview", previewTab]]);
+    host.previewSurface = {
+      setUrl: vi.fn((url: string) => {
+        order.push(`set-url:${url}`);
+      }),
+      getIframe: vi.fn(() => iframe),
+    };
+    host.clearScheduledPreviewStartRetry = vi.fn(() => {
+      order.push("clear-preview-retry");
+    });
+    host.registerPreviewHmrTargets = vi.fn(() => {
+      order.push("hmr");
+    });
+    host.updateTerminalStatus = vi.fn((tab: unknown, text: string) => {
+      if (tab === previewTab) {
+        order.push(`terminal-status:${text}`);
+      }
+    });
+
+    (
+      host as unknown as {
+        handleServerReady: (
+          port: unknown,
+          url: unknown,
+          metadata?: { purpose?: string; framework?: string; root?: string },
+        ) => void;
+      }
+    ).handleServerReady(3000, "http://localhost/__virtual__/3000", {
+      purpose: "workspace-preview",
+      framework: "vite",
+      root: "/project",
+    });
+
+    expect(host.previewPort).toBe(3000);
+    expect(host.previewUrl).toBe("http://localhost/__virtual__/3000/");
+    expect(host.previewStartRequested).toBe(false);
+    expect(iframe.addEventListener).toHaveBeenCalledWith(
+      "load",
+      expect.any(Function),
+      { once: true },
+    );
+    expect(order).toEqual([
+      "clear-preview-retry",
+      "set-url:http://localhost/__virtual__/3000/",
+      "hmr",
+      "terminal-status:Preview ready: http://localhost/__virtual__/3000/",
+    ]);
+  });
+
   it("reopens OpenCode when switching into the first project after an empty state", async () => {
     const order: string[] = [];
     const vfs = {
@@ -1285,7 +1417,7 @@ describe("WebIDEHost AI launcher behavior", () => {
       WebIDEHost.prototype as unknown as {
         launchAiSession: (
           this: unknown,
-          kind: "opencode" | "terminal" | "claude" | "codex",
+          kind: "opencode" | "terminal" | "claude" | "codex" | "pi",
         ) => Promise<void>;
       }
     ).launchAiSession.call(
@@ -1316,7 +1448,7 @@ describe("WebIDEHost AI launcher behavior", () => {
       WebIDEHost.prototype as unknown as {
         launchAiSession: (
           this: unknown,
-          kind: "opencode" | "terminal" | "claude" | "codex",
+          kind: "opencode" | "terminal" | "claude" | "codex" | "pi",
         ) => Promise<void>;
       }
     ).launchAiSession.call(
@@ -1372,6 +1504,55 @@ describe("WebIDEHost AI launcher behavior", () => {
       echoCommand: true,
       interceptAgentLaunch: false,
     });
+  });
+
+  it("launches Pi from the AI sidebar dropdown with restored keychain config", async () => {
+    const revealOpenCodeSidebarView = vi.fn().mockResolvedValue(undefined);
+    const tab = { id: "pi-sidebar-1" };
+    const createAiSidebarTerminalTab = vi.fn(() => tab);
+    const runCommand = vi.fn().mockResolvedValue(undefined);
+    const prepareForCommand = vi.fn().mockResolvedValue(true);
+
+    await (
+      WebIDEHost.prototype as unknown as {
+        launchAiSession: (
+          this: unknown,
+          kind: "opencode" | "terminal" | "claude" | "codex" | "pi",
+        ) => Promise<void>;
+      }
+    ).launchAiSession.call(
+      {
+        agentMode: "browser",
+        revealOpenCodeSidebarView,
+        createAiSidebarTerminalTab,
+        runCommand,
+        getAiLaunchCommand: WebIDEHost.prototype["getAiLaunchCommand"],
+        buildPiShellEnv: WebIDEHost.prototype["buildPiShellEnv"],
+        keychain: { prepareForCommand },
+        piSidebarCounter: 0,
+      },
+      "pi",
+    );
+
+    expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(true);
+    expect(prepareForCommand).toHaveBeenCalledWith(
+      "npx @earendil-works/pi-coding-agent",
+    );
+    expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(true, {
+      title: "Pi 1",
+      agentHarness: "pi",
+      env: {
+        PI_CODING_AGENT_DIR: "/home/user/.pi/agent",
+      },
+    });
+    expect(runCommand).toHaveBeenCalledWith(
+      tab,
+      "npx @earendil-works/pi-coding-agent",
+      {
+        echoCommand: true,
+        interceptAgentLaunch: false,
+      },
+    );
   });
 
   it("reroutes typed opencode launches into the AI sidebar instead of running npx in the terminal", async () => {
@@ -1453,7 +1634,7 @@ describe("WebIDEHost AI launcher behavior", () => {
       WebIDEHost.prototype as unknown as {
         launchAiSession: (
           this: unknown,
-          kind: "opencode" | "terminal" | "claude" | "codex",
+          kind: "opencode" | "terminal" | "claude" | "codex" | "pi",
           options?: {
             title?: string;
             args?: {
@@ -1511,7 +1692,7 @@ describe("WebIDEHost AI launcher behavior", () => {
           thread: {
             id: string;
             projectId: string;
-            harness: "claude" | "opencode" | "codex";
+            harness: "claude" | "opencode" | "codex" | "pi";
             title: string;
             resumeToken: string;
             createdAt: number;
@@ -1539,8 +1720,10 @@ describe("WebIDEHost AI launcher behavior", () => {
       },
     );
 
-    expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(true);
-    expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(true, {
+    // Thread resumes never steal focus or pop the TUI panel open — the chat
+    // stays in front while the TUI mounts offscreen.
+    expect(revealOpenCodeSidebarView).toHaveBeenCalledWith(false);
+    expect(createAiSidebarTerminalTab).toHaveBeenCalledWith(false, {
       id: expect.stringMatching(/^claude-sidebar-/),
       title: "Fix Claude restore",
       agentHarness: "claude",
@@ -1568,7 +1751,7 @@ describe("WebIDEHost AI launcher behavior", () => {
           thread: {
             id: string;
             projectId: string;
-            harness: "claude" | "opencode" | "codex";
+            harness: "claude" | "opencode" | "codex" | "pi";
             title: string;
             resumeToken: string;
             createdAt: number;
@@ -1598,6 +1781,7 @@ describe("WebIDEHost AI launcher behavior", () => {
       args: {
         sessionID: "ses_123",
       },
+      focus: false,
     });
   });
 

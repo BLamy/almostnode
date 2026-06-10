@@ -700,6 +700,40 @@ describe('Runtime', () => {
       });
     });
 
+    it('should resolve computed dynamic imports of node builtins through runtime shims', async () => {
+      vfs.writeFileSync('/project/virtual.txt', 'hello from vfs');
+      vfs.writeFileSync(
+        '/entry-dynamic-node-import.mjs',
+        `
+          const fsSpecifier = 'node:' + 'fs';
+          const osSpecifier = 'node:os';
+          const pathSpecifier = 'node:path';
+          const fs = await import(fsSpecifier);
+          const os = await import(osSpecifier);
+          const path = await import(pathSpecifier);
+
+          export default {
+            exists: fs.existsSync('/project/virtual.txt'),
+            defaultExists: fs.default.existsSync('/project/virtual.txt'),
+            osPlatformType: typeof os.platform,
+            joined: path.join('/project', 'virtual.txt'),
+          };
+        `,
+      );
+
+      const { exports } = await runtime.importModule(
+        '/entry-dynamic-node-import.mjs',
+        '/entry-dynamic-node-import.mjs',
+      );
+
+      expect(exports).toEqual({
+        exists: true,
+        defaultExists: true,
+        osPlatformType: 'function',
+        joined: '/project/virtual.txt',
+      });
+    });
+
     it('should normalize signal-exit object exports to callable function', async () => {
       vfs.writeFileSync(
         '/node_modules/signal-exit/package.json',

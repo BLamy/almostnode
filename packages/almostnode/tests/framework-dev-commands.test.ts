@@ -173,7 +173,8 @@ describe('framework dev shell commands', () => {
     await waitFor(() => container.serverBridge.getServerPorts().includes(3000));
 
     const before = await container.serverBridge.handleRequest(3000, 'GET', '/_npm/tiny-pkg', {});
-    expect(before.statusCode).toBe(500);
+    expect(before.statusCode).toBe(200);
+    expect(before.body.toString()).toContain("Failed to bundle 'tiny-pkg'");
 
     const installResult = await container.run('npm install tiny-pkg');
     expect(installResult.exitCode).toBe(0);

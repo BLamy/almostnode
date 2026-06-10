@@ -35,7 +35,7 @@ const DEFAULT_BUILTINS = new Set([
   'fs/promises', 'fsevents', 'http', 'http2', 'https', 'inspector', 'module',
   'net', 'os', 'path', 'path/posix', 'path/win32', 'perf_hooks', 'process',
   'querystring', 'readline', 'readdirp', 'rollup', 'stream',
-  'stream/consumers', 'stream/promises', 'string_decoder', 'tls', 'tty', 'url', 'util',
+  'stream/consumers', 'stream/promises', 'string_decoder', 'tls', 'tty', 'undici', 'url', 'util',
   'util/types', 'v8', 'vm', 'worker_threads', 'ws', 'zlib',
 ]);
 

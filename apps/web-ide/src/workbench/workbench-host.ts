@@ -3,6 +3,7 @@ import {
   type PersistedNetworkSession,
   type NetworkStatus,
   type RunResult,
+  type ServerRegistrationMetadata,
   type WorkspaceSearchProvider,
 } from "almostnode";
 import {
@@ -23,9 +24,19 @@ import { OpenVSXClient } from "../extensions/open-vsx";
 import { prunePersistedWorkbenchExtensions } from "../features/persisted-extensions";
 import {
   augmentClaudeLaunchCommand as augmentClaudeLaunchCommandString,
+  extractResumeToken,
+  matchesClaudeLaunchCommand,
+  matchesCodexLaunchCommand,
   parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
+import { agentSessionRegistry } from "../chat/agent-session-registry";
+import {
+  CHAT_EFFORT_THINKING_TOKENS,
+  readChatEffort,
+  readChatModel,
+  readChatPlanMode,
+} from "../chat/chat-preferences";
 import { isCloudflareLoginCommand } from "../features/cloudflare-command-routing";
 import { isFlyLoginCommand } from "../features/fly-command-routing";
 import { isNetlifyLoginCommand } from "../features/netlify-command-routing";
@@ -187,6 +198,10 @@ import {
   OPENCODE_CONFIG_PATH,
   OPENCODE_LEGACY_CONFIG_PATH,
   OPENCODE_MCP_AUTH_PATH,
+  PI_AGENT_DIR,
+  PI_AUTH_PATH,
+  PI_MODELS_PATH,
+  PI_SETTINGS_PATH,
   TAILSCALE_SESSION_KEYCHAIN_PATH,
   type KeychainState,
 } from "../features/keychain";
@@ -210,6 +225,7 @@ import {
 } from "../features/network-session";
 import {
   collectOpenCodeBrowserSnapshot,
+  createOpenCodeBrowserClient,
   listOpenCodeBrowserSessions,
   mountOpenCodeBrowserSession,
   type OpenCodeBrowserLaunchArgs,
@@ -237,6 +253,7 @@ import {
   postAppBuildingStop,
   waitForFlyMachineStarted,
   waitForWorkerReady,
+  DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE as BROWSER_CLAUDE_CODE_PACKAGE,
 } from "almostnode/internal";
 import {
   type WebIdeOpenTarget,
@@ -825,7 +842,7 @@ interface TerminalTabState {
   kind: "user" | "preview" | "agent";
   inputMode: "managed" | "passthrough";
   surface: "panel" | "sidebar";
-  agentHarness: "claude" | "opencode" | "codex" | null;
+  agentHarness: "claude" | "opencode" | "codex" | "pi" | null;
 }
 
 interface OpenCodeTabState {
@@ -1035,6 +1052,7 @@ export class WebIDEHost {
   private openCodeSidebarTerminalCounter = 0;
   private claudeSidebarCounter = 0;
   private codexSidebarCounter = 0;
+  private piSidebarCounter = 0;
   private previewStartRequested = false;
   private previewPort: number | null = null;
   private previewUrl: string | null = null;
@@ -1119,6 +1137,7 @@ export class WebIDEHost {
   private readonly desktopBridge: DesktopBridge | null;
   private readonly hostProjectDirectory: string | null;
   private readonly agentLaunchCommand: string | null;
+  private claudeCodePrewarmStarted = false;
   private readonly agentMode: "browser" | "host";
   private readonly databaseSurface: DatabaseSidebarSurface;
   private readonly databaseBrowserSurface: DatabaseBrowserSurface;
@@ -1535,6 +1554,11 @@ export class WebIDEHost {
       CODEX_CONFIG_TOML_PATH,
       CODEX_CONFIG_JSON_PATH,
     ]);
+    this.keychain.registerSlot("pi", [
+      PI_AUTH_PATH,
+      PI_SETTINGS_PATH,
+      PI_MODELS_PATH,
+    ]);
     this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
     this.keychain.registerSlot("aws", [AWS_CONFIG_PATH, AWS_AUTH_PATH]);
     this.keychain.registerSlot("infisical", [
@@ -1937,34 +1961,42 @@ export class WebIDEHost {
   }
 
   async resumeResumableThread(thread: ResumableThreadRecord): Promise<void> {
-    const title =
-      thread.title.trim() ||
-      (thread.harness === "claude"
-        ? `Claude Code ${++this.claudeSidebarCounter}`
-        : `OpenCode ${++this.openCodeSidebarTerminalCounter}`);
-    if (thread.harness === "opencode") {
-      await this.launchAiSession("opencode", {
-        title,
-        args: {
-          sessionID: thread.resumeToken,
-        },
-      });
-      return;
-    }
+    // Detach the chat from the previous thread's session right away — any
+    // message sent while the resume is in flight must not reach it.
+    const launchToken = agentSessionRegistry.beginLaunch();
+    try {
+      const title =
+        thread.title.trim() ||
+        (thread.harness === "claude"
+          ? `Claude Code ${++this.claudeSidebarCounter}`
+          : `OpenCode ${++this.openCodeSidebarTerminalCounter}`);
+      if (thread.harness === "opencode") {
+        await this.launchAiSession("opencode", {
+          title,
+          args: {
+            sessionID: thread.resumeToken,
+          },
+          focus: false,
+        });
+        return;
+      }
 
-    await this.revealOpenCodeSidebarView(true);
-    const tab = this.createAiSidebarTerminalTab(true, {
-      id: `claude-sidebar-${crypto.randomUUID()}`,
-      title,
-      agentHarness: "claude",
-    });
-    const command = this.buildClaudeLaunchCommand({
-      resumeToken: thread.resumeToken,
-    });
-    await this.runCommand(tab, command, {
-      echoCommand: true,
-      interceptAgentLaunch: false,
-    });
+      await this.revealOpenCodeSidebarView(false);
+      const tab = this.createAiSidebarTerminalTab(false, {
+        id: `claude-sidebar-${crypto.randomUUID()}`,
+        title,
+        agentHarness: "claude",
+      });
+      const command = this.buildClaudeLaunchCommand({
+        resumeToken: thread.resumeToken,
+      });
+      await this.runCommand(tab, command, {
+        echoCommand: true,
+        interceptAgentLaunch: false,
+      });
+    } finally {
+      agentSessionRegistry.endLaunch(launchToken);
+    }
   }
 
   private normalizeProjectDatabaseNamespace(dbPrefix?: string): string {
@@ -2086,6 +2118,7 @@ export class WebIDEHost {
     this.currentProjectDatabaseNamespace = nextNamespace;
     this.currentProjectDefaultDatabaseName = nextDefaultDatabaseName;
     void this.initPGliteIfNeeded();
+    this.prewarmClaudeCodePackage();
     await this.resumePendingProjectLaunch();
   }
 
@@ -3067,6 +3100,54 @@ export class WebIDEHost {
     this.previewSurface.setStatus(text);
   }
 
+  private shouldUseServerForPreview(
+    metadata: ServerRegistrationMetadata | undefined,
+  ): boolean {
+    return metadata?.purpose !== "auxiliary";
+  }
+
+  private handleServerReady(
+    port: unknown,
+    url: unknown,
+    metadata?: ServerRegistrationMetadata,
+  ): void {
+    if (typeof port !== "number" || typeof url !== "string") {
+      return;
+    }
+
+    if (!this.shouldUseServerForPreview(metadata)) {
+      return;
+    }
+
+    this.previewPort = port;
+    this.previewUrl = `${url}/`;
+    this.previewStartRequested = false;
+    this.clearScheduledPreviewStartRetry();
+    if (this.previewMode === "workbench") {
+      this.previewSurface.setUrl(this.previewUrl);
+
+      const iframe = this.previewSurface.getIframe();
+      iframe.addEventListener(
+        "load",
+        () => {
+          this.registerPreviewHmrTargets();
+        },
+        { once: true },
+      );
+    }
+    this.registerPreviewHmrTargets();
+
+    const previewTab = this.previewTerminalTabId
+      ? this.terminalTabs.get(this.previewTerminalTabId)
+      : null;
+    if (previewTab) {
+      this.updateTerminalStatus(
+        previewTab,
+        `Preview ready: ${this.previewUrl}`,
+      );
+    }
+  }
+
   private shouldAutoLaunchOpenCode(): boolean {
     try {
       const searchParams = new URLSearchParams(window.location.search);
@@ -3153,7 +3234,7 @@ export class WebIDEHost {
       session?: WorkbenchTerminalSession;
       inputMode?: "managed" | "passthrough";
       surface?: "panel" | "sidebar";
-      agentHarness?: "claude" | "opencode" | "codex" | null;
+      agentHarness?: "claude" | "opencode" | "codex" | "pi" | null;
     },
   ): TerminalTabState {
     const id = options?.id ?? `${kind}-${crypto.randomUUID()}`;
@@ -3271,7 +3352,7 @@ export class WebIDEHost {
     options?: {
       id?: string;
       title?: string;
-      agentHarness?: "claude" | "opencode" | "codex" | null;
+      agentHarness?: "claude" | "opencode" | "codex" | "pi" | null;
       env?: Record<string, string>;
     },
   ): TerminalTabState {
@@ -3398,6 +3479,7 @@ export class WebIDEHost {
   }
 
   private closeAiSidebarTab(id: string): void {
+    agentSessionRegistry.clearActive(id);
     const openCodeTab = this.openCodeSidebarTabs.get(id);
     if (openCodeTab) {
       const wasActive = this.activeOpenCodeSidebarTabId === id;
@@ -3451,7 +3533,16 @@ export class WebIDEHost {
     if (kind === "codex") {
       return "codex";
     }
+    if (kind === "pi") {
+      return "npx @earendil-works/pi-coding-agent";
+    }
     return "npx opencode-ai";
+  }
+
+  private buildPiShellEnv(): Record<string, string> {
+    return {
+      PI_CODING_AGENT_DIR: PI_AGENT_DIR,
+    };
   }
 
   private buildClaudeLaunchCommand(options?: { resumeToken?: string }): string {
@@ -3460,10 +3551,20 @@ export class WebIDEHost {
       "--plugin-dir",
       this.quoteShellArg(`${WORKSPACE_ROOT}/.claude-plugin`),
     ];
+    const model = readChatModel();
+    if (model) {
+      parts.push("--model", this.quoteShellArg(model));
+    }
+    if (readChatPlanMode()) {
+      parts.push("--permission-mode", "plan");
+    }
     if (options?.resumeToken) {
       parts.push("--resume", this.quoteShellArg(options.resumeToken));
     }
-    return this.augmentClaudeLaunchCommand(parts.join(" "));
+    const thinkingTokens = CHAT_EFFORT_THINKING_TOKENS[readChatEffort()];
+    const effortPrefix =
+      thinkingTokens === null ? "" : `MAX_THINKING_TOKENS=${thinkingTokens} `;
+    return effortPrefix + this.augmentClaudeLaunchCommand(parts.join(" "));
   }
 
   private augmentClaudeLaunchCommand(command: string): string {
@@ -3533,6 +3634,16 @@ export class WebIDEHost {
 
       this.openCodeSidebarTabs.set(id, { id, title, host, session });
       this.openCodeSurface.updateTabStatus(id, "OpenCode ready");
+      // No terminal stdin exists for the DOM-mounted TUI; chat sends go
+      // through the shared opencode server's TUI prompt routes instead.
+      agentSessionRegistry.setActive({
+        harness: "opencode",
+        tabId: id,
+        startedAt: Date.now(),
+        resumeToken: options?.args?.sessionID ?? null,
+        sendInput: () => {},
+        isRunning: () => this.openCodeSidebarTabs.has(id),
+      });
 
       void session.exited.finally(() => {
         if (!this.openCodeSidebarTabs.has(id)) {
@@ -3583,18 +3694,26 @@ export class WebIDEHost {
     options?: {
       title?: string;
       args?: OpenCodeBrowserLaunchArgs;
+      /**
+       * Reveal and focus the TUI surface (default). Chat-initiated launches
+       * pass false: the TUI still mounts and renders in the AI panel (so it
+       * stays a live, attachable view of the session) but nothing is
+       * focused — with the workbench drawer closed it stays offscreen.
+       */
+      focus?: boolean;
     },
   ): Promise<void> {
+    const focus = options?.focus ?? true;
     if (this.agentMode === "host") {
-      await this.revealTerminalPanel(true);
-      void this.createHostAgentTerminalTab(true);
+      await this.revealTerminalPanel(focus);
+      void this.createHostAgentTerminalTab(focus);
       return;
     }
 
-    await this.revealOpenCodeSidebarView(true);
+    await this.revealOpenCodeSidebarView(focus);
 
     if (kind === "opencode") {
-      await this.createOpenCodeSidebarTab(true, {
+      await this.createOpenCodeSidebarTab(focus, {
         title: options?.title,
         args: this.normalizeOpenCodeSidebarArgs(options?.args),
       });
@@ -3602,7 +3721,7 @@ export class WebIDEHost {
     }
 
     if (kind === "terminal") {
-      this.createAiSidebarTerminalTab(true);
+      this.createAiSidebarTerminalTab(focus);
       return;
     }
 
@@ -3613,10 +3732,29 @@ export class WebIDEHost {
         return;
       }
 
-      const tab = this.createAiSidebarTerminalTab(true, {
+      const tab = this.createAiSidebarTerminalTab(focus, {
         title: `Codex ${++this.codexSidebarCounter}`,
         agentHarness: "codex",
         env: this.buildCodexShellEnv(),
+      });
+      await this.runCommand(tab, command, {
+        echoCommand: true,
+        interceptAgentLaunch: false,
+      });
+      return;
+    }
+
+    if (kind === "pi") {
+      const command = this.getAiLaunchCommand(kind);
+      if (!(await this.keychain.prepareForCommand(command))) {
+        await this.revealKeychainPanel();
+        return;
+      }
+
+      const tab = this.createAiSidebarTerminalTab(focus, {
+        title: `Pi ${++this.piSidebarCounter}`,
+        agentHarness: "pi",
+        env: this.buildPiShellEnv(),
       });
       await this.runCommand(tab, command, {
         echoCommand: true,
@@ -3638,7 +3776,7 @@ export class WebIDEHost {
     const tab = this.createTerminalTab(
       "user",
       `Claude Code ${++this.claudeSidebarCounter}`,
-      true,
+      focus,
       true,
       {
         id: `claude-sidebar-${crypto.randomUUID()}`,
@@ -3912,7 +4050,15 @@ export class WebIDEHost {
     await this.createOpenCodeSidebarTab(focus);
   }
 
+  /** Show or hide the workbench's inner sidebar part (hidden at startup). */
+  async setWorkbenchSidebarVisible(visible: boolean): Promise<void> {
+    setPartVisibility(Parts.SIDEBAR_PART, visible);
+  }
+
   async revealKeychainPanel(): Promise<void> {
+    // The keychain needs user attention and lives in the workbench drawer —
+    // ask the drawer to open (event handled by WorkbenchDrawer).
+    window.dispatchEvent(new Event("webide:open-workbench-drawer"));
     const paneCompositeService = await getService(IPaneCompositePartService);
     setPartVisibility(Parts.AUXILIARYBAR_PART, true);
     await paneCompositeService.openPaneComposite(
@@ -4022,6 +4168,14 @@ export class WebIDEHost {
         authLabel: this.keychain.hasSlotData("codex")
           ? "Re-authenticate"
           : "Login",
+      },
+      {
+        name: "pi",
+        label: "Pi",
+        active: this.keychain.hasSlotData("pi"),
+        statusText: this.keychain.hasSlotData("pi")
+          ? "Saved auth/config"
+          : "No saved auth/config",
       },
       {
         name: "replay",
@@ -6215,6 +6369,22 @@ export class WebIDEHost {
       this.agentMode === "browser"
         ? this.augmentClaudeLaunchCommand(trimmed)
         : trimmed;
+    const chatHarness =
+      this.agentMode === "browser" ? this.detectChatAgentHarness(tab, trimmed) : null;
+    if (chatHarness) {
+      agentSessionRegistry.setActive({
+        harness: chatHarness,
+        tabId: tab.id,
+        startedAt: Date.now(),
+        resumeToken: extractResumeToken(trimmed),
+        sendInput: (data) => tab.session.sendInput(data),
+        isRunning: () => Boolean(tab.runningAbortController),
+        ready:
+          chatHarness === "claude" && this.claudeIdeBridge
+            ? this.waitForClaudeIdeReady()
+            : undefined,
+      });
+    }
 
     try {
       const result = await tab.session.run(executableCommand, {
@@ -6235,8 +6405,104 @@ export class WebIDEHost {
         cancelPreparedCloudflareAuthPopup();
       }
       tab.runningAbortController = null;
+      if (chatHarness) {
+        agentSessionRegistry.clearActive(tab.id);
+      }
       this.printPrompt(tab);
     }
+  }
+
+  /**
+   * Resolves the next time a Claude CLI's MCP client connects to the IDE
+   * bridge — the earliest reliable signal that the TUI accepts input.
+   */
+  private waitForClaudeIdeReady(): Promise<void> {
+    return new Promise((resolve) => {
+      const unsubscribe = this.claudeIdeBridge!.onClientInitialized(() => {
+        unsubscribe();
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Download/extract the Claude Code package in the background so the first
+   * agent launch doesn't pay the cold npm install (the dominant cost of
+   * "claude is slow to open"). Reuses npx's install location, so the launch
+   * finds the bin already resolved.
+   */
+  private prewarmClaudeCodePackage(): void {
+    if (this.claudeCodePrewarmStarted || this.agentMode !== "browser") {
+      return;
+    }
+    this.claudeCodePrewarmStarted = true;
+    void this.container.npm.install(BROWSER_CLAUDE_CODE_PACKAGE).catch(() => {
+      // Best-effort warm-up; the real launch installs on demand if needed.
+      this.claudeCodePrewarmStarted = false;
+    });
+  }
+
+  private detectChatAgentHarness(
+    tab: TerminalTabState,
+    command: string,
+  ): "claude" | "codex" | null {
+    if (tab.agentHarness === "claude" || tab.agentHarness === "codex") {
+      return tab.agentHarness;
+    }
+    if (matchesClaudeLaunchCommand(command)) {
+      return "claude";
+    }
+    if (matchesCodexLaunchCommand(command)) {
+      return "codex";
+    }
+    return null;
+  }
+
+  /**
+   * Launch an agent session from outside the workbench (e.g. the chat
+   * surface). Unlike the internal launcher this surfaces launch blockers as
+   * errors instead of silently revealing panels, so chat can show the reason.
+   * Resolves once the launch is initiated — not when the session exits.
+   */
+  async startAgentSession(kind: AgentLaunchKind): Promise<void> {
+    if (this.agentMode === "browser") {
+      if (kind === "claude" && !this.getClaudeLauncherAvailable()) {
+        void this.revealKeychainPanel();
+        throw new Error(
+          "Claude Code isn't ready: connect the network and add your Claude credentials in the Keychain panel (in the workbench drawer), then try again.",
+        );
+      }
+      if (kind === "claude" || kind === "codex") {
+        const command = this.getAiLaunchCommand(kind);
+        if (!(await this.keychain.prepareForCommand(command))) {
+          void this.revealKeychainPanel();
+          throw new Error(
+            "Keychain unlock is required before starting this agent — unlock it in the workbench drawer and try again.",
+          );
+        }
+      }
+    }
+    // Chat-initiated launch: keep the TUI offscreen (no reveal focus) and
+    // mark the launch window so chat sends wait for this session instead of
+    // racing it or starting a duplicate.
+    const launchToken = agentSessionRegistry.beginLaunch();
+    void this.launchAiSession(kind, { focus: false }).finally(() => {
+      agentSessionRegistry.endLaunch(launchToken);
+    });
+  }
+
+  /** The shared chat/terminal agent session registry (exposed for chat + tests). */
+  getAgentSessionRegistry() {
+    return agentSessionRegistry;
+  }
+
+  /** Client against the shared in-browser opencode server, for the chat adapter. */
+  async createOpenCodeChatClient() {
+    return createOpenCodeBrowserClient({
+      container: this.container,
+      cwd: WORKSPACE_ROOT,
+      env: {},
+    });
   }
 
   async executeHostCommand(command?: string): Promise<void> {
@@ -8860,6 +9126,9 @@ export class WebIDEHost {
       width: 600,
       height: currentSize.height,
     });
+    // Keep the inner sidebar collapsed by default; launching an agent
+    // session reveals the AI view in it (unfocused for chat launches).
+    setPartVisibility(Parts.SIDEBAR_PART, false);
 
     // Inject custom-ui-style.stylesheet CSS from workspace settings
     this.injectCustomUiStylesheet();
@@ -9665,38 +9934,16 @@ export class WebIDEHost {
       );
     });
 
-    this.container.on("server-ready", (_port: unknown, url: unknown) => {
-      if (typeof _port !== "number" || typeof url !== "string") {
-        return;
-      }
-      this.previewPort = _port;
-      this.previewUrl = `${url}/`;
-      this.previewStartRequested = false;
-      this.clearScheduledPreviewStartRetry();
-      if (this.previewMode === "workbench") {
-        this.previewSurface.setUrl(this.previewUrl);
-
-        const iframe = this.previewSurface.getIframe();
-        iframe.addEventListener(
-          "load",
-          () => {
-            this.registerPreviewHmrTargets();
-          },
-          { once: true },
+    this.container.on(
+      "server-ready",
+      (port: unknown, url: unknown, metadata: unknown) => {
+        this.handleServerReady(
+          port,
+          url,
+          metadata as ServerRegistrationMetadata | undefined,
         );
-      }
-      this.registerPreviewHmrTargets();
-
-      const previewTab = this.previewTerminalTabId
-        ? this.terminalTabs.get(this.previewTerminalTabId)
-        : null;
-      if (previewTab) {
-        this.updateTerminalStatus(
-          previewTab,
-          `Preview ready: ${this.previewUrl}`,
-        );
-      }
-    });
+      },
+    );
 
     this.container.on("server-unregistered", (port: unknown) => {
       if (typeof port !== "number" || port !== this.previewPort) {

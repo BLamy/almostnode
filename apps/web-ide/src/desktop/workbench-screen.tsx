@@ -3,6 +3,8 @@ import type { TemplateId } from '../features/workspace-seed';
 import { WebIDEHost } from '../workbench/workbench-host';
 import { ProjectManager } from '../features/project-manager';
 import { ProjectSidebar } from '../sidebar/project-sidebar';
+import { WorkbenchDrawer } from './workbench-drawer';
+import { ChatScreen } from '../chat/chat-screen';
 import { AwsSetupDialog } from '../sidebar/aws-setup-dialog';
 import { AppBuildingSetupDialog } from '../sidebar/app-building-setup-dialog';
 import type { AwsSetupDraft } from '../features/aws-setup';
@@ -151,6 +153,10 @@ export function WorkbenchScreen({
   const [appBuildingSetupDraft, setAppBuildingSetupDraft] = useState<AppBuildingSetupDraft | null>(null);
   const [projectLaunchDialogOpen, setProjectLaunchDialogOpen] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null | undefined>(undefined);
+  const [activeThreadTitle, setActiveThreadTitle] = useState<string | null>(null);
+  // The workbench drawer starts closed: the chat is the primary surface and
+  // the TUI/workbench live offscreen until summoned from the chat header.
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Lazily create the project manager singleton
   if (!managerRef.current) {
@@ -170,6 +176,19 @@ export function WorkbenchScreen({
         window.dispatchEvent(new Event('resize'));
       }, 220);
       return next;
+    });
+  }, []);
+
+  const handleToggleDrawer = useCallback(() => {
+    setDrawerOpen((prev) => {
+      // Trigger Monaco layout reflow immediately and after the transition.
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+      window.setTimeout(() => {
+        window.dispatchEvent(new Event('resize'));
+      }, 220);
+      return !prev;
     });
   }, []);
 
@@ -283,22 +302,39 @@ export function WorkbenchScreen({
           <ProjectSidebar
             manager={manager}
             isCollapsed={sidebarCollapsed}
-            onToggle={handleToggleSidebar}
             projectLaunchDialogOpen={projectLaunchDialogOpen}
             onProjectLaunchDialogOpenChange={setProjectLaunchDialogOpen}
             onActiveProjectChange={setActiveProjectId}
+            onActiveThreadChange={setActiveThreadTitle}
           />
         )}
-        <div className="webide-workbench-shell">
-          <div
-            id="webideWorkbench"
-            ref={workbenchRef}
-            className={hostReady && activeProjectId === null ? 'is-background-hidden' : ''}
-          />
-          {hostReady && activeProjectId === null ? (
+        <div className="webide-chat-column">
+          {hostReady && (
+            <ChatHeader
+              threadTitle={activeThreadTitle}
+              sidebarCollapsed={sidebarCollapsed}
+              onToggleSidebar={handleToggleSidebar}
+              workbenchOpen={drawerOpen}
+              onToggleWorkbench={handleToggleDrawer}
+            />
+          )}
+          {!hostReady ? (
+            <div className="webide-chat-loading" aria-hidden="true" />
+          ) : activeProjectId === null ? (
             <IDEEmptyState onOpenProjectLauncher={() => setProjectLaunchDialogOpen(true)} />
-          ) : null}
+          ) : (
+            <ChatScreen host={hostRef.current} />
+          )}
         </div>
+        <WorkbenchDrawer open={drawerOpen} onOpenChange={setDrawerOpen}>
+          <div className="webide-workbench-shell">
+            <div
+              id="webideWorkbench"
+              ref={workbenchRef}
+              className={hostReady && activeProjectId === null ? 'is-background-hidden' : ''}
+            />
+          </div>
+        </WorkbenchDrawer>
       </main>
       <AwsSetupDialog
         open={awsSetupDraft !== null}
@@ -334,6 +370,68 @@ export function WorkbenchScreen({
           setAppBuildingSetupDraft(null);
         }}
       />
+    </div>
+  );
+}
+
+function ChatHeader({
+  threadTitle,
+  sidebarCollapsed,
+  onToggleSidebar,
+  workbenchOpen,
+  onToggleWorkbench,
+}: {
+  threadTitle: string | null;
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+  workbenchOpen: boolean;
+  onToggleWorkbench: () => void;
+}) {
+  return (
+    <div className="webide-chat-header" data-testid="chat-header">
+      <button
+        type="button"
+        className="webide-chat-header-button"
+        data-testid="chat-sidebar-toggle"
+        aria-expanded={!sidebarCollapsed}
+        aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+        title={sidebarCollapsed ? 'Show sidebar (⌘B)' : 'Hide sidebar (⌘B)'}
+        onClick={onToggleSidebar}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M3 4h10M3 8h10M3 12h10"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+        </svg>
+      </button>
+      <span className="webide-chat-header-title" data-testid="chat-thread-title">
+        {threadTitle ?? ''}
+      </span>
+      <button
+        type="button"
+        className="webide-chat-header-button"
+        data-testid="workbench-drawer-toggle"
+        aria-expanded={workbenchOpen}
+        aria-label={workbenchOpen ? 'Hide workbench' : 'Show workbench'}
+        title={workbenchOpen ? 'Hide workbench (⌘⇧.)' : 'Show workbench (⌘⇧.)'}
+        onClick={onToggleWorkbench}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect
+            x="2"
+            y="3"
+            width="12"
+            height="10"
+            rx="1.5"
+            stroke="currentColor"
+            strokeWidth="1.3"
+          />
+          <path d="M10 3v10" stroke="currentColor" strokeWidth="1.3" />
+        </svg>
+      </button>
     </div>
   );
 }

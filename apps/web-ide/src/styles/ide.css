@@ -342,7 +342,9 @@ html[data-almostnode-theme="light"] .almostnode-ui-input {
 .webide-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  min-height: 100dvh;
+  /* Fixed viewport height so the chat timeline scrolls internally instead
+     of growing the page. */
+  height: 100dvh;
   min-width: 0;
   overflow: hidden;
 }
@@ -627,6 +629,125 @@ html[data-almostnode-theme="light"] .ide-route-loading__workbench {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0)),
     color-mix(in srgb, var(--panel-bg) 88%, white);
+}
+
+.webide-chat-column {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.webide-chat-loading {
+  flex: 1 1 auto;
+}
+
+.webide-chat-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  min-height: 2.6rem;
+}
+
+.webide-chat-header-button {
+  flex: none;
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.webide-chat-header-button:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+html[data-almostnode-theme="light"] .webide-chat-header-button:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.webide-chat-header-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.webide-drawer-region {
+  position: relative;
+  display: flex;
+  flex: none;
+  min-height: 0;
+}
+
+.webide-drawer {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  transition: width 0.2s ease;
+  display: flex;
+}
+
+.webide-drawer-region.is-dragging .webide-drawer {
+  transition: none;
+}
+
+.webide-drawer-region.is-dragging,
+.webide-drawer-region.is-dragging * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+.webide-drawer-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 8px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.webide-drawer-resize-handle:hover::after,
+.webide-drawer-region.is-dragging .webide-drawer-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+.webide-drawer-region.is-closed .webide-drawer-resize-handle {
+  display: none;
+}
+
+.webide-drawer-content {
+  flex: none;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  margin-left: auto;
 }
 
 .webide-workbench-shell {

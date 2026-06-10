@@ -158,6 +158,10 @@ export function format(pathObject: {
   return dir + '/' + base;
 }
 
+export function toNamespacedPath(path: string): string {
+  return path;
+}
+
 // POSIX interface (we only support POSIX)
 export const posix = {
   sep,
@@ -172,6 +176,7 @@ export const posix = {
   relative,
   parse,
   format,
+  toNamespacedPath,
 };
 
 // Win32 interface (stub — we always use POSIX, but packages import this)
@@ -188,6 +193,7 @@ export const win32 = {
   relative,
   parse,
   format,
+  toNamespacedPath,
 };
 
 // Default export for CommonJS compatibility
@@ -204,6 +210,7 @@ export default {
   relative,
   parse,
   format,
+  toNamespacedPath,
   posix,
   win32,
 };

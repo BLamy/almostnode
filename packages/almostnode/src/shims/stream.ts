@@ -283,6 +283,51 @@ export class Readable extends Stream {
 
     return readable;
   }
+
+  static fromWeb(
+    readableStream: ReadableStream<unknown> | AsyncIterable<unknown>,
+    options?: { objectMode?: boolean; highWaterMark?: number }
+  ): Readable {
+    const readable = new Readable();
+
+    (async () => {
+      try {
+        const webLike = readableStream as {
+          getReader?: () => {
+            read: () => Promise<{ done?: boolean; value?: unknown }>;
+            releaseLock?: () => void;
+          };
+        };
+
+        if (typeof webLike.getReader === 'function') {
+          const reader = webLike.getReader();
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value !== null && value !== undefined) {
+                readable.push(value as Uint8Array | string);
+              }
+            }
+          } finally {
+            reader.releaseLock?.();
+          }
+        } else {
+          for await (const chunk of readableStream as AsyncIterable<unknown>) {
+            if (chunk !== null && chunk !== undefined) {
+              readable.push(chunk as Uint8Array | string);
+            }
+          }
+        }
+
+        readable.push(null);
+      } catch (err) {
+        readable.destroy(err as Error);
+      }
+    })();
+
+    return readable;
+  }
 }
 
 export class Writable extends Stream {
@@ -533,6 +578,7 @@ export class Transform extends Duplex {
 (Stream as unknown as Record<string, unknown>).Stream = Stream;
 // Also expose Readable.from on Stream for compatibility
 (Stream as unknown as Record<string, unknown>).from = Readable.from;
+(Stream as unknown as Record<string, unknown>).fromWeb = Readable.fromWeb;
 
 // Promises API
 export const promises = {

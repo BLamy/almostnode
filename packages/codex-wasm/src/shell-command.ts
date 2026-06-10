@@ -283,8 +283,8 @@ function shouldRunBrowserExecPrompt(args: string[]): boolean {
   const first = args[0];
   return Boolean(
     first &&
-      !first.startsWith("-") &&
-      !CODEX_BROWSER_TUI_NATIVE_SUBCOMMANDS.has(first),
+    !first.startsWith("-") &&
+    !CODEX_BROWSER_TUI_NATIVE_SUBCOMMANDS.has(first),
   );
 }
 
@@ -398,30 +398,30 @@ async function handleBrowserTuiResult(
     const runOptions = runOptionsForContext(context);
     if (appServer?.available()) {
       const turnTask = runBrowserTuiAppServerTurn(
-          action.prompt,
-          context,
-          runner,
-          runOptions,
-          appServer,
-        ).then((execResult) =>
-          renderBrowserTuiAsyncActionResult(
-            context,
-            runner,
-            "exec",
-            execResult,
-          ),
-        );
+        action.prompt,
+        context,
+        runner,
+        runOptions,
+        appServer,
+      ).then((execResult) =>
+        renderBrowserTuiAsyncActionResult(context, runner, "exec", execResult),
+      );
       trackBrowserTuiBackgroundTurn(backgroundTurns, turnTask, context);
       return null;
     }
 
     const execResult = await runBrowserTuiExecAction(
-          action.prompt,
-          context,
-          runner,
-          runOptions,
-        );
-    await renderBrowserTuiAsyncActionResult(context, runner, "exec", execResult);
+      action.prompt,
+      context,
+      runner,
+      runOptions,
+    );
+    await renderBrowserTuiAsyncActionResult(
+      context,
+      runner,
+      "exec",
+      execResult,
+    );
     return null;
   }
 
@@ -886,6 +886,9 @@ function writeBrowserTuiOutput(
   context: CodexCliShellCommandContext,
 ): void {
   if (result.browserTui?.ansi) {
+    if (result.browserTui.scrollbackAnsi) {
+      context.writeStdout(result.browserTui.scrollbackAnsi);
+    }
     context.writeStdout(
       `${CODEX_BROWSER_TUI_FRAME_PREFIX}${result.browserTui.ansi}${browserTuiCursorAnsi(result.browserTui)}${CODEX_BROWSER_TUI_FRAME_SUFFIX}`,
     );

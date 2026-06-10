@@ -85,7 +85,10 @@ export {
   getServerBridge,
   resetServerBridge,
 } from "./server-bridge";
-export type { InitServiceWorkerOptions } from "./server-bridge";
+export type {
+  InitServiceWorkerOptions,
+  ServerRegistrationMetadata,
+} from "./server-bridge";
 // Dev servers
 export { DevServer } from "./dev-server";
 export type { DevServerOptions, ResponseData, HMRUpdate } from "./dev-server";

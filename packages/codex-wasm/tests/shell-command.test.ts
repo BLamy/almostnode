@@ -281,6 +281,50 @@ describe("createCodexCliShellCommand", () => {
     expect(disposed).toEqual(["disposed"]);
   });
 
+  it("writes browser TUI scrollback deltas before redrawing the live frame", async () => {
+    const interactive = createInteractiveShellContext();
+    const command = createCodexCliShellCommand({
+      createRunner() {
+        const tui = createTestTuiRunner([]);
+        return {
+          async run(args): Promise<CodexCliShellCommandResult> {
+            const tuiResult = tui(args);
+            if (tuiResult) return tuiResult;
+            return {
+              stdout: `answer:${args.join(" ")}\n`,
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+          dispose() {},
+        };
+      },
+    });
+
+    const runPromise = command.execute([], interactive.ctx);
+    await interactive.waitForStdout("OpenAI Codex");
+
+    interactive.type("scrollback probe");
+    interactive.key("\r", { name: "return" });
+    await interactive.waitForStdout("› scrollback probe\r\n");
+
+    const output = interactive.stdout();
+    const scrollbackIndex = output.indexOf("› scrollback probe\r\n");
+    const redrawIndex = output.indexOf(
+      "\x1b[?25l\x1b[H\x1b[2J",
+      scrollbackIndex,
+    );
+    expect(scrollbackIndex).toBeGreaterThanOrEqual(0);
+    expect(redrawIndex).toBeGreaterThan(scrollbackIndex);
+
+    interactive.key(undefined, { name: "d", ctrl: true });
+    await expect(runPromise).resolves.toEqual({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    });
+  });
+
   it("keeps the browser interactive codex loop alive after exec errors", async () => {
     const disposed: string[] = [];
     const interactive = createInteractiveShellContext();
@@ -913,7 +957,9 @@ describe("createCodexCliShellCommand", () => {
       await vi.advanceTimersByTimeAsync(121_000);
       await flushAsyncWork();
 
-      expect(interactive.stderr()).not.toContain("Timed out waiting for Codex turn");
+      expect(interactive.stderr()).not.toContain(
+        "Timed out waiting for Codex turn",
+      );
       expect(settled).toBe(false);
 
       for (const listener of Array.from(appServerNotifications)) {
@@ -942,7 +988,9 @@ describe("createCodexCliShellCommand", () => {
         stderr: "",
         exitCode: 0,
       });
-      expect(disposed).toEqual(expect.arrayContaining(["app-server", "runner"]));
+      expect(disposed).toEqual(
+        expect.arrayContaining(["app-server", "runner"]),
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -1289,16 +1337,27 @@ function submitTestTuiInput(
   if (text.startsWith("!")) {
     const command = text.slice(1).trim();
     transcript.push(`› !${command}`);
-    return renderTestTui("", transcript, { type: "shell", command });
+    return renderTestTui(
+      "",
+      transcript,
+      { type: "shell", command },
+      `› !${command}\r\n`,
+    );
   }
   transcript.push(`› ${text}`);
-  return renderTestTui("", transcript, { type: "exec", prompt: text });
+  return renderTestTui(
+    "",
+    transcript,
+    { type: "exec", prompt: text },
+    `› ${text}\r\n`,
+  );
 }
 
 function renderTestTui(
   input: string,
   transcript: string[],
   action: NonNullable<CodexCliShellCommandResult["browserTui"]>["action"],
+  scrollbackAnsi?: string,
 ): CodexCliShellCommandResult {
   return {
     stdout: "",
@@ -1307,6 +1366,7 @@ function renderTestTui(
     browserTui: {
       ansi: ["OpenAI Codex", `› ${input}`, ...transcript].join("\n"),
       action,
+      ...(scrollbackAnsi ? { scrollbackAnsi } : {}),
       cursor: { x: 2 + input.length, y: 1 },
     },
   };

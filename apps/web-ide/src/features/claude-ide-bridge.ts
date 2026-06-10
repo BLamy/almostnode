@@ -400,6 +400,7 @@ export class ClaudeIdeVirtualServer {
       openFile: (params: ClaudeIdeOpenFileParams) => Promise<void>;
       getDiagnostics: (uri?: string) => Promise<ClaudeIdeDiagnosticFile[]>;
       handleFileUpdated: (params: ClaudeIdeFileUpdatedParams) => Promise<void>;
+      onClientInitialized?: () => void;
     },
   ) {}
 
@@ -615,6 +616,7 @@ export class ClaudeIdeVirtualServer {
 
     switch (method) {
       case 'initialize':
+        this.handlers.onClientInitialized?.();
         return createJsonRpcSuccess(id, {
           protocolVersion:
             typeof (message.params as { protocolVersion?: unknown } | undefined)
@@ -776,6 +778,7 @@ export class ClaudeIdeBridge {
 
   private selectionKey: string | null = null;
   private selectionRefreshPending = false;
+  private readonly clientInitializedListeners = new Set<() => void>();
 
   private constructor(
     private readonly container: ContainerInstance,
@@ -790,8 +793,25 @@ export class ClaudeIdeBridge {
       openFile: (params) => this.openFile(params),
       getDiagnostics: (uri) => this.getDiagnostics(uri),
       handleFileUpdated: (params) => this.handleFileUpdated(params),
+      onClientInitialized: () => {
+        for (const listener of this.clientInitializedListeners) {
+          listener();
+        }
+      },
     });
     this.sseUrl = `${this.container.serverBridge.getServerUrl(port)}${SSE_PATH}`;
+  }
+
+  /**
+   * Subscribe to MCP client `initialize` requests — fired each time a Claude
+   * CLI finishes booting far enough to connect to the IDE bridge. Used as the
+   * readiness signal before injecting chat input into the TUI.
+   */
+  onClientInitialized(listener: () => void): () => void {
+    this.clientInitializedListeners.add(listener);
+    return () => {
+      this.clientInitializedListeners.delete(listener);
+    };
   }
 
   static async create(options: {
@@ -843,7 +863,12 @@ export class ClaudeIdeBridge {
   }
 
   private start(): void {
-    this.container.serverBridge.registerServer(this.server as never, this.port);
+    this.container.serverBridge.registerServer(
+      this.server as never,
+      this.port,
+      '0.0.0.0',
+      { purpose: 'auxiliary', name: 'claude-ide-bridge' },
+    );
 
     for (const editor of this.codeEditorService.listCodeEditors()) {
       this.registerCodeEditor(editor as CodeEditorLike);

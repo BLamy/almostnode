@@ -266,7 +266,7 @@ describe('Stream module (Node.js compat)', () => {
         const chunks: Buffer[] = [];
 
         for await (const chunk of readable) {
-          chunks.push(chunk);
+          chunks.push(chunk as Buffer);
         }
 
         const result = Buffer.concat(chunks).toString();
@@ -278,7 +278,7 @@ describe('Stream module (Node.js compat)', () => {
         const chunks: Buffer[] = [];
 
         for await (const chunk of readable) {
-          chunks.push(chunk);
+          chunks.push(chunk as Buffer);
         }
 
         expect(chunks.map((chunk) => chunk.toString())).toEqual(['hello world']);
@@ -407,6 +407,25 @@ describe('Stream module (Node.js compat)', () => {
 
       it('should be accessible via Stream.from', () => {
         expect((Stream as unknown as Record<string, unknown>).from).toBe(Readable.from);
+      });
+
+      it('should create stream from Web ReadableStream', async () => {
+        const webStream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(Buffer.from('hello '));
+            controller.enqueue(Buffer.from('from web'));
+            controller.close();
+          },
+        });
+        const readable = Readable.fromWeb(webStream);
+        const chunks: string[] = [];
+
+        for await (const chunk of readable) {
+          chunks.push(String(chunk));
+        }
+
+        expect(chunks.join('')).toBe('hello from web');
+        expect((Stream as unknown as Record<string, unknown>).fromWeb).toBe(Readable.fromWeb);
       });
     });
   });
