@@ -61,6 +61,7 @@ export type {
   NetworkLookupAddress,
   NetworkLookupOptions,
   NetworkLookupResult,
+  NetworkAuthMode,
   NetworkOptions,
   NetworkProxyOptions,
   NetworkProvider,

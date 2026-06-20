@@ -14,6 +14,7 @@ import wasm from "vite-plugin-wasm";
 import tailwindcss from "@tailwindcss/vite";
 import { resolvePreferredPnpmPackagePath } from "../../scripts/resolve-pnpm-package-path.mjs";
 import { corsProxyPlugin } from "./src/plugins/vite-plugin-cors-proxy";
+import { tailscaleAuthKeyPlugin } from "./src/plugins/vite-plugin-tailscale-auth-key";
 import { workbenchEntrypointsPlugin } from "./src/plugins/vite-plugin-workbench-entrypoints";
 import { workspaceTemplatesPlugin } from "./src/plugins/vite-plugin-workspace-templates";
 
@@ -644,6 +645,7 @@ export default defineConfig(async ({ mode }) => {
     },
     plugins: [
       corsProxyPlugin(),
+      tailscaleAuthKeyPlugin(),
       workbenchEntrypointsPlugin({
         entrypointsDir: resolve(__dirname, "src/workbench/entrypoints"),
       }),

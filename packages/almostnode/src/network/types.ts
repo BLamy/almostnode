@@ -1,6 +1,6 @@
 export type NetworkProvider = 'browser' | 'tailscale';
 
-export type NetworkAuthMode = 'interactive';
+export type NetworkAuthMode = 'interactive' | 'auth-key';
 
 export interface NetworkProxyOptions {
   httpUrl?: string | null;
@@ -12,6 +12,9 @@ export interface NetworkProxyOptions {
 export interface NetworkOptions {
   provider?: NetworkProvider;
   authMode?: NetworkAuthMode;
+  authKey?: string | null;
+  controlUrl?: string | null;
+  hostname?: string | null;
   useExitNode?: boolean;
   exitNodeId?: string | null;
   activeExitNodeId?: string | null;

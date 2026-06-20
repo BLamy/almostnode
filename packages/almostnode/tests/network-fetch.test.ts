@@ -5,6 +5,9 @@ import type { NetworkOptions } from '../src/network/types';
 const DEFAULT_OPTIONS: Required<NetworkOptions> = {
   provider: 'browser',
   authMode: 'interactive',
+  authKey: null,
+  controlUrl: null,
+  hostname: null,
   useExitNode: false,
   exitNodeId: null,
   acceptDns: false,

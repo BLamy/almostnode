@@ -17,3 +17,11 @@
 [submodule "packages/app-building"]
 	path = packages/app-building
 	url = https://github.com/replayio/app-building
+[submodule "vendor/tailscale"]
+	path = vendor/tailscale
+	url = git@github.com:BLamy/tailscale.git
+	branch = almostnode-browser-connect
+[submodule "vendor/headscale"]
+	path = vendor/headscale
+	url = git@github.com:BLamy/headscale.git
+	branch = almostnode-browser-ts2021

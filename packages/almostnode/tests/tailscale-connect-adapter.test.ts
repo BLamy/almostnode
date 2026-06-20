@@ -512,6 +512,47 @@ describe('tailscale connect adapter', () => {
     expect(onAuthUrl).toHaveBeenCalledWith('https://login.tailscale.test');
   });
 
+  it('does not open an auth popup when logging in with an auth key', async () => {
+    const open = vi.fn();
+    Object.defineProperty(globalThis, 'open', {
+      value: open,
+      configurable: true,
+      writable: true,
+    });
+    FakeWorker.loginValue = {
+      state: 'starting',
+    };
+
+    const adapter = createNativeTailscaleConnectAdapter(
+      {
+        provider: 'tailscale',
+        authMode: 'auth-key',
+        authKey: 'tskey-auth-test',
+        controlUrl: 'https://headscale.example.com',
+        hostname: 'almostnode-browser',
+        useExitNode: false,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        proxy: {
+          httpUrl: null,
+          httpsUrl: null,
+          noProxy: null,
+          caBundlePem: null,
+        },
+        tailscaleConnected: false,
+      },
+      () => {},
+    );
+
+    await adapter.login();
+
+    expect(open).not.toHaveBeenCalled();
+    expect(FakeWorker.lastInstance?.messages).toContainEqual(expect.objectContaining({
+      type: 'login',
+    }));
+  });
+
   it('clears persisted state on explicit logout', async () => {
     const storage = new MemorySessionStorage();
     storage.setItem(

@@ -160,7 +160,9 @@ class TailscaleConnectAdapter implements TailscaleAdapter {
   }
 
   async login(): Promise<TailscaleAdapterStatus> {
-    this.ensurePendingAuthPopup();
+    if (this.options.authMode !== 'auth-key' && !this.options.authKey) {
+      this.ensurePendingAuthPopup();
+    }
     try {
       if (this.hasPersistedSessionSnapshot()) {
         const currentStatus = await this.refreshStatus();
