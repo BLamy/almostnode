@@ -18,7 +18,7 @@ export type TailscaleWorkerErrorCode =
   | 'runtime_unavailable';
 
 export interface TailscaleWorkerErrorDebug {
-  phase?: 'prepare_public_dns' | 'ipn_start' | 'recover_runtime' | 'primary_fetch' | 'fallback_fetch' | 'read_body';
+  phase?: 'prepare_public_dns' | 'ipn_start' | 'recover_runtime' | 'primary_fetch' | 'fallback_fetch' | 'redirect_follow' | 'read_body';
   url?: string;
   hostname?: string | null;
   ipAddress?: string | null;
@@ -46,6 +46,7 @@ export interface TailscaleWorkerErrorDebug {
   fallbackAttempted?: boolean;
   primaryError?: string;
   fallbackError?: string;
+  redirectCount?: number;
 }
 
 export interface TailscaleWorkerErrorPayload {

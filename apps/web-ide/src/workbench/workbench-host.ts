@@ -51,6 +51,10 @@ import {
   parseCodexIdToken,
   runCodexBrowserLogin,
 } from "../features/codex-auth";
+import {
+  buildProvisionedTailscaleNetworkOptions,
+  requestTailscaleAuthKey,
+} from "../features/tailscale-provisioning";
 import { installOxcMonacoIntegration } from "../features/oxc-monaco";
 import { VfsFileSystemProvider } from "../features/vfs-file-system-provider";
 import type { DesktopBridge } from "../desktop/bridge";
@@ -6172,10 +6176,15 @@ export class WebIDEHost {
   private async tailscaleAuthAction(action: "login" | "logout"): Promise<void> {
     try {
       if (action === "login") {
-        await this.container.network.configure({
-          provider: "tailscale",
-          useExitNode: true,
-        });
+        const provisioned = await requestTailscaleAuthKey();
+        await this.container.network.configure(
+          provisioned
+            ? buildProvisionedTailscaleNetworkOptions(provisioned)
+            : {
+                provider: "tailscale",
+                useExitNode: true,
+              },
+        );
         this.tailscaleStatus = await this.container.network.login();
       } else {
         this.tailscaleStatus = await this.container.network.logout();

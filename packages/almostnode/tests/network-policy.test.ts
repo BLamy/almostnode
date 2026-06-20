@@ -9,6 +9,23 @@ import {
 } from '../src/network';
 
 describe('network policy', () => {
+  it('normalizes non-interactive tailscale auth-key options', () => {
+    expect(
+      normalizeNetworkOptions({
+        provider: 'tailscale',
+        authKey: ' tskey-auth-test ',
+        controlUrl: ' https://headscale.example.com ',
+        hostname: ' almostnode-browser ',
+      }),
+    ).toMatchObject({
+      provider: 'tailscale',
+      authMode: 'auth-key',
+      authKey: 'tskey-auth-test',
+      controlUrl: 'https://headscale.example.com',
+      hostname: 'almostnode-browser',
+    });
+  });
+
   it('matches NO_PROXY entries for exact hosts, suffixes, wildcards, and ports', () => {
     expect(shouldBypassProxy('https://api.example.com/v1', 'api.example.com')).toBe(true);
     expect(shouldBypassProxy('https://api.example.com/v1', '.example.com')).toBe(true);

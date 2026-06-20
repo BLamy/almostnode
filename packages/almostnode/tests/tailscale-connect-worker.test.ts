@@ -181,6 +181,53 @@ describe('tailscale connect worker', () => {
     expect(getResponseMessages(workerScope).filter((message) => !message.ok)).toHaveLength(0);
   });
 
+  it('passes auth-key bootstrap options through to createIPN', async () => {
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      fetch: vi.fn(),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    await workerScope.dispatch({
+      id: 1,
+      type: 'configure',
+      options: {
+        provider: 'tailscale',
+        authMode: 'auth-key',
+        authKey: 'tskey-auth-test',
+        controlUrl: 'https://headscale.example.com',
+        hostname: 'almostnode-browser',
+        useExitNode: false,
+        exitNodeId: null,
+        acceptDns: true,
+        corsProxy: null,
+        proxy: {
+          httpUrl: null,
+          httpsUrl: null,
+          noProxy: null,
+          caBundlePem: null,
+        },
+        tailscaleConnected: false,
+      },
+    });
+    await workerScope.dispatch({
+      id: 2,
+      type: 'getStatus',
+    });
+    await vi.runAllTimersAsync();
+
+    expect(createIPNMock).toHaveBeenCalledWith(expect.objectContaining({
+      authKey: 'tskey-auth-test',
+      controlURL: 'https://headscale.example.com',
+      hostname: 'almostnode-browser',
+    }));
+    expect(getResponseMessages(workerScope).filter((message) => !message.ok)).toHaveLength(0);
+  });
+
   it('uses string fetch for simple GET requests on the minimal runtime', async () => {
     const ipn = {
       run: vi.fn(),
@@ -779,6 +826,156 @@ describe('tailscale connect worker', () => {
       }),
       failureBuckets: expect.objectContaining({
         dns_loopback: 0,
+      }),
+      dominantFailureBucket: null,
+    });
+  });
+
+  it('follows redirects in the worker so redirected hostnames also use direct-IP fallback', async () => {
+    const dnsFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url,
+      );
+      expect(url.toString()).toContain('cloudflare-dns.com/dns-query');
+      const name = url.searchParams.get('name');
+      const data = name === 'youtube.com'
+        ? '203.0.113.10'
+        : name === 'www.google.com'
+          ? '198.51.100.20'
+          : null;
+      expect(data).toBeTruthy();
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: [{ type: 1, data }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/dns-json' },
+      });
+    });
+    Object.defineProperty(globalThis, 'fetch', {
+      value: dnsFetch,
+      configurable: true,
+      writable: true,
+    });
+
+    const ipn = {
+      run: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      configure: vi.fn(async () => {}),
+      fetch: vi.fn(async (request: {
+        url: string;
+        headers?: Record<string, string>;
+        tlsServerName?: string;
+        redirect?: string;
+      }) => {
+        if (request.url === 'https://youtube.com/') {
+          throw new Error(
+            'Get "https://youtube.com/": lookup youtube.com on [::1]:53: ' +
+            'server misbehaving',
+          );
+        }
+
+        if (request.url === 'https://203.0.113.10/') {
+          expect(request).toMatchObject({
+            headers: { Host: 'youtube.com' },
+            tlsServerName: 'youtube.com',
+            redirect: 'manual',
+          });
+          return {
+            url: request.url,
+            status: 302,
+            statusText: '302 Found',
+            headers: { location: 'http://www.google.com/' },
+            bodyBase64: '',
+            text: async () => '',
+          };
+        }
+
+        if (request.url === 'http://www.google.com/') {
+          throw new Error(
+            'Get "http://www.google.com/": lookup www.google.com on [::1]:53: ' +
+            'server misbehaving',
+          );
+        }
+
+        expect(request).toMatchObject({
+          url: 'http://198.51.100.20/',
+          headers: { Host: 'www.google.com' },
+          redirect: 'manual',
+        });
+        expect(request).not.toHaveProperty('tlsServerName');
+        return {
+          url: request.url,
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'text/plain' },
+          bodyBase64: Buffer.from('google-response').toString('base64'),
+          text: async () => 'google-response',
+        };
+      }),
+    };
+    createIPNMock.mockResolvedValue(ipn);
+
+    await import('../src/network/tailscale-connect-worker');
+
+    const fetchPromise = workerScope.dispatch({
+      id: 1,
+      type: 'fetch',
+      request: {
+        url: 'https://youtube.com/',
+        method: 'GET',
+        headers: {},
+        redirect: 'follow',
+      },
+    });
+    await vi.runAllTimersAsync();
+    await fetchPromise;
+
+    expect(dnsFetch).toHaveBeenCalledTimes(2);
+    expect(ipn.fetch).toHaveBeenCalledTimes(4);
+    expect(ipn.fetch.mock.calls[0]?.[0]).toMatchObject({
+      url: 'https://youtube.com/',
+      redirect: 'manual',
+    });
+    expect(ipn.fetch.mock.calls[1]?.[0]).toMatchObject({
+      url: 'https://203.0.113.10/',
+      headers: { Host: 'youtube.com' },
+      tlsServerName: 'youtube.com',
+      redirect: 'manual',
+    });
+    expect(ipn.fetch.mock.calls[2]?.[0]).toMatchObject({
+      url: 'http://www.google.com/',
+      redirect: 'manual',
+    });
+    expect(ipn.fetch.mock.calls[3]?.[0]).toMatchObject({
+      url: 'http://198.51.100.20/',
+      headers: { Host: 'www.google.com' },
+      redirect: 'manual',
+    });
+
+    const responses = getResponseMessages(workerScope);
+    expect(responses.at(-1)).toMatchObject({
+      id: 1,
+      ok: true,
+      value: expect.objectContaining({
+        url: 'http://www.google.com/',
+        status: 200,
+      }),
+    });
+
+    await expect(requestDiagnostics(workerScope, 201)).resolves.toMatchObject({
+      counters: expect.objectContaining({
+        totalFetches: 1,
+        publicFetches: 1,
+        structuredFetches: 2,
+        directIpFallbacks: 2,
+        successes: 1,
+        failures: 0,
       }),
       dominantFailureBucket: null,
     });

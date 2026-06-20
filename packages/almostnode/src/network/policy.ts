@@ -88,9 +88,13 @@ export function normalizeNetworkOptions(
     activeExitNodeId?: string | null;
   };
   const hasActiveExitNodeId = Object.prototype.hasOwnProperty.call(record, 'activeExitNodeId');
+  const authKey = trimToNull(record.authKey);
   return {
     provider: record.provider || 'browser',
-    authMode: record.authMode || 'interactive',
+    authMode: record.authMode || (authKey ? 'auth-key' : 'interactive'),
+    authKey,
+    controlUrl: trimToNull(record.controlUrl),
+    hostname: trimToNull(record.hostname),
     useExitNode: Boolean(record.useExitNode),
     exitNodeId: record.exitNodeId?.trim() || null,
     acceptDns: record.acceptDns !== false,

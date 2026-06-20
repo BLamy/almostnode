@@ -91,6 +91,9 @@ class ClassifiedTailscaleWorkerError extends Error {
 const defaultOptions: ResolvedNetworkOptions = {
   provider: 'tailscale',
   authMode: 'interactive',
+  authKey: null,
+  controlUrl: null,
+  hostname: null,
   useExitNode: false,
   exitNodeId: null,
   acceptDns: true,
@@ -114,6 +117,7 @@ const TAILSCALE_RUNTIME_STDIN_PATH = `${TAILSCALE_RUNTIME_ROOT}/stdin`;
 const TAILSCALE_RUNTIME_STDOUT_PATH = `${TAILSCALE_RUNTIME_ROOT}/stdout`;
 const TAILSCALE_RUNTIME_STDERR_PATH = `${TAILSCALE_RUNTIME_ROOT}/stderr`;
 const DIAGNOSTIC_RECENT_FAILURE_LIMIT = 20;
+const TAILSCALE_MAX_REDIRECTS = 20;
 
 let options = defaultOptions;
 let ipnPromise: Promise<TailscaleConnectIPN> | null = null;
@@ -771,6 +775,7 @@ interface TailscaleConnectGoRuntime {
 
 interface TailscaleConnectBootstrapConfig {
   authKey: string;
+  controlUrl: string | null;
   hostname: string;
   stateStorage: TailscaleConnectStateStorage;
   useExitNode: boolean;
@@ -935,6 +940,7 @@ async function createWorkerIpn(
     // both forms so the Go engine actually picks up DNS/routing config.
     const ipn = await tailscaleConnect.createIPN({
       authKey: config.authKey,
+      controlURL: config.controlUrl ?? undefined,
       hostname: config.hostname,
       stateStorage: config.stateStorage,
       useExitNode: config.useExitNode,
@@ -1887,8 +1893,12 @@ async function ensureIpn(): Promise<TailscaleConnectIPN> {
     lastRuntimeFailureSignal = null;
     ipnGeneration += 1;
     ipnPromise = createWorkerIpn({
-      authKey: '',
-      hostname: storedHostname || `almostnode-${Math.random().toString(36).slice(2, 8)}`,
+      authKey: options.authKey ?? '',
+      controlUrl: options.controlUrl,
+      hostname:
+        options.hostname
+        || storedHostname
+        || `almostnode-${Math.random().toString(36).slice(2, 8)}`,
       stateStorage: tailscaleStateStorage as TailscaleConnectStateStorage,
       useExitNode: options.useExitNode,
       exitNodeId: options.exitNodeId,
@@ -2005,6 +2015,14 @@ function isLoopbackDnsFailure(message: string, hostname: string | null): boolean
   return normalized.includes(`lookup ${hostname.toLowerCase()}`);
 }
 
+function isRuntimeDnsFeatureUnavailable(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('feature not included in this build')
+    || normalized.includes('not implemented on js')
+  );
+}
+
 function isFatalRuntimeMessage(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
@@ -2066,6 +2084,7 @@ function buildDirectIpFallbackRequest(
   request: NetworkFetchRequest,
   hostname: string,
   ipAddress: string,
+  redirectMode?: RequestRedirect,
 ): Parameters<TailscaleConnectIPN['fetch']>[0] {
   const url = new URL(request.url);
   const originalHostHeader = url.host;
@@ -2085,9 +2104,10 @@ function buildDirectIpFallbackRequest(
     method: request.method,
     headers,
     bodyBase64: request.bodyBase64,
-    redirect: request.redirect === 'manual' || request.redirect === 'error'
-      ? request.redirect
-      : 'follow',
+    redirect: redirectMode
+      ?? (request.redirect === 'manual' || request.redirect === 'error'
+        ? request.redirect
+        : 'follow'),
   };
 
   if (url.protocol === 'https:') {
@@ -2095,6 +2115,68 @@ function buildDirectIpFallbackRequest(
   }
 
   return fallbackRequest;
+}
+
+function getIpnFetchRedirectMode(request: NetworkFetchRequest): RequestRedirect {
+  return request.redirect === 'manual' || request.redirect === 'error'
+    ? request.redirect
+    : 'follow';
+}
+
+function isRedirectResponse(status: number): boolean {
+  return status === 301
+    || status === 302
+    || status === 303
+    || status === 307
+    || status === 308;
+}
+
+function stripBodyHeaders(headers: Record<string, string>): Record<string, string> {
+  const nextHeaders: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const normalized = key.toLowerCase();
+    if (
+      normalized === 'content-length'
+      || normalized === 'content-type'
+      || normalized === 'transfer-encoding'
+    ) {
+      continue;
+    }
+    nextHeaders[key] = value;
+  }
+  return nextHeaders;
+}
+
+function buildRedirectedFetchRequest(
+  request: NetworkFetchRequest,
+  status: number,
+  location: string,
+): NetworkFetchRequest {
+  let nextUrl: string;
+  try {
+    nextUrl = new URL(location, request.url).toString();
+  } catch {
+    throw new ClassifiedTailscaleWorkerError(
+      'runtime_unavailable',
+      `Tailscale fetch received invalid redirect location '${location}'.`,
+      { phase: 'redirect_follow', url: request.url },
+    );
+  }
+
+  const currentMethod = (request.method || 'GET').toUpperCase();
+  const shouldRewriteToGet =
+    status === 303 && currentMethod !== 'GET' && currentMethod !== 'HEAD'
+    || (status === 301 || status === 302) && currentMethod === 'POST';
+
+  return {
+    ...request,
+    url: nextUrl,
+    method: shouldRewriteToGet ? 'GET' : request.method,
+    headers: shouldRewriteToGet
+      ? stripBodyHeaders(request.headers || {})
+      : request.headers,
+    bodyBase64: shouldRewriteToGet ? undefined : request.bodyBase64,
+  };
 }
 
 function shouldRetryWithResolvedIp(
@@ -2119,7 +2201,11 @@ function shouldRetryWithResolvedIp(
     return false;
   }
 
-  return isLoopbackDnsFailure(getErrorMessage(error), preparedRoute.hostname);
+  const message = getErrorMessage(error);
+  return (
+    isLoopbackDnsFailure(message, preparedRoute.hostname)
+    || isRuntimeDnsFeatureUnavailable(message)
+  );
 }
 
 const TAILSCALE_DEFAULT_FETCH_TIMEOUT_MS = 30_000;
@@ -2186,11 +2272,11 @@ async function handleFetch(
   };
 
   try {
-    const preparedRoute = await preparePublicHostnameIpMap(request.url);
+    const initialPreparedRoute = await preparePublicHostnameIpMap(request.url);
     fetchDebug = {
       ...fetchDebug,
-      hostname: preparedRoute.hostname,
-      ipAddress: preparedRoute.ipAddress,
+      hostname: initialPreparedRoute.hostname,
+      ipAddress: initialPreparedRoute.ipAddress,
     };
     fetchDebug = {
       ...fetchDebug,
@@ -2200,119 +2286,176 @@ async function handleFetch(
     await ensureIpnStarted(ipn);
 
     const capabilities = getTailscaleBridgeCapabilities(ipn);
-    const primaryTimeoutMs = getTailscaleFetchTimeoutMs(request, 'primary');
     fetchDebug = {
       ...fetchDebug,
-      phase: 'primary_fetch',
       capabilities,
-      timeoutMs: primaryTimeoutMs,
       runtimeGeneration: ipnGeneration,
       runtimeResetCount: ipnResetCount,
       lastRuntimeResetReason,
-      attemptedIpMapSync: Boolean(preparedRoute.mappingChanged && capabilities.canReconfigure),
     };
     almostnodeDebugLog(
       'tailscale',
       `[tailscale-worker][fetch] capabilities: structured=${capabilities.canStructuredFetch ? 'yes' : 'no'} reconfigure=${capabilities.canReconfigure ? 'yes' : 'no'} lookup=${capabilities.canLookup ? 'yes' : 'no'} liveIpn=${hadLiveIpn ? 'yes' : 'no'}`,
     );
 
-    if (preparedRoute.mappingChanged) {
-      if (!capabilities.canReconfigure) {
-        if (hadLiveIpn) {
-          throw new ClassifiedTailscaleWorkerError(
-            'runtime_unavailable',
-            `Active Tailscale runtime cannot refresh public-host routing for '${preparedRoute.hostname}'.`,
-          );
-        }
-      } else {
-        almostnodeDebugLog(
-          'tailscale',
-          `[tailscale-worker][fetch] syncing ipMap before fetch: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
-        );
-        await applyCurrentIpnConfig(ipn);
-      }
-    }
-
-    let response: Awaited<ReturnType<TailscaleConnectIPN['fetch']>>;
+    let response: Awaited<ReturnType<TailscaleConnectIPN['fetch']>> | null = null;
+    let currentRequest = request;
+    let redirectCount = 0;
+    let finalResponseUrl = request.url;
     let usedDirectIpFallback = false;
     let usedStructuredFetch = false;
-    if (capabilities.canStructuredFetch) {
-      usedStructuredFetch = true;
-      diagnosticsCounters.structuredFetches += 1;
-      const fetchReq: Parameters<TailscaleConnectIPN['fetch']>[0] = {
-        url: request.url,
-        method: request.method,
-        headers: request.headers,
-        bodyBase64: request.bodyBase64,
-        redirect: request.redirect === 'manual' || request.redirect === 'error'
-          ? request.redirect
-          : 'follow',
+    const followRedirects = getIpnFetchRedirectMode(request) === 'follow';
+
+    while (true) {
+      const preparedRoute = redirectCount === 0 && currentRequest.url === request.url
+        ? initialPreparedRoute
+        : await preparePublicHostnameIpMap(currentRequest.url);
+      fetchDebug = {
+        ...fetchDebug,
+        phase: 'primary_fetch',
+        url: currentRequest.url,
+        hostname: preparedRoute.hostname,
+        ipAddress: preparedRoute.ipAddress,
+        redirectCount,
+        attemptedIpMapSync: Boolean(preparedRoute.mappingChanged && capabilities.canReconfigure),
       };
-      try {
-        response = await withTimeout(ipn.fetch(fetchReq), primaryTimeoutMs, fetchLabel);
-      } catch (primaryError) {
-        if (!shouldRetryWithResolvedIp(primaryError, request, preparedRoute, capabilities)) {
-          throw primaryError;
-        }
 
-        const primaryErrorMessage = getErrorMessage(primaryError);
-        const fallbackRequest = buildDirectIpFallbackRequest(
-          request,
-          preparedRoute.hostname,
-          preparedRoute.ipAddress,
-        );
-        const fallbackLabel = `${fetchLabel} [direct-ip fallback]`;
-        const fallbackTimeoutMs = getTailscaleFetchTimeoutMs(request, 'fallback');
-        fetchDebug = {
-          ...fetchDebug,
-          phase: 'fallback_fetch',
-          timeoutMs: fallbackTimeoutMs,
-          fallbackAttempted: true,
-          fallbackStrategy: 'rewrite_to_resolved_ip',
-          primaryError: primaryErrorMessage,
+      if (preparedRoute.mappingChanged) {
+        if (!capabilities.canReconfigure) {
+          if (hadLiveIpn) {
+            throw new ClassifiedTailscaleWorkerError(
+              'runtime_unavailable',
+              `Active Tailscale runtime cannot refresh public-host routing for '${preparedRoute.hostname}'.`,
+            );
+          }
+        } else {
+          almostnodeDebugLog(
+            'tailscale',
+            `[tailscale-worker][fetch] syncing ipMap before fetch: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
+          );
+          await applyCurrentIpnConfig(ipn);
+        }
+      }
+
+      const primaryTimeoutMs = getTailscaleFetchTimeoutMs(currentRequest, 'primary');
+      fetchDebug = {
+        ...fetchDebug,
+        timeoutMs: primaryTimeoutMs,
+      };
+      if (capabilities.canStructuredFetch) {
+        usedStructuredFetch = true;
+        diagnosticsCounters.structuredFetches += 1;
+        const redirectMode = followRedirects ? 'manual' : getIpnFetchRedirectMode(currentRequest);
+        const fetchReq: Parameters<TailscaleConnectIPN['fetch']>[0] = {
+          url: currentRequest.url,
+          method: currentRequest.method,
+          headers: currentRequest.headers,
+          bodyBase64: currentRequest.bodyBase64,
+          redirect: redirectMode,
         };
-        almostnodeDebugWarn(
-          'tailscale',
-          `[tailscale-worker][fetch] primary fetch hit loopback DNS despite ipMap; retrying direct IP: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
-          fetchDebug,
-        );
-
         try {
-          response = await withTimeout(
-            ipn.fetch(fallbackRequest),
-            fallbackTimeoutMs,
-            fallbackLabel,
+          response = await withTimeout(ipn.fetch(fetchReq), primaryTimeoutMs, fetchLabel);
+        } catch (primaryError) {
+          if (!shouldRetryWithResolvedIp(primaryError, currentRequest, preparedRoute, capabilities)) {
+            throw primaryError;
+          }
+
+          const primaryErrorMessage = getErrorMessage(primaryError);
+          const fallbackRequest = buildDirectIpFallbackRequest(
+            currentRequest,
+            preparedRoute.hostname,
+            preparedRoute.ipAddress,
+            redirectMode,
           );
-          usedDirectIpFallback = true;
-          diagnosticsCounters.directIpFallbacks += 1;
-        } catch (fallbackError) {
-          const fallbackMessage = getErrorMessage(fallbackError);
-          const fallbackPayload = toTailscaleWorkerErrorPayload(
-            fallbackError,
-            'runtime_unavailable',
-            {
-              ...fetchDebug,
-              fallbackError: fallbackMessage,
-            },
+          const fallbackLabel = `${fetchLabel} [direct-ip fallback]`;
+          const fallbackTimeoutMs = getTailscaleFetchTimeoutMs(currentRequest, 'fallback');
+          fetchDebug = {
+            ...fetchDebug,
+            phase: 'fallback_fetch',
+            timeoutMs: fallbackTimeoutMs,
+            fallbackAttempted: true,
+            fallbackStrategy: 'rewrite_to_resolved_ip',
+            primaryError: primaryErrorMessage,
+          };
+          almostnodeDebugWarn(
+            'tailscale',
+            `[tailscale-worker][fetch] primary fetch failed despite ipMap; retrying direct IP: host=${preparedRoute.hostname} ip=${preparedRoute.ipAddress}`,
+            fetchDebug,
           );
+
+          try {
+            response = await withTimeout(
+              ipn.fetch(fallbackRequest),
+              fallbackTimeoutMs,
+              fallbackLabel,
+            );
+            usedDirectIpFallback = true;
+            diagnosticsCounters.directIpFallbacks += 1;
+          } catch (fallbackError) {
+            const fallbackMessage = getErrorMessage(fallbackError);
+            const fallbackPayload = toTailscaleWorkerErrorPayload(
+              fallbackError,
+              'runtime_unavailable',
+              {
+                ...fetchDebug,
+                fallbackError: fallbackMessage,
+              },
+            );
+            throw new ClassifiedTailscaleWorkerError(
+              fallbackPayload.code,
+              `Tailscale runtime ignored ipMap for '${preparedRoute.hostname}' and direct-IP retry failed. Primary error: ${primaryErrorMessage}. Fallback error: ${fallbackPayload.message}`,
+              fallbackPayload.debug,
+            );
+          }
+        }
+      } else {
+        if (!isSimpleUrlOnlyFetchRequest(currentRequest)) {
           throw new ClassifiedTailscaleWorkerError(
-            fallbackPayload.code,
-            `Tailscale runtime ignored ipMap for '${preparedRoute.hostname}' and direct-IP retry failed. Primary error: ${primaryErrorMessage}. Fallback error: ${fallbackPayload.message}`,
-            fallbackPayload.debug,
+            'unsupported_fetch_shape',
+            getMinimalRuntimeFetchError(),
           );
         }
-      }
-    } else {
-      if (!isSimpleUrlOnlyFetchRequest(request)) {
-        throw new ClassifiedTailscaleWorkerError(
-          'unsupported_fetch_shape',
-          getMinimalRuntimeFetchError(),
+        response = await withTimeout(
+          ipn.fetch(currentRequest.url),
+          getTailscaleFetchTimeoutMs(currentRequest, 'primary'),
+          fetchLabel,
         );
       }
-      response = await withTimeout(
-        ipn.fetch(request.url),
-        getTailscaleFetchTimeoutMs(request, 'primary'),
-        fetchLabel,
+
+      finalResponseUrl = usedDirectIpFallback
+        ? currentRequest.url
+        : (response.url || currentRequest.url);
+      if (!followRedirects || !isRedirectResponse(response.status)) {
+        break;
+      }
+
+      const location = getHeaderValue(response.headers || {}, 'location');
+      if (!location) {
+        break;
+      }
+
+      redirectCount += 1;
+      if (redirectCount > TAILSCALE_MAX_REDIRECTS) {
+        throw new ClassifiedTailscaleWorkerError(
+          'runtime_unavailable',
+          `Tailscale fetch exceeded redirect limit of ${TAILSCALE_MAX_REDIRECTS}: ${request.url}`,
+          { ...fetchDebug, phase: 'redirect_follow', redirectCount },
+        );
+      }
+
+      const nextRequest = buildRedirectedFetchRequest(currentRequest, response.status, location);
+      almostnodeDebugLog(
+        'tailscale',
+        `[tailscale-worker][fetch] following redirect ${response.status}: ${currentRequest.url} -> ${nextRequest.url}`,
+      );
+      currentRequest = nextRequest;
+    }
+
+    if (!response) {
+      throw new ClassifiedTailscaleWorkerError(
+        'runtime_unavailable',
+        `Tailscale fetch did not produce a response: ${request.url}`,
+        fetchDebug,
       );
     }
 
@@ -2364,7 +2507,7 @@ async function handleFetch(
     }
 
     return {
-      url: usedDirectIpFallback ? request.url : (response.url || request.url),
+      url: finalResponseUrl,
       status: response.status,
       statusText: response.statusText,
       headers: response.headers || {},
