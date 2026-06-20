@@ -3912,8 +3912,26 @@ body.ide-active {
 
 .hp-tech,
 .hp-capabilities,
+.hp-learn,
 .hp-stack {
   width: 100%;
+}
+
+.hp-learn {
+  background: #f6efe3;
+  border-top: 1px solid rgba(17, 17, 17, 0.08);
+}
+
+.hp-learn__inner {
+  padding-top: 4.5rem;
+  padding-bottom: 5rem;
+}
+
+.hp-learn__player {
+  margin-top: 2.4rem;
+  height: min(78vh, 640px);
+  border-radius: 18px;
+  box-shadow: 0 24px 70px rgba(20, 16, 10, 0.26);
 }
 
 .hp-tech {
@@ -3924,6 +3942,7 @@ body.ide-active {
 
 .hp-tech__inner,
 .hp-capabilities__inner,
+.hp-learn__inner,
 .hp-stack__layout,
 .hp-footer__inner {
   width: min(100%, 76rem);

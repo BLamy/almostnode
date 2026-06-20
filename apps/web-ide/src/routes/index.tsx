@@ -11,6 +11,8 @@ import opencodeLogoUrl from '../../readme-assets/logos/opencode.svg?url';
 import pgliteLogoUrl from '../../readme-assets/logos/pglite.svg?url';
 import replayLogoUrl from '../../readme-assets/logos/replay.svg?url';
 import tailscaleLogoUrl from '../../readme-assets/logos/tailscale.svg?url';
+import { LearnPage } from '../learn/LearnPage';
+import '../learn/learn.css';
 
 type IndexSearch = {
   template?: string;
@@ -288,6 +290,9 @@ function Homepage() {
             ))}
           </div>
           <div className="hp-nav__actions">
+            <a className="hp-nav__link hp-nav__link--text" href="#learn">
+              Learn
+            </a>
             <Link className="hp-nav__link hp-nav__link--text" to="/app-builder">
               App Builder
             </Link>
@@ -380,6 +385,22 @@ function Homepage() {
                   <p>{section.integrationSummary}</p>
                 </article>
               ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="hp-learn" id="learn" aria-labelledby="learn-title">
+          <div className="hp-learn__inner">
+            <h2 id="learn-title" className="hp-section-title">
+              Learn how it works
+            </h2>
+            <p className="hp-section-subtitle">
+              Animated, narrated walkthroughs — the runtime, the keychain, the coding
+              agents, the preview tooling, Tailscale, and the app-builder. Press play on
+              a chapter to start; full screen lives at <Link to="/learn">/learn</Link>.
+            </p>
+            <div className="hp-learn__player">
+              <LearnPage embedded />
             </div>
           </div>
         </section>
