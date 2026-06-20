@@ -9,10 +9,20 @@ const repoRoot = resolve(__dirname, "..");
 const codexRoot = resolve(repoRoot, "vendor/codex");
 const buildAdapterScript = resolve(repoRoot, "packages/codex-wasm/scripts/build-adapter.mjs");
 const codexUrl = process.env.CODEX_VENDOR_URL ?? "https://github.com/BLamy/codex.git";
-const codexRef = process.env.CODEX_VENDOR_REF ?? "codex/wasm-browser-release-2026-06-07";
+// Pinned to a specific commit on the BLamy/codex fork (branch
+// almostnode-browser-wasm) so CI builds the exact codex that
+// packages/codex-wasm/rust/src/cli.rs was written against. That commit carries
+// the browser-wasm patches the adapter needs (apply_patch_grammar, scrollback,
+// login/wasm); the plain release branch does not. Override with CODEX_VENDOR_REF
+// (accepts a sha, branch, or tag).
+const codexRef = process.env.CODEX_VENDOR_REF ?? "76685598def751be4c94390438713d597be663f1";
 
 if (!existsSync(codexRoot)) {
-  run("git", ["clone", "--depth", "1", "--branch", codexRef, codexUrl, codexRoot], repoRoot);
+  // `git clone --branch` only accepts ref names, not commit SHAs, so fetch the
+  // pinned commit into a fresh repo instead (works for a sha, branch, or tag).
+  run("git", ["init", "-q", codexRoot], repoRoot);
+  run("git", ["-C", codexRoot, "fetch", "--depth", "1", codexUrl, codexRef], repoRoot);
+  run("git", ["-C", codexRoot, "checkout", "-q", "FETCH_HEAD"], repoRoot);
 } else {
   const dirty = spawnSync("git", ["-C", codexRoot, "diff", "--quiet"], {
     cwd: repoRoot,
