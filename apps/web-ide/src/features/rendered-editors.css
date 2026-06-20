@@ -1,15 +1,31 @@
 /* Scoped Tailwind CSS for rendered editor panes */
 @import "tailwindcss" layer(tailwind);
-
-/* Scope Tailwind to markdown pane only to avoid leaking into the IDE */
-@layer tailwind {
-  @scope (.almostnode-markdown-pane) {
-    @import "streamdown/styles.css";
-  }
-}
+@import "@brett_lamy/docstream/styles.css";
+@import "@brett_lamy/docstream-editor/styles.css";
 
 /* Markdown pane container */
 .almostnode-markdown-pane {
+  --background: var(--vscode-editor-background, #1e1e1e);
+  --foreground: var(--vscode-editor-foreground, #cccccc);
+  --card: var(--vscode-editorWidget-background, var(--background));
+  --card-foreground: var(--foreground);
+  --muted: var(--vscode-sideBar-background, #252526);
+  --muted-foreground: var(--vscode-descriptionForeground, #9d9d9d);
+  --accent: var(--vscode-list-hoverBackground, #2a2d2e);
+  --accent-foreground: var(--vscode-list-hoverForeground, var(--foreground));
+  --border: var(--vscode-editorWidget-border, var(--vscode-panel-border, #3c3c3c));
+  --primary: var(--vscode-textLink-foreground, #3794ff);
+  --primary-foreground: var(--background);
+  --destructive: var(--vscode-errorForeground, #f48771);
+  --gb-panel: var(--card);
+  --gb-panel-foreground: var(--card-foreground);
+  --gb-muted: var(--muted);
+  --gb-muted-foreground: var(--muted-foreground);
+  --gb-border: var(--border);
+  --gb-accent: var(--accent);
+  --gb-accent-foreground: var(--accent-foreground);
+  --gb-primary: var(--primary);
+  --gb-primary-foreground: var(--primary-foreground);
   width: 100%;
   height: 100%;
   overflow: auto;

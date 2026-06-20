@@ -878,6 +878,7 @@ describe('ProjectManager init', () => {
       return 'nextjs' as const;
     });
 
+    const markActiveSessionReadOnly = vi.fn();
     manager.setHost({
       getVfs: () => container.vfs,
       getTemplateId: () => 'vite',
@@ -895,6 +896,7 @@ describe('ProjectManager init', () => {
       restoreAgentStateSnapshot: vi.fn(async () => undefined),
       discoverActiveProjectThreads: vi.fn(async () => ({ claude: [], opencode: [] })),
       resumeResumableThread: vi.fn(async () => undefined),
+      markActiveSessionReadOnly,
     });
 
     const project = await manager.importGitHubRepository({
@@ -915,6 +917,8 @@ describe('ProjectManager init', () => {
       'project-',
       'octocat-web-ide',
     );
+    // Imports attach the repo base in place — main is always read-only.
+    expect(markActiveSessionReadOnly).toHaveBeenCalled();
     expect(project).toEqual(expect.objectContaining({
       id: 'project-imported',
       name: 'octocat/web-ide',

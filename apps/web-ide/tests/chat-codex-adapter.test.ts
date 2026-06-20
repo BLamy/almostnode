@@ -106,6 +106,50 @@ describe('codex conversation adapter', () => {
     adapter.dispose();
   });
 
+  it('renders commandExecution at item/started and finalizes at item/completed', () => {
+    const { bus, adapter, getState } = setup();
+
+    bus.emitNotification({
+      method: 'item/started',
+      params: {
+        threadId: 't',
+        turnId: 'turn-1',
+        item: {
+          type: 'commandExecution',
+          id: 'cmd-1',
+          command: 'npm run typecheck',
+          status: 'inProgress',
+        },
+      },
+    });
+
+    let message = getState().messages.find((m) => m.id === 'cmd-1');
+    expect(message?.tool?.command).toBe('npm run typecheck');
+    expect(message?.tool?.status).toBe('running');
+
+    bus.emitNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 't',
+        turnId: 'turn-1',
+        item: {
+          type: 'commandExecution',
+          id: 'cmd-1',
+          command: 'npm run typecheck',
+          status: 'completed',
+          exitCode: 0,
+          aggregatedOutput: 'done\n',
+        },
+      },
+    });
+
+    message = getState().messages.find((m) => m.id === 'cmd-1');
+    expect(message?.tool?.status).toBe('success');
+    expect(message?.tool?.output).toContain('done');
+    expect(getState().messages.filter((m) => m.id === 'cmd-1')).toHaveLength(1);
+    adapter.dispose();
+  });
+
   it('replays buffered events when attaching mid-session', () => {
     const bus = new CodexConversationBus();
     bus.emitNotification({

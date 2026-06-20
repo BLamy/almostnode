@@ -224,6 +224,7 @@ html[data-almostnode-theme="light"] .almostnode-project-sidebar {
 }
 
 .almostnode-project-item:hover .almostnode-project-item__menu-trigger,
+.almostnode-sandbox-item:hover .almostnode-project-item__menu-trigger,
 .almostnode-project-item__menu-trigger[data-state="open"] {
   opacity: 1;
 }
@@ -231,6 +232,91 @@ html[data-almostnode-theme="light"] .almostnode-project-sidebar {
 .almostnode-project-item__menu-trigger:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.08);
+}
+
+/* Repo rows are read-only (main never changes — sandboxes hold the work). */
+.almostnode-project-item__readonly {
+  flex: none;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.32rem;
+  opacity: 0.75;
+}
+
+/* Sandbox rows (Repo > Sandbox > Chats) */
+.almostnode-sandbox-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.almostnode-sandbox-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.35rem 0.75rem 0.35rem 1.55rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.1s;
+}
+
+.almostnode-sandbox-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.almostnode-sandbox-item.is-active {
+  background: rgba(255, 122, 89, 0.12);
+}
+
+.almostnode-sandbox-item__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.almostnode-sandbox-item__badge {
+  flex: none;
+  max-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: #8ed3ff;
+  background: rgba(108, 182, 255, 0.12);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+}
+
+.almostnode-sandbox-item__badge.is-pr {
+  color: #b6f0c1;
+  background: rgba(70, 200, 110, 0.14);
+}
+
+.almostnode-sandbox-group__chats {
+  display: flex;
+  flex-direction: column;
+}
+
+.almostnode-sandbox-group__chats .almostnode-thread-item {
+  padding-left: 3.3rem;
+}
+
+.almostnode-project-group__empty.is-nested {
+  padding-left: 3.3rem;
 }
 
 /* Project thread list */
@@ -352,6 +438,19 @@ html[data-almostnode-theme="light"] .almostnode-project-sidebar {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Running-agent indicator — small row variant of the switching spinner.
+   Rendered inline on chat/sandbox/repo rows; the full-sidebar switching
+   overlay above stacks on top of it independently (z-index 100). */
+.almostnode-sidebar__row-spinner {
+  width: 0.65rem;
+  height: 0.65rem;
+  flex: none;
+  border: 1.5px solid rgba(255, 122, 89, 0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sidebar-spin 0.6s linear infinite;
 }
 
 /* Inline rename input */

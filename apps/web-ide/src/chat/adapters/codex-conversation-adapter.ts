@@ -185,6 +185,17 @@ export class CodexConversationAdapter implements ConversationAdapter {
         this.publish();
         return;
       }
+      case 'item/started': {
+        // Long-running commands (Codex background terminals like
+        // `npm run typecheck`) only emit item/completed when they finish —
+        // render them as soon as they start so the command is visible.
+        const item = params.item as CodexThreadItem | undefined;
+        if (!item || typeof item.id !== 'string') return;
+        if (item.type === 'commandExecution') {
+          this.upsertCommandExecution(item, { running: true });
+        }
+        return;
+      }
       case 'item/completed': {
         const item = params.item as CodexThreadItem | undefined;
         if (!item || typeof item.id !== 'string') return;
@@ -210,28 +221,7 @@ export class CodexConversationAdapter implements ConversationAdapter {
             timestamp: Date.now(),
           });
         } else if (item.type === 'commandExecution') {
-          const command = typeof item.command === 'string' ? item.command : '';
-          if (!command) return;
-          const failed =
-            item.status === 'failed' ||
-            (typeof item.exitCode === 'number' && item.exitCode !== 0);
-          this.upsertMessage({
-            id: item.id,
-            role: 'assistant',
-            kind: 'tool',
-            text: '',
-            timestamp: Date.now(),
-            tool: {
-              name: 'Bash',
-              title: command,
-              command,
-              output:
-                typeof item.aggregatedOutput === 'string' && item.aggregatedOutput
-                  ? truncateToolOutput(item.aggregatedOutput)
-                  : undefined,
-              status: failed ? 'error' : 'success',
-            },
-          });
+          this.upsertCommandExecution(item, { running: false });
         } else if (item.type === 'fileChange') {
           const changes = Array.isArray(item.changes) ? item.changes : [];
           const diffs = changes
@@ -262,6 +252,34 @@ export class CodexConversationAdapter implements ConversationAdapter {
       }
       default:
     }
+  }
+
+  private upsertCommandExecution(
+    item: CodexThreadItem,
+    { running }: { running: boolean },
+  ): void {
+    const command = typeof item.command === 'string' ? item.command : '';
+    if (!command || typeof item.id !== 'string') return;
+    const failed =
+      item.status === 'failed' ||
+      (typeof item.exitCode === 'number' && item.exitCode !== 0);
+    this.upsertMessage({
+      id: item.id,
+      role: 'assistant',
+      kind: 'tool',
+      text: '',
+      timestamp: Date.now(),
+      tool: {
+        name: 'Bash',
+        title: command,
+        command,
+        output:
+          typeof item.aggregatedOutput === 'string' && item.aggregatedOutput
+            ? truncateToolOutput(item.aggregatedOutput)
+            : undefined,
+        status: running ? 'running' : failed ? 'error' : 'success',
+      },
+    });
   }
 
   private upsertMessage(message: ChatMessage): void {

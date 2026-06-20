@@ -5,7 +5,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { VirtualFS } from '../src/virtual-fs';
 import { Runtime } from '../src/runtime';
-import { setStreamingCallbacks, clearStreamingCallbacks } from '../src/shims/child_process';
+import {
+  initChildProcess,
+  setStreamingCallbacks,
+  clearStreamingCallbacks,
+} from '../src/shims/child_process';
+import { getServerBridge, resetServerBridge } from '../src/server-bridge';
 
 describe('child_process Integration', () => {
   let vfs: VirtualFS;
@@ -425,6 +430,7 @@ exec('node /node_modules/cli/cli.js', (error, stdout, stderr) => {
         const node = cp.spawnSync('which', ['node'], { encoding: 'utf8' });
         const rg = cp.spawnSync('which', ['rg'], { encoding: 'utf8' });
         const fd = cp.spawnSync('which', ['fd'], { encoding: 'utf8' });
+        const bunx = cp.spawnSync('which', ['bunx'], { encoding: 'utf8' });
         const rgVersion = cp.spawnSync('rg', ['--version'], { encoding: 'utf8' });
         const fdVersion = cp.spawnSync('fd', ['--version'], { encoding: 'utf8' });
         module.exports = {
@@ -434,6 +440,8 @@ exec('node /node_modules/cli/cli.js', (error, stdout, stderr) => {
           rgStdout: rg.stdout.trim(),
           fdStatus: fd.status,
           fdStdout: fd.stdout.trim(),
+          bunxStatus: bunx.status,
+          bunxStdout: bunx.stdout.trim(),
           rgVersionStatus: rgVersion.status,
           rgVersionStdout: rgVersion.stdout.trim(),
           fdVersionStatus: fdVersion.status,
@@ -448,6 +456,8 @@ exec('node /node_modules/cli/cli.js', (error, stdout, stderr) => {
         rgStdout: '/usr/bin/rg',
         fdStatus: 0,
         fdStdout: '/usr/bin/fd',
+        bunxStatus: 0,
+        bunxStdout: '/usr/bin/bunx',
         rgVersionStatus: 0,
         rgVersionStdout: 'ripgrep 14.1.1',
         fdVersionStatus: 0,
@@ -1094,6 +1104,80 @@ exec('npx greeter world foo', (error, stdout, stderr) => {
       expect(consoleOutput.some(o => o.includes('greeting: world foo'))).toBe(true);
     });
 
+    it('should run bunx through the package bin execution path', async () => {
+      vfs.mkdirSync('/node_modules/.bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/.bin/shadcn', 'node "/node_modules/shadcn/dist/index.js" "$@"\n');
+      vfs.mkdirSync('/node_modules/shadcn/dist', { recursive: true });
+      vfs.writeFileSync(
+        '/node_modules/shadcn/package.json',
+        JSON.stringify({ name: 'shadcn', bin: { shadcn: './dist/index.js' } })
+      );
+      vfs.writeFileSync(
+        '/node_modules/shadcn/dist/index.js',
+        'console.log("shadcn args: " + process.argv.slice(2).join(" "));'
+      );
+
+      runtime = new Runtime(vfs, {
+        onConsole: (_method, args) => {
+          consoleOutput.push(args.join(' '));
+        },
+      });
+
+      const code = `
+const { exec } = require('child_process');
+exec('bunx shadcn add button --yes', (error, stdout, stderr) => {
+  console.log('STDOUT:' + stdout);
+  if (error) console.log('ERROR:' + error.message);
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('shadcn args: add button --yes')));
+
+      expect(consoleOutput.some(o => o.includes('shadcn args: add button --yes'))).toBe(true);
+      expect(consoleOutput.some(o => o.includes('ERROR:'))).toBe(false);
+    });
+
+    it('should resolve interactive package exec commands with stale stdin listeners after completion', async () => {
+      vfs.mkdirSync('/node_modules/.bin', { recursive: true });
+      vfs.writeFileSync('/node_modules/.bin/sticky-cli', 'node "/node_modules/sticky-cli/index.js" "$@"\n');
+      vfs.mkdirSync('/node_modules/sticky-cli', { recursive: true });
+      vfs.writeFileSync(
+        '/node_modules/sticky-cli/package.json',
+        JSON.stringify({ name: 'sticky-cli', bin: { 'sticky-cli': './index.js' } })
+      );
+      vfs.writeFileSync(
+        '/node_modules/sticky-cli/index.js',
+        [
+          'process.stdin.on("data", () => {});',
+          'console.log("sticky cli completed");',
+        ].join('\n')
+      );
+
+      const controller = initChildProcess(vfs);
+      const abort = new AbortController();
+      const execution = controller.createExecution({
+        signal: abort.signal,
+        interactive: true,
+      });
+
+      try {
+        const result = await Promise.race([
+          controller.runCommand('bunx sticky-cli', { cwd: '/', env: {} }, execution.id),
+          new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1500)),
+        ]);
+
+        expect(result).not.toBe('timeout');
+        expect(result).toMatchObject({
+          exitCode: 0,
+          stderr: '',
+        });
+        expect(typeof result === 'object' ? result.stdout : '').toContain('sticky cli completed');
+      } finally {
+        controller.destroyExecution(execution.id);
+      }
+    });
+
     it('should return error when no command is given', async () => {
       const code = `
 const { exec } = require('child_process');
@@ -1453,4 +1537,103 @@ const { execa } = require('execa');
       expect(consoleOutput.some(o => o.includes('EXECA_ERROR:'))).toBe(false);
     });
   });
+});
+
+describe('multi-controller scoping', () => {
+  beforeEach(() => {
+    resetServerBridge();
+  });
+
+  it('scopes commands and streaming callbacks per controller', async () => {
+    const vfsA = new VirtualFS();
+    const vfsB = new VirtualFS();
+    vfsA.writeFileSync('/who.txt', 'controller-a');
+    vfsB.writeFileSync('/who.txt', 'controller-b');
+
+    const controllerA = initChildProcess(vfsA, { containerId: 'container-a' });
+    // B is initialized last, so it becomes the default controller.
+    const controllerB = initChildProcess(vfsB, { containerId: 'container-b' });
+
+    expect(controllerA.id).not.toBe(controllerB.id);
+    expect(controllerA.containerId).toBe('container-a');
+    expect(controllerB.containerId).toBe('container-b');
+
+    const resultA = await controllerA.runCommand('cat /who.txt');
+    const resultB = await controllerB.runCommand('cat /who.txt');
+    expect(resultA.stdout).toContain('controller-a');
+    expect(resultB.stdout).toContain('controller-b');
+
+    // The deprecated module-level alias only touches the default controller.
+    const onStdout = () => {};
+    try {
+      setStreamingCallbacks({ onStdout });
+      expect(controllerA.legacyStreamingCallbacks.onStdout).toBeNull();
+      expect(controllerB.legacyStreamingCallbacks.onStdout).toBe(onStdout);
+    } finally {
+      clearStreamingCallbacks();
+    }
+    expect(controllerB.legacyStreamingCallbacks.onStdout).toBeNull();
+  });
+
+  it('auto-increments the dev server port when another owner holds it', async () => {
+    const waitForCondition = async (predicate: () => boolean, timeoutMs = 8000): Promise<void> => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (predicate()) return;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      throw new Error(`Timed out after ${timeoutMs}ms`);
+    };
+
+    const setupPagesApp = (vfs: VirtualFS, marker: string) => {
+      vfs.mkdirSync('/app/dist', { recursive: true });
+      vfs.writeFileSync('/app/dist/index.html', `<main>${marker}</main>`);
+      vfs.writeFileSync('/app/wrangler.toml', 'name = "app"\npages_build_output_dir = "dist"\n');
+    };
+
+    const vfsA = new VirtualFS();
+    const vfsB = new VirtualFS();
+    setupPagesApp(vfsA, 'pages-a');
+    setupPagesApp(vfsB, 'pages-b');
+    const controllerA = initChildProcess(vfsA, { containerId: 'container-a' });
+    const controllerB = initChildProcess(vfsB, { containerId: 'container-b' });
+    const bridge = getServerBridge({ baseUrl: 'http://localhost:5173' });
+
+    const abortA = new AbortController();
+    const abortB = new AbortController();
+    const outputB: string[] = [];
+    const executionA = controllerA.createExecution({ signal: abortA.signal });
+    const executionB = controllerB.createExecution({
+      signal: abortB.signal,
+      onStdout: chunk => outputB.push(chunk),
+    });
+
+    const runA = controllerA.runCommand(
+      'wrangler pages dev',
+      { cwd: '/app', env: {} },
+      executionA.id,
+    );
+    await waitForCondition(() => bridge.getServerPorts().includes(8788));
+    expect(bridge.getServerMetadata(8788)?.ownerId).toBe('container-a');
+
+    const runB = controllerB.runCommand(
+      'wrangler pages dev',
+      { cwd: '/app', env: {} },
+      executionB.id,
+    );
+    await waitForCondition(() => bridge.getServerPorts().includes(8789));
+    expect(outputB.join('')).toContain('Port 8788 is in use, trying 8789...');
+    expect(bridge.getServerMetadata(8789)?.ownerId).toBe('container-b');
+    // A's server is untouched.
+    expect(bridge.getServerMetadata(8788)?.ownerId).toBe('container-a');
+
+    abortA.abort();
+    abortB.abort();
+    await Promise.all([runA, runB]);
+    controllerA.destroyExecution(executionA.id);
+    controllerB.destroyExecution(executionB.id);
+
+    expect(bridge.getServerPorts()).not.toContain(8788);
+    expect(bridge.getServerPorts()).not.toContain(8789);
+  }, 30000);
 });

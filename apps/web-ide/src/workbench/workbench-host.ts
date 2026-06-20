@@ -1,11 +1,18 @@
 import {
   createContainer,
+  type ContainerInstance,
   type PersistedNetworkSession,
   type NetworkStatus,
   type RunResult,
   type ServerRegistrationMetadata,
   type WorkspaceSearchProvider,
 } from "almostnode";
+import {
+  defaultCredentialSlots,
+  getDefaultCredentialMirrorPaths,
+} from "almostnode-sdk/auth";
+import { SandboxSession } from "./sandbox-session";
+import { SESSION_POOL_CAP, selectSessionsToEvict } from "./session-pool";
 import {
   DEFAULT_FILE,
   DEFAULT_RUN_COMMAND,
@@ -69,19 +76,27 @@ import {
 } from "../desktop/project-snapshot";
 import {
   ProjectDB,
+  REPO_DEFAULT_BRANCH,
   type AppBuildingConfig,
   type AppBuildingJobRecord,
+  type CodexThreadTranscriptRecord,
   type ProjectAgentStateSnapshot,
   type ProjectGitRemoteRecord,
   type ProjectRecord,
   type ResumableThreadRecord,
+  type SandboxRecord,
 } from "../features/project-db";
 import type { GitHubRepositorySummary } from "../features/github-repositories";
 import {
   CLAUDE_PROJECTS_ROOT,
   discoverClaudeThreads,
+  toCodexThreads,
   toOpenCodeThreads,
 } from "../features/resumable-threads";
+import {
+  codexConversationBus,
+  type CodexBusEvent,
+} from "../chat/codex-conversation-bus";
 import { readGhToken } from "../../../../packages/almostnode/src/shims/gh-auth";
 import {
   cancelPreparedCloudflareAuthPopup,
@@ -228,14 +243,14 @@ import {
   writeStoredTailscaleSessionSnapshot,
 } from "../features/network-session";
 import {
-  collectOpenCodeBrowserSnapshot,
   createOpenCodeBrowserClient,
+  disposeOpenCodeInstance,
   listOpenCodeBrowserSessions,
   mountOpenCodeBrowserSession,
   type OpenCodeBrowserLaunchArgs,
   type OpenCodeBrowserSessionHandle,
   type OpenCodeBrowserShellState,
-  restoreOpenCodeBrowserSnapshot,
+  registerLegacyOpenCodeDbSnapshot,
 } from "../features/opencode-browser-session";
 import {
   collectClipboardImageMimeTypes,
@@ -374,6 +389,11 @@ const LEGACY_TESTS_ROOT = "/tests";
 const LEGACY_TEST_E2E_ROOT = `${LEGACY_TESTS_ROOT}/e2e`;
 const LEGACY_TEST_METADATA_PATH = `${LEGACY_TESTS_ROOT}/.almostnode-tests.json`;
 const AI_SIDEBAR_TAB_CLOSED_EVENT = "almostnode:ai-sidebar-tab-closed";
+/**
+ * Fired when an agent session starts or its thread title changes, so the
+ * sidebar can refresh its chat list without waiting for a project switch.
+ */
+const AGENT_THREAD_UPDATED_EVENT = "almostnode:agent-thread-updated";
 
 export interface WebIDEHostElements {
   workbench: HTMLElement;
@@ -832,7 +852,7 @@ function inferThemeKindFromThemeName(
   return null;
 }
 
-interface TerminalTabState {
+export interface TerminalTabState {
   id: string;
   title: string;
   terminal: Terminal;
@@ -847,9 +867,26 @@ interface TerminalTabState {
   inputMode: "managed" | "passthrough";
   surface: "panel" | "sidebar";
   agentHarness: "claude" | "opencode" | "codex" | "pi" | null;
+  /**
+   * Last time the running command produced output (or received input).
+   * Agent-CLI busy detection: a TUI sitting at its prompt is silent, while
+   * a working agent streams/repaints constantly — so "recent output" is
+   * what distinguishes an agent mid-task from an idle-but-open TUI for
+   * session-pool pinning.
+   */
+  lastOutputAt?: number;
 }
 
-interface OpenCodeTabState {
+/**
+ * An agent CLI in a terminal counts as "running" while its TUI produced
+ * output this recently. Working agents stream/repaint constantly (spinners,
+ * tool output); an idle TUI at its prompt is silent. Generous enough to
+ * ride out a long silent tool call, short enough that an abandoned TUI
+ * stops pinning its sandbox against eviction.
+ */
+const AGENT_CLI_OUTPUT_IDLE_MS = 45_000;
+
+export interface OpenCodeTabState {
   id: string;
   title: string;
   host: HTMLElement;
@@ -858,7 +895,7 @@ interface OpenCodeTabState {
   restoreTitle: string | null;
 }
 
-interface OpenCodeSidebarTabState {
+export interface OpenCodeSidebarTabState {
   id: string;
   title: string;
   host: HTMLElement;
@@ -926,7 +963,7 @@ interface PreviewSourcePickerElementInfo {
   formattedStack?: string | null;
 }
 
-interface PreviewSourcePickerRuntime {
+export interface PreviewSourcePickerRuntime {
   window: Window & {
     __REACT_GRAB__?: {
       activate(): void;
@@ -1024,45 +1061,36 @@ function getWorkbenchCorsProxyUrl(): string | undefined {
   return `${window.location.origin}/__api/cors-proxy?url=`;
 }
 
+/**
+ * Broadcast when an edit or agent launch is refused because the active
+ * session shows a repo's read-only base (main). Detail: `{ repoId }`.
+ * The sidebar turns this into create-sandbox UX.
+ */
+export const FORK_REQUESTED_EVENT = "almostnode:fork-requested";
+
+/**
+ * Credential files mirrored to localStorage and seeded into every fresh
+ * session VFS. The package manifest is the source of truth so Web IDE does
+ * not drift from the public SDK auth/keychain surface.
+ */
+let credentialMirrorPathsCache: string[] | null = null;
+function getCredentialMirrorPaths(): string[] {
+  credentialMirrorPathsCache ??= getDefaultCredentialMirrorPaths();
+  return credentialMirrorPathsCache;
+}
+
 export class WebIDEHost {
   private static readonly defaultCorsProxyUrl = getWorkbenchCorsProxyUrl();
-  readonly container;
+  private readonly sessions = new Map<string, SandboxSession>();
+  private activeSession: SandboxSession;
   private readonly marketplaceMode: MarketplaceMode;
   private readonly debugSections: string[];
   private readonly filesSurface: FilesSidebarSurface;
   private readonly openCodeSurface: OpenCodeTerminalSurface;
   private readonly previewSurface: PreviewSurface;
   private readonly appBuildingPreviewSurface: AppBuildingPreviewSurface;
-  private readonly appBuildingPreviewOpenedJobs = new Set<string>();
-  private currentAppBuildingPreviewUrl: string | null = null;
   private readonly terminalSurface: TerminalPanelSurface;
   private readonly workbenchSurfaces: RegisteredWorkbenchSurfaces;
-  private readonly terminalTabs = new Map<string, TerminalTabState>();
-  private readonly openCodeTabs = new Map<string, OpenCodeTabState>();
-  private readonly openCodeSidebarTabs = new Map<
-    string,
-    OpenCodeSidebarTabState
-  >();
-  private readonly openCodeSidebarTerminalTabs = new Map<
-    string,
-    TerminalTabState
-  >();
-  private activeTerminalTabId: string | null = null;
-  private activeOpenCodeSidebarTabId: string | null = null;
-  private previewTerminalTabId: string | null = null;
-  private terminalCounter = 0;
-  private openCodeTerminalCounter = 0;
-  private openCodeSidebarCounter = 0;
-  private openCodeSidebarTerminalCounter = 0;
-  private claudeSidebarCounter = 0;
-  private codexSidebarCounter = 0;
-  private piSidebarCounter = 0;
-  private previewStartRequested = false;
-  private previewPort: number | null = null;
-  private previewUrl: string | null = null;
-  private previewSourcePickerActive = false;
-  private previewSourcePickerRuntime: PreviewSourcePickerRuntime | null = null;
-  private previewStartRetryTimeoutId = 0;
   private readonly consolePanel = new ConsolePanelElement();
   private readonly consoleTabId = "console-panel";
   private consoleMessageCount = 0;
@@ -1087,7 +1115,6 @@ export class WebIDEHost {
   private oauthOrchestratorRunning = false;
   private wasKeychainUnlocked = false;
   private readonly projectDb = new ProjectDB();
-  private readonly claudeImagePasteCleanup = new Map<string, () => void>();
   private keychainStatusEntry: IStatusbarEntryAccessor | null = null;
   private tailscaleStatus: NetworkStatus | null = null;
   private tailscaleDiagnosticsHintPrinted = false;
@@ -1128,12 +1155,36 @@ export class WebIDEHost {
   };
   private vaultSyncMessageClearTimer: ReturnType<typeof setTimeout> | null =
     null;
-  private workspaceDependencyInstallPromise: Promise<void> | null = null;
-  private workspaceDependencyInstallKey: string | null = null;
-  private workspaceDependencyInstallRequestKey: string | null = null;
   private pendingProjectLaunch = false;
   private activeProjectId: string | null = null;
-  private templateId: TemplateId;
+  /**
+   * One sandbox session per project until sandbox granularity lands. Values
+   * are keys of `sessions`; at most one project is bound to a session.
+   */
+  private readonly projectSessionIds = new Map<string, string>();
+  /**
+   * repoId per sandbox session (session id == sandbox id). Sessions in this
+   * map are writable branch forks; project-bound sessions show the repo's
+   * read-only base. Bindings outlive eviction so re-opens stay sandboxes.
+   */
+  private readonly sandboxSessionRepoIds = new Map<string, string>();
+  /**
+   * Registered by ProjectManager: snapshots a session's files + agent state
+   * to IndexedDB. The session pool refuses to evict without it.
+   */
+  private persistSessionForEviction:
+    | ((sessionId: string) => Promise<void>)
+    | null = null;
+  /**
+   * The ONE port-aware PGlite middleware on the singleton server bridge
+   * (host-level, unlike per-session state): each /__db__/ request resolves
+   * its namespace from the sandbox owning the receiving port, so it serves
+   * every live sandbox at once.
+   */
+  private hostPgliteMiddleware:
+    | import("almostnode/internal").RequestMiddleware
+    | null = null;
+  private vfsProvider: VfsFileSystemProvider | null = null;
   private readonly initialProjectFiles: SerializedFile[] | null;
   private readonly skipWorkspaceSeed: boolean;
   private readonly deferPreviewStart: boolean;
@@ -1146,18 +1197,12 @@ export class WebIDEHost {
   private readonly databaseSurface: DatabaseSidebarSurface;
   private readonly databaseBrowserSurface: DatabaseBrowserSurface;
   private readonly keychainSurface: KeychainSidebarSurface;
-  private pgliteMiddleware:
-    | import("almostnode/internal").RequestMiddleware
-    | null = null;
   private databaseSidebarRegistered = false;
-  private currentProjectDatabaseNamespace = "global";
-  private currentProjectDefaultDatabaseName = "default";
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
   private externalPreviewWindow: Window | null = null;
   private removeHostConsoleBridge: (() => void) | null = null;
   private removeDesktopOAuthLoopbackBridge: (() => void) | null = null;
-  private claudeIdeBridge: ClaudeIdeBridge | null = null;
   private testRecorder:
     | import("../features/test-recorder").TestRecorder
     | null = null;
@@ -1173,54 +1218,277 @@ export class WebIDEHost {
   private static readonly elementSourceScriptUrl =
     "https://unpkg.com/element-source@0.0.5/dist/index.global.js";
 
+  // ── Per-sandbox state, owned by SandboxSession ────────────────────────────
+  // Same-named accessors delegate to the active session so the existing call
+  // sites stay untouched. Unit tests build hosts via
+  // Object.create(WebIDEHost.prototype) (skipping the constructor) and assign
+  // these fields directly, so every accessor has a setter and falls back to a
+  // detached state-holder session when none was constructed.
+  private get sessionState(): SandboxSession {
+    if (!this.activeSession) {
+      this.activeSession = SandboxSession.createDetached();
+    }
+    return this.activeSession;
+  }
+
+  get container(): ContainerInstance {
+    return this.sessionState.container;
+  }
+  set container(value: ContainerInstance) {
+    this.sessionState.container = value;
+  }
+  private get templateId(): TemplateId {
+    return this.sessionState.templateId;
+  }
+  private set templateId(value: TemplateId) {
+    this.sessionState.templateId = value;
+  }
+  private get terminalTabs(): Map<string, TerminalTabState> {
+    return this.sessionState.terminalTabs;
+  }
+  private set terminalTabs(value: Map<string, TerminalTabState>) {
+    this.sessionState.terminalTabs = value;
+  }
+  private get openCodeTabs(): Map<string, OpenCodeTabState> {
+    return this.sessionState.openCodeTabs;
+  }
+  private set openCodeTabs(value: Map<string, OpenCodeTabState>) {
+    this.sessionState.openCodeTabs = value;
+  }
+  private get openCodeSidebarTabs(): Map<string, OpenCodeSidebarTabState> {
+    return this.sessionState.openCodeSidebarTabs;
+  }
+  private set openCodeSidebarTabs(
+    value: Map<string, OpenCodeSidebarTabState>,
+  ) {
+    this.sessionState.openCodeSidebarTabs = value;
+  }
+  private get openCodeSidebarTerminalTabs(): Map<string, TerminalTabState> {
+    return this.sessionState.openCodeSidebarTerminalTabs;
+  }
+  private set openCodeSidebarTerminalTabs(value: Map<string, TerminalTabState>) {
+    this.sessionState.openCodeSidebarTerminalTabs = value;
+  }
+  private get activeTerminalTabId(): string | null {
+    return this.sessionState.activeTerminalTabId;
+  }
+  private set activeTerminalTabId(value: string | null) {
+    this.sessionState.activeTerminalTabId = value;
+  }
+  private get activeOpenCodeSidebarTabId(): string | null {
+    return this.sessionState.activeOpenCodeSidebarTabId;
+  }
+  private set activeOpenCodeSidebarTabId(value: string | null) {
+    this.sessionState.activeOpenCodeSidebarTabId = value;
+  }
+  private get previewTerminalTabId(): string | null {
+    return this.sessionState.previewTerminalTabId;
+  }
+  private set previewTerminalTabId(value: string | null) {
+    this.sessionState.previewTerminalTabId = value;
+  }
+  private get terminalCounter(): number {
+    return this.sessionState.terminalCounter;
+  }
+  private set terminalCounter(value: number) {
+    this.sessionState.terminalCounter = value;
+  }
+  private get openCodeTerminalCounter(): number {
+    return this.sessionState.openCodeTerminalCounter;
+  }
+  private set openCodeTerminalCounter(value: number) {
+    this.sessionState.openCodeTerminalCounter = value;
+  }
+  private get openCodeSidebarCounter(): number {
+    return this.sessionState.openCodeSidebarCounter;
+  }
+  private set openCodeSidebarCounter(value: number) {
+    this.sessionState.openCodeSidebarCounter = value;
+  }
+  private get openCodeSidebarTerminalCounter(): number {
+    return this.sessionState.openCodeSidebarTerminalCounter;
+  }
+  private set openCodeSidebarTerminalCounter(value: number) {
+    this.sessionState.openCodeSidebarTerminalCounter = value;
+  }
+  private get claudeSidebarCounter(): number {
+    return this.sessionState.claudeSidebarCounter;
+  }
+  private set claudeSidebarCounter(value: number) {
+    this.sessionState.claudeSidebarCounter = value;
+  }
+  private get codexSidebarCounter(): number {
+    return this.sessionState.codexSidebarCounter;
+  }
+  private set codexSidebarCounter(value: number) {
+    this.sessionState.codexSidebarCounter = value;
+  }
+  private get piSidebarCounter(): number {
+    return this.sessionState.piSidebarCounter;
+  }
+  private set piSidebarCounter(value: number) {
+    this.sessionState.piSidebarCounter = value;
+  }
+  private get previewStartRequested(): boolean {
+    return this.sessionState.previewStartRequested;
+  }
+  private set previewStartRequested(value: boolean) {
+    this.sessionState.previewStartRequested = value;
+  }
+  private get previewPort(): number | null {
+    return this.sessionState.previewPort;
+  }
+  private set previewPort(value: number | null) {
+    this.sessionState.previewPort = value;
+  }
+  private get previewUrl(): string | null {
+    return this.sessionState.previewUrl;
+  }
+  private set previewUrl(value: string | null) {
+    this.sessionState.previewUrl = value;
+  }
+  private get previewSourcePickerActive(): boolean {
+    return this.sessionState.previewSourcePickerActive;
+  }
+  private set previewSourcePickerActive(value: boolean) {
+    this.sessionState.previewSourcePickerActive = value;
+  }
+  private get previewSourcePickerRuntime(): PreviewSourcePickerRuntime | null {
+    return this.sessionState.previewSourcePickerRuntime;
+  }
+  private set previewSourcePickerRuntime(
+    value: PreviewSourcePickerRuntime | null,
+  ) {
+    this.sessionState.previewSourcePickerRuntime = value;
+  }
+  private get previewStartRetryTimeoutId(): number {
+    return this.sessionState.previewStartRetryTimeoutId;
+  }
+  private set previewStartRetryTimeoutId(value: number) {
+    this.sessionState.previewStartRetryTimeoutId = value;
+  }
+  private get appBuildingPreviewOpenedJobs(): Set<string> {
+    return this.sessionState.appBuildingPreviewOpenedJobs;
+  }
+  private set appBuildingPreviewOpenedJobs(value: Set<string>) {
+    this.sessionState.appBuildingPreviewOpenedJobs = value;
+  }
+  private get currentAppBuildingPreviewUrl(): string | null {
+    return this.sessionState.currentAppBuildingPreviewUrl;
+  }
+  private set currentAppBuildingPreviewUrl(value: string | null) {
+    this.sessionState.currentAppBuildingPreviewUrl = value;
+  }
+  private get pgliteMiddleware():
+    | import("almostnode/internal").RequestMiddleware
+    | null {
+    return this.sessionState.pgliteMiddleware;
+  }
+  private set pgliteMiddleware(
+    value: import("almostnode/internal").RequestMiddleware | null,
+  ) {
+    this.sessionState.pgliteMiddleware = value;
+  }
+  private get currentProjectDatabaseNamespace(): string {
+    return this.sessionState.currentProjectDatabaseNamespace;
+  }
+  private set currentProjectDatabaseNamespace(value: string) {
+    this.sessionState.currentProjectDatabaseNamespace = value;
+  }
+  private get currentProjectDefaultDatabaseName(): string {
+    return this.sessionState.currentProjectDefaultDatabaseName;
+  }
+  private set currentProjectDefaultDatabaseName(value: string) {
+    this.sessionState.currentProjectDefaultDatabaseName = value;
+  }
+  private get workspaceDependencyInstallPromise(): Promise<void> | null {
+    return this.sessionState.workspaceDependencyInstallPromise;
+  }
+  private set workspaceDependencyInstallPromise(value: Promise<void> | null) {
+    this.sessionState.workspaceDependencyInstallPromise = value;
+  }
+  private get workspaceDependencyInstallKey(): string | null {
+    return this.sessionState.workspaceDependencyInstallKey;
+  }
+  private set workspaceDependencyInstallKey(value: string | null) {
+    this.sessionState.workspaceDependencyInstallKey = value;
+  }
+  private get workspaceDependencyInstallRequestKey(): string | null {
+    return this.sessionState.workspaceDependencyInstallRequestKey;
+  }
+  private set workspaceDependencyInstallRequestKey(value: string | null) {
+    this.sessionState.workspaceDependencyInstallRequestKey = value;
+  }
+  private get claudeIdeBridge(): ClaudeIdeBridge | null {
+    return this.sessionState.claudeIdeBridge;
+  }
+  private set claudeIdeBridge(value: ClaudeIdeBridge | null) {
+    this.sessionState.claudeIdeBridge = value;
+  }
+  private get claudeImagePasteCleanup(): Map<string, () => void> {
+    return this.sessionState.claudeImagePasteCleanup;
+  }
+  private set claudeImagePasteCleanup(value: Map<string, () => void>) {
+    this.sessionState.claudeImagePasteCleanup = value;
+  }
+
   constructor(private readonly options: WebIDEHostOptions) {
-    this.container = createContainer({
-      baseUrl: options.baseUrl,
-      basePath: import.meta.env.BASE_URL?.replace(/\/$/, "") || "",
-      cwd: WORKSPACE_ROOT,
-      env: WebIDEHost.defaultCorsProxyUrl
-        ? { CORS_PROXY_URL: WebIDEHost.defaultCorsProxyUrl }
-        : undefined,
-      networkIntegration: {
-        loadSession: (): PersistedNetworkSession | null => {
-          const stored = readStoredWorkbenchNetworkConfig();
-          if (!stored) {
-            return null;
-          }
+    // Only the first session ever created passes networkIntegration: the
+    // page-level Tailscale default network controller is set-if-unset, so it
+    // must come from the initial container.
+    const initialSession = new SandboxSession({
+      id: "default",
+      templateId: options.template || "vite",
+      createContainerOptions: {
+        baseUrl: options.baseUrl,
+        basePath: import.meta.env.BASE_URL?.replace(/\/$/, "") || "",
+        cwd: WORKSPACE_ROOT,
+        env: WebIDEHost.defaultCorsProxyUrl
+          ? { CORS_PROXY_URL: WebIDEHost.defaultCorsProxyUrl }
+          : undefined,
+        networkIntegration: {
+          loadSession: (): PersistedNetworkSession | null => {
+            const stored = readStoredWorkbenchNetworkConfig();
+            if (!stored) {
+              return null;
+            }
 
-          return {
-            ...stored,
-            stateSnapshot: readStoredTailscaleSessionSnapshot(),
-          };
-        },
-        saveSession: (session) => {
-          if (!session) {
-            clearStoredWorkbenchNetworkConfig();
-            clearStoredTailscaleSessionSnapshot();
-            return;
-          }
+            return {
+              ...stored,
+              stateSnapshot: readStoredTailscaleSessionSnapshot(),
+            };
+          },
+          saveSession: (session) => {
+            if (!session) {
+              clearStoredWorkbenchNetworkConfig();
+              clearStoredTailscaleSessionSnapshot();
+              return;
+            }
 
-          writeStoredWorkbenchNetworkConfig({
-            provider: session.provider,
-            useExitNode: session.useExitNode,
-            exitNodeId: session.exitNodeId,
-            acceptDns: session.acceptDns,
-          });
+            writeStoredWorkbenchNetworkConfig({
+              provider: session.provider,
+              useExitNode: session.useExitNode,
+              exitNodeId: session.exitNodeId,
+              acceptDns: session.acceptDns,
+            });
 
-          if (session.stateSnapshot) {
-            writeStoredTailscaleSessionSnapshot(session.stateSnapshot);
-          } else {
-            clearStoredTailscaleSessionSnapshot();
-          }
-        },
-        onAuthUrl: (url) => {
-          if (!url) {
-            return;
-          }
-          globalThis.open?.(url, "_blank", "noopener,noreferrer");
+            if (session.stateSnapshot) {
+              writeStoredTailscaleSessionSnapshot(session.stateSnapshot);
+            } else {
+              clearStoredTailscaleSessionSnapshot();
+            }
+          },
+          onAuthUrl: (url) => {
+            if (!url) {
+              return;
+            }
+            globalThis.open?.(url, "_blank", "noopener,noreferrer");
+          },
         },
       },
     });
+    this.activeSession = initialSession;
+    this.sessions.set(initialSession.id, initialSession);
     this.templateId = options.template || "vite";
     this.initialProjectFiles = options.initialProjectFiles ?? null;
     this.skipWorkspaceSeed = options.skipWorkspaceSeed === true;
@@ -1305,8 +1573,11 @@ export class WebIDEHost {
       databaseBrowserSurface: this.databaseBrowserSurface,
       keychainSurface: this.keychainSurface,
       testsSurface: this.testsSurface,
-      vfs: this.container.vfs,
+      // Resolved lazily: `this.container` follows the active session, whose
+      // VFS changes when a sandbox attaches.
+      getVfs: () => this.container.vfs,
       openFileAsText: (path: string) => void this.openWorkspaceFileAsText(path),
+      isWorkspaceReadOnly: () => this.sessionState?.readOnly === true,
     });
     this.keychain = new Keychain({
       vfs: this.container.vfs,
@@ -1326,6 +1597,7 @@ export class WebIDEHost {
         }
       },
     });
+    this.subscribeCodexThreadEvents();
     this.oauthRegistry = new OAuthServiceRegistry();
     this.oauthOrchestrator = new OAuthServiceOrchestrator({
       vfs: this.container.vfs,
@@ -1547,47 +1819,9 @@ export class WebIDEHost {
           break;
       }
     });
-    this.keychain.registerSlot("tailscale", [TAILSCALE_SESSION_KEYCHAIN_PATH]);
-    this.keychain.registerSlot("claude", [
-      CLAUDE_AUTH_CREDENTIALS_PATH,
-      CLAUDE_AUTH_CONFIG_PATH,
-      CLAUDE_LEGACY_CONFIG_PATH,
-    ]);
-    this.keychain.registerSlot("codex", [
-      CODEX_AUTH_PATH,
-      CODEX_CONFIG_TOML_PATH,
-      CODEX_CONFIG_JSON_PATH,
-    ]);
-    this.keychain.registerSlot("pi", [
-      PI_AUTH_PATH,
-      PI_SETTINGS_PATH,
-      PI_MODELS_PATH,
-    ]);
-    this.keychain.registerSlot("github", ["/home/user/.config/gh/hosts.yml"]);
-    this.keychain.registerSlot("aws", [AWS_CONFIG_PATH, AWS_AUTH_PATH]);
-    this.keychain.registerSlot("infisical", [
-      INFISICAL_CONFIG_PATH,
-      INFISICAL_AUTH_PATH,
-    ]);
-    this.keychain.registerSlot("fly", [FLY_CONFIG_PATH]);
-    this.keychain.registerSlot("netlify", [
-      NETLIFY_CONFIG_PATH,
-      NETLIFY_LEGACY_CONFIG_PATH,
-    ]);
-    this.keychain.registerSlot("cloudflare", [
-      WRANGLER_AUTH_CONFIG_PATH,
-      WRANGLER_LEGACY_AUTH_CONFIG_PATH,
-    ]);
-    this.keychain.registerSlot("neon", [NEON_CREDENTIALS_PATH]);
-    this.keychain.registerSlot("app-building", [APP_BUILDING_CONFIG_PATH]);
-    this.keychain.registerSlot("opencode", [
-      OPENCODE_AUTH_PATH,
-      OPENCODE_MCP_AUTH_PATH,
-      OPENCODE_CONFIG_JSONC_PATH,
-      OPENCODE_CONFIG_PATH,
-      OPENCODE_LEGACY_CONFIG_PATH,
-    ]);
-    this.keychain.registerSlot("replay", ["/home/user/.replay/auth.json"]);
+    for (const slot of defaultCredentialSlots) {
+      this.keychain.registerSlot(slot.id, [...slot.paths]);
+    }
     // Register slots for every persisted user OAuth service. MUST happen
     // before `keychain.init()` because the watcher rejects writes to unknown
     // managed paths during `restoreSavedCredentials`.
@@ -1597,27 +1831,7 @@ export class WebIDEHost {
     this.oauthStatuses = this.oauthOrchestrator.getStatuses();
     this.credentialMirror = new CredentialMirror({
       vfs: this.container.vfs,
-      paths: [
-        CLAUDE_AUTH_CREDENTIALS_PATH,
-        CLAUDE_AUTH_CONFIG_PATH,
-        CLAUDE_LEGACY_CONFIG_PATH,
-        CODEX_AUTH_PATH,
-        CODEX_CONFIG_TOML_PATH,
-        CODEX_CONFIG_JSON_PATH,
-        "/home/user/.config/gh/hosts.yml",
-        AWS_CONFIG_PATH,
-        AWS_AUTH_PATH,
-        INFISICAL_CONFIG_PATH,
-        INFISICAL_AUTH_PATH,
-        FLY_CONFIG_PATH,
-        NETLIFY_CONFIG_PATH,
-        NETLIFY_LEGACY_CONFIG_PATH,
-        WRANGLER_AUTH_CONFIG_PATH,
-        WRANGLER_LEGACY_AUTH_CONFIG_PATH,
-        NEON_CREDENTIALS_PATH,
-        APP_BUILDING_CONFIG_PATH,
-        "/home/user/.replay/auth.json",
-      ],
+      paths: getCredentialMirrorPaths(),
     });
     this.credentialMirror.hydrateFromStorage();
     this.hadTailscaleKeychainData = this.keychain.hasSlotData("tailscale");
@@ -1661,6 +1875,147 @@ export class WebIDEHost {
     return this.container.vfs;
   }
 
+  /**
+   * The VFS of the session bound to `projectId`, or null when the project
+   * has no live session. Lets persistence read a background project's files
+   * without touching the active session.
+   */
+  getVfsForProject(projectId: string) {
+    return this.sessionForProject(projectId)?.container.vfs ?? null;
+  }
+
+  /** VFS of any live session (active or background), or null. */
+  getVfsForSession(sessionId: string) {
+    return this.sessions?.get(sessionId)?.container.vfs ?? null;
+  }
+
+  /** Ids of every live (in-memory) session, the active one included. */
+  getLiveSessionIds(): string[] {
+    return Array.from(this.sessions?.keys() ?? []);
+  }
+
+  getActiveSessionId(): string | null {
+    return this.sessionState?.id ?? null;
+  }
+
+  /** Project bound to a session (repo-base sessions), or null. */
+  getProjectIdForSession(sessionId: string): string | null {
+    for (const [projectId, boundSessionId] of this.projectSessionIds ?? []) {
+      if (boundSessionId === sessionId) {
+        return projectId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Registered by ProjectManager so the session pool can snapshot a
+   * session's files + agent state before disposing it.
+   */
+  setSessionPersistence(
+    persist: (sessionId: string) => Promise<void>,
+  ): void {
+    this.persistSessionForEviction = persist;
+  }
+
+  /**
+   * Run a shell command inside a live session's container. Sandbox ids
+   * resolve directly (sessions are keyed by sandbox id); project ids
+   * resolve through their bound session. Used by ProjectManager's sandbox
+   * PR/merge actions.
+   */
+  async runSessionCommand(
+    sessionOrProjectId: string,
+    command: string,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const session =
+      this.sessions?.get(sessionOrProjectId) ??
+      this.sessionForProject(sessionOrProjectId);
+    if (!session) {
+      throw new Error(`No live session for ${sessionOrProjectId}`);
+    }
+    const result = await session.container.run(command, {
+      cwd: WORKSPACE_ROOT,
+    });
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+    };
+  }
+
+  /**
+   * Fully dispose a live background session — the pool-eviction disposal
+   * path minus the snapshot. Used for deleted sandboxes, where the records
+   * are gone and there is nothing worth saving. No-op for the active
+   * session (callers switch away first).
+   */
+  disposeSession(sessionId: string): void {
+    const session = this.sessions?.get(sessionId);
+    if (!session || session === this.activeSession) {
+      return;
+    }
+    for (const agent of agentSessionRegistry.getSessionsForSandbox(
+      sessionId,
+    )) {
+      agentSessionRegistry.clearActive(agent.tabId);
+    }
+    if (session.container?.vfs) {
+      this.keychain?.detachAuxiliaryVfs?.(session.container.vfs);
+    }
+    try {
+      session.dispose();
+    } catch (error) {
+      console.warn(`[sessions] error disposing ${sessionId}`, error);
+    }
+    this.sessions.delete(sessionId);
+    // Unlike eviction, deletion drops the sandbox binding for good.
+    this.sandboxSessionRepoIds?.delete(sessionId);
+  }
+
+  /**
+   * Mark the active session read-only (Monaco writes refuse and request a
+   * sandbox fork). Boot restores and import recovery attach a repo base in
+   * place, outside the session switcher — repo bases are always read-only.
+   */
+  markActiveSessionReadOnly(): void {
+    if (this.sessionState) {
+      this.sessionState.readOnly = true;
+    }
+    this.vfsProvider?.setReadOnly(true);
+  }
+
+  /**
+   * Replace a live repo-base session's files with an updated base snapshot
+   * (after "Merge to main" promotes a sandbox's merge result). Repo bases
+   * are read-only, so the live session has no unsaved user state to lose;
+   * VFS watchers propagate the change to the explorer and open editors.
+   * No-op when the repo has no live session.
+   */
+  refreshRepoBaseSession(repoId: string, files: SerializedFile[]): void {
+    const session = this.sessionForProject(repoId);
+    if (!session) {
+      return;
+    }
+    replaceProjectFilesInVfs(session.container.vfs, files, {
+      includeGit: true,
+    });
+  }
+
+  private sessionForProject(projectId: string): SandboxSession | null {
+    const sessionId = this.projectSessionIds?.get(projectId);
+    return sessionId ? (this.sessions?.get(sessionId) ?? null) : null;
+  }
+
+  private bindProjectToSession(projectId: string, sessionId: string): void {
+    for (const [boundProjectId, boundSessionId] of this.projectSessionIds) {
+      if (boundSessionId === sessionId && boundProjectId !== projectId) {
+        this.projectSessionIds.delete(boundProjectId);
+      }
+    }
+    this.projectSessionIds.set(projectId, sessionId);
+  }
+
   getTemplateId(): TemplateId {
     return this.templateId;
   }
@@ -1671,6 +2026,20 @@ export class WebIDEHost {
 
   setActiveProjectId(projectId: string | null): void {
     this.activeProjectId = projectId;
+    // Projects attached without going through the session switcher (boot
+    // restore, GitHub import) live in the currently-active session; record
+    // that binding so saves and later switches find the right container.
+    // Never bind a project to a sandbox session — its workspace is a branch
+    // fork, not the repo base.
+    if (
+      projectId &&
+      this.projectSessionIds &&
+      !this.projectSessionIds.has(projectId) &&
+      this.sessionState?.id !== undefined &&
+      !this.sandboxSessionRepoIds?.has(this.sessionState.id)
+    ) {
+      this.bindProjectToSession(projectId, this.sessionState.id);
+    }
     void this.syncActiveProjectAppBuildingConfig();
   }
 
@@ -1914,15 +2283,39 @@ export class WebIDEHost {
     await this.ensureGitInitialized(project);
   }
 
-  async collectAgentStateSnapshot(): Promise<ProjectAgentStateSnapshot> {
+  async collectAgentStateSnapshot(
+    projectId?: string,
+  ): Promise<ProjectAgentStateSnapshot> {
+    // Collect from the owning session's VFS so background projects snapshot
+    // their own transcripts, not the active session's.
+    const session = projectId ? this.sessionForProject(projectId) : null;
+    if (session?.id !== undefined) {
+      return this.collectAgentStateSnapshotForSession(session.id);
+    }
+    return this.collectAgentStateFromVfs(this.container.vfs);
+  }
+
+  /** Agent-state snapshot read from a specific session's VFS. */
+  async collectAgentStateSnapshotForSession(
+    sessionId: string,
+  ): Promise<ProjectAgentStateSnapshot> {
+    const vfs = this.sessions?.get(sessionId)?.container.vfs ?? this.container.vfs;
+    const snapshot = await this.collectAgentStateFromVfs(vfs);
+    // Codex transcripts live in host memory (the bus tee), not the VFS —
+    // ride along in the snapshot so the thread survives session disposal
+    // and page reloads.
+    const codexThreads = this.serializeCodexThreads(sessionId);
+    return codexThreads.length > 0 ? { ...snapshot, codexThreads } : snapshot;
+  }
+
+  private async collectAgentStateFromVfs(
+    vfs: ContainerInstance["vfs"],
+  ): Promise<ProjectAgentStateSnapshot> {
+    // OpenCode history lives in one host-level browser DB that persists
+    // itself (opencode-browser-session.ts) — snapshots no longer carry an
+    // openCodeDb blob; ProjectManager preserves legacy blobs on save.
     return {
-      claudeFiles: collectScopedFilesBase64(this.container.vfs, [
-        CLAUDE_PROJECTS_ROOT,
-      ]),
-      openCodeDb:
-        this.agentMode === "browser"
-          ? await collectOpenCodeBrowserSnapshot()
-          : null,
+      claudeFiles: collectScopedFilesBase64(vfs, [CLAUDE_PROJECTS_ROOT]),
     };
   }
 
@@ -1935,9 +2328,62 @@ export class WebIDEHost {
       snapshot?.claudeFiles ?? [],
     );
 
-    if (this.agentMode === "browser") {
-      await restoreOpenCodeBrowserSnapshot(snapshot?.openCodeDb ?? null);
+    // Rehydrate Codex transcripts for the session being restored: without
+    // this the threads vanish from the sidebar after a reload (the bus tee
+    // is in-memory only) and reopening one has nothing to replay.
+    const restoredSessionId = this.sessionState?.id;
+    if (restoredSessionId !== undefined && snapshot?.codexThreads?.length) {
+      let threads = this.codexThreadsBySandbox?.get(restoredSessionId);
+      if (!threads) {
+        threads = new Map();
+        this.codexThreadsBySandbox?.set(restoredSessionId, threads);
+      }
+      for (const record of snapshot.codexThreads) {
+        if (typeof record?.id !== "string" || !record.id) continue;
+        const existing = threads.get(record.id);
+        if (existing && existing.updatedAt >= record.updatedAt) continue;
+        threads.set(record.id, {
+          title: record.title ?? null,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
+          events: Array.isArray(record.events)
+            ? ([...record.events] as CodexBusEvent[])
+            : [],
+        });
+      }
+      window.dispatchEvent(new CustomEvent(AGENT_THREAD_UPDATED_EVENT));
     }
+
+    if (this.agentMode === "browser") {
+      // The host-level OpenCode DB is never swapped on switches; the legacy
+      // per-project blob only seeds it once (first init) and backs the
+      // recovery-reset reimport for the active project.
+      await registerLegacyOpenCodeDbSnapshot(snapshot?.openCodeDb ?? null);
+    }
+  }
+
+  /**
+   * OpenCode-side directory namespace for the active session: sandbox
+   * sessions live at `/sandboxes/{sandboxId}`, repo-base sessions at
+   * `/repos/{repoId}`. `undefined` selects the legacy `WORKSPACE_ROOT`
+   * mapping (unbound/test sessions).
+   */
+  private openCodeDirectoryForActiveSession(): string | undefined {
+    return this.openCodeDirectoryForSession(this.sessionState?.id);
+  }
+
+  /** Same namespace resolution for any session id (active or background). */
+  private openCodeDirectoryForSession(
+    sessionId: string | undefined,
+  ): string | undefined {
+    if (!sessionId) {
+      return undefined;
+    }
+    if (this.sandboxSessionRepoIds?.has(sessionId)) {
+      return `/sandboxes/${sessionId}`;
+    }
+    const projectId = this.getProjectIdForSession(sessionId);
+    return projectId ? `/repos/${projectId}` : undefined;
   }
 
   async discoverActiveProjectThreads(projectId: string): Promise<{
@@ -1957,6 +2403,7 @@ export class WebIDEHost {
       container: this.container,
       cwd: WORKSPACE_ROOT,
       env: {},
+      opencodeDirectory: this.openCodeDirectoryForActiveSession(),
     });
     return {
       claude,
@@ -1964,7 +2411,247 @@ export class WebIDEHost {
     };
   }
 
+  /**
+   * List a live sandbox session's OpenCode chats (namespaced under
+   * `/sandboxes/{sandboxId}` in the host-level OpenCode DB). Dormant
+   * sandboxes return [] — their chats come from stored thread records.
+   */
+  async discoverSandboxOpenCodeThreads(
+    sandboxId: string,
+  ): Promise<ResumableThreadRecord[]> {
+    if (this.agentMode !== "browser") {
+      return [];
+    }
+    const session = this.sessions.get(sandboxId);
+    if (!session) {
+      return [];
+    }
+    const sessions = await listOpenCodeBrowserSessions({
+      container: session.container,
+      cwd: WORKSPACE_ROOT,
+      env: {},
+      opencodeDirectory: this.openCodeDirectoryForSession(sandboxId),
+    });
+    return toOpenCodeThreads(sandboxId, sessions);
+  }
+
+  /**
+   * Codex threads observed from the app-server JSON-RPC tee, grouped by the
+   * sandbox whose session ran them — titles for the sidebar AND the
+   * captured bus events themselves. The WASM Codex build persists no
+   * rollout files, so these events are the conversation's only record:
+   * they ride along in agent-state snapshots (collectAgentStateSnapshot*)
+   * and are replayed into the chat when a thread is reopened after the
+   * page (or the sandbox's session) is gone.
+   */
+  private readonly codexThreadsBySandbox = new Map<
+    string,
+    Map<
+      string,
+      {
+        title: string | null;
+        createdAt: number;
+        updatedAt: number;
+        events: CodexBusEvent[];
+      }
+    >
+  >();
+
+  /** Max captured bus events kept per Codex thread (oldest dropped). */
+  private static readonly CODEX_THREAD_EVENT_CAP = 600;
+
+  /**
+   * True while resumeResumableThread re-emits a stored transcript onto the
+   * bus — the recorder must not re-capture its own replay (the events
+   * would double in the store).
+   */
+  private replayingCodexThread = false;
+
+  private subscribeCodexThreadEvents(): void {
+    // The app-server only states the thread id in the thread/start REQUEST
+    // result ({thread:{id}}); its notifications usually carry no
+    // params.threadId (the chat adapter learns the id the same way). Track
+    // the last-started thread so threadId-less item notifications still
+    // attribute — keyed nowhere finer because the bus is a single tee that
+    // resets per app-server session.
+    let currentThreadId: string | null = null;
+
+    codexConversationBus.subscribe(
+      (event) => {
+        if (this.replayingCodexThread) {
+          return;
+        }
+        if (event.kind === "reset") {
+          currentThreadId = null;
+          return;
+        }
+
+        let threadId: string | null = null;
+        let title: string | null = null;
+
+        if (event.kind === "request") {
+          if (event.method !== "thread/start") return;
+          const thread = (
+            event.result as { thread?: { id?: unknown } } | undefined
+          )?.thread;
+          if (typeof thread?.id !== "string" || !thread.id) return;
+          threadId = thread.id;
+          currentThreadId = threadId;
+        } else if (event.kind === "notification") {
+          const notification = event.notification as {
+            method?: string;
+            params?: { threadId?: unknown; item?: Record<string, unknown> };
+          };
+          const paramsThreadId =
+            typeof notification.params?.threadId === "string"
+              ? notification.params.threadId
+              : null;
+          if (paramsThreadId) {
+            currentThreadId = paramsThreadId;
+          }
+          threadId = paramsThreadId ?? currentThreadId;
+          if (!threadId) return;
+
+          const item = notification.params?.item;
+          if (
+            notification.method === "item/completed" &&
+            item?.type === "userMessage"
+          ) {
+            const content = item.content;
+            const text = Array.isArray(content)
+              ? content
+                  .map((part) =>
+                    typeof (part as { text?: unknown })?.text === "string"
+                      ? (part as { text: string }).text
+                      : "",
+                  )
+                  .join(" ")
+                  .trim()
+              : "";
+            if (text) {
+              title = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+            }
+          }
+        } else {
+          return;
+        }
+
+        const active = agentSessionRegistry.getActive();
+        const sandboxId =
+          (active?.harness === "codex" ? active.sandboxId : undefined) ??
+          this.activeSession?.id;
+        if (!sandboxId) return;
+
+        let threads = this.codexThreadsBySandbox.get(sandboxId);
+        if (!threads) {
+          threads = new Map();
+          this.codexThreadsBySandbox.set(sandboxId, threads);
+        }
+        const existing = threads.get(threadId);
+        const now = Date.now();
+        const isNew = !existing;
+        const titleChanged = Boolean(title) && existing?.title !== title;
+        const events = existing?.events ?? [];
+        events.push(event);
+        if (events.length > WebIDEHost.CODEX_THREAD_EVENT_CAP) {
+          events.splice(0, events.length - WebIDEHost.CODEX_THREAD_EVENT_CAP);
+        }
+        threads.set(threadId, {
+          title: title ?? existing?.title ?? null,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+          events,
+        });
+        if (isNew || titleChanged) {
+          window.dispatchEvent(new CustomEvent(AGENT_THREAD_UPDATED_EVENT));
+        }
+      },
+      { replay: true },
+    );
+  }
+
+  /** Serialized transcripts for a session's Codex threads (snapshots). */
+  private serializeCodexThreads(
+    sessionId: string,
+  ): CodexThreadTranscriptRecord[] {
+    const threads = this.codexThreadsBySandbox?.get(sessionId);
+    if (!threads || threads.size === 0) {
+      return [];
+    }
+    return Array.from(threads.entries()).map(([id, info]) => ({
+      id,
+      title: info.title,
+      createdAt: info.createdAt,
+      updatedAt: info.updatedAt,
+      events: [...info.events],
+    }));
+  }
+
+  /** Codex threads observed in a live sandbox session ([] when dormant). */
+  async discoverSandboxCodexThreads(
+    sandboxId: string,
+  ): Promise<ResumableThreadRecord[]> {
+    const threads = this.codexThreadsBySandbox.get(sandboxId);
+    if (!threads || threads.size === 0) {
+      return [];
+    }
+    return toCodexThreads(
+      sandboxId,
+      Array.from(threads.entries()).map(([id, info]) => ({
+        id,
+        title: info.title ?? undefined,
+        createdAt: info.createdAt,
+        updatedAt: info.updatedAt,
+      })),
+    );
+  }
+
+  /**
+   * Show a dead Codex thread's captured transcript in the chat: re-emit
+   * the stored bus events (the conversation adapter renders them exactly
+   * as it would live traffic) and register a non-running session so the
+   * chat surface attaches to this thread. The next user message launches
+   * a fresh Codex session — WASM Codex cannot truly resume a thread.
+   */
+  private replayCodexThreadIntoChat(
+    thread: ResumableThreadRecord,
+    events: readonly CodexBusEvent[],
+  ): void {
+    this.replayingCodexThread = true;
+    try {
+      codexConversationBus.reset();
+      for (const event of events) {
+        if (event.kind === "notification") {
+          codexConversationBus.emitNotification(event.notification);
+        } else if (event.kind === "request") {
+          codexConversationBus.emitRequest(
+            event.method,
+            event.params,
+            event.result,
+          );
+        }
+      }
+    } finally {
+      this.replayingCodexThread = false;
+    }
+
+    agentSessionRegistry.setActive({
+      harness: "codex",
+      tabId: `codex-replay-${crypto.randomUUID()}`,
+      startedAt: thread.createdAt,
+      sandboxId: thread.sandboxId ?? this.sessionState?.id,
+      threadId: thread.resumeToken,
+      resumeToken: thread.resumeToken,
+      sendInput: () => {},
+      isRunning: () => false,
+    });
+  }
+
   async resumeResumableThread(thread: ResumableThreadRecord): Promise<void> {
+    if (this.refuseAgentLaunchOnReadOnlyMain?.()) {
+      return;
+    }
+
     // Detach the chat from the previous thread's session right away — any
     // message sent while the resume is in flight must not reach it.
     const launchToken = agentSessionRegistry.beginLaunch();
@@ -1973,7 +2660,9 @@ export class WebIDEHost {
         thread.title.trim() ||
         (thread.harness === "claude"
           ? `Claude Code ${++this.claudeSidebarCounter}`
-          : `OpenCode ${++this.openCodeSidebarTerminalCounter}`);
+          : thread.harness === "codex"
+            ? `Codex ${++this.codexSidebarCounter}`
+            : `OpenCode ${++this.openCodeSidebarTerminalCounter}`);
       if (thread.harness === "opencode") {
         await this.launchAiSession("opencode", {
           title,
@@ -1981,6 +2670,53 @@ export class WebIDEHost {
             sessionID: thread.resumeToken,
           },
           focus: false,
+        });
+        return;
+      }
+
+      if (thread.harness === "codex") {
+        // A session for this thread may still be live (the sandbox kept
+        // running in the background) — just route chat back to it.
+        const targetSandboxId = thread.sandboxId ?? this.sessionState?.id;
+        const live = targetSandboxId
+          ? agentSessionRegistry
+              .getSessionsForSandbox(targetSandboxId)
+              .find(
+                (candidate) =>
+                  candidate.harness === "codex" &&
+                  (candidate.threadId === thread.resumeToken ||
+                    candidate.resumeToken === thread.resumeToken),
+              )
+          : undefined;
+        if (live) {
+          agentSessionRegistry.setActiveByTab(live.tabId);
+          return;
+        }
+
+        // The WASM Codex keeps no rollout files, so `codex resume` cannot
+        // bring a dead thread back — replay the captured transcript into
+        // the chat instead. Sending a new message starts a fresh Codex
+        // session (chat-screen launches on send when nothing is running).
+        const stored = targetSandboxId && thread.resumeToken
+          ? this.codexThreadsBySandbox
+              ?.get(targetSandboxId)
+              ?.get(thread.resumeToken)
+          : undefined;
+        if (stored && stored.events.length > 0) {
+          this.replayCodexThreadIntoChat(thread, stored.events);
+          return;
+        }
+
+        // No live session and no captured transcript (legacy record) —
+        // the CLI attempt is all that's left.
+        const tab = this.createAiSidebarTerminalTab(false, {
+          title,
+          agentHarness: "codex",
+          env: this.buildCodexShellEnv(),
+        });
+        await this.runCommand(tab, `codex resume ${thread.resumeToken}`, {
+          echoCommand: true,
+          interceptAgentLaunch: false,
         });
         return;
       }
@@ -2097,11 +2833,32 @@ export class WebIDEHost {
       setDatabaseNamespace(this.currentProjectDatabaseNamespace);
       const active = getActiveDatabase(this.currentProjectDatabaseNamespace);
       if (active) {
-        await closePGliteInstance(active);
+        await closePGliteInstance(active, this.currentProjectDatabaseNamespace);
       }
     } catch {
       // PGlite may not have been initialized.
     }
+  }
+
+  /**
+   * Database namespace of the sandbox whose container owns the given port.
+   * The PGlite bridge middleware calls this per request, which is what
+   * keeps each sandbox's app on its own database while several dev servers
+   * run at once. Ownerless ports (page-level/legacy servers) fall back to
+   * the active session's namespace — the pre-multi-sandbox behavior.
+   */
+  private resolveDatabaseNamespaceForPort(port: number): string | null {
+    const ownerId =
+      this.container?.serverBridge?.getServerMetadata?.(port)?.ownerId;
+    if (ownerId) {
+      for (const session of this.sessions?.values() ?? []) {
+        if (session.container?.id === ownerId) {
+          return session.currentProjectDatabaseNamespace ?? null;
+        }
+      }
+      return null;
+    }
+    return this.currentProjectDatabaseNamespace ?? null;
   }
 
   async attachProjectContext(
@@ -2176,6 +2933,756 @@ export class WebIDEHost {
     await this.resumePendingProjectLaunch({ previewRevealed: true });
 
     window.dispatchEvent(new Event("resize"));
+  }
+
+  /**
+   * Switch the workbench to the session bound to `projectId`, creating that
+   * session (fresh container + VFS) on first visit. Unlike
+   * `switchProjectWorkspace` this never overwrites a live session's files:
+   * its terminals, agents, and dev servers keep running in the background.
+   * Returns whether the project's workspace was (re)loaded from `files`, so
+   * the caller knows to restore persisted agent state.
+   */
+  async switchProjectWorkspaceToSession(
+    projectId: string,
+    templateId: TemplateId,
+    files: SerializedFile[],
+    dbPrefix?: string,
+    defaultDatabaseName?: string,
+  ): Promise<{ workspaceReplaced: boolean }> {
+    let sessionId = this.projectSessionIds.get(projectId);
+    if (!sessionId) {
+      const activeId = this.sessionState?.id;
+      const activeIsBound =
+        activeId !== undefined &&
+        (Array.from(this.projectSessionIds.values()).includes(activeId) ||
+          this.sandboxSessionRepoIds?.has(activeId) === true);
+      if (activeId !== undefined && !activeIsBound) {
+        // The active session never held a project or sandbox (bootstrap
+        // session before its first project). Adopt it with the legacy
+        // in-place restore — nothing in it belongs to another project.
+        this.bindProjectToSession(projectId, activeId);
+        await this.switchProjectWorkspace(
+          templateId,
+          files,
+          dbPrefix,
+          defaultDatabaseName,
+        );
+        if (this.sessionState) {
+          this.sessionState.readOnly = true;
+        }
+        this.vfsProvider?.setReadOnly(true);
+        return { workspaceReplaced: true };
+      }
+      sessionId = `project-${projectId}`;
+      this.bindProjectToSession(projectId, sessionId);
+    }
+
+    const createdSession = !this.sessions.has(sessionId);
+    // Project sessions show the repo's base (main) — read-only; making a
+    // change means forking a sandbox.
+    await this.switchToSession(sessionId, {
+      templateId,
+      files,
+      dbPrefix,
+      defaultDatabaseName,
+      readOnly: true,
+    });
+    return { workspaceReplaced: createdSession };
+  }
+
+  /**
+   * Detach the active session's UI (terminals, agent tabs, preview iframe,
+   * editors) without stopping anything inside it, then attach the target
+   * session — creating it from `opts` when it doesn't exist yet.
+   */
+  async switchToSession(
+    sessionId: string,
+    opts: {
+      templateId: TemplateId;
+      files?: SerializedFile[];
+      dbPrefix?: string;
+      defaultDatabaseName?: string;
+      /** Repo-base sessions attach read-only; sandboxes pass false. */
+      readOnly?: boolean;
+    },
+  ): Promise<void> {
+    if (this.sessions.has(sessionId) && this.sessionState?.id === sessionId) {
+      return;
+    }
+    await this.detachActiveSession();
+    await this.attachSession(sessionId, opts);
+    // Enforce the live-session cap once the switch settled; never blocks the
+    // attach (snapshots + disposal run in the background).
+    void this.evictIdleSessions();
+  }
+
+  /**
+   * Park the active session's UI without stopping its work: terminal/agent
+   * tabs detach with their live DOM (xterm keeps buffering offscreen), the
+   * preview iframe clears while the dev server keeps running and stays
+   * registered, PGlite middleware stays registered, agent sessions stay in
+   * the registry (chat just detaches), and editors close.
+   */
+  private async detachActiveSession(): Promise<void> {
+    const session = this.activeSession;
+    if (!session) {
+      return;
+    }
+
+    // Stop the preview retry loop; the session keeps previewPort/previewUrl
+    // so a running dev server is re-adopted on re-attach.
+    this.clearScheduledPreviewStartRetry();
+    this.setPreviewSourcePickerActive(false);
+
+    // The preview iframe (and its contentWindow identity) survives across
+    // sandboxes — drop this session's HMR target or its background dev
+    // server would keep posting hot updates into whichever sandbox's app
+    // the iframe shows next. Re-attach re-registers via
+    // registerPreviewHmrTargets(). (Optional-chained: test harness
+    // containers are bare stubs.)
+    if (session.previewPort !== null) {
+      session.container.setHMRTargetForPort?.(session.previewPort, null);
+    }
+
+    for (const id of session.terminalTabs.keys()) {
+      const body = this.terminalSurface.detachTab(id);
+      if (body) {
+        session.detachedTabBodies.set(id, body);
+      }
+    }
+    for (const id of session.openCodeTabs.keys()) {
+      const body = this.terminalSurface.detachTab(id);
+      if (body) {
+        session.detachedTabBodies.set(id, body);
+      }
+    }
+    for (const id of session.openCodeSidebarTabs.keys()) {
+      const body = this.openCodeSurface.detachTab(id);
+      if (body) {
+        session.detachedTabBodies.set(id, body);
+      }
+    }
+    for (const id of session.openCodeSidebarTerminalTabs.keys()) {
+      const body = this.openCodeSurface.detachTab(id);
+      if (body) {
+        session.detachedTabBodies.set(id, body);
+      }
+    }
+
+    this.previewSurface.setActiveDb(null);
+    this.previewSurface.clear("Project running in background…");
+    this.appBuildingPreviewSurface.clear("Project running in background…");
+    this.databaseSurface.update([], null);
+
+    // Chat detaches; background agent sessions stay registered and running.
+    agentSessionRegistry.deactivate();
+
+    try {
+      const commandService = await getService(ICommandService);
+      await commandService.executeCommand("workbench.action.closeAllEditors");
+    } catch {
+      // May fail if no editors are open
+    }
+  }
+
+  /**
+   * Attach (or create) a sandbox session: rebind the editor stack to its
+   * VFS, re-insert its parked tabs, restore its preview, and refresh the
+   * database surface for its namespace.
+   */
+  private async attachSession(
+    sessionId: string,
+    opts: {
+      templateId: TemplateId;
+      files?: SerializedFile[];
+      dbPrefix?: string;
+      defaultDatabaseName?: string;
+      readOnly?: boolean;
+    },
+  ): Promise<void> {
+    let session = this.sessions.get(sessionId);
+    const createdSession = !session;
+    if (!session) {
+      session = this.createBackgroundSession(sessionId, opts.templateId);
+      this.sessions.set(sessionId, session);
+      if (opts.files && opts.files.length > 0) {
+        replaceProjectFilesInVfs(session.container.vfs, opts.files, {
+          includeGit: true,
+        });
+      }
+      if (!session.container.vfs.existsSync(`${WORKSPACE_ROOT}/package.json`)) {
+        seedWorkspace(session.container, opts.templateId);
+      }
+    }
+
+    this.activeSession = session;
+    session.lastActiveAt = Date.now();
+    session.templateId = opts.templateId;
+    if (opts.readOnly !== undefined) {
+      session.readOnly = opts.readOnly;
+    }
+    session.currentProjectDatabaseNamespace =
+      this.normalizeProjectDatabaseNamespace(opts.dbPrefix);
+    session.currentProjectDefaultDatabaseName =
+      this.normalizeProjectDefaultDatabaseName(opts.defaultDatabaseName);
+
+    // Rebind the editor stack to this session's VFS.
+    this.vfsProvider?.setVfs(session.container.vfs);
+    this.vfsProvider?.setReadOnly(session.readOnly === true);
+    this.filesSurface.setVfs?.(session.container.vfs);
+
+    // Move the keychain to this session: watch this VFS for new credentials,
+    // restore saved keys into it (when unlocked), and let this container's
+    // commands persist credential changes back to the vault.
+    if (this.keychain) {
+      session.container.setKeychain(this.keychain);
+      await this.keychain.setVfs(session.container.vfs);
+    }
+
+    if (createdSession) {
+      await this.ensureGitInitialized();
+    }
+
+    this.reattachSessionTabs(session);
+    if (session.terminalTabs.size === 0) {
+      const initialTab = this.createUserTerminalTab(false);
+      this.updateTerminalStatus(initialTab, "Idle");
+    }
+
+    await this.revealPreviewEditor();
+    if (session.previewUrl) {
+      // The dev server kept running in the background: restore the iframe
+      // and re-arm HMR for its port.
+      if (this.previewMode === "workbench") {
+        this.previewSurface.setUrl(session.previewUrl);
+        const iframe = this.previewSurface.getIframe();
+        iframe.addEventListener(
+          "load",
+          () => {
+            this.registerPreviewHmrTargets();
+          },
+          { once: true },
+        );
+      }
+      this.registerPreviewHmrTargets();
+      this.updatePreviewStatus(`Preview ready: ${session.previewUrl}`);
+    } else {
+      this.updatePreviewStatus("Waiting for a preview server");
+      this.ensurePreviewServerRunning();
+      this.schedulePreviewStartRetry();
+    }
+    if (session.currentAppBuildingPreviewUrl) {
+      this.appBuildingPreviewSurface.setUrl(
+        session.currentAppBuildingPreviewUrl,
+      );
+    }
+
+    // Refresh the database surface for this session's namespace.
+    void this.initPGliteIfNeeded();
+    await this.resumePendingProjectLaunch({ previewRevealed: true });
+
+    // Route chat to an agent still running in this sandbox, if any — unless
+    // the user explicitly started a fresh chat here or a new session launch
+    // is already in flight; reattaching the old agent then would steal the
+    // chat back and send the next message to the wrong thread.
+    if (!agentSessionRegistry.shouldSuppressAutoActivate(session.id)) {
+      const runningAgents = agentSessionRegistry
+        .getSessionsForSandbox(session.id)
+        .filter((agent) => agent.isRunning());
+      const latestAgent = runningAgents[runningAgents.length - 1];
+      if (latestAgent) {
+        agentSessionRegistry.setActiveByTab(latestAgent.tabId);
+      }
+    }
+
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  /**
+   * Create a SandboxSession for a background project. Secondary sessions
+   * never pass `networkIntegration` — the page-level Tailscale default
+   * controller is set-if-unset and owned by the bootstrap container.
+   */
+  private createBackgroundSession(
+    sessionId: string,
+    templateId: TemplateId,
+  ): SandboxSession {
+    const session = new SandboxSession({
+      id: sessionId,
+      templateId,
+      createContainerOptions: {
+        baseUrl: this.options.baseUrl,
+        basePath: import.meta.env.BASE_URL?.replace(/\/$/, "") || "",
+        cwd: WORKSPACE_ROOT,
+        env: WebIDEHost.defaultCorsProxyUrl
+          ? { CORS_PROXY_URL: WebIDEHost.defaultCorsProxyUrl }
+          : undefined,
+      },
+    });
+    this.seedSessionCredentials(session);
+    // Track this VFS in the keychain: saved keys restore into it now (when
+    // unlocked) AND on every later unlock, its credential files are watched
+    // so a login performed here reaches the vault even while another
+    // sandbox is foreground, and snapshots prefer the newest copy across
+    // sandboxes. (Optional-chained: test harnesses construct hosts without
+    // a keychain.)
+    this.keychain?.attachAuxiliaryVfs?.(session.container.vfs);
+    this.registerWorkbenchShellCommands(session.container);
+    this.subscribeSessionServerEvents(session);
+    if (this.agentMode === "browser") {
+      void ClaudeIdeBridge.create({ container: session.container })
+        .then((bridge) => {
+          session.claudeIdeBridge = bridge;
+        })
+        .catch((error) => {
+          console.error("[claude-ide] failed to initialize IDE bridge", error);
+        });
+      // Session disposal drops the opencode server's per-directory instance
+      // cache (fire-and-forget; the directory is resolved lazily because
+      // sandbox/project bindings may land after session construction).
+      session.disposeOpenCodeInstance = () => {
+        void disposeOpenCodeInstance({
+          container: session.container,
+          cwd: WORKSPACE_ROOT,
+          env: {},
+          opencodeDirectory: this.openCodeDirectoryForSession(session.id),
+        }).catch(() => {
+          // The container may already be unusable mid-teardown.
+        });
+      };
+    }
+    return session;
+  }
+
+  /** Seed mirrored credentials (Claude, gh, …) into a fresh session's VFS. */
+  private seedSessionCredentials(session: SandboxSession): void {
+    new CredentialMirror({
+      vfs: session.container.vfs,
+      paths: getCredentialMirrorPaths(),
+    }).hydrateFromStorage();
+  }
+
+  /**
+   * Route a container's server lifecycle events to its owning session.
+   * While the session is active the regular UI handlers run; in the
+   * background only the session's own preview fields update, so the active
+   * session's preview never reacts to a background server.
+   */
+  private subscribeSessionServerEvents(session: SandboxSession): void {
+    session.container.on(
+      "server-ready",
+      (port: unknown, url: unknown, metadata: unknown) => {
+        const serverMetadata = metadata as
+          | ServerRegistrationMetadata
+          | undefined;
+        if (this.activeSession === session) {
+          this.handleServerReady(port, url, serverMetadata);
+          return;
+        }
+        if (typeof port !== "number" || typeof url !== "string") {
+          return;
+        }
+        if (!this.shouldUseServerForPreview(serverMetadata)) {
+          return;
+        }
+        session.previewPort = port;
+        session.previewUrl = `${url}/`;
+        session.previewStartRequested = false;
+      },
+    );
+
+    session.container.on("server-unregistered", (port: unknown) => {
+      if (typeof port !== "number" || port !== session.previewPort) {
+        return;
+      }
+
+      session.previewPort = null;
+      session.previewUrl = null;
+      session.previewStartRequested = false;
+      session.previewSourcePickerRuntime = null;
+      if (this.activeSession !== session) {
+        return;
+      }
+
+      this.setPreviewSourcePickerActive(false);
+      this.clearScheduledPreviewStartRetry();
+      if (this.previewMode === "workbench") {
+        this.previewSurface.clear(
+          "Preview server stopped. Run the workspace to start it again.",
+        );
+      }
+      const previewTab = this.previewTerminalTabId
+        ? this.terminalTabs.get(this.previewTerminalTabId)
+        : null;
+      if (previewTab) {
+        this.updateTerminalStatus(previewTab, "Preview server stopped");
+      }
+    });
+  }
+
+  /** Re-insert a session's parked tabs and restore its tab selection. */
+  private reattachSessionTabs(session: SandboxSession): void {
+    for (const [id, tab] of session.terminalTabs) {
+      const body = session.detachedTabBodies.get(id);
+      if (!body) {
+        continue;
+      }
+      session.detachedTabBodies.delete(id);
+      this.terminalSurface.attachTab(
+        {
+          id,
+          title: tab.title,
+          closable: tab.closable,
+          terminal: tab.terminal,
+          fitAddon: tab.fitAddon,
+        },
+        body,
+      );
+    }
+    for (const [id, tab] of session.openCodeTabs) {
+      const body = session.detachedTabBodies.get(id);
+      if (!body) {
+        continue;
+      }
+      session.detachedTabBodies.delete(id);
+      this.terminalSurface.attachTab(
+        { id, title: tab.title, closable: true, element: tab.host },
+        body,
+      );
+    }
+    for (const [id, tab] of session.openCodeSidebarTabs) {
+      const body = session.detachedTabBodies.get(id);
+      if (!body) {
+        continue;
+      }
+      session.detachedTabBodies.delete(id);
+      this.openCodeSurface.attachTab(
+        { id, title: tab.title, closable: true, element: tab.host },
+        body,
+      );
+    }
+    for (const [id, tab] of session.openCodeSidebarTerminalTabs) {
+      const body = session.detachedTabBodies.get(id);
+      if (!body) {
+        continue;
+      }
+      session.detachedTabBodies.delete(id);
+      this.openCodeSurface.attachTab(
+        {
+          id,
+          title: tab.title,
+          closable: tab.closable,
+          terminal: tab.terminal,
+          fitAddon: tab.fitAddon,
+        },
+        body,
+      );
+    }
+
+    const activeTerminalTabId = session.activeTerminalTabId;
+    if (
+      activeTerminalTabId &&
+      (session.terminalTabs.has(activeTerminalTabId) ||
+        session.openCodeTabs.has(activeTerminalTabId))
+    ) {
+      this.terminalSurface.setActiveTab(activeTerminalTabId);
+    }
+    const activeAiTabId = session.activeOpenCodeSidebarTabId;
+    if (
+      activeAiTabId &&
+      (session.openCodeSidebarTabs.has(activeAiTabId) ||
+        session.openCodeSidebarTerminalTabs.has(activeAiTabId))
+    ) {
+      this.openCodeSurface.setActiveTab(activeAiTabId);
+    }
+  }
+
+  /**
+   * Build a sandbox session as a branch fork of its repo: fresh container
+   * seeded from the repo's base snapshot (plus mirrored credentials), then
+   * `git checkout -b <branch>` inside the session's container. When the repo
+   * has a remote, a background `git fetch origin <defaultBranch>` freshens
+   * main — failures only log, forks must work offline. The session is left
+   * in the background; callers attach it via `switchToSession`.
+   */
+  async createSandboxSession(
+    repo: ProjectRecord,
+    sandbox: SandboxRecord,
+    baseFiles: SerializedFile[],
+  ): Promise<SandboxSession> {
+    this.sandboxSessionRepoIds.set(sandbox.id, sandbox.repoId);
+    const existing = this.sessions.get(sandbox.id);
+    if (existing) {
+      return existing;
+    }
+
+    const session = this.createBackgroundSession(sandbox.id, repo.templateId);
+    session.readOnly = false;
+    this.sessions.set(sandbox.id, session);
+
+    if (baseFiles.length > 0) {
+      replaceProjectFilesInVfs(session.container.vfs, baseFiles, {
+        includeGit: true,
+      });
+    }
+    if (!session.container.vfs.existsSync(`${WORKSPACE_ROOT}/package.json`)) {
+      seedWorkspace(session.container, repo.templateId);
+    }
+
+    if (!session.container.vfs.existsSync(`${WORKSPACE_ROOT}/.git`)) {
+      await this.runSessionGitCommand(session, "git init");
+      await this.runSessionGitCommand(session, "git add .");
+      await this.runSessionGitCommand(
+        session,
+        'git commit -m "Initial commit"',
+      );
+    }
+    await this.runSessionGitCommand(
+      session,
+      `git checkout -b ${this.quoteShellArg(sandbox.branch)}`,
+    );
+
+    if (repo.gitRemote) {
+      const defaultBranch = repo.defaultBranch || REPO_DEFAULT_BRANCH;
+      void session.container
+        .run(`git fetch origin ${this.quoteShellArg(defaultBranch)}`, {
+          cwd: WORKSPACE_ROOT,
+        })
+        .then((result) => {
+          if (result.exitCode !== 0) {
+            console.warn(
+              `[sandbox] background git fetch failed: ${(result.stderr || result.stdout).trim()}`,
+            );
+          }
+        })
+        .catch((error) => {
+          console.warn("[sandbox] background git fetch failed", error);
+        });
+    }
+
+    return session;
+  }
+
+  /**
+   * Open a sandbox in the workbench. Reuses its live session when present;
+   * otherwise restores the sandbox's persisted snapshot, or forks a brand
+   * new session from the repo base via `createSandboxSession`. Sandboxes
+   * always attach writable — only repo bases are read-only. Returns whether
+   * the workspace was (re)created, so the caller knows to restore persisted
+   * agent state.
+   */
+  async openSandboxSession(
+    repo: ProjectRecord,
+    sandbox: SandboxRecord,
+    savedFiles: SerializedFile[],
+    baseFiles: SerializedFile[],
+    dbPrefix?: string,
+    defaultDatabaseName?: string,
+  ): Promise<{ workspaceReplaced: boolean }> {
+    this.sandboxSessionRepoIds.set(sandbox.id, sandbox.repoId);
+    const created = !this.sessions.has(sandbox.id);
+    if (created && savedFiles.length === 0) {
+      await this.createSandboxSession(repo, sandbox, baseFiles);
+    }
+    await this.switchToSession(sandbox.id, {
+      templateId: repo.templateId,
+      files: savedFiles.length > 0 ? savedFiles : undefined,
+      dbPrefix,
+      defaultDatabaseName,
+      readOnly: false,
+    });
+    return { workspaceReplaced: created };
+  }
+
+  private async runSessionGitCommand(
+    session: SandboxSession,
+    command: string,
+  ): Promise<RunResult> {
+    const result = await session.container.run(command, {
+      cwd: WORKSPACE_ROOT,
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(
+        (result.stderr || result.stdout || `${command} failed`).trim(),
+      );
+    }
+    return result;
+  }
+
+  private sessionHasRunningCommand(session: SandboxSession): boolean {
+    for (const tab of session.terminalTabs?.values() ?? []) {
+      if (tab.runningAbortController) {
+        return true;
+      }
+    }
+    for (const tab of session.openCodeSidebarTerminalTabs?.values() ?? []) {
+      if (tab.runningAbortController) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Enforce the live-session cap (`SESSION_POOL_CAP`): snapshot, then fully
+   * dispose the least-recently-attached background sessions. Pinned (never
+   * evicted): the active session, sessions with a running agent CLI, and
+   * sessions with a running terminal command. A session whose snapshot
+   * fails is kept live — eviction must never lose unsaved work — and
+   * without a registered persistence handler nothing is evicted at all.
+   * Project/sandbox bindings survive eviction so re-opening restores from
+   * the snapshot under the same session id.
+   */
+  async evictIdleSessions(): Promise<string[]> {
+    // Serialize: eviction is fire-and-forget from every switch, and its
+    // awaited snapshot/busy probes take real time — two interleaved runs
+    // could each pick candidates from a stale view and double-dispose.
+    const previous = this.evictionChain ?? Promise.resolve();
+    const run = previous.then(() => this.evictIdleSessionsSerialized());
+    this.evictionChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private evictionChain: Promise<void> | null = null;
+
+  private async evictIdleSessionsSerialized(): Promise<string[]> {
+    const persist = this.persistSessionForEviction;
+    if (!persist || !this.sessions) {
+      return [];
+    }
+
+    const runningSandboxes = agentSessionRegistry.getRunningSandboxes();
+    const entries = Array.from(this.sessions.values()).map((session) => ({
+      id: session.id,
+      lastActiveAt: session.lastActiveAt ?? 0,
+      pinned:
+        session === this.activeSession ||
+        runningSandboxes.has(session.id) ||
+        this.sessionHasRunningCommand(session),
+    }));
+
+    const evicted: string[] = [];
+    for (const sessionId of selectSessionsToEvict(entries, SESSION_POOL_CAP)) {
+      const session = this.sessions.get(sessionId);
+      if (!session || session === this.activeSession) {
+        continue;
+      }
+      // Authoritative probe before the (slow) snapshot: the pinned flags
+      // above came from cached isRunning() answers, which can lag an agent
+      // that just picked up work.
+      if (await this.sessionAgentsBusy(sessionId)) {
+        continue;
+      }
+      try {
+        await persist(sessionId);
+      } catch (error) {
+        console.warn(
+          `[sessions] keeping ${sessionId} live — pre-eviction snapshot failed`,
+          error,
+        );
+        continue;
+      }
+      // The snapshot took real time: the user may have switched here, a
+      // command may have started, or an agent may have picked up work.
+      // Disposing now would kill it mid-task — keep the session live and
+      // let the next switch re-evaluate.
+      if (
+        session === this.activeSession
+        || this.sessionHasRunningCommand(session)
+        || (await this.sessionAgentsBusy(sessionId))
+      ) {
+        continue;
+      }
+      // Drop the sandbox's (non-running) agent sessions from the registry so
+      // a later re-open never routes chat to a disposed terminal.
+      for (const agent of agentSessionRegistry.getSessionsForSandbox(
+        sessionId,
+      )) {
+        agentSessionRegistry.clearActive(agent.tabId);
+      }
+      if (session.container?.vfs) {
+      this.keychain?.detachAuxiliaryVfs?.(session.container.vfs);
+    }
+      try {
+        session.dispose();
+      } catch (error) {
+        console.warn(`[sessions] error disposing ${sessionId}`, error);
+      }
+      this.sessions.delete(sessionId);
+      evicted.push(sessionId);
+    }
+    return evicted;
+  }
+
+  /**
+   * Awaited busy probe across a sandbox's registered agent sessions —
+   * `isBusy` (fresh fetch) when the session provides one, else its sync
+   * `isRunning`. A probe failure counts as busy: never green-light
+   * disposing a sandbox on a broken signal.
+   */
+  private async sessionAgentsBusy(sessionId: string): Promise<boolean> {
+    for (const agent of agentSessionRegistry.getSessionsForSandbox(
+      sessionId,
+    )) {
+      try {
+        if (agent.isBusy ? await agent.isBusy() : agent.isRunning()) {
+          return true;
+        }
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** repoId shown by the active session (sandbox or repo base), or null. */
+  private getActiveRepoId(): string | null {
+    const sessionId = this.sessionState?.id;
+    if (sessionId !== undefined) {
+      const sandboxRepoId = this.sandboxSessionRepoIds?.get(sessionId);
+      if (sandboxRepoId) {
+        return sandboxRepoId;
+      }
+      const boundProjectId = this.getProjectIdForSession(sessionId);
+      if (boundProjectId) {
+        return boundProjectId;
+      }
+    }
+    return this.activeProjectId;
+  }
+
+  /**
+   * An edit (or write-capable launch) was attempted on a read-only repo
+   * base. Phase 5 turns this into create-sandbox UX; for now warn and
+   * broadcast so the sidebar can react.
+   */
+  private handleAttemptedMainEdit(): void {
+    console.warn(
+      "[sandbox] Edit refused: this repo's main is read-only. Create a sandbox to make changes.",
+    );
+    window.dispatchEvent(
+      new CustomEvent(FORK_REQUESTED_EVENT, {
+        detail: { repoId: this.getActiveRepoId() },
+      }),
+    );
+  }
+
+  /**
+   * True (and the fork-requested event fired) when an agent launch must be
+   * refused because the active session is a read-only repo base. Call sites
+   * use optional invocation — launcher unit tests run prototype methods
+   * against bare stubs.
+   */
+  private refuseAgentLaunchOnReadOnlyMain(): boolean {
+    if (this.sessionState?.readOnly !== true) {
+      return false;
+    }
+    this.handleAttemptedMainEdit();
+    return true;
   }
 
   /**
@@ -3057,6 +4564,7 @@ export class WebIDEHost {
 
   private writeTerminal(tab: TerminalTabState, text: string): void {
     if (!text) return;
+    tab.lastOutputAt = Date.now();
     tab.terminal.write(normalizeTerminalOutput(text));
   }
 
@@ -3431,6 +4939,14 @@ export class WebIDEHost {
   }
 
   private async revealOpenCodeSidebarView(focus: boolean): Promise<void> {
+    if (!focus) {
+      // Background launches (startup auto-launch, chat-initiated sessions)
+      // must not pop the inner sidebar open: the workbench opens with every
+      // part closed — just the editor body with the preview tab. The TUI
+      // mounts offscreen into its surface tab either way and attaches when
+      // the user opens the AI view.
+      return;
+    }
     const paneCompositeService = await getService(IPaneCompositePartService);
     setPartVisibility(Parts.SIDEBAR_PART, true);
     await paneCompositeService.openPaneComposite(
@@ -3438,9 +4954,7 @@ export class WebIDEHost {
       ViewContainerLocation.Sidebar,
       focus,
     );
-    if (focus) {
-      this.openCodeSurface.focus();
-    }
+    this.openCodeSurface.focus();
   }
 
   private getClaudeLauncherAvailable(): boolean {
@@ -3561,6 +5075,10 @@ export class WebIDEHost {
     }
     if (readChatPlanMode()) {
       parts.push("--permission-mode", "plan");
+    } else {
+      // Browser sandboxes are isolated per session: skip permission prompts
+      // entirely so the agent never blocks on TUI-only approval asks.
+      parts.push("--permission-mode", "bypassPermissions");
     }
     if (options?.resumeToken) {
       parts.push("--resume", this.quoteShellArg(options.resumeToken));
@@ -3591,6 +5109,10 @@ export class WebIDEHost {
       args?: OpenCodeBrowserLaunchArgs;
     },
   ): Promise<void> {
+    if (this.refuseAgentLaunchOnReadOnlyMain?.()) {
+      return;
+    }
+
     if (this.agentMode === "host") {
       await this.revealTerminalPanel(focus);
       void this.createHostAgentTerminalTab(focus);
@@ -3602,6 +5124,9 @@ export class WebIDEHost {
       return;
     }
 
+    // The launch may outlive a session switch: keep writing tab state to the
+    // session that owns this tab, not whichever session is active later.
+    const owningSession = this.sessionState;
     this.openCodeSidebarCounter += 1;
     const id = `opencode-sidebar-${crypto.randomUUID()}`;
     const title = options?.title ?? `OpenCode ${this.openCodeSidebarCounter}`;
@@ -3613,7 +5138,7 @@ export class WebIDEHost {
       element: host,
       closable: true,
     });
-    this.openCodeSidebarTabs.set(id, {
+    owningSession.openCodeSidebarTabs.set(id, {
       id,
       title,
       host,
@@ -3624,33 +5149,58 @@ export class WebIDEHost {
 
     try {
       const session = await mountOpenCodeBrowserSession({
-        container: this.container,
+        container: owningSession.container,
         element: host,
         cwd: WORKSPACE_ROOT,
         env: {},
+        opencodeDirectory: this.openCodeDirectoryForSession(owningSession.id),
         args: options?.args,
         themeMode: this.workbenchThemeKind,
         onTitleChange: (nextTitle) => {
           const resolvedTitle = nextTitle?.trim() || title;
           this.openCodeSurface.updateTabTitle(id, resolvedTitle);
+          // The TUI titles the tab once its session exists/renames — the
+          // moment the chat becomes listable in the sidebar.
+          window.dispatchEvent(new CustomEvent(AGENT_THREAD_UPDATED_EVENT));
         },
       });
 
-      this.openCodeSidebarTabs.set(id, { id, title, host, session });
+      owningSession.openCodeSidebarTabs.set(id, { id, title, host, session });
       this.openCodeSurface.updateTabStatus(id, "OpenCode ready");
       // No terminal stdin exists for the DOM-mounted TUI; chat sends go
       // through the shared opencode server's TUI prompt routes instead.
+      // Running means the agent is actually processing (the server's
+      // SessionStatus for this directory) — an idle-but-open TUI must not
+      // pin its sandbox in the session pool forever.
       agentSessionRegistry.setActive({
         harness: "opencode",
         tabId: id,
         startedAt: Date.now(),
+        sandboxId: owningSession.id,
+        threadId: options?.args?.sessionID ?? null,
         resumeToken: options?.args?.sessionID ?? null,
         sendInput: () => {},
-        isRunning: () => this.openCodeSidebarTabs.has(id),
+        isRunning: () =>
+          owningSession.openCodeSidebarTabs.has(id) && session.isAgentBusy(),
+        isBusy: () =>
+          owningSession.openCodeSidebarTabs.has(id)
+            ? session.refreshAgentBusy()
+            : Promise.resolve(false),
       });
+      window.dispatchEvent(new CustomEvent(AGENT_THREAD_UPDATED_EVENT));
 
       void session.exited.finally(() => {
-        if (!this.openCodeSidebarTabs.has(id)) {
+        if (!owningSession.openCodeSidebarTabs.has(id)) {
+          return;
+        }
+
+        if (this.sessionState !== owningSession) {
+          // The TUI exited while its sandbox was in the background: the
+          // surface no longer shows the tab, so drop the parked state.
+          owningSession.openCodeSidebarTabs.delete(id);
+          owningSession.detachedTabBodies.delete(id);
+          agentSessionRegistry.clearActive(id);
+          window.dispatchEvent(new CustomEvent(AI_SIDEBAR_TAB_CLOSED_EVENT));
           return;
         }
 
@@ -3658,10 +5208,10 @@ export class WebIDEHost {
       });
     } catch (error) {
       console.error("[opencode] failed to start sidebar session", error);
-      this.openCodeSidebarTabs.delete(id);
+      owningSession.openCodeSidebarTabs.delete(id);
       this.openCodeSurface.removeTab(id);
-      if (this.activeOpenCodeSidebarTabId === id) {
-        this.activeOpenCodeSidebarTabId = null;
+      if (owningSession.activeOpenCodeSidebarTabId === id) {
+        owningSession.activeOpenCodeSidebarTabId = null;
       }
       const message = error instanceof Error ? error.message : String(error);
       const fallbackTab = this.createAiSidebarTerminalTab(focus, {
@@ -3707,6 +5257,10 @@ export class WebIDEHost {
       focus?: boolean;
     },
   ): Promise<void> {
+    if (this.refuseAgentLaunchOnReadOnlyMain?.()) {
+      return;
+    }
+
     const focus = options?.focus ?? true;
     if (this.agentMode === "host") {
       await this.revealTerminalPanel(focus);
@@ -3845,6 +5399,7 @@ export class WebIDEHost {
         element: host,
         cwd: initialShellState.cwd,
         env: initialShellState.env,
+        opencodeDirectory: this.openCodeDirectoryForActiveSession(),
         themeMode: this.workbenchThemeKind,
         onTitleChange: (nextTitle) => {
           const resolvedTitle = nextTitle?.trim() || title;
@@ -6341,6 +7896,23 @@ export class WebIDEHost {
       }
     }
 
+    // Typed agent launches (claude/codex) are refused on a read-only repo
+    // base just like button-driven launches — the fork-requested event has
+    // already fired by the time the message prints.
+    if (
+      this.agentMode === "browser" &&
+      this.detectChatAgentHarness(tab, trimmed) !== null &&
+      this.refuseAgentLaunchOnReadOnlyMain?.()
+    ) {
+      this.writeTerminal(
+        tab,
+        "This repo's main is read-only — create a sandbox to run agents.\n",
+      );
+      this.updateTerminalStatus(tab, "Read-only main");
+      this.printPrompt(tab);
+      return;
+    }
+
     if (!(await this.keychain.prepareForCommand(trimmed))) {
       if (shouldPrepareFlyAuthPopup) {
         cancelPreparedFlyAuthPopup();
@@ -6381,13 +7953,27 @@ export class WebIDEHost {
     const chatHarness =
       this.agentMode === "browser" ? this.detectChatAgentHarness(tab, trimmed) : null;
     if (chatHarness) {
+      const resumeToken = extractResumeToken(trimmed);
+      // Busy = the TUI produced output (or got input) recently. A CLI
+      // sitting idle at its prompt stops pinning its sandbox; the launch
+      // itself stamps activity so a just-started agent counts immediately.
+      tab.lastOutputAt = Date.now();
+      const agentCliBusy = () =>
+        Boolean(tab.runningAbortController)
+        && Date.now() - (tab.lastOutputAt ?? 0) < AGENT_CLI_OUTPUT_IDLE_MS;
       agentSessionRegistry.setActive({
         harness: chatHarness,
         tabId: tab.id,
         startedAt: Date.now(),
-        resumeToken: extractResumeToken(trimmed),
-        sendInput: (data) => tab.session.sendInput(data),
-        isRunning: () => Boolean(tab.runningAbortController),
+        sandboxId: this.sessionState?.id,
+        threadId: resumeToken,
+        resumeToken,
+        sendInput: (data) => {
+          tab.lastOutputAt = Date.now();
+          tab.session.sendInput(data);
+        },
+        isRunning: agentCliBusy,
+        isBusy: () => Promise.resolve(agentCliBusy()),
         ready:
           chatHarness === "claude" && this.claudeIdeBridge
             ? this.waitForClaudeIdeReady()
@@ -6511,6 +8097,7 @@ export class WebIDEHost {
       container: this.container,
       cwd: WORKSPACE_ROOT,
       env: {},
+      opencodeDirectory: this.openCodeDirectoryForActiveSession(),
     });
   }
 
@@ -6529,17 +8116,25 @@ export class WebIDEHost {
     await this.runCommand(this.getPreviewTerminalTab(), command);
   }
 
-  private registerWorkbenchShellCommands(): void {
-    if (typeof this.container.registerShellCommand !== "function") {
+  /**
+   * Install the workbench's custom shell commands (codex, webide-open,
+   * app-building) into a session container. Every session gets its own
+   * container, so this MUST run per session — not just once at startup —
+   * or the commands only exist in the bootstrap session.
+   */
+  private registerWorkbenchShellCommands(
+    container: ContainerInstance = this.container,
+  ): void {
+    if (typeof container.registerShellCommand !== "function") {
       return;
     }
 
-    registerWebIdeCodexCliShellCommand(this.container, {
+    registerWebIdeCodexCliShellCommand(container, {
       cwd: WORKSPACE_ROOT,
       requestBrowserLogin: async ({ login, context }) => {
         const result = await runCodexBrowserLogin({
           method: login.type,
-          vfs: this.container.vfs,
+          vfs: container.vfs,
           signal: context.signal,
           writeStdout: context.writeStdout,
         });
@@ -6552,7 +8147,7 @@ export class WebIDEHost {
       },
     });
 
-    this.container.registerShellCommand({
+    container.registerShellCommand({
       name: "webide-open",
       interceptShellParsing: true,
       execute: async (args, context) => {
@@ -6584,7 +8179,7 @@ export class WebIDEHost {
       },
     });
 
-    this.container.registerShellCommand({
+    container.registerShellCommand({
       name: "app-building",
       interceptShellParsing: true,
       execute: async (args, context) => {
@@ -8985,6 +10580,9 @@ export class WebIDEHost {
       this.container.vfs,
       WORKSPACE_ROOT,
     );
+    provider.onReadOnlyWriteAttempt(() => this.handleAttemptedMainEdit());
+    provider.setReadOnly(this.sessionState?.readOnly === true);
+    this.vfsProvider = provider;
     registerFileSystemOverlay(1, provider);
 
     const { client, baseUrl } = this.resolveMarketplaceClient();
@@ -9372,15 +10970,24 @@ export class WebIDEHost {
         activeName,
         this.container.vfs,
         getIdbPath(activeName, namespace),
+        namespace,
       );
       console.log(`[pglite] Database "${activeName}" ready`);
 
-      // Register middleware
-      if (!this.pgliteMiddleware) {
+      // Register ONE host-level middleware on the singleton bridge. It is
+      // port-aware: each request resolves the namespace of the sandbox
+      // whose container owns the receiving port, so a background sandbox's
+      // app reads its own database — never the foreground one's.
+      if (!this.hostPgliteMiddleware) {
         const { createPGliteMiddleware } =
           await import("../../../../packages/almostnode/src/pglite/bridge-middleware");
-        this.pgliteMiddleware = createPGliteMiddleware();
-        this.container.serverBridge.registerMiddleware(this.pgliteMiddleware);
+        this.hostPgliteMiddleware = createPGliteMiddleware({
+          resolveNamespaceForPort: (port) =>
+            this.resolveDatabaseNamespaceForPort(port),
+        });
+        this.container.serverBridge.registerMiddleware(
+          this.hostPgliteMiddleware,
+        );
       }
 
       // Set active DB on preview surface
@@ -9389,12 +10996,18 @@ export class WebIDEHost {
       // Update database panel
       this.databaseSurface.update(listDatabases(namespace), activeName);
 
-      // Set up database browser query handler
+      // Set up database browser query handler (the panel always shows the
+      // foreground sandbox's namespace)
       this.databaseBrowserSurface.setQueryHandler(
         async (operation, body, dbName) => {
           const { handleDatabaseRequest } =
             await import("../../../../packages/almostnode/src/pglite/pglite-database");
-          return handleDatabaseRequest(operation, body, dbName);
+          return handleDatabaseRequest(
+            operation,
+            body,
+            dbName,
+            this.currentProjectDatabaseNamespace,
+          );
         },
       );
       this.databaseBrowserSurface.setDatabase(activeName);
@@ -9411,12 +11024,15 @@ export class WebIDEHost {
             if (currentActive !== name) {
               const { closePGliteInstance, initAndMigrate: initMigrate } =
                 await import("../../../../packages/almostnode/src/pglite/pglite-database");
-              if (currentActive) await closePGliteInstance(currentActive);
+              if (currentActive) {
+                await closePGliteInstance(currentActive, callbackNamespace);
+              }
               setActiveDatabase(name, callbackNamespace);
               await initMigrate(
                 name,
                 this.container.vfs,
                 getIdbPath(name, callbackNamespace),
+                callbackNamespace,
               );
               this.previewSurface.setActiveDb(name);
               this.databaseSurface.update(
@@ -9439,12 +11055,15 @@ export class WebIDEHost {
             const { closePGliteInstance, initAndMigrate: initMigrate } =
               await import("../../../../packages/almostnode/src/pglite/pglite-database");
             const oldActive = getActiveDatabase(callbackNamespace);
-            if (oldActive) await closePGliteInstance(oldActive);
+            if (oldActive) {
+              await closePGliteInstance(oldActive, callbackNamespace);
+            }
             setActiveDatabase(name, callbackNamespace);
             await initMigrate(
               name,
               this.container.vfs,
               getIdbPath(name, callbackNamespace),
+              callbackNamespace,
             );
             this.previewSurface.setActiveDb(name);
             this.databaseSurface.update(listDatabases(callbackNamespace), name);
@@ -9466,6 +11085,7 @@ export class WebIDEHost {
               name,
               this.container.vfs,
               getIdbPath(name, callbackNamespace),
+              callbackNamespace,
             );
             this.databaseSurface.update(
               listDatabases(callbackNamespace),
@@ -9497,6 +11117,7 @@ export class WebIDEHost {
                 newActive,
                 this.container.vfs,
                 getIdbPath(newActive, callbackNamespace),
+                callbackNamespace,
               );
               this.previewSurface.setActiveDb(newActive);
               this.databaseBrowserSurface.setDatabase(newActive);
@@ -9943,40 +11564,7 @@ export class WebIDEHost {
       );
     });
 
-    this.container.on(
-      "server-ready",
-      (port: unknown, url: unknown, metadata: unknown) => {
-        this.handleServerReady(
-          port,
-          url,
-          metadata as ServerRegistrationMetadata | undefined,
-        );
-      },
-    );
-
-    this.container.on("server-unregistered", (port: unknown) => {
-      if (typeof port !== "number" || port !== this.previewPort) {
-        return;
-      }
-
-      this.previewPort = null;
-      this.previewUrl = null;
-      this.previewStartRequested = false;
-      this.previewSourcePickerRuntime = null;
-      this.setPreviewSourcePickerActive(false);
-      this.clearScheduledPreviewStartRetry();
-      if (this.previewMode === "workbench") {
-        this.previewSurface.clear(
-          "Preview server stopped. Run the workspace to start it again.",
-        );
-      }
-      const previewTab = this.previewTerminalTabId
-        ? this.terminalTabs.get(this.previewTerminalTabId)
-        : null;
-      if (previewTab) {
-        this.updateTerminalStatus(previewTab, "Preview server stopped");
-      }
-    });
+    this.subscribeSessionServerEvents(this.activeSession);
 
     logMemory("before service worker init");
     try {

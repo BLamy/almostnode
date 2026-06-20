@@ -70,7 +70,9 @@ function createSyntheticStats(kind: 'file' | 'directory'): Stats {
     isFIFO: () => false,
     isSocket: () => false,
     size: 0,
-    mode: isDirectory ? 0o755 : 0o666,
+    // Include S_IFDIR/S_IFREG type bits like real node — Go WASM binaries
+    // (via syscall/js) classify entries from the raw mode bits.
+    mode: isDirectory ? 0o40755 : 0o100666,
     mtime: new Date(mtime),
     atime: new Date(mtime),
     ctime: new Date(mtime),
@@ -483,7 +485,9 @@ export class VirtualFS {
       isFIFO: () => false,
       isSocket: () => false,
       size,
-      mode: node.type === 'directory' ? 0o755 : 0o644,
+      // Include S_IFDIR/S_IFREG type bits like real node — Go WASM binaries
+      // (via syscall/js) classify entries from the raw mode bits.
+      mode: node.type === 'directory' ? 0o40755 : 0o100644,
       mtime: new Date(mtime),
       atime: new Date(mtime),
       ctime: new Date(mtime),

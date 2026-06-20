@@ -119,6 +119,8 @@ export interface BuildOptions {
   write?: boolean;
   plugins?: unknown[];
   absWorkingDir?: string;
+  /** VFS to resolve/load files from. Falls back to the module-level setVFS() instance. */
+  vfs?: VirtualFS;
 }
 
 export interface BuildResult {
@@ -680,12 +682,11 @@ function findVFSFile(vfs: VirtualFS, originalPath: string, extensions: string[])
  * 2. Relative paths (./file.ts, ../file.ts)
  * 3. Bare imports (convex/server, react)
  */
-function createVFSPlugin(externals?: string[]): unknown {
-  if (!globalVFS) {
+function createVFSPlugin(externals?: string[], vfsOverride?: VirtualFS): unknown {
+  const vfs = vfsOverride ?? globalVFS;
+  if (!vfs) {
     return null;
   }
-
-  const vfs = globalVFS;
 
   return {
     name: 'vfs-loader',
@@ -861,8 +862,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     throw new Error('esbuild not initialized');
   }
 
-  // Add VFS plugin if VFS is available
-  const vfsPlugin = createVFSPlugin(options.external);
+  // Add VFS plugin if VFS is available (per-build VFS wins over setVFS())
+  const buildVFS = options.vfs ?? globalVFS;
+  const vfsPlugin = createVFSPlugin(options.external, options.vfs);
   const plugins = [...(options.plugins || [])];
   if (vfsPlugin) {
     plugins.unshift(vfsPlugin);
@@ -872,7 +874,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   // Path remapping (if any) happens in the VFS plugin's onLoad handler instead,
   // preserving the original paths for esbuild's output file naming.
   let entryPoints = options.entryPoints;
-  if (entryPoints && globalVFS) {
+  if (entryPoints && buildVFS) {
     const absWorkingDir = options.absWorkingDir || (typeof globalThis !== 'undefined' && globalThis.process && typeof globalThis.process.cwd === 'function' ? globalThis.process.cwd() : '/');
     entryPoints = entryPoints.map(ep => {
       // Handle paths that came from previous builds with vfs: namespace prefix
@@ -907,9 +909,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
   // In browser, we need write: false to get outputFiles
   // Pass absWorkingDir so metafile paths are relative to the correct directory
+  // (strip `vfs` — esbuild rejects unknown options)
+  const { vfs: _vfs, ...esbuildOptions } = options;
   const resolvedAbsWorkingDir = options.absWorkingDir || (typeof globalThis !== 'undefined' && globalThis.process && typeof globalThis.process.cwd === 'function' ? globalThis.process.cwd() : '/');
   const result = await esbuildInstance.build({
-    ...options,
+    ...esbuildOptions,
     entryPoints,
     plugins,
     write: false,
@@ -976,3 +980,28 @@ export default {
   setWasmURL,
   setVFS,
 };
+
+/**
+ * Per-runtime esbuild module that injects this runtime's VFS into builds
+ * that don't carry one. The module-level setVFS() fallback is
+ * last-write-wins across containers — a build started by container A after
+ * container B booted would otherwise read B's files.
+ */
+export function createEsbuildModule(vfs: VirtualFS): Record<string, unknown> {
+  const boundBuild = (options: BuildOptions): Promise<BuildResult> =>
+    build({ ...options, vfs: options.vfs ?? vfs });
+  const scoped = {
+    initialize,
+    isInitialized,
+    transform,
+    transformSync,
+    transformToCommonJS,
+    build: boundBuild,
+    buildSync,
+    context,
+    version,
+    setWasmURL,
+    setVFS,
+  };
+  return { ...scoped, default: scoped };
+}

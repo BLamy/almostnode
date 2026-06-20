@@ -152,6 +152,45 @@ describe("CodexHostBridge", () => {
     channel.port2.close();
   });
 
+  it("Add File overwrites an existing file (codex-rs parity)", async () => {
+    const vfs = new FakeVfs();
+    const bridge = createCodexHostBridge({
+      container: {
+        vfs,
+        createTerminalSession: createFakeTerminalSession,
+      },
+    });
+    const channel = new MessageChannel();
+    const clientPort = channel.port2 as unknown as MessagePortLike;
+    bridge.attach(channel.port1 as unknown as MessagePortLike);
+
+    vfs.writeFileSync("/workspace/src/pages/Home.tsx", "old content\n");
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "patch-add-overwrite",
+        op: "fs/applyPatch",
+        params: {
+          cwd: "/workspace",
+          patch:
+            "*** Begin Patch\n*** Add File: src/pages/Home.tsx\n+new homepage\n*** End Patch\n",
+        },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        exitCode: 0,
+        stdout: "Success. Updated the following files:\nA src/pages/Home.tsx\n",
+      },
+    });
+    expect(vfs.readFileSync("/workspace/src/pages/Home.tsx", "utf8")).toBe(
+      "new homepage\n",
+    );
+
+    bridge.dispose();
+    channel.port2.close();
+  });
+
   it("runs commands through TerminalSession and streams output deltas", async () => {
     const vfs = new FakeVfs();
     const bridge = createCodexHostBridge({

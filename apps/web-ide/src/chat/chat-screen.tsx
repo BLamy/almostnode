@@ -144,6 +144,25 @@ export function ChatScreen({ host }: ChatScreenProps) {
     [host, selectedHarness],
   );
 
+  const handleRespondToElicitation = useCallback(
+    async (requestId: string, answers: string[][]) => {
+      const adapter = adapterRef.current;
+      if (!adapter?.respondToElicitation) {
+        throw new Error('This agent cannot answer requests from the chat yet.');
+      }
+      await adapter.respondToElicitation(requestId, answers);
+    },
+    [],
+  );
+
+  const handleRejectElicitation = useCallback(async (requestId: string) => {
+    const adapter = adapterRef.current;
+    if (!adapter?.rejectElicitation) {
+      throw new Error('This agent cannot answer requests from the chat yet.');
+    }
+    await adapter.rejectElicitation(requestId);
+  }, []);
+
   const emptyHint = useMemo(() => {
     if (!session) return null;
     if (!adapterRef.current && conversation === null) {
@@ -158,6 +177,8 @@ export function ChatScreen({ host }: ChatScreenProps) {
         messages={conversation?.messages ?? []}
         busy={conversation?.busy ?? false}
         emptyHint={emptyHint}
+        onRespondToElicitation={handleRespondToElicitation}
+        onRejectElicitation={handleRejectElicitation}
       />
       <ChatComposer
         activeHarness={session?.harness ?? null}

@@ -9,8 +9,22 @@ import { Buffer } from '../shims/stream';
 
 const DB_PREFIX = '/__db__/';
 
-export function createPGliteMiddleware(): RequestMiddleware {
-  return async (_port, _method, url, _headers, body) => {
+export interface PGliteMiddlewareOptions {
+  /**
+   * Maps the virtual-server port that received the request to the database
+   * namespace of the sandbox owning that port. Without it every sandbox's
+   * /__db__/ requests resolve against the page-global "current" namespace —
+   * i.e. whichever sandbox is in the foreground — so background apps would
+   * read and write the wrong database. Return null/undefined to fall back
+   * to legacy (namespace-less) resolution.
+   */
+  resolveNamespaceForPort?: (port: number) => string | null | undefined;
+}
+
+export function createPGliteMiddleware(
+  options: PGliteMiddlewareOptions = {},
+): RequestMiddleware {
+  return async (port, _method, url, _headers, body) => {
     // Parse URL to check path
     const questionMark = url.indexOf('?');
     const pathname = questionMark >= 0 ? url.slice(0, questionMark) : url;
@@ -38,7 +52,13 @@ export function createPGliteMiddleware(): RequestMiddleware {
       }
     }
 
-    const result = await handleDatabaseRequest(operation, parsedBody, dbName);
+    const namespace = options.resolveNamespaceForPort?.(port) ?? undefined;
+    const result = await handleDatabaseRequest(
+      operation,
+      parsedBody,
+      dbName,
+      namespace,
+    );
 
     return {
       statusCode: result.statusCode,

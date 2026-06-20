@@ -9,6 +9,11 @@ const SHARED_TEMPLATE_DIRECTORY = path.join(TEMPLATES_ROOT, '_shared');
 const PROJECT_METADATA_DIRECTORY = '.almostnode';
 const PROJECT_METADATA_PATH = path.join(PROJECT_METADATA_DIRECTORY, 'project.json');
 
+function getTemplateSourceDirectoryName(templateId: TemplateId): string {
+  if (templateId === 'next') return 'nextjs';
+  return templateId;
+}
+
 function walkFiles(directoryPath: string): string[] {
   const entries = fs.readdirSync(directoryPath, { withFileTypes: true });
   const files: string[] = [];
@@ -60,7 +65,7 @@ export function seedProjectDirectoryFromTemplate(
   fs.mkdirSync(absoluteProjectDirectory, { recursive: true });
 
   copyTreeIntoDirectory(SHARED_TEMPLATE_DIRECTORY, absoluteProjectDirectory);
-  copyTreeIntoDirectory(path.join(TEMPLATES_ROOT, templateId), absoluteProjectDirectory, {
+  copyTreeIntoDirectory(path.join(TEMPLATES_ROOT, getTemplateSourceDirectoryName(templateId)), absoluteProjectDirectory, {
     overwrite: true,
   });
 

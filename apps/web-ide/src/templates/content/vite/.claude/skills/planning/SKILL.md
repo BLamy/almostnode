@@ -7,11 +7,20 @@ description: Structured implementation workflows for common Vite template tasks 
 
 Structured approaches for different task types. Pick the workflow that matches your task, then follow the steps in order.
 
+## OpenAPI Contract Requirement
+
+Every plan must include an `API Contract` section written as OpenAPI 3.1 before implementation steps.
+
+- Load the [GitBook OpenAPI skill](../gitbook-openapi/SKILL.md) when writing the plan.
+- If the task adds or changes endpoints, fetch calls, server actions, RPC handlers, request payloads, response payloads, auth behavior, or error states, write the affected OpenAPI 3.1 spec.
+- If the task has no API impact, include a minimal OpenAPI 3.1 spec with `paths: {}` and an `x-notes.noApiChanges` explanation.
+- Use GitBook-compatible Markdown and titled `openapi.yaml` code blocks or `openapi-operation` blocks so the plan renders as GitBook docs.
+
 ## New Feature Workflow
 
 **Use when:** Adding new functionality (new page, new component, new data model).
 
-1. **Spec** — Clarify what the feature does. What data does it need? What does the UI look like? What user actions does it support?
+1. **Spec** — Clarify what the feature does. What data does it need? What does the UI look like? What user actions does it support? Include the OpenAPI 3.1 contract for every affected route or `paths: {}` if no API changes.
 2. **Schema** — If it needs new data, design the Drizzle schema first. Define tables, columns, relationships.
 3. **Migration** — Generate and apply the migration before writing any frontend code.
 4. **Components** — Build the React components. Start with the data display, then add interactivity.
@@ -27,7 +36,7 @@ Structured approaches for different task types. Pick the workflow that matches y
 
 **Use when:** Something is broken and needs fixing.
 
-1. **Triage** — Read the error. Classify it using the [debugging skill](../debugging/SKILL.md). Is it a rendering issue? Data issue? Timing issue?
+1. **Triage** — Read the error. Classify it using the [debugging skill](../debugging/SKILL.md). Is it a rendering issue? Data issue? Timing issue? Capture the expected API contract before changing behavior.
 2. **Diagnose** — Use the right diagnostic tool for the failure type. Check console, snapshot, database state.
 3. **Fix** — Make the minimal change that fixes the root cause. Don't refactor unrelated code.
 4. **Verify** — Confirm the fix works AND nothing else broke. Check console errors, run the user flow, verify database state.
@@ -41,7 +50,7 @@ Structured approaches for different task types. Pick the workflow that matches y
 
 **Use when:** Modifying the database schema (adding columns, changing types, adding tables).
 
-1. **Design** — Write the new schema in `src/db/schema.ts`. Consider: nullability, defaults, indexes, foreign keys.
+1. **Design** — Write the new schema in `src/db/schema.ts` and update the OpenAPI 3.1 schemas for any affected data returned by APIs. Consider: nullability, defaults, indexes, foreign keys.
 2. **Generate Migration** — `drizzle-kit generate --name <description> --force`
 3. **Review SQL** — Read the generated migration file. Make sure it does what you expect.
 4. **Apply** — `drizzle-kit migrate --force`
@@ -58,7 +67,7 @@ Structured approaches for different task types. Pick the workflow that matches y
 
 **Use when:** Styling changes, layout adjustments, component modifications that don't touch data.
 
-1. **Design** — What should change visually? Reference existing design patterns in the app.
+1. **Design** — What should change visually? Reference existing design patterns in the app. Include an `API Contract` section with `paths: {}` and an explicit no-API-impact note.
 2. **Implement** — Make the changes. Use Tailwind classes, shadcn/ui components.
 3. **Verify** — `playwright-cli screenshot` + `playwright-cli snapshot` to confirm it looks right and is accessible.
 

@@ -5,14 +5,18 @@ import { almostnodeDebugLog } from "./utils/debug";
 import type { InstallMode, PackageManagerMutationSummary } from "./npm";
 import {
   createNetworkController,
+  hasExplicitDefaultNetworkController,
   NETWORK_ENV_KEYS,
   setDefaultNetworkController,
 } from "./network";
 import { ServerBridge, getServerBridge } from "./server-bridge";
+import type { ServerRegistrationMetadata } from "./server-bridge";
 import {
+  disposeChildProcessController,
   initChildProcess,
   stripInternalChildProcessEnv,
 } from "./shims/child_process";
+import { closeServersByOwner as closeHttpServersByOwner } from "./shims/http";
 import type { ShellCommandDefinition } from "./shell-commands";
 import type { IExecuteResult } from "./runtime-interface";
 import type { WorkspaceSearchProvider } from "./shims/child_process";
@@ -105,6 +109,8 @@ export interface ContainerOptions extends RuntimeOptions {
 }
 
 export interface ContainerInstance {
+  /** Unique id for this container (used as ServerRegistrationMetadata.ownerId). */
+  id: string;
   vfs: VirtualFS;
   runtime: Runtime;
   network: NetworkController;
@@ -123,7 +129,12 @@ export interface ContainerInstance {
   on: (event: string, listener: (...args: unknown[]) => void) => void;
   setKeychain: (kc: { persistCurrentState(): Promise<void> }) => void;
   setSearchProvider: (provider: WorkspaceSearchProvider) => void;
-  setHMRTargetForPort: (port: number, targetWindow: Window) => void;
+  setHMRTargetForPort: (port: number, targetWindow: Window | null) => void;
+  /**
+   * Tear down this container: abort running commands, stop its framework dev
+   * servers, and unregister its servers from the shared bridge.
+   */
+  dispose: () => void;
 }
 
 const GIT_ENV_KEYS = [
@@ -163,6 +174,7 @@ function gitAuthToEnv(auth: GitAuthOptions): Record<string, string> {
 }
 
 export function createContainer(options?: ContainerOptions): ContainerInstance {
+  const containerId = crypto.randomUUID();
   const baseEnv: Record<string, string> = { ...(options?.env || {}) };
   let gitAuth = sanitizeGitAuth(options?.git);
   const vfs = new VirtualFS();
@@ -170,13 +182,18 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     options?.network,
     options?.networkIntegration ?? null,
   );
-  setDefaultNetworkController(networkController);
+  // Set-if-unset: the first container becomes the page default; later
+  // containers keep their controller scoped via runtimeOptions.networkController.
+  if (!hasExplicitDefaultNetworkController()) {
+    setDefaultNetworkController(networkController);
+  }
   const childProcessController = initChildProcess(vfs, {
     installMode: options?.installMode,
+    containerId,
     onInstallMutation: async (summary: PackageManagerMutationSummary) => {
       if (summary.touchesNodeModules) {
         const { clearNpmBundleCache } = await import("./frameworks/npm-serve");
-        clearNpmBundleCache();
+        clearNpmBundleCache(vfs);
       }
 
       if (!(summary.touchesNodeModules || summary.touchesPackageJson)) {
@@ -207,6 +224,8 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     env: resolveCommandEnv(),
     childProcessController,
     networkController,
+    // Servers created inside this runtime attribute to this container.
+    ownerId: containerId,
   };
   const runtime = new Runtime(vfs, runtimeOptions);
   const npmManager = new PackageManager(vfs, {
@@ -217,8 +236,24 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
   const serverBridge = getServerBridge({
     baseUrl: options?.baseUrl,
     basePath: options?.basePath,
-    onServerReady: options?.onServerReady,
   });
+
+  // Subscribe via the bridge event rather than BridgeOptions.onServerReady:
+  // the bridge is a singleton, so constructor options from the 2nd+ container
+  // would be silently ignored. Filter to servers this container owns (servers
+  // registered without an ownerId — e.g. raw http.listen — notify everyone).
+  const handleServerReady = (...args: unknown[]) => {
+    const [port, url, metadata] = args as [
+      number,
+      string,
+      ServerRegistrationMetadata | undefined,
+    ];
+    if (metadata?.ownerId && metadata.ownerId !== containerId) return;
+    options?.onServerReady?.(port, url);
+  };
+  if (options?.onServerReady) {
+    serverBridge.on("server-ready", handleServerReady);
+  }
 
   const syncRuntimeEnvWithGitAuth = () => {
     const proc = runtime.getProcess();
@@ -246,6 +281,9 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     return next;
   };
 
+  // Tracked so dispose() can abort everything this container is running.
+  const activeAbortControllers = new Set<AbortController>();
+
   const createLinkedAbortController = (
     signal?: AbortSignal,
   ): {
@@ -253,20 +291,25 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     cleanup: () => void;
   } => {
     const controller = new AbortController();
+    activeAbortControllers.add(controller);
+    const untrack = () => activeAbortControllers.delete(controller);
     if (!signal) {
-      return { controller, cleanup: () => {} };
+      return { controller, cleanup: untrack };
     }
 
     if (signal.aborted) {
       controller.abort();
-      return { controller, cleanup: () => {} };
+      return { controller, cleanup: untrack };
     }
 
     const onAbort = () => controller.abort();
     signal.addEventListener("abort", onAbort, { once: true });
     return {
       controller,
-      cleanup: () => signal.removeEventListener("abort", onAbort),
+      cleanup: () => {
+        untrack();
+        signal.removeEventListener("abort", onAbort);
+      },
     };
   };
 
@@ -433,7 +476,28 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     };
   };
 
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    serverBridge.off("server-ready", handleServerReady);
+    for (const controller of activeAbortControllers) {
+      controller.abort();
+    }
+    activeAbortControllers.clear();
+    // Stops framework dev servers (which unregister their bridge ports) and
+    // drops the controller from the child_process registries.
+    disposeChildProcessController(childProcessController);
+    // Raw `node server.js` servers outlive their terminal command by
+    // design, so nothing above closed them — and the http server registry
+    // is page-global. Close them or this container's ports would
+    // EADDRINUSE every other container until a page reload.
+    closeHttpServersByOwner(containerId);
+    serverBridge.unregisterServersByOwner(containerId);
+  };
+
   return {
+    id: containerId,
     vfs,
     runtime,
     network: networkController,
@@ -487,7 +551,7 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
     setSearchProvider: (provider: WorkspaceSearchProvider) => {
       childProcessController.searchProvider = provider;
     },
-    setHMRTargetForPort: (port: number, targetWindow: Window) => {
+    setHMRTargetForPort: (port: number, targetWindow: Window | null) => {
       for (const server of childProcessController.frameworkDevServers.values()) {
         if (server.port === port) {
           server.setHMRTarget?.(targetWindow);
@@ -495,6 +559,7 @@ export function createContainer(options?: ContainerOptions): ContainerInstance {
         }
       }
     },
+    dispose,
   };
 }
 

@@ -159,4 +159,163 @@ describe('agent session registry', () => {
     registry.setActive(makeSession({ isRunning: () => false }));
     await expect(registry.sendUserText('hello')).rejects.toThrow();
   });
+
+  it('tracks sessions from multiple sandboxes; register does not steal focus', () => {
+    const registry = new AgentSessionRegistry();
+    const main = makeSession({ tabId: 'tab-main', sandboxId: 'sb-main' });
+    const background = makeSession({ tabId: 'tab-bg', sandboxId: 'sb-bg' });
+    registry.setActive(main);
+    registry.register(background);
+
+    expect(registry.getActive()).toBe(main);
+    expect(registry.getSessionsForSandbox('sb-main')).toEqual([main]);
+    expect(registry.getSessionsForSandbox('sb-bg')).toEqual([background]);
+    expect(registry.getSessionsForSandbox('sb-other')).toEqual([]);
+  });
+
+  it('getRunningSandboxes reflects isRunning flips', () => {
+    const registry = new AgentSessionRegistry();
+    let aRunning = true;
+    let bRunning = true;
+    registry.register(
+      makeSession({ tabId: 'tab-a', sandboxId: 'sb-a', isRunning: () => aRunning }),
+    );
+    registry.register(
+      makeSession({ tabId: 'tab-b', sandboxId: 'sb-b', isRunning: () => bRunning }),
+    );
+    // Sessions without a sandboxId never contribute to running sandboxes.
+    registry.register(makeSession({ tabId: 'tab-legacy' }));
+
+    expect(registry.getRunningSandboxes()).toEqual(new Set(['sb-a', 'sb-b']));
+    aRunning = false;
+    expect(registry.getRunningSandboxes()).toEqual(new Set(['sb-b']));
+    bRunning = false;
+    expect(registry.getRunningSandboxes()).toEqual(new Set());
+  });
+
+  it('clearActive of a background tab does not disturb the active session', () => {
+    const registry = new AgentSessionRegistry();
+    const main = makeSession({ tabId: 'tab-main', sandboxId: 'sb-main' });
+    const background = makeSession({ tabId: 'tab-bg', sandboxId: 'sb-bg' });
+    registry.setActive(main);
+    registry.register(background);
+
+    registry.clearActive('tab-bg');
+    expect(registry.getActive()).toBe(main);
+    expect(registry.getSessionsForSandbox('sb-bg')).toEqual([]);
+    expect(registry.getSessionsForSandbox('sb-main')).toEqual([main]);
+  });
+
+  it('deactivate detaches the chat but keeps the session registered', () => {
+    const registry = new AgentSessionRegistry();
+    const session = makeSession({ tabId: 'tab-1', sandboxId: 'sb-1' });
+    registry.setActive(session);
+    registry.deactivate();
+
+    expect(registry.getActive()).toBeNull();
+    expect(registry.getSessionsForSandbox('sb-1')).toEqual([session]);
+    expect(registry.getRunningSandboxes()).toEqual(new Set(['sb-1']));
+  });
+
+  it('setActiveByTab routes chat to a registered background session', () => {
+    const registry = new AgentSessionRegistry();
+    const main = makeSession({ tabId: 'tab-main' });
+    const background = makeSession({ tabId: 'tab-bg' });
+    registry.setActive(main);
+    registry.register(background);
+
+    registry.setActiveByTab('tab-bg');
+    expect(registry.getActive()).toBe(background);
+
+    // Unknown tabs are ignored.
+    registry.setActiveByTab('tab-missing');
+    expect(registry.getActive()).toBe(background);
+  });
+
+  it('subscribeAll emits immediately and after every mutation', () => {
+    const registry = new AgentSessionRegistry();
+    const emissions: string[][] = [];
+    const unsubscribe = registry.subscribeAll((sessions) =>
+      emissions.push(sessions.map((session) => session.tabId)),
+    );
+    expect(emissions).toEqual([[]]);
+
+    registry.register(makeSession({ tabId: 'tab-1', sandboxId: 'sb-1' }));
+    registry.setActive(makeSession({ tabId: 'tab-2', sandboxId: 'sb-2' }));
+    registry.clearActive('tab-1');
+    // deactivate changes the active session only; the list re-emits unchanged.
+    registry.deactivate();
+    expect(emissions).toEqual([
+      [],
+      ['tab-1'],
+      ['tab-1', 'tab-2'],
+      ['tab-2'],
+      ['tab-2'],
+    ]);
+
+    unsubscribe();
+    registry.register(makeSession({ tabId: 'tab-3' }));
+    expect(emissions).toHaveLength(5);
+  });
+
+  it('startNewChat suppresses auto-activate for that sandbox once', () => {
+    const registry = new AgentSessionRegistry();
+    const running = makeSession({ tabId: 'tab-old', sandboxId: 'sb-1' });
+    registry.setActive(running);
+
+    registry.startNewChat('sb-1');
+    expect(registry.getActive()).toBeNull();
+    // The session stays registered, but attaching the sandbox must not
+    // route chat back to it.
+    expect(registry.shouldSuppressAutoActivate('sb-1')).toBe(true);
+    // The intent is consumed: a later attach reattaches as usual.
+    expect(registry.shouldSuppressAutoActivate('sb-1')).toBe(false);
+  });
+
+  it('startNewChat does not suppress auto-activate for other sandboxes', () => {
+    const registry = new AgentSessionRegistry();
+    registry.startNewChat('sb-1');
+    expect(registry.shouldSuppressAutoActivate('sb-other')).toBe(false);
+    // Intent for sb-1 survives an attach of another sandbox.
+    expect(registry.shouldSuppressAutoActivate('sb-1')).toBe(true);
+  });
+
+  it('activating any session clears the pending new-chat intent', () => {
+    const registry = new AgentSessionRegistry();
+    const background = makeSession({ tabId: 'tab-bg', sandboxId: 'sb-1' });
+    registry.register(background);
+
+    registry.startNewChat('sb-1');
+    registry.setActiveByTab('tab-bg');
+    expect(registry.shouldSuppressAutoActivate('sb-1')).toBe(false);
+
+    registry.startNewChat('sb-1');
+    registry.setActive(makeSession({ tabId: 'tab-new', sandboxId: 'sb-1' }));
+    expect(registry.shouldSuppressAutoActivate('sb-1')).toBe(false);
+  });
+
+  it('suppresses auto-activate while a launch is in flight', () => {
+    const registry = new AgentSessionRegistry();
+    registry.beginLaunch();
+    expect(registry.shouldSuppressAutoActivate('sb-any')).toBe(true);
+
+    registry.setActive(makeSession({ tabId: 'tab-1', sandboxId: 'sb-any' }));
+    expect(registry.shouldSuppressAutoActivate('sb-any')).toBe(false);
+  });
+
+  it('sendUserText routes to the active session only', async () => {
+    vi.useFakeTimers();
+    const registry = new AgentSessionRegistry();
+    const main = makeSession({ tabId: 'tab-main', sandboxId: 'sb-main' });
+    const background = makeSession({ tabId: 'tab-bg', sandboxId: 'sb-bg' });
+    registry.setActive(main);
+    registry.register(background);
+
+    const send = registry.sendUserText('hello');
+    await vi.advanceTimersByTimeAsync(100);
+    await send;
+    expect(main.inputs).toEqual(['[200~hello[201~', '\r']);
+    expect(background.inputs).toEqual([]);
+    vi.useRealTimers();
+  });
 });

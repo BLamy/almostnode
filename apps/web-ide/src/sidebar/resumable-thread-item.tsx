@@ -3,6 +3,8 @@ import type { ResumableThreadRecord } from '../features/project-db';
 interface ResumableThreadItemProps {
   thread: ResumableThreadRecord;
   isActive: boolean;
+  /** The thread's agent session is currently running (Codex-style spinner). */
+  isRunning?: boolean;
   onSelect: (id: string) => void;
 }
 
@@ -39,6 +41,7 @@ function HarnessIcon({ harness }: { harness: ResumableThreadRecord['harness'] })
 export function ResumableThreadItem({
   thread,
   isActive,
+  isRunning = false,
   onSelect,
 }: ResumableThreadItemProps) {
   return (
@@ -49,9 +52,17 @@ export function ResumableThreadItem({
     >
       <HarnessIcon harness={thread.harness} />
       <span className="almostnode-thread-item__title">{thread.title}</span>
-      <span className="almostnode-thread-item__time">
-        {formatRelativeTime(thread.updatedAt)}
-      </span>
+      {isRunning ? (
+        <span
+          className="almostnode-sidebar__row-spinner"
+          role="status"
+          aria-label="Agent running"
+        />
+      ) : (
+        <span className="almostnode-thread-item__time">
+          {formatRelativeTime(thread.updatedAt)}
+        </span>
+      )}
     </button>
   );
 }

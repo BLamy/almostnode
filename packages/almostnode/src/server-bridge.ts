@@ -42,6 +42,8 @@ export interface ServerRegistrationMetadata {
   framework?: 'next' | 'vite' | 'wrangler' | 'wrangler-pages' | string;
   root?: string;
   name?: string;
+  /** Container instance that owns this server (ContainerInstance.id). */
+  ownerId?: string;
 }
 
 export interface BridgeOptions {
@@ -67,6 +69,12 @@ export interface InitServiceWorkerOptions {
    * @default '/__sw__.js'
    */
   swUrl?: string;
+  /**
+   * Reload the page the first time the service worker controls it so static
+   * hosts can attach COOP/COEP headers to the navigation response.
+   * @default true
+   */
+  reloadOnFirstControl?: boolean;
 }
 
 /**
@@ -97,9 +105,19 @@ export class ServerBridge extends EventEmitter {
       this.baseUrl = options.baseUrl || 'http://localhost';
     }
 
-    // Set up auto-registration from http module
+    // Set up auto-registration from http module. Raw http.listen servers
+    // carry their owning container id when constructed through a runtime's
+    // owned http module — register it so server-ready events route to that
+    // container only (instead of fanning out to every container) and
+    // dispose can clean up by owner.
     setServerListenCallback((port, server) => {
-      this.registerServer(server, port);
+      const ownerId = server._ownerId;
+      this.registerServer(
+        server,
+        port,
+        '0.0.0.0',
+        ownerId !== undefined ? { ownerId } : undefined,
+      );
     });
 
     setServerCloseCallback((port) => {
@@ -136,6 +154,36 @@ export class ServerBridge extends EventEmitter {
   unregisterServer(port: number): void {
     this.servers.delete(port);
     this.notifyServiceWorker('server-unregistered', { port });
+  }
+
+  /**
+   * Unregister every server registered with the given owner id
+   * (ServerRegistrationMetadata.ownerId). Used by ContainerInstance.dispose().
+   */
+  unregisterServersByOwner(ownerId: string): void {
+    for (const [port, entry] of this.servers) {
+      if (entry.metadata?.ownerId === ownerId) {
+        this.unregisterServer(port);
+      }
+    }
+  }
+
+  /**
+   * Get the registration metadata for a server, if any
+   */
+  getServerMetadata(port: number): ServerRegistrationMetadata | undefined {
+    return this.servers.get(port)?.metadata;
+  }
+
+  /**
+   * Find the first unregistered port at or above the preferred port
+   */
+  findFreePort(preferred: number): number {
+    let port = preferred;
+    while (this.servers.has(port)) {
+      port++;
+    }
+    return port;
   }
 
   /**
@@ -288,8 +336,10 @@ export class ServerBridge extends EventEmitter {
     // like GitHub Pages that can't set custom headers)
     if (!sessionStorage.getItem('__almostnode_sw_init')) {
       sessionStorage.setItem('__almostnode_sw_init', '1');
-      window.location.reload();
-      return;
+      if (options?.reloadOnFirstControl ?? true) {
+        window.location.reload();
+        return;
+      }
     }
 
     // Re-establish communication when the SW loses its port (idle termination)

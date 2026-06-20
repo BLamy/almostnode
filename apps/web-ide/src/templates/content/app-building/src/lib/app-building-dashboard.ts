@@ -146,7 +146,6 @@ export const TASK_STATUS_ORDER: BoardTaskStatus[] = [
 ];
 
 const DB_NAME = 'almostnode-webide';
-const DB_VERSION = 4;
 const ACTIVE_PROJECT_KEY = 'almostnode-active-project-id';
 const CONFIG_STORE = 'app-building-config';
 const JOBS_STORE = 'app-building-jobs';
@@ -157,23 +156,22 @@ const BRIDGE_TIMEOUT_MS = 10 * 60_000;
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(CONFIG_STORE)) {
-        db.createObjectStore(CONFIG_STORE, { keyPath: 'projectId' });
-      }
-      if (!db.objectStoreNames.contains(JOBS_STORE)) {
-        const jobs = db.createObjectStore(JOBS_STORE, { keyPath: 'id' });
-        jobs.createIndex('projectId', 'projectId', { unique: false });
-      }
-    };
+    // Open at the host's CURRENT version — the IDE's project-db owns this
+    // database's schema and migrations. Pinning a version in template code
+    // throws VersionError the moment the IDE bumps its schema, and an
+    // upgrade from the preview could corrupt the host's stores.
+    const request = indexedDB.open(DB_NAME);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
 function txGet<T>(db: IDBDatabase, store: string, key: IDBValidKey): Promise<T | undefined> {
+  if (!db.objectStoreNames.contains(store)) {
+    // The host hasn't created the store yet (fresh install) — same result
+    // as a present-but-empty store.
+    return Promise.resolve(undefined);
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readonly');
     const req = tx.objectStore(store).get(key);
@@ -188,6 +186,9 @@ function txGetAllByIndex<T>(
   indexName: string,
   key: IDBValidKey,
 ): Promise<T[]> {
+  if (!db.objectStoreNames.contains(store)) {
+    return Promise.resolve([]);
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readonly');
     const req = tx.objectStore(store).index(indexName).getAll(key);

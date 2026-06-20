@@ -52,6 +52,10 @@ const OPENCODE_PATH_ALIASES: Record<string, string> = {
 
 const V1_STORAGE_KEY = 'almostnode.webide.claudeAuth.v1';
 export const KEYCHAIN_STORAGE_KEY = 'almostnode.webide.keychain.v2';
+/** Vaults this build failed to parse — auto-recovered once a build can parse them. */
+export const KEYCHAIN_QUARANTINE_KEY = 'almostnode.webide.keychain.v2.quarantine';
+/** Vaults discarded on purpose (deleted creds, invalid payload) — kept for manual recovery only. */
+export const KEYCHAIN_DISCARDED_KEY = 'almostnode.webide.keychain.v2.discarded';
 const KEYCHAIN_VERSION = 2;
 const V1_VERSION = 1;
 
@@ -620,10 +624,20 @@ function parseV1Vault(raw: string | null): StoredV1Vault | null {
 // ── Keychain ─────────────────────────────────────────────────────────────────
 
 export class Keychain {
-  private readonly vfs: VirtualFS;
+  private vfs: VirtualFS;
   private readonly overlayRoot: HTMLElement | null;
   private readonly onStateChange?: (state: KeychainState) => void;
   private watchers: FSWatcher[] = [];
+  /**
+   * VFSes of live BACKGROUND sandbox sessions. Each gets credential
+   * watchers, gets saved credentials restored on unlock, and participates
+   * in the newest-wins snapshot merge — a login performed inside a
+   * background sandbox must reach the vault even while another sandbox is
+   * foreground, and unlocking must arm every live sandbox, not just the
+   * one currently attached.
+   */
+  private readonly auxiliaryVfses = new Set<VirtualFS>();
+  private readonly auxiliaryWatchers = new Map<VirtualFS, FSWatcher[]>();
   private pendingHandle = 0;
   private unlockedKey: CryptoKey | null = null;
   private bannerMode: BannerMode = null;
@@ -688,15 +702,30 @@ export class Keychain {
       return readStoredTailscaleSessionSnapshot() !== null;
     }
 
-    if (path === CLAUDE_AUTH_CREDENTIALS_PATH) {
-      return inspectCredentialsFile(this.vfs).kind === 'valid';
-    }
+    // Credentials living only in a background sandbox still count — slot
+    // indicators (and the OAuth orchestrator) must reflect every live
+    // sandbox, not just the foreground one.
+    for (const vfs of [this.vfs, ...this.auxiliaryVfses]) {
+      if (path === CLAUDE_AUTH_CREDENTIALS_PATH) {
+        try {
+          if (inspectCredentialsFile(vfs).kind === 'valid') {
+            return true;
+          }
+        } catch {
+          // Disposed sandbox VFS — skip.
+        }
+        continue;
+      }
 
-    try {
-      return this.vfs.existsSync(path) && this.vfs.statSync(path).isFile();
-    } catch {
-      return false;
+      try {
+        if (vfs.existsSync(path) && vfs.statSync(path).isFile()) {
+          return true;
+        }
+      } catch {
+        // Disposed sandbox VFS — skip.
+      }
     }
+    return false;
   }
 
   private getPrimaryManagedPath(): string {
@@ -709,7 +738,17 @@ export class Keychain {
     ensureBannerStyles();
     this.ensureBannerElement();
     await this.detectSupport();
+    this.setupWatchers();
+    this.updateBannerForCurrentState();
+  }
 
+  private setupWatchers(): void {
+    this.watchers = this.armWatchers(this.vfs);
+  }
+
+  /** Arm credential watchers for every managed path on the given VFS. */
+  private armWatchers(vfs: VirtualFS): FSWatcher[] {
+    const watchers: FSWatcher[] = [];
     // Watch parent dirs for all managed paths
     const watchedDirs = new Set<string>();
     for (const p of this.managedPaths) {
@@ -722,11 +761,11 @@ export class Keychain {
 
       if (parentDir === '/') {
         // Watch individual files at root
-        this.watchers.push(this.vfs.watch(p, () => {
+        watchers.push(vfs.watch(p, () => {
           this.scheduleCredentialsInspection();
         }));
       } else {
-        this.watchers.push(this.vfs.watch(parentDir, { recursive: true }, (_eventType, filename) => {
+        watchers.push(vfs.watch(parentDir, { recursive: true }, (_eventType, filename) => {
           const resolvedPath = filename?.startsWith('/')
             ? filename
             : `${parentDir}/${filename || ''}`.replace(/\/+$/g, '');
@@ -736,18 +775,110 @@ export class Keychain {
         }));
       }
     }
+    return watchers;
+  }
 
-    // Also watch individual managed files that are directly in root or top-level
-    for (const p of this.managedPaths) {
-      if (this.isSyntheticManagedPath(p)) {
-        continue;
+  /**
+   * Track a live background sandbox's VFS: arm credential watchers on it,
+   * restore saved credentials into it when the vault is already unlocked,
+   * and include it in the newest-wins snapshot merge. The workbench host
+   * attaches every session VFS at creation and detaches it on dispose.
+   */
+  attachAuxiliaryVfs(vfs: VirtualFS): void {
+    if (vfs === this.vfs || this.auxiliaryVfses.has(vfs)) {
+      return;
+    }
+    this.auxiliaryVfses.add(vfs);
+    this.auxiliaryWatchers.set(vfs, this.armWatchers(vfs));
+    if (this.unlockedKey && this.getStoredVault()) {
+      void this.restoreIntoVfs(vfs).catch(() => {
+        // The unlock banner will surface on the next credential-gated command.
+      });
+    }
+  }
+
+  /** Stop tracking a disposed session's VFS. */
+  detachAuxiliaryVfs(vfs: VirtualFS): void {
+    for (const watcher of this.auxiliaryWatchers.get(vfs) ?? []) {
+      try {
+        watcher.close();
+      } catch {
+        // Watchers on disposed VFS instances may already be gone.
       }
-      const parentDir = p.slice(0, p.lastIndexOf('/')) || '/';
-      if (!watchedDirs.has(parentDir) || parentDir === '/') continue;
-      // The directory watcher above covers this
+    }
+    this.auxiliaryWatchers.delete(vfs);
+    this.auxiliaryVfses.delete(vfs);
+  }
+
+  /**
+   * Rebind the keychain to a different session's VFS (the active sandbox).
+   * Watchers move to the new VFS, and saved credentials are restored into it
+   * when the vault is already unlocked so agents in that sandbox keep working.
+   */
+  async setVfs(vfs: VirtualFS): Promise<void> {
+    if (vfs === this.vfs) return;
+    const previous = this.vfs;
+    for (const watcher of this.watchers) {
+      try {
+        watcher.close();
+      } catch {
+        // Watchers on disposed VFS instances may already be gone.
+      }
+    }
+    this.watchers = [];
+    // The incoming primary may have been tracked as a background session —
+    // its auxiliary watchers are superseded by the primary ones below.
+    for (const watcher of this.auxiliaryWatchers.get(vfs) ?? []) {
+      try {
+        watcher.close();
+      } catch {
+        // Watchers on disposed VFS instances may already be gone.
+      }
+    }
+    this.auxiliaryWatchers.delete(vfs);
+    this.auxiliaryVfses.delete(vfs);
+    this.vfs = vfs;
+    this.setupWatchers();
+    // The outgoing primary keeps running in the background: keep watching
+    // its credentials (a login there must still reach the vault). The host
+    // detaches it when its session is disposed.
+    if (!this.auxiliaryVfses.has(previous)) {
+      this.auxiliaryVfses.add(previous);
+      this.auxiliaryWatchers.set(previous, this.armWatchers(previous));
     }
 
+    if (this.unlockedKey && this.getStoredVault()) {
+      try {
+        await this.restoreSavedCredentials();
+      } catch {
+        // The unlock banner will surface on the next credential-gated command.
+      }
+    }
     this.updateBannerForCurrentState();
+    this.scheduleCredentialsInspection();
+  }
+
+  /**
+   * Restore saved credentials into an arbitrary VFS (e.g. a freshly created
+   * background sandbox container) without moving the watchers. No-op when the
+   * vault is locked or absent; returns whether credentials were written.
+   */
+  async restoreIntoVfs(target: VirtualFS): Promise<boolean> {
+    const stored = this.getStoredVault();
+    if (!stored || !this.unlockedKey) return false;
+    const decrypted = await decryptData(this.unlockedKey, stored.ciphertext, stored.iv);
+    const snapshot = parseSnapshotPayload(decrypted, (p) => this.normalizeManagedPath(p));
+    for (const entry of snapshot) {
+      if (entry.path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+        continue; // Stored at the browser level, not per-VFS.
+      }
+      const parentPath = entry.path.slice(0, entry.path.lastIndexOf('/')) || '/';
+      if (parentPath !== '/') {
+        target.mkdirSync(parentPath, { recursive: true });
+      }
+      target.writeFileSync(entry.path, entry.rawText);
+    }
+    return true;
   }
 
   async prepareForCommand(command: string): Promise<boolean> {
@@ -801,7 +932,59 @@ export class Keychain {
   }
 
   private getManagedSnapshotState(): ManagedSnapshotState {
-    return readManagedSnapshotState(this.vfs, this.managedPaths);
+    const primary = readManagedSnapshotState(this.vfs, this.managedPaths);
+    if (this.auxiliaryVfses.size === 0) {
+      return primary;
+    }
+
+    // Newest file wins per managed path across every live sandbox VFS: a
+    // login performed in a background sandbox must be what the vault saves
+    // — snapshotting only the foreground VFS would persist (and on the next
+    // restore, spread) a stale copy over the fresh token.
+    const newest = new Map<string, { entry: SnapshotEntry; mtimeMs: number }>();
+    let hasInvalidClaudeCredentials = primary.hasInvalidClaudeCredentials;
+    const record = (vfs: VirtualFS, state: ManagedSnapshotState) => {
+      for (const entry of state.files) {
+        const mtimeMs = this.managedPathMtime(vfs, entry.path);
+        const existing = newest.get(entry.path);
+        if (!existing || mtimeMs > existing.mtimeMs) {
+          newest.set(entry.path, { entry, mtimeMs });
+        }
+      }
+    };
+    record(this.vfs, primary);
+    for (const vfs of this.auxiliaryVfses) {
+      try {
+        const state = readManagedSnapshotState(vfs, this.managedPaths);
+        hasInvalidClaudeCredentials =
+          hasInvalidClaudeCredentials || state.hasInvalidClaudeCredentials;
+        record(vfs, state);
+      } catch {
+        // A disposed sandbox VFS must not block the snapshot.
+      }
+    }
+
+    // Preserve managedPaths order so equal content yields a stable digest.
+    const files: SnapshotEntry[] = [];
+    for (const path of this.managedPaths) {
+      const found = newest.get(path);
+      if (found) {
+        files.push(found.entry);
+      }
+    }
+    return { files, hasInvalidClaudeCredentials };
+  }
+
+  private managedPathMtime(vfs: VirtualFS, path: string): number {
+    if (path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+      return 0; // Browser-level storage — identical for every VFS.
+    }
+    try {
+      const stats = vfs.statSync(path) as { mtimeMs?: number; mtime?: Date };
+      return stats.mtimeMs ?? stats.mtime?.getTime?.() ?? 0;
+    } catch {
+      return 0;
+    }
   }
 
   notifyExternalStateChanged(): void {
@@ -1106,6 +1289,26 @@ export class Keychain {
         }
         this.vfs.writeFileSync(entry.path, entry.rawText);
       }
+
+      // Unlocking arms every live sandbox, not just the foreground one —
+      // agents already running in background sandboxes need the restored
+      // credentials too.
+      for (const vfs of this.auxiliaryVfses) {
+        try {
+          for (const entry of snapshot) {
+            if (entry.path === TAILSCALE_SESSION_KEYCHAIN_PATH) {
+              continue; // Browser-level storage, written above.
+            }
+            const parentPath = entry.path.slice(0, entry.path.lastIndexOf('/')) || '/';
+            if (parentPath !== '/') {
+              vfs.mkdirSync(parentPath, { recursive: true });
+            }
+            vfs.writeFileSync(entry.path, entry.rawText);
+          }
+        } catch {
+          // A disposed sandbox VFS must not fail the unlock.
+        }
+      }
     } finally {
       queueMicrotask(() => {
         this.ignoredWrite = false;
@@ -1256,6 +1459,12 @@ export class Keychain {
   }
 
   private clearStoredVault(): void {
+    // Intentional discard: keep the ciphertext for manual recovery, but do
+    // NOT auto-recover it (deleting credentials must actually clear state).
+    const raw = localStorage.getItem(KEYCHAIN_STORAGE_KEY);
+    if (raw) {
+      localStorage.setItem(KEYCHAIN_DISCARDED_KEY, raw);
+    }
     localStorage.removeItem(KEYCHAIN_STORAGE_KEY);
     this.unlockedKey = null;
     this.syncedSnapshotDigest = null;
@@ -1266,6 +1475,19 @@ export class Keychain {
     this.emitState();
   }
 
+  /**
+   * Never destroy a vault outright — the ciphertext is the only copy of the
+   * user's saved credentials. Park it under a quarantine key so a later
+   * build (or support) can recover it.
+   */
+  private quarantineStoredVault(): void {
+    const raw = localStorage.getItem(KEYCHAIN_STORAGE_KEY);
+    if (raw) {
+      localStorage.setItem(KEYCHAIN_QUARANTINE_KEY, raw);
+    }
+    localStorage.removeItem(KEYCHAIN_STORAGE_KEY);
+  }
+
   private getStoredVault(): StoredKeychain | null {
     // Try v2 first
     const raw = localStorage.getItem(KEYCHAIN_STORAGE_KEY);
@@ -1274,7 +1496,21 @@ export class Keychain {
       return parsed;
     }
     if (raw) {
-      localStorage.removeItem(KEYCHAIN_STORAGE_KEY);
+      this.quarantineStoredVault();
+    }
+
+    // A previous build may have quarantined (or destructively discarded) a
+    // vault that this build can parse again — recover it.
+    const quarantined = parseStoredKeychain(
+      localStorage.getItem(KEYCHAIN_QUARANTINE_KEY),
+    );
+    if (quarantined) {
+      localStorage.setItem(
+        KEYCHAIN_STORAGE_KEY,
+        JSON.stringify(quarantined),
+      );
+      localStorage.removeItem(KEYCHAIN_QUARANTINE_KEY);
+      return quarantined;
     }
 
     // Try v1 migration
@@ -1443,7 +1679,8 @@ function serializeSnapshot(files: SnapshotEntry[]): string {
   return JSON.stringify({ files } satisfies SnapshotPayload);
 }
 
-function parseSnapshotPayload(rawText: string, normalizePath: (path: string) => string | null): SnapshotEntry[] {
+/** Exported for tests. */
+export function parseSnapshotPayload(rawText: string, normalizePath: (path: string) => string | null): SnapshotEntry[] {
   const parsed = JSON.parse(rawText) as Record<string, unknown>;
 
   if (parsed && Array.isArray(parsed.files)) {
@@ -1459,7 +1696,12 @@ function parseSnapshotPayload(rawText: string, normalizePath: (path: string) => 
         continue;
       }
 
-      const normalizedPath = normalizePath((entry as { path: string }).path);
+      // Keep entries whose path isn't currently managed (slot registration
+      // may not have happened yet, or the path list changed between builds).
+      // Treating them as invalid used to get the entire vault discarded.
+      const storedPath = (entry as { path: string }).path;
+      const normalizedPath = normalizePath(storedPath)
+        ?? (storedPath.startsWith('/') ? storedPath : null);
       if (!normalizedPath) {
         continue;
       }

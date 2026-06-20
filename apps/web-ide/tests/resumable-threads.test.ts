@@ -3,10 +3,43 @@ import { describe, expect, it } from 'vitest';
 import {
   discoverClaudeThreads,
   mergeDiscoveredThreads,
+  toCodexThreads,
   toOpenCodeThreads,
 } from '../src/features/resumable-threads';
 import type { SerializedFile } from '../src/desktop/project-snapshot';
 import type { ResumableThreadRecord } from '../src/features/project-db';
+
+describe('toCodexThreads', () => {
+  it('maps Codex thread summaries to resumable records, newest first', () => {
+    const records = toCodexThreads('sandbox-1', [
+      { id: 'thread-a', title: 'make homepage advertise todos', createdAt: 10, updatedAt: 20 },
+      { id: 'thread-b', createdAt: 30, updatedAt: 40 },
+    ]);
+
+    expect(records).toEqual([
+      {
+        id: 'codex:sandbox-1:thread-b',
+        projectId: 'sandbox-1',
+        sandboxId: 'sandbox-1',
+        harness: 'codex',
+        title: 'Codex conversation',
+        resumeToken: 'thread-b',
+        createdAt: 30,
+        updatedAt: 40,
+      },
+      {
+        id: 'codex:sandbox-1:thread-a',
+        projectId: 'sandbox-1',
+        sandboxId: 'sandbox-1',
+        harness: 'codex',
+        title: 'make homepage advertise todos',
+        resumeToken: 'thread-a',
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    ]);
+  });
+});
 
 describe('resumable thread discovery', () => {
   it('extracts Claude sessions from JSONL transcripts and ignores invalid noise', () => {
@@ -76,6 +109,7 @@ describe('resumable thread discovery', () => {
       {
         id: 'opencode:project-1:session-root',
         projectId: 'project-1',
+        sandboxId: 'project-1',
         harness: 'opencode',
         title: 'Root session',
         resumeToken: 'session-root',
@@ -85,5 +119,44 @@ describe('resumable thread discovery', () => {
     ]);
 
     expect(mergeDiscoveredThreads(existing, { claude: [], opencode: [] })).toEqual([]);
+  });
+
+  it('preserves sandbox assignments across repo-level re-discovery', () => {
+    const assigned: ResumableThreadRecord = {
+      id: 'opencode:project-1:session-root',
+      projectId: 'project-1',
+      // Resumed once already: a fork was created and recorded.
+      sandboxId: 'sandbox-fork-1',
+      harness: 'opencode',
+      title: 'Root session',
+      resumeToken: 'session-root',
+      createdAt: 20,
+      updatedAt: 30,
+    };
+    const rediscovered = toOpenCodeThreads('project-1', [
+      { id: 'session-root', title: 'Root session', time: { created: 20, updated: 40 } },
+      { id: 'session-new', title: 'New session', time: { created: 50, updated: 60 } },
+    ]);
+
+    const merged = mergeDiscoveredThreads([assigned], {
+      claude: [],
+      opencode: rediscovered,
+    });
+
+    expect(merged).toEqual([
+      // Fresh threads keep the legacy ownerId convention…
+      expect.objectContaining({
+        id: 'opencode:project-1:session-new',
+        sandboxId: 'project-1',
+        updatedAt: 60,
+      }),
+      // …but an assigned thread must keep its fork so resuming it never
+      // creates another sandbox.
+      expect.objectContaining({
+        id: 'opencode:project-1:session-root',
+        sandboxId: 'sandbox-fork-1',
+        updatedAt: 40,
+      }),
+    ]);
   });
 });

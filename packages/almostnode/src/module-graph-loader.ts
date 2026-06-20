@@ -318,8 +318,6 @@ export class ModuleGraphLoader {
     const lines = [
       'const __almostnode_hostGlobal = Function("return globalThis")();',
       `const __almostnode_global = __almostnode_hostGlobal.__almostnodeModuleInterop.getRuntimeGlobal(${JSON.stringify(this.runtimeId)});`,
-      'const globalThis = __almostnode_global;',
-      'const global = __almostnode_global;',
       `const __almostnode_dynamic_import = (specifier) => {`,
       `  if (typeof specifier === "string") {`,
       `    const builtinId = specifier.startsWith("node:") ? specifier.slice(5) : specifier;`,
@@ -331,6 +329,12 @@ export class ModuleGraphLoader {
       `  return import(specifier);`,
       `};`,
     ];
+
+    for (const name of ['globalThis', 'global']) {
+      if (!topLevelBindings?.has(name)) {
+        lines.splice(2, 0, `const ${name} = __almostnode_global;`);
+      }
+    }
 
     for (const name of ['console', 'process', 'Buffer']) {
       if (!topLevelBindings?.has(name)) {
@@ -556,7 +560,7 @@ export class ModuleGraphLoader {
         bridge.registerModuleProvider(this.runtimeId, (url) => this.createResponse(url));
         this.bridgeRegistered = true;
       }
-      await bridge.ensureServiceWorkerReady();
+      await bridge.ensureServiceWorkerReady({ reloadOnFirstControl: false });
     })();
 
     return this.bridgeReadyPromise;

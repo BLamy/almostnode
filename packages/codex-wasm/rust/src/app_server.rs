@@ -125,11 +125,17 @@ struct BrowserThread {
 
 #[cfg(feature = "real-codex")]
 #[derive(Clone, Debug)]
-struct BrowserCodexExternalAuth {
-    auth_mode: protocol::AuthMode,
+struct BrowserCodexAuthState {
     access_token: String,
     account_id: Option<String>,
     plan_type: Option<String>,
+}
+
+#[cfg(feature = "real-codex")]
+#[derive(Debug)]
+struct BrowserCodexExternalAuth {
+    auth_mode: protocol::AuthMode,
+    state: std::sync::RwLock<BrowserCodexAuthState>,
 }
 
 #[cfg(feature = "real-codex")]
@@ -154,17 +160,22 @@ impl ExternalAuth for BrowserCodexExternalAuth {
     }
 
     async fn resolve(&self) -> std::io::Result<Option<ExternalAuthTokens>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| std::io::Error::other("Codex browser auth state is poisoned"))?
+            .clone();
         let tokens = match self.auth_mode {
             protocol::AuthMode::ApiKey => {
-                ExternalAuthTokens::access_token_only(self.access_token.clone())
+                ExternalAuthTokens::access_token_only(state.access_token)
             }
             protocol::AuthMode::Chatgpt | protocol::AuthMode::ChatgptAuthTokens => {
                 ExternalAuthTokens {
-                    access_token: self.access_token.clone(),
-                    chatgpt_metadata: self.account_id.clone().map(|account_id| {
+                    access_token: state.access_token,
+                    chatgpt_metadata: state.account_id.map(|account_id| {
                         ExternalAuthChatgptMetadata {
                             account_id,
-                            plan_type: self.plan_type.clone(),
+                            plan_type: state.plan_type,
                         }
                     }),
                 }
@@ -180,6 +191,48 @@ impl ExternalAuth for BrowserCodexExternalAuth {
         &self,
         _context: ExternalAuthRefreshContext,
     ) -> std::io::Result<ExternalAuthTokens> {
+        // host_request_json's future is !Send (it holds JsValues), but the
+        // ExternalAuth trait requires Send futures — bounce through
+        // spawn_local and a oneshot channel to keep this future Send.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<BrowserCodexAuthState, String>>();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = host_request_json::<HostAuthEnvResult, _>(
+                "auth/refresh",
+                &serde_json::json!({ "reason": "unauthorized" }),
+            )
+            .await
+            .map_err(|err| format!("{err:?}"))
+            .and_then(|result| {
+                let env = result.env;
+                let access_token = env
+                    .get("CODEX_ACCESS_TOKEN")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        "auth/refresh host shim did not return CODEX_ACCESS_TOKEN".to_string()
+                    })?;
+                Ok(BrowserCodexAuthState {
+                    access_token,
+                    account_id: env
+                        .get("CODEX_CHATGPT_ACCOUNT_ID")
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                    plan_type: env
+                        .get("CODEX_CHATGPT_PLAN_TYPE")
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                })
+            });
+            let _ = tx.send(result);
+        });
+
+        let refreshed = rx
+            .await
+            .map_err(|_| std::io::Error::other("auth/refresh host request was dropped"))?
+            .map_err(std::io::Error::other)?;
+        if let Ok(mut state) = self.state.write() {
+            *state = refreshed.clone();
+        }
         self.resolve()
             .await?
             .ok_or_else(|| std::io::Error::other("Codex browser auth is unavailable"))
@@ -719,15 +772,17 @@ async fn browser_auth_manager(
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
     auth_manager.set_external_auth(Arc::new(BrowserCodexExternalAuth {
         auth_mode: protocol::AuthMode::ChatgptAuthTokens,
-        access_token,
-        account_id: env
-            .get("CODEX_CHATGPT_ACCOUNT_ID")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        plan_type: env
-            .get("CODEX_CHATGPT_PLAN_TYPE")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        state: std::sync::RwLock::new(BrowserCodexAuthState {
+            access_token,
+            account_id: env
+                .get("CODEX_CHATGPT_ACCOUNT_ID")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            plan_type: env
+                .get("CODEX_CHATGPT_PLAN_TYPE")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        }),
     }));
     Ok(auth_manager)
 }

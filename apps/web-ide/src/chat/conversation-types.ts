@@ -17,15 +17,43 @@ export interface ChatToolCall {
   status?: 'running' | 'success' | 'error';
 }
 
+export interface ChatElicitationQuestion {
+  /** Complete question text. */
+  question: string;
+  /** Very short label (chip/tag). */
+  header: string;
+  options: { label: string; description: string }[];
+  /** Allow selecting multiple options. */
+  multiple?: boolean;
+  /** Allow a free-text custom answer (defaults to true for questions). */
+  custom?: boolean;
+}
+
+/**
+ * An agent-side request that needs the user's input: a plan-mode/question
+ * tool ask, or a permission prompt that wasn't auto-approved. Surfaced as a
+ * chat message so it can be answered without the TUI.
+ */
+export interface ChatElicitation {
+  /** Server-side request id used to reply. */
+  requestId: string;
+  kind: 'question' | 'permission';
+  questions: ChatElicitationQuestion[];
+  status: 'pending' | 'answered' | 'rejected';
+  /** Selected labels per question, echoed once resolved. */
+  answers?: string[][];
+}
+
 export interface ChatMessage {
   /** Stable id: claude transcript uuid / codex item id / opencode messageID. */
   id: string;
   role: 'user' | 'assistant';
   /** 'tool' messages render as tool-call cards instead of bubbles. */
-  kind?: 'text' | 'tool';
+  kind?: 'text' | 'tool' | 'elicitation';
   text: string;
   timestamp: number;
   tool?: ChatToolCall;
+  elicitation?: ChatElicitation;
   /** Sent from the chat composer but not yet observed in the agent's own record. */
   pending?: boolean;
 }
@@ -54,5 +82,9 @@ export interface ConversationAdapter {
   /** Subscribe to conversation state. Fires immediately with current state. */
   subscribe(cb: (state: ConversationState) => void): () => void;
   sendUserMessage(text: string): Promise<void>;
+  /** Answer a pending elicitation (selected labels per question). */
+  respondToElicitation?(requestId: string, answers: string[][]): Promise<void>;
+  /** Reject a pending elicitation. */
+  rejectElicitation?(requestId: string): Promise<void>;
   dispose(): void;
 }

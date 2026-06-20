@@ -182,6 +182,143 @@ describe('git CLI command', () => {
     expect(result.stdout).toContain('upstream commit');
   });
 
+  it('commits through the simple index without forcing an isomorphic-git checkout', async () => {
+    const container = createContainer({
+      git: {
+        authorName: 'Test User',
+        authorEmail: 'test@example.com',
+      },
+    });
+
+    container.vfs.mkdirSync('/repo/app', { recursive: true });
+    container.vfs.mkdirSync('/repo/components/ui', { recursive: true });
+    container.vfs.writeFileSync('/repo/app/globals.css', 'body { color: black; }\n');
+    container.vfs.writeFileSync('/repo/components/ui/card.tsx', 'export const Card = () => null;\n');
+
+    const checkoutSpy = vi.spyOn(git, 'checkout');
+
+    let result = await container.run('git init', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git add .', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+
+    result = await container.run('git commit -m "generated app"', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('generated app');
+    expect(checkoutSpy).not.toHaveBeenCalled();
+
+    result = await container.run('git status --porcelain', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+  });
+
+  it('merges branches: fast-forward, true merge, and already up to date', async () => {
+    const container = createContainer({
+      git: {
+        authorName: 'Test User',
+        authorEmail: 'test@example.com',
+      },
+    });
+
+    container.vfs.mkdirSync('/repo', { recursive: true });
+    container.vfs.writeFileSync('/repo/base.txt', 'base\n');
+    await container.run('git init', { cwd: '/repo' });
+    await container.run('git add .', { cwd: '/repo' });
+    await container.run('git commit -m "init"', { cwd: '/repo' });
+    const branchResult = await container.run('git branch', { cwd: '/repo' });
+    const mainBranch = branchResult.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('* '))
+      ?.slice(2)
+      .trim() || 'master';
+
+    // Fast-forward: feature is strictly ahead of main.
+    await container.run('git checkout -b feature', { cwd: '/repo' });
+    container.vfs.writeFileSync('/repo/feature.txt', 'feature\n');
+    await container.run('git add feature.txt', { cwd: '/repo' });
+    await container.run('git commit -m "feature commit"', { cwd: '/repo' });
+    await container.run(`git checkout ${mainBranch}`, { cwd: '/repo' });
+
+    let result = await container.run('git merge feature', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Fast-forward');
+    expect(container.vfs.readFileSync('/repo/feature.txt', 'utf8')).toBe('feature\n');
+
+    // Already up to date: nothing new on feature.
+    result = await container.run('git merge feature', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Already up to date');
+
+    // True merge: divergent but non-conflicting changes.
+    await container.run('git checkout -b topic', { cwd: '/repo' });
+    container.vfs.writeFileSync('/repo/topic.txt', 'topic\n');
+    await container.run('git add topic.txt', { cwd: '/repo' });
+    await container.run('git commit -m "topic commit"', { cwd: '/repo' });
+    await container.run(`git checkout ${mainBranch}`, { cwd: '/repo' });
+    container.vfs.writeFileSync('/repo/main-only.txt', 'main\n');
+    await container.run('git add main-only.txt', { cwd: '/repo' });
+    await container.run('git commit -m "main-only commit"', { cwd: '/repo' });
+
+    result = await container.run('git merge topic', { cwd: '/repo' });
+    expect(result.exitCode).toBe(0);
+    expect(container.vfs.readFileSync('/repo/topic.txt', 'utf8')).toBe('topic\n');
+    expect(container.vfs.readFileSync('/repo/main-only.txt', 'utf8')).toBe('main\n');
+
+    // The shim's log walker is first-parent only, so assert the merge
+    // commit and the first-parent line ("topic commit" is reachable through
+    // the second parent — its tree content is asserted above).
+    const log = await container.run('git log -n 5', { cwd: '/repo' });
+    expect(log.stdout).toContain("Merge branch 'topic' into");
+    expect(log.stdout).toContain('main-only commit');
+  });
+
+  it('aborts conflicting merges without touching the working tree', async () => {
+    const container = createContainer({
+      git: {
+        authorName: 'Test User',
+        authorEmail: 'test@example.com',
+      },
+    });
+
+    container.vfs.mkdirSync('/repo', { recursive: true });
+    container.vfs.writeFileSync('/repo/shared.txt', 'base\n');
+    await container.run('git init', { cwd: '/repo' });
+    await container.run('git add .', { cwd: '/repo' });
+    await container.run('git commit -m "init"', { cwd: '/repo' });
+    const branchResult = await container.run('git branch', { cwd: '/repo' });
+    const mainBranch = branchResult.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('* '))
+      ?.slice(2)
+      .trim() || 'master';
+
+    await container.run('git checkout -b conflicting', { cwd: '/repo' });
+    container.vfs.writeFileSync('/repo/shared.txt', 'branch change\n');
+    await container.run('git add shared.txt', { cwd: '/repo' });
+    await container.run('git commit -m "branch change"', { cwd: '/repo' });
+    await container.run(`git checkout ${mainBranch}`, { cwd: '/repo' });
+    container.vfs.writeFileSync('/repo/shared.txt', 'main change\n');
+    await container.run('git add shared.txt', { cwd: '/repo' });
+    await container.run('git commit -m "main change"', { cwd: '/repo' });
+
+    const merge = await container.run('git merge conflicting', { cwd: '/repo' });
+    expect(merge.exitCode).toBe(1);
+    expect(`${merge.stderr}${merge.stdout}`).toContain('Automatic merge failed');
+    // The merge aborted atomically — main's tree is untouched.
+    expect(container.vfs.readFileSync('/repo/shared.txt', 'utf8')).toBe('main change\n');
+
+    // --abort is accepted for script compatibility (no in-progress merge state).
+    const abort = await container.run('git merge --abort', { cwd: '/repo' });
+    expect(abort.exitCode).toBe(0);
+
+    const status = await container.run('git status --porcelain', { cwd: '/repo' });
+    expect(status.exitCode).toBe(0);
+    expect(status.stdout.trim()).toBe('');
+  });
+
   it('supports diff variants and rebases transactionally on conflict', async () => {
     const container = createContainer({
       git: {
@@ -1044,6 +1181,26 @@ describe('git CLI command', () => {
 
     fetchArgs = fetchSpy.mock.calls[1][0] as any;
     expect(fetchArgs.onAuth()).toEqual({});
+  });
+
+  it('tolerates shadcn template clone optimization flags', async () => {
+    const container = createContainer();
+    const cloneSpy = vi.spyOn(git, 'clone');
+
+    const result = await container.run(
+      'git clone --depth 1 --filter=blob:none --sparse https://github.com/shadcn-ui/ui.git /tmp/shadcn-template',
+      { cwd: '/project' },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toContain('Cloned https://github.com/shadcn-ui/ui.git into /tmp/shadcn-template');
+
+    expect(cloneSpy).not.toHaveBeenCalled();
+    expect(container.vfs.existsSync('/tmp/shadcn-template/.git')).toBe(true);
+    expect(
+      container.vfs.readFileSync('/tmp/shadcn-template/.git/simplegit/sparse-clone.json', 'utf8'),
+    ).toContain('"repo":"ui"');
   });
 
   it('resolves auth/env precedence as run env > live auth > container env', async () => {

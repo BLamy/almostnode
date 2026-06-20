@@ -220,7 +220,7 @@ describe('VirtualFS extended Stats', () => {
     expect(stats.isDirectory()).toBe(false);
     expect(stats.isSymbolicLink()).toBe(false);
     expect(stats.size).toBe(11); // 'hello world'.length
-    expect(stats.mode).toBe(0o644);
+    expect(stats.mode).toBe(0o100644);
     expect(stats.mtime).toBeInstanceOf(Date);
     expect(stats.atime).toBeInstanceOf(Date);
     expect(stats.ctime).toBeInstanceOf(Date);
@@ -233,7 +233,7 @@ describe('VirtualFS extended Stats', () => {
 
     expect(stats.isFile()).toBe(false);
     expect(stats.isDirectory()).toBe(true);
-    expect(stats.mode).toBe(0o755);
+    expect(stats.mode).toBe(0o40755);
   });
 
   it('should have lstatSync that works like statSync', () => {

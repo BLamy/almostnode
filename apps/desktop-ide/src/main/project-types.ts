@@ -1,4 +1,12 @@
-export type TemplateId = 'vite' | 'nextjs' | 'tanstack' | 'app-building';
+export type TemplateId =
+  | 'next'
+  | 'vite'
+  | 'start'
+  | 'react-router'
+  | 'astro'
+  | 'nextjs'
+  | 'tanstack'
+  | 'app-building';
 
 export interface SerializedFile {
   path: string;

@@ -308,6 +308,8 @@ export class Server extends EventEmitter {
   }> = new Map();
 
   listening: boolean = false;
+  /** Container that called listen(); undefined outside tracked executions. */
+  _ownerId?: string;
   maxHeadersCount: number | null = null;
   timeout: number = 0;
   keepAliveTimeout: number = 5000;
@@ -355,6 +357,53 @@ export class Server extends EventEmitter {
       port = portOrOptions.port;
       host = portOrOptions.host;
       cb = typeof hostOrCallback === 'function' ? hostOrCallback : callback;
+    }
+
+    // Reject the port only when another CONTAINER's server is still listening
+    // on it (Node-style async 'error' with EADDRINUSE). Within a single
+    // container, a re-listen silently replaces the registration — raw node
+    // servers outlive their terminal execution by design, and replacing the
+    // stale registration is the historical abort-then-rerun restart path.
+    // Owner attribution: servers constructed via a runtime's owned http
+    // module (createOwnedHttpModule) carry their container id from birth.
+    // The active-process global is only a fallback for legacy paths — it is
+    // last-write-wins across containers (wrong for any listen() that runs
+    // after another container's process became active), so it must never
+    // override a baked-in owner. Servers with neither stay ownerless and
+    // keep legacy replace semantics.
+    if (this._ownerId === undefined) {
+      const activeProc = (
+        globalThis as {
+          __almostnodeActiveProcess?: { __almostnodeOwnerId?: string };
+        }
+      ).__almostnodeActiveProcess;
+      const fallbackOwner = activeProc?.__almostnodeOwnerId;
+      if (fallbackOwner !== undefined) {
+        this._ownerId = fallbackOwner;
+      }
+    }
+    const owner = this._ownerId;
+    if (typeof port === 'number') {
+      const existing = serverRegistry.get(port);
+      if (
+        existing &&
+        existing !== this &&
+        existing.listening &&
+        existing._ownerId !== undefined &&
+        owner !== undefined &&
+        existing._ownerId !== owner
+      ) {
+        const error = new Error(
+          `listen EADDRINUSE: address already in use ${host ?? '::'}:${port}`,
+        ) as Error & { code: string; errno: number; syscall: string; address: string; port: number };
+        error.code = 'EADDRINUSE';
+        error.errno = -98;
+        error.syscall = 'listen';
+        error.address = host ?? '::';
+        error.port = port;
+        queueMicrotask(() => this.emit('error', error));
+        return this;
+      }
     }
 
     // Wrap callback to register server after listening
@@ -1024,6 +1073,63 @@ export function getServer(port: number): Server | undefined {
 
 export function getAllServers(): Map<number, Server> {
   return new Map(serverRegistry);
+}
+
+/**
+ * Close and unregister every raw server owned by the given container.
+ * ContainerInstance.dispose() calls this: the server registry is
+ * page-global, so a disposed sandbox's still-listening `http.listen`
+ * server would otherwise squat on its port and EADDRINUSE every other
+ * container until a page reload.
+ */
+export function closeServersByOwner(ownerId: string): void {
+  for (const [port, server] of Array.from(serverRegistry)) {
+    if (server._ownerId !== ownerId) continue;
+    try {
+      server.close();
+    } catch {
+      // close() normally unregisters; if it threw first, drop the
+      // registration directly so the port stays reusable.
+      _unregisterServer(port);
+    }
+  }
+}
+
+/**
+ * Per-runtime http/https module: servers constructed through it carry the
+ * owning container's id from birth instead of relying on the ambient
+ * __almostnodeActiveProcess global (last-write-wins across containers).
+ * `baseModule` is the module shape to wrap — the http namespace for
+ * require('http'), the https namespace for require('https').
+ */
+export function createOwnedHttpModule(
+  ownerId: string,
+  baseModule: Record<string, unknown>,
+): Record<string, unknown> {
+  class OwnedServer extends Server {
+    constructor(requestListener?: RequestListener) {
+      super(requestListener);
+      this._ownerId = ownerId;
+    }
+  }
+  const createOwnedServer = (requestListener?: RequestListener): Server =>
+    new OwnedServer(requestListener);
+  const owned: Record<string, unknown> = {
+    ...baseModule,
+    Server: OwnedServer,
+    createServer: createOwnedServer,
+  };
+  const baseDefault = baseModule.default as
+    | Record<string, unknown>
+    | undefined;
+  if (baseDefault) {
+    owned.default = {
+      ...baseDefault,
+      Server: OwnedServer,
+      createServer: createOwnedServer,
+    };
+  }
+  return owned;
 }
 
 export function setServerListenCallback(callback: ServerRegistryCallback | null): void {

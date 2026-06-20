@@ -1,10 +1,10 @@
-/* Scoped Tailwind utilities for Streamdown-rendered chat markdown. */
+/* Scoped Tailwind utilities for GitBook-rendered chat markdown. */
 @import "tailwindcss" layer(chat-tw);
+@import "@brett_lamy/docstream/styles.css";
 
 @layer chat-tw {
   @scope (.webide-chat-markdown) {
     @import "tailwindcss/utilities";
-    @import "streamdown/styles.css";
   }
 }
 
@@ -25,6 +25,13 @@
   padding: 1.5rem clamp(1rem, 6vw, 4rem) 1rem;
 }
 
+/* The timeline is a fixed-height flex column: without this, overflowing
+   messages SHRINK to fit (flattening the conversation) instead of growing
+   past the viewport and scrolling. */
+.webide-chat-timeline > * {
+  flex-shrink: 0;
+}
+
 .webide-chat-timeline.is-empty {
   align-items: center;
   justify-content: center;
@@ -36,6 +43,128 @@
   color: var(--muted);
   font-size: 0.9rem;
   line-height: 1.5;
+}
+
+.webide-chat-elicitation {
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel-bg));
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  max-width: min(42rem, 92%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-size: 0.92rem;
+}
+
+.webide-chat-elicitation.is-answered,
+.webide-chat-elicitation.is-rejected {
+  opacity: 0.75;
+  border-color: var(--panel-border, color-mix(in srgb, var(--muted) 30%, transparent));
+  background: transparent;
+}
+
+.webide-chat-elicitation-header {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  margin-bottom: 0.35rem;
+}
+
+.webide-chat-elicitation-question {
+  display: flex;
+  flex-direction: column;
+}
+
+.webide-chat-elicitation-text {
+  line-height: 1.5;
+}
+
+.webide-chat-elicitation-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.webide-chat-elicitation-option {
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--panel-bg);
+  color: inherit;
+  border-radius: 8px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.webide-chat-elicitation-option:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
+}
+
+.webide-chat-elicitation-option.is-selected {
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel-bg));
+  border-color: var(--accent);
+}
+
+.webide-chat-elicitation-option:disabled {
+  cursor: default;
+}
+
+.webide-chat-elicitation-custom input {
+  width: 100%;
+  border: 1px solid var(--panel-border, color-mix(in srgb, var(--muted) 30%, transparent));
+  background: var(--panel-bg);
+  color: inherit;
+  border-radius: 8px;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+.webide-chat-elicitation-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.webide-chat-elicitation-submit,
+.webide-chat-elicitation-reject {
+  border-radius: 8px;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.webide-chat-elicitation-submit {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 85%, var(--panel-bg));
+  color: var(--panel-bg);
+}
+
+.webide-chat-elicitation-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.webide-chat-elicitation-reject {
+  border: 1px solid var(--panel-border, color-mix(in srgb, var(--muted) 30%, transparent));
+  background: transparent;
+  color: var(--muted);
+}
+
+.webide-chat-elicitation-resolution {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.webide-chat-elicitation-error {
+  font-size: 0.8rem;
+  color: var(--vscode-errorForeground, #d4554e);
 }
 
 .webide-chat-message {
@@ -66,14 +195,46 @@
   padding: 0.15rem 0;
 }
 
+.webide-chat-message.is-assistant:has(.gb-api-card) .webide-chat-message-bubble,
+.webide-chat-message.is-assistant:has(.oas) .webide-chat-message-bubble {
+  width: min(100%, 76rem);
+  max-width: min(76rem, 100%);
+}
+
 .webide-chat-message.is-pending .webide-chat-message-bubble {
   opacity: 0.6;
 }
 
 .webide-chat-markdown {
+  --background: var(--panel-bg);
+  --foreground: var(--text);
+  --card: var(--panel-bg);
+  --card-foreground: var(--text);
+  --border: var(--panel-border);
+  --primary: var(--accent);
+  --primary-foreground: var(--panel-bg);
+  --destructive: #ff8d7a;
+  --gb-panel: var(--panel-bg);
+  --gb-panel-foreground: var(--text);
+  --gb-muted: var(--panel-alt);
+  --gb-muted-foreground: var(--muted);
+  --gb-border: var(--panel-border);
+  --gb-accent: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
+  --gb-accent-foreground: var(--text);
+  --gb-primary: var(--accent);
+  --gb-primary-foreground: var(--panel-bg);
   max-width: 100%;
   color: inherit;
   white-space: normal;
+}
+
+.webide-chat-markdown:has(.gb-api-card),
+.webide-chat-markdown:has(.oas) {
+  width: 100%;
+}
+
+.webide-chat-markdown .docs-blocks-inline {
+  display: block !important;
 }
 
 .webide-chat-markdown :where(p) {

@@ -1,5 +1,5 @@
 import { createCodexHostBridge, type CodexHostBridge } from "./host-bridge";
-import type { CodexHostContainer } from "./host-bridge";
+import type { CodexHostAuthController, CodexHostContainer } from "./host-bridge";
 import {
   CodexJsonRpcPeer,
   type CodexClientInfo,
@@ -12,6 +12,7 @@ export interface CodexBrowserSessionOptions {
   worker: Worker;
   defaultCwd?: string;
   env?: Record<string, string>;
+  auth?: CodexHostAuthController;
   wasmModuleUrl?: string;
   wasmInitInput?: string | URL | Request | BufferSource | WebAssembly.Module;
   initialize?: CodexInitializeParams;
@@ -33,6 +34,7 @@ export function createCodexBrowserSession(
     container: options.container,
     defaultCwd: options.defaultCwd,
     env: options.env,
+    auth: options.auth,
   });
   hostBridge.attach(channel.port1);
 

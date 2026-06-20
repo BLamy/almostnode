@@ -104,10 +104,21 @@ export const HMR_CLIENT_SCRIPT = `
     return hot;
   };
 
+  // This preview's own virtual port: with several sandboxes live, updates
+  // from another sandbox's dev server must be ignored even if a stale HMR
+  // target still points at this window.
+  var __hmrPortMatch = location.pathname.match(/\\/__virtual__\\/(\\d+)\\//);
+  var __hmrOwnPort = __hmrPortMatch ? Number(__hmrPortMatch[1]) : null;
+
   // Listen for HMR updates via postMessage (works with sandboxed iframes)
   window.addEventListener('message', async (event) => {
     // Filter for HMR messages only
     if (!event.data || event.data.channel !== 'next-hmr') return;
+    if (
+      __hmrOwnPort !== null &&
+      typeof event.data.port === 'number' &&
+      event.data.port !== __hmrOwnPort
+    ) return;
     const { type, path, timestamp } = event.data;
 
     if (type === 'update') {

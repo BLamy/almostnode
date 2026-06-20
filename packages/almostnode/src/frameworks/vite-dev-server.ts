@@ -136,6 +136,9 @@ export interface ViteDevServerOptions extends DevServerOptions {
    * Public directory for static assets mounted at the URL root (default: '<root>/public')
    */
   publicDir?: string | false;
+
+  /** Deployment base path prefix (e.g., '/almostnode' for GitHub Pages subpath). NOT the same as Vite's `base`. */
+  deploymentBasePath?: string;
 }
 
 /**
@@ -225,10 +228,21 @@ const HMR_CLIENT_SCRIPT = `
     return hot;
   };
 
+  // This preview's own virtual port: with several sandboxes live, updates
+  // from another sandbox's dev server must be ignored even if a stale HMR
+  // target still points at this window.
+  var __hmrPortMatch = location.pathname.match(/\\/__virtual__\\/(\\d+)\\//);
+  var __hmrOwnPort = __hmrPortMatch ? Number(__hmrPortMatch[1]) : null;
+
   // Listen for HMR updates via postMessage (works with sandboxed iframes)
   window.addEventListener('message', async (event) => {
     // Filter for HMR messages only
     if (!event.data || event.data.channel !== 'vite-hmr') return;
+    if (
+      __hmrOwnPort !== null &&
+      typeof event.data.port === 'number' &&
+      event.data.port !== __hmrOwnPort
+    ) return;
     const { type, path, timestamp } = event.data;
 
     if (type === 'update') {
@@ -529,10 +543,13 @@ export class ViteDevServer extends DevServer {
   }
 
   /**
-   * Set the target window for HMR updates (typically iframe.contentWindow)
-   * This enables HMR to work with sandboxed iframes via postMessage
+   * Set the target window for HMR updates (typically iframe.contentWindow).
+   * This enables HMR to work with sandboxed iframes via postMessage.
+   * Pass null when the workspace detaches: the iframe element (and its
+   * contentWindow identity) is shared across sandboxes, so a stale target
+   * would deliver this server's updates into another sandbox's preview.
    */
-  setHMRTarget(targetWindow: Window): void {
+  setHMRTarget(targetWindow: Window | null): void {
     this.hmrTargetWindow = targetWindow;
   }
 
@@ -540,7 +557,7 @@ export class ViteDevServer extends DevServer {
     this.transformCache.clear();
     this._installedPackages = undefined;
     this._dependencies = undefined;
-    clearNpmBundleCache();
+    clearNpmBundleCache(this.vfs);
   }
 
   private scheduleInstalledPackagesCacheClear(): void {
@@ -567,9 +584,13 @@ export class ViteDevServer extends DevServer {
     const urlObj = new URL(url, 'http://localhost');
     let pathname = urlObj.pathname;
 
-    // Serve bundled npm modules from VFS node_modules
-    if (pathname.startsWith('/_npm/')) {
-      return this.serveNpmModule(pathname);
+    // Serve bundled npm modules from VFS node_modules. Match by path suffix:
+    // redirectNpmImports emits /__virtual__/{port}/_npm/ URLs, and the service
+    // worker normally strips the virtual prefix, but direct handleRequest
+    // callers (tests, tooling) may pass the full prefixed path.
+    const npmMatch = pathname.match(/^(?:\/__virtual__\/\d+)?(\/_npm\/.*)$/);
+    if (npmMatch) {
+      return this.serveNpmModule(npmMatch[1]);
     }
 
     // Handle ?url query parameter - return file path as URL string export
@@ -841,10 +862,12 @@ export class ViteDevServer extends DevServer {
     // Emit event for ServerBridge
     this.emitHMRUpdate(update);
 
-    // Send HMR update via postMessage (works with sandboxed iframes)
+    // Send HMR update via postMessage (works with sandboxed iframes).
+    // `port` lets the client drop updates from another sandbox's server in
+    // case a stale target still points at its window.
     if (this.hmrTargetWindow) {
       try {
-        this.hmrTargetWindow.postMessage({ ...update, channel: 'vite-hmr' }, '*');
+        this.hmrTargetWindow.postMessage({ ...update, channel: 'vite-hmr', port: this.port }, '*');
       } catch (e) {
         // Window may be closed or unavailable
       }
@@ -1172,7 +1195,10 @@ export class ViteDevServer extends DevServer {
   ];
 
   private redirectNpmImports(code: string): string {
-    return _redirectNpmImports(code, ViteDevServer.IMPORT_MAP_PACKAGES, this.getDependencies(), undefined, this.getInstalledPackages());
+    // Prefix /_npm/ URLs with this server's virtual base so nested imports keep
+    // their runtime-instance context (multiple runtimes can be registered).
+    const npmUrlPrefix = `${this.options.deploymentBasePath || ''}/__virtual__/${this.port}`;
+    return _redirectNpmImports(code, ViteDevServer.IMPORT_MAP_PACKAGES, this.getDependencies(), undefined, this.getInstalledPackages(), npmUrlPrefix);
   }
 
   private async serveNpmModule(pathname: string): Promise<ResponseData> {
@@ -1182,7 +1208,7 @@ export class ViteDevServer extends DevServer {
     }
 
     try {
-      let code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      let code = await bundleNpmModuleForBrowser(specifier, [this.root, '/'], this.vfs);
       // Rewrite any bare specifiers that esbuild left external (e.g., unresolved
       // transitive deps converted to ESM imports by patchExternalRequires)
       code = this.redirectNpmImports(code);

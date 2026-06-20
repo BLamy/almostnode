@@ -1,18 +1,35 @@
 import type { AgentHarness } from './conversation-types';
 
 /**
- * A handle to the interactive agent CLI session currently running in a
- * workbench terminal. `sendInput` feeds the exact same channel xterm key
- * input uses, so anything sent here echoes in the terminal TUI as if typed.
+ * A handle to an interactive agent CLI session running in a workbench
+ * terminal. `sendInput` feeds the exact same channel xterm key input uses,
+ * so anything sent here echoes in the terminal TUI as if typed.
  */
 export interface ActiveAgentSession {
   harness: AgentHarness;
   tabId: string;
   startedAt: number;
+  /** Sandbox whose container runs this session; absent for legacy callers. */
+  sandboxId?: string;
+  /** Resumable thread this session maps to, when known. */
+  threadId?: string | null;
   /** Session/thread id when known up front (e.g. `claude --resume <id>`). */
   resumeToken: string | null;
   sendInput: (data: string) => void;
+  /**
+   * True while the agent is actually processing (streaming, running tools)
+   * — NOT merely while its tab exists. The session pool pins sandboxes by
+   * this answer; an always-true implementation makes its sandbox immortal
+   * and the pool grows without bound.
+   */
   isRunning: () => boolean;
+  /**
+   * Authoritative async busy probe (e.g. a fresh opencode /session/status
+   * fetch). Eviction awaits this before disposing a sandbox so a cached
+   * `isRunning()` can never let a mid-task agent be torn down. Falls back
+   * to `isRunning()` when absent.
+   */
+  isBusy?: () => Promise<boolean>;
   /**
    * Resolves when the agent TUI is ready to accept input (e.g. Claude's MCP
    * client connected to the IDE bridge). Input injected before this point is
@@ -22,6 +39,7 @@ export interface ActiveAgentSession {
 }
 
 type RegistryListener = (session: ActiveAgentSession | null) => void;
+type SessionsListener = (sessions: ActiveAgentSession[]) => void;
 
 const BRACKETED_PASTE_START = '[200~';
 const BRACKETED_PASTE_END = '[201~';
@@ -29,40 +47,110 @@ const BRACKETED_PASTE_END = '[201~';
 const SUBMIT_DELAY_MS = 60;
 
 /**
- * Tracks the single active agent CLI session shared by the chat UI and the
- * drawer terminal. The workbench host registers sessions as they launch
- * (whether started from chat, the AI launcher, or typed into a terminal);
- * the chat surface subscribes and routes sends through it.
+ * Tracks every interactive agent CLI session across sandboxes. The workbench
+ * host registers sessions as they launch (whether started from chat, the AI
+ * launcher, or typed into a terminal); the chat surface subscribes to the
+ * `active` session and routes sends through it, while the sidebar subscribes
+ * to the full list for running-agent indicators.
+ *
+ * Invariants:
+ * - At most one session per terminal tab (`sessions` is keyed by tabId);
+ *   re-registering a tab replaces its previous session.
+ * - `active` is always null or one of the registered sessions.
+ * - Detaching the chat (`deactivate`, `beginLaunch`) never unregisters a
+ *   session — background agents keep running and stay visible to
+ *   `subscribeAll`. Only `clearActive` (the session's CLI ended or its tab
+ *   closed) removes a session.
+ * - Every mutation notifies both `subscribe` and `subscribeAll` listeners.
  */
 export class AgentSessionRegistry {
+  private readonly sessions = new Map<string, ActiveAgentSession>();
   private active: ActiveAgentSession | null = null;
   private listeners = new Set<RegistryListener>();
+  private allListeners = new Set<SessionsListener>();
   private sendChain: Promise<void> = Promise.resolve();
   private launching = false;
   private launchGeneration = 0;
+  /** Sandbox where the user explicitly started a fresh chat; suppresses
+   * auto-reattach to that sandbox's running agent until a session activates. */
+  private newChatSandboxId: string | null = null;
 
   getActive(): ActiveAgentSession | null {
     return this.active;
   }
 
+  /** Registers the session (replacing the tab's previous one) and routes chat to it. */
   setActive(session: ActiveAgentSession): void {
+    this.sessions.set(session.tabId, session);
     this.active = session;
     this.launching = false;
-    this.notify();
-  }
-
-  /** Clears the active session if it still belongs to the given tab. */
-  clearActive(tabId: string): void {
-    if (this.active?.tabId !== tabId) {
-      return;
-    }
-    this.active = null;
+    this.newChatSandboxId = null;
     this.notify();
   }
 
   /**
+   * Registers a session without stealing chat focus — used for launches in
+   * background sandboxes. If the tab currently holds the active session, the
+   * replacement becomes active so `active` stays a registered session.
+   */
+  register(session: ActiveAgentSession): void {
+    const replacesActive = this.active?.tabId === session.tabId;
+    this.sessions.set(session.tabId, session);
+    if (replacesActive) {
+      this.active = session;
+    }
+    this.notify();
+  }
+
+  /**
+   * Unregisters the given tab's session and, if it was the active one,
+   * detaches the chat. No-op (and no notification) when the tab has no
+   * registered session.
+   */
+  clearActive(tabId: string): void {
+    const removed = this.sessions.delete(tabId);
+    const wasActive = this.active?.tabId === tabId;
+    if (wasActive) {
+      this.active = null;
+    }
+    if (removed || wasActive) {
+      this.notify();
+    }
+  }
+
+  /** Routes chat to an already-registered session (e.g. focusing its tab). */
+  setActiveByTab(tabId: string): void {
+    const session = this.sessions.get(tabId);
+    if (!session || session === this.active) {
+      return;
+    }
+    this.active = session;
+    this.launching = false;
+    this.newChatSandboxId = null;
+    this.notify();
+  }
+
+  getSessionsForSandbox(sandboxId: string): ActiveAgentSession[] {
+    return Array.from(this.sessions.values()).filter(
+      (session) => session.sandboxId === sandboxId,
+    );
+  }
+
+  /** Sandboxes with at least one session whose CLI is still running. */
+  getRunningSandboxes(): Set<string> {
+    const running = new Set<string>();
+    for (const session of this.sessions.values()) {
+      if (session.sandboxId !== undefined && session.isRunning()) {
+        running.add(session.sandboxId);
+      }
+    }
+    return running;
+  }
+
+  /**
    * Detach the chat from the current session without ending it (the CLI
-   * keeps running in its terminal tab). Used when starting a fresh thread.
+   * keeps running in its terminal tab and stays registered). Used when
+   * starting a fresh thread or switching sandboxes.
    */
   deactivate(): void {
     this.launching = false;
@@ -74,11 +162,39 @@ export class AgentSessionRegistry {
   }
 
   /**
+   * The user explicitly started a fresh chat in the given sandbox: detach
+   * the chat and remember the intent so attaching that sandbox does NOT
+   * auto-route chat back to an agent still running there. The intent clears
+   * as soon as any session activates (the fresh chat's launch registering,
+   * or the user resuming/clicking another thread).
+   */
+  startNewChat(sandboxId: string): void {
+    this.newChatSandboxId = sandboxId;
+    this.deactivate();
+  }
+
+  /**
+   * True when auto-routing chat to a running agent in this sandbox should
+   * be skipped: either the user just started a fresh chat there, or a new
+   * session launch is already in flight. Consumes the new-chat intent.
+   */
+  shouldSuppressAutoActivate(sandboxId: string): boolean {
+    if (this.launching) {
+      return true;
+    }
+    if (this.newChatSandboxId === sandboxId) {
+      this.newChatSandboxId = null;
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Mark that a new session launch is in flight (e.g. resuming a thread).
-   * Clears the previous active session immediately so chat sends can never
-   * route to the thread the user just navigated away from; `setActive`
-   * ends the launch window when the new session registers. Returns a token
-   * for `endLaunch`.
+   * Detaches the previous active session immediately (it stays registered)
+   * so chat sends can never route to the thread the user just navigated
+   * away from; `setActive` ends the launch window when the new session
+   * registers. Returns a token for `endLaunch`.
    */
   beginLaunch(): number {
     this.launching = true;
@@ -112,6 +228,19 @@ export class AgentSessionRegistry {
     listener(this.active);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  /**
+   * Subscribe to the full session list across all sandboxes. Emits
+   * immediately and after every registry mutation (including active-only
+   * changes, whose list contents are unchanged).
+   */
+  subscribeAll(listener: SessionsListener): () => void {
+    this.allListeners.add(listener);
+    listener(this.snapshotSessions());
+    return () => {
+      this.allListeners.delete(listener);
     };
   }
 
@@ -161,9 +290,17 @@ export class AgentSessionRegistry {
     return result;
   }
 
+  private snapshotSessions(): ActiveAgentSession[] {
+    return Array.from(this.sessions.values());
+  }
+
   private notify(): void {
     for (const listener of this.listeners) {
       listener(this.active);
+    }
+    const sessions = this.snapshotSessions();
+    for (const listener of this.allListeners) {
+      listener(sessions);
     }
   }
 }

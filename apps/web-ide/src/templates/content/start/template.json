@@ -1,0 +1,4 @@
+{
+  "defaultFile": "src/routes/index.tsx",
+  "runCommand": "npm run dev"
+}

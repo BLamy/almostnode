@@ -446,10 +446,13 @@ export class NextDevServer extends DevServer {
   }
 
   /**
-   * Set the target window for HMR updates (typically iframe.contentWindow)
-   * This enables HMR to work with sandboxed iframes via postMessage
+   * Set the target window for HMR updates (typically iframe.contentWindow).
+   * This enables HMR to work with sandboxed iframes via postMessage.
+   * Pass null when the workspace detaches: the iframe element (and its
+   * contentWindow identity) is shared across sandboxes, so a stale target
+   * would deliver this server's updates into another sandbox's preview.
    */
-  setHMRTarget(targetWindow: Window): void {
+  setHMRTarget(targetWindow: Window | null): void {
     this.hmrTargetWindow = targetWindow;
   }
 
@@ -1574,7 +1577,7 @@ export class NextDevServer extends DevServer {
   clearInstalledPackagesCache(): void {
     this._installedPackages = undefined;
     this._dependencies = undefined;
-    clearNpmBundleCache();
+    clearNpmBundleCache(this.vfs);
   }
 
   private scheduleInstalledPackagesCacheClear(): void {
@@ -1599,7 +1602,7 @@ export class NextDevServer extends DevServer {
     }
 
     try {
-      let code = await bundleNpmModuleForBrowser(specifier, [this.root, '/']);
+      let code = await bundleNpmModuleForBrowser(specifier, [this.root, '/'], this.vfs);
       // Rewrite any bare specifiers that esbuild left external (e.g., unresolved
       // transitive deps converted to ESM imports by patchExternalRequires)
       code = this.redirectNpmImports(code);
@@ -1627,7 +1630,10 @@ export class NextDevServer extends DevServer {
   }
 
   private redirectNpmImports(code: string): string {
-    return _redirectNpmImports(code, this.options.additionalLocalPackages, this.getDependencies(), this.options.esmShDeps, this.getInstalledPackages());
+    // Prefix /_npm/ URLs with this server's virtual base so nested imports keep
+    // their runtime-instance context (multiple runtimes can be registered).
+    const npmUrlPrefix = `${this.options.deploymentBasePath || ''}/__virtual__/${this.port}`;
+    return _redirectNpmImports(code, this.options.additionalLocalPackages, this.getDependencies(), this.options.esmShDeps, this.getInstalledPackages(), npmUrlPrefix);
   }
 
   private stripCssImports(code: string, currentFile?: string): string {
@@ -1792,10 +1798,12 @@ export class NextDevServer extends DevServer {
 
     this.emitHMRUpdate(update);
 
-    // Send HMR update via postMessage (works with sandboxed iframes)
+    // Send HMR update via postMessage (works with sandboxed iframes).
+    // `port` lets the client drop updates from another sandbox's server in
+    // case a stale target still points at its window.
     if (this.hmrTargetWindow) {
       try {
-        this.hmrTargetWindow.postMessage({ ...update, channel: 'next-hmr' }, '*');
+        this.hmrTargetWindow.postMessage({ ...update, channel: 'next-hmr', port: this.port }, '*');
       } catch (e) {
         // Window may be closed or unavailable
       }

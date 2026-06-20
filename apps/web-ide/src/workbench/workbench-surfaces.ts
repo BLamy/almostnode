@@ -247,7 +247,7 @@ export class FilesSidebarSurface {
   };
 
   constructor(
-    private readonly vfs: VirtualFS,
+    private vfs: VirtualFS,
     private readonly workspaceRoot: string,
     private readonly openFile: (path: string) => void,
     private readonly openFileAsText?: (path: string) => void,
@@ -314,6 +314,24 @@ export class FilesSidebarSurface {
 
   attach(container: HTMLElement): IDisposable {
     return mountStaticSlotSurface(container, FILES_VIEW_ID, this.model);
+  }
+
+  /**
+   * Rebind the tree to a different session's VFS: move the change/delete
+   * listeners over and re-render from the new tree.
+   */
+  setVfs(vfs: VirtualFS): void {
+    if (vfs === this.vfs) {
+      return;
+    }
+
+    this.vfs.off("change", this.changeListener);
+    this.vfs.off("delete", this.deleteListener);
+    this.vfs = vfs;
+    this.vfs.on("change", this.changeListener);
+    this.vfs.on("delete", this.deleteListener);
+    this.selectedPath = null;
+    this.render();
   }
 
   private render(): void {
@@ -1399,6 +1417,21 @@ export class ConsolePanelElement {
   }
 }
 
+/**
+ * Tab descriptor accepted by `attachTab` when re-inserting a tab whose body
+ * element was preserved by `detachTab`. xterm-backed tabs carry `terminal` +
+ * `fitAddon`; custom (DOM-mounted) tabs such as the OpenCode TUI carry
+ * `element` (the mount host living inside the preserved body).
+ */
+export interface TerminalTabAttachState {
+  id: string;
+  title: string;
+  closable: boolean;
+  terminal?: Terminal;
+  fitAddon?: FitAddon;
+  element?: HTMLElement;
+}
+
 export class TerminalPanelSurface {
   private readonly root = document.createElement("div");
   readonly model: SurfaceModel<SlotSurfaceState, SlotSurfaceActions> =
@@ -1422,8 +1455,10 @@ export class TerminalPanelSurface {
   private opened = false;
   private activeTabId: string | null = null;
   private readonly tabButtons = new Map<string, HTMLButtonElement>();
-  private readonly tabBodies = new Map<string, HTMLDivElement>();
+  private readonly tabBodies = new Map<string, HTMLElement>();
   private readonly tabStatuses = new Map<string, string>();
+  /** Statuses parked by `detachTab` so re-attach restores "Running: …". */
+  private readonly detachedTabStatuses = new Map<string, string>();
   private readonly terminals = new Map<
     string,
     { terminal: Terminal; fitAddon: FitAddon }
@@ -1472,7 +1507,8 @@ export class TerminalPanelSurface {
     if (!this.opened) {
       for (const [tabId, { terminal }] of this.terminals.entries()) {
         const body = this.tabBodies.get(tabId);
-        if (body) {
+        // Reattached terminals were already open()ed; xterm can't open twice.
+        if (body && !terminal.element) {
           terminal.open(body);
         }
       }
@@ -1636,6 +1672,7 @@ export class TerminalPanelSurface {
     this.tabButtons.delete(id);
     this.tabBodies.delete(id);
     this.tabStatuses.delete(id);
+    this.detachedTabStatuses.delete(id);
     this.terminals.delete(id);
     this.customTabs.delete(id);
 
@@ -1643,6 +1680,126 @@ export class TerminalPanelSurface {
       this.activeTabId = null;
       this.status.textContent = "Idle";
     }
+  }
+
+  /**
+   * Removes the tab's chrome without disposing the xterm/session and returns
+   * the live body element so the caller can reattach it later via
+   * `attachTab`. xterm keeps buffering output while the body is offscreen.
+   */
+  detachTab(id: string): HTMLElement | null {
+    const body = this.tabBodies.get(id);
+    if (!body) {
+      return null;
+    }
+
+    const wasActive = this.activeTabId === id;
+    this.tabButtons.get(id)?.remove();
+    body.remove();
+    // Drop the e2e anchor id so an active tab elsewhere can claim it.
+    if (body.id === "webideTerminal") {
+      body.removeAttribute("id");
+    }
+    // Park the status so re-attach restores it (e.g. "Running: <command>"
+    // for a command that keeps running in the background session).
+    const status = this.tabStatuses.get(id);
+    if (status) {
+      this.detachedTabStatuses.set(id, status);
+    }
+    this.tabButtons.delete(id);
+    this.tabBodies.delete(id);
+    this.tabStatuses.delete(id);
+    this.terminals.delete(id);
+    this.customTabs.delete(id);
+
+    if (wasActive) {
+      this.activeTabId = null;
+      this.status.textContent = "Idle";
+      const nextId = this.tabButtons.keys().next().value;
+      if (nextId) {
+        this.setActiveTab(nextId);
+      }
+    }
+
+    return body;
+  }
+
+  /**
+   * Re-inserts a tab preserved by `detachTab`. The SAME body element must be
+   * passed back: xterm can only open() once, so the original DOM is reused
+   * and the renderer catches up on the next fit/refresh.
+   */
+  attachTab(tab: TerminalTabAttachState, body: HTMLElement): void {
+    if (this.tabButtons.has(tab.id)) {
+      this.updateTabTitle(tab.id, tab.title);
+      return;
+    }
+
+    const button = this.buildTabButton(tab);
+    body.hidden = true;
+    body.style.display = "none";
+
+    this.tabButtons.set(tab.id, button);
+    this.tabBodies.set(tab.id, body);
+    this.tabStatuses.set(
+      tab.id,
+      this.detachedTabStatuses.get(tab.id) ?? "Idle",
+    );
+    this.detachedTabStatuses.delete(tab.id);
+    this.tabs.appendChild(button);
+    this.body.appendChild(body);
+
+    if (tab.terminal && tab.fitAddon) {
+      this.terminals.set(tab.id, {
+        terminal: tab.terminal,
+        fitAddon: tab.fitAddon,
+      });
+      // Only open() terminals that never had a DOM (detached pre-open).
+      if (this.opened && !tab.terminal.element) {
+        tab.terminal.open(body);
+      }
+      queueTerminalFit(() => this.fit());
+      return;
+    }
+
+    this.customTabs.add(tab.id);
+    if (tab.element && tab.element.parentElement !== body) {
+      body.appendChild(tab.element);
+    }
+  }
+
+  private buildTabButton(tab: {
+    id: string;
+    title: string;
+    closable: boolean;
+  }): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "almostnode-terminal-surface__tab";
+    button.dataset.terminalId = tab.id;
+    button.addEventListener("click", () => {
+      this.callbacks.onSelectTab(tab.id);
+    });
+
+    const label = document.createElement("span");
+    label.className = "almostnode-terminal-surface__tab-label";
+    label.textContent = tab.title;
+    button.appendChild(label);
+
+    if (tab.closable) {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "almostnode-terminal-surface__tab-close";
+      closeButton.textContent = "x";
+      closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+      closeButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.callbacks.onCloseTab(tab.id);
+      });
+      button.appendChild(closeButton);
+    }
+
+    return button;
   }
 
   updateTabTitle(id: string, title: string): void {
@@ -1746,8 +1903,10 @@ export class OpenCodeTerminalSurface {
   private opened = false;
   private activeTabId: string | null = null;
   private readonly tabButtons = new Map<string, HTMLButtonElement>();
-  private readonly tabBodies = new Map<string, HTMLDivElement>();
+  private readonly tabBodies = new Map<string, HTMLElement>();
   private readonly tabStatuses = new Map<string, string>();
+  /** Statuses parked by `detachTab` so re-attach restores "Running: …". */
+  private readonly detachedTabStatuses = new Map<string, string>();
   private readonly terminals = new Map<
     string,
     { terminal: Terminal; fitAddon: FitAddon }
@@ -1834,7 +1993,8 @@ export class OpenCodeTerminalSurface {
     if (!this.opened) {
       for (const [tabId, { terminal }] of this.terminals.entries()) {
         const body = this.tabBodies.get(tabId);
-        if (body) {
+        // Reattached terminals were already open()ed; xterm can't open twice.
+        if (body && !terminal.element) {
           terminal.open(body);
         }
       }
@@ -2123,6 +2283,7 @@ export class OpenCodeTerminalSurface {
     this.tabButtons.delete(id);
     this.tabBodies.delete(id);
     this.tabStatuses.delete(id);
+    this.detachedTabStatuses.delete(id);
     this.terminals.delete(id);
     this.customTabs.delete(id);
     this.customHosts.delete(id);
@@ -2130,6 +2291,127 @@ export class OpenCodeTerminalSurface {
     if (this.activeTabId === id) {
       this.activeTabId = null;
     }
+  }
+
+  /**
+   * Removes the tab's chrome without disposing the xterm/TUI session and
+   * returns the live body element for a later `attachTab`. For custom tabs
+   * the OpenCode TUI mount host stays inside the returned body, so the
+   * canvas TUI keeps its state while offscreen.
+   */
+  detachTab(id: string): HTMLElement | null {
+    const body = this.tabBodies.get(id);
+    if (!body) {
+      return null;
+    }
+
+    const wasActive = this.activeTabId === id;
+    this.tabButtons.get(id)?.remove();
+    body.remove();
+    // Park the status so re-attach restores it (e.g. a running command).
+    const status = this.tabStatuses.get(id);
+    if (status) {
+      this.detachedTabStatuses.set(id, status);
+    }
+    this.tabButtons.delete(id);
+    this.tabBodies.delete(id);
+    this.tabStatuses.delete(id);
+    this.terminals.delete(id);
+    this.customTabs.delete(id);
+    this.customHosts.delete(id);
+
+    if (wasActive) {
+      this.activeTabId = null;
+      const nextId = this.tabButtons.keys().next().value;
+      if (nextId) {
+        this.setActiveTab(nextId);
+      }
+    }
+
+    return body;
+  }
+
+  /**
+   * Re-inserts a tab preserved by `detachTab`. The SAME body element must be
+   * passed back: xterm can only open() once. Custom TUI tabs are re-added
+   * without any fit/refresh (the canvas TUI manages its own rendering).
+   */
+  attachTab(tab: TerminalTabAttachState, body: HTMLElement): void {
+    if (this.tabButtons.has(tab.id)) {
+      this.updateTabTitle(tab.id, tab.title);
+      return;
+    }
+
+    const button = this.buildTabButton(tab);
+    body.hidden = true;
+    body.style.display = "none";
+
+    this.tabButtons.set(tab.id, button);
+    this.tabBodies.set(tab.id, body);
+    this.tabStatuses.set(
+      tab.id,
+      this.detachedTabStatuses.get(tab.id) ?? "Idle",
+    );
+    this.detachedTabStatuses.delete(tab.id);
+    this.tabs.appendChild(button);
+    this.body.appendChild(body);
+
+    if (tab.terminal && tab.fitAddon) {
+      this.terminals.set(tab.id, {
+        terminal: tab.terminal,
+        fitAddon: tab.fitAddon,
+      });
+      // Only open() terminals that never had a DOM (detached pre-open).
+      if (this.opened && !tab.terminal.element) {
+        tab.terminal.open(body);
+      }
+      queueTerminalFit(() => this.fit());
+      return;
+    }
+
+    this.customTabs.add(tab.id);
+    const host =
+      tab.element ?? (body.firstElementChild as HTMLElement | null);
+    if (host) {
+      this.customHosts.set(tab.id, host);
+      if (host.parentElement !== body) {
+        body.appendChild(host);
+      }
+    }
+  }
+
+  private buildTabButton(tab: {
+    id: string;
+    title: string;
+    closable: boolean;
+  }): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "almostnode-opencode-surface__tab";
+    button.dataset.terminalId = tab.id;
+    button.addEventListener("click", () => {
+      this.callbacks.onSelectTab?.(tab.id);
+    });
+
+    const label = document.createElement("span");
+    label.className = "almostnode-opencode-surface__tab-label";
+    label.textContent = tab.title;
+    button.appendChild(label);
+
+    if (tab.closable) {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "almostnode-opencode-surface__tab-close";
+      closeButton.textContent = "x";
+      closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+      closeButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.callbacks.onCloseTab?.(tab.id);
+      });
+      button.appendChild(closeButton);
+    }
+
+    return button;
   }
 
   updateTabTitle(id: string, title: string): void {
@@ -2630,12 +2912,14 @@ export function registerWorkbenchSurfaces(options: {
   databaseBrowserSurface: DatabaseBrowserSurface;
   keychainSurface: KeychainSidebarSurface;
   testsSurface: TestsSidebarSurface;
-  vfs: VirtualFS;
+  getVfs: () => VirtualFS;
   openFileAsText: (path: string) => void;
+  isWorkspaceReadOnly?: () => boolean;
 }): RegisteredWorkbenchSurfaces {
   const rendered = registerRenderedEditors({
-    vfs: options.vfs,
+    getVfs: options.getVfs,
     openFileAsText: options.openFileAsText,
+    isReadOnly: options.isWorkspaceReadOnly,
   });
   const entrypoints = registerWorkbenchEntrypoints({
     surfaces: {

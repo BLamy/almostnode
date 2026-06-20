@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import { Button } from '../components/ui/button.jsx';
 
 export default function HomePage() {
   const [count, setCount] = useState(0);
@@ -19,18 +20,17 @@ export default function HomePage() {
           Edit the files and see changes reflected instantly.
         </p>
         <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
-          <button
+          <Button
             onClick={() => setCount(c => c + 1)}
-            style={{ padding: '0.6rem 1.2rem', borderRadius: '0.5rem', border: 'none', background: '#f97316', color: '#fff', cursor: 'pointer', fontWeight: 500 }}
           >
             Count: {count}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="outline"
             onClick={() => setCount(0)}
-            style={{ padding: '0.6rem 1.2rem', borderRadius: '0.5rem', border: '1px solid #333', background: 'transparent', color: '#ccc', cursor: 'pointer' }}
           >
             Reset
-          </button>
+          </Button>
         </div>
       </div>
 

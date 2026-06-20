@@ -647,7 +647,9 @@ function createBrowserTuiAppServerState(
     const threadStart = await session.peer.request("thread/start", {
       model: browserTuiModelId(context),
       cwd: context.cwd,
-      approvalPolicy: "on-request",
+      // Browser sandboxes are isolated per session: run without approval
+      // prompts so the agent never blocks on TUI-only permission asks.
+      approvalPolicy: "never",
       approvalsReviewer: "user",
       sandbox: "danger-full-access",
       ephemeral: true,

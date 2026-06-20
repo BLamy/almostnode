@@ -6,6 +6,10 @@ const initBrowserDBMock = vi.fn();
 const resetBrowserDBMock = vi.fn();
 const databaseClientResetMock = vi.fn();
 const setWorkspaceRootMock = vi.fn();
+const hasPersistedBrowserDBMock = vi.fn();
+const importBrowserDBSnapshotMock = vi.fn();
+const startAutoPersistMock = vi.fn();
+const persistDBMock = vi.fn();
 
 vi.mock("../src/shims/node-process", () => ({
   configureBrowserProcess: vi.fn(({ cwd, env }: { cwd: string; env: Record<string, string> }) => ({
@@ -22,18 +26,25 @@ vi.mock("../../../vendor/opencode/packages/browser/src/shims/opencode-sdk.browse
 
 vi.mock("../src/shims/opencode-child-process", () => ({
   withProcessBridgeScope: (_bridge: unknown, fn: () => unknown) => fn(),
+  registerProcessBridgeForRoot: vi.fn(),
+  unregisterProcessBridgeForRoot: vi.fn(),
 }));
 
 vi.mock("../../../vendor/opencode/packages/browser/src/shims/fs.browser", () => ({
   setWorkspaceRoot: setWorkspaceRootMock,
   withWorkspaceBridgeScope: (_bridge: unknown, fn: () => unknown) => fn(),
+  registerWorkspaceBridgeForRoot: vi.fn(),
+  unregisterWorkspaceBridgeForRoot: vi.fn(),
 }));
 
 vi.mock("../../../vendor/opencode/packages/browser/src/shims/db.browser", () => ({
   initBrowserDB: initBrowserDBMock,
   exportBrowserDBSnapshot: vi.fn(),
-  importBrowserDBSnapshot: vi.fn(),
+  hasPersistedBrowserDB: hasPersistedBrowserDBMock,
+  importBrowserDBSnapshot: importBrowserDBSnapshotMock,
+  persistDB: persistDBMock,
   resetBrowserDB: resetBrowserDBMock,
+  startAutoPersist: startAutoPersistMock,
   isRecoverableBrowserDBError: (error: unknown) =>
     String(error instanceof Error ? error.message : error).toLowerCase().includes("out of memory"),
 }));
@@ -95,6 +106,8 @@ describe("OpenCode browser session recovery", () => {
     vi.clearAllMocks();
     initBrowserDBMock.mockResolvedValue({});
     resetBrowserDBMock.mockResolvedValue({});
+    hasPersistedBrowserDBMock.mockResolvedValue(true);
+    importBrowserDBSnapshotMock.mockResolvedValue(undefined);
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -118,12 +131,96 @@ describe("OpenCode browser session recovery", () => {
 
     expect(sessions).toEqual([{ id: "session-1", title: "Recovered session" }]);
     expect(sessionList).toHaveBeenCalledTimes(2);
-    expect(setWorkspaceRootMock).toHaveBeenCalledWith("/project");
+    expect(setWorkspaceRootMock).toHaveBeenCalledWith("/project", ["/project"]);
     expect(createOpencodeClientMock).toHaveBeenLastCalledWith(expect.objectContaining({
       directory: "/project",
     }));
     expect(databaseClientResetMock).toHaveBeenCalledTimes(1);
     expect(resetBrowserDBMock).toHaveBeenCalledTimes(1);
+    // The reset wipes the single host-level store — the warning says so.
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("ALL projects and sandboxes"),
+      expect.any(Error),
+    );
+  });
+
+  it("scopes the client and session listing to the per-sandbox directory", async () => {
+    const sessionList = vi.fn().mockResolvedValue([]);
+    createOpencodeClientMock.mockReturnValue({
+      session: {
+        list: sessionList,
+      },
+    });
+
+    const { listOpenCodeBrowserSessions } = await import("../src/features/opencode-browser-session");
+    await listOpenCodeBrowserSessions({
+      container: createFakeContainer() as never,
+      cwd: "/project",
+      env: {},
+      opencodeDirectory: "/sandboxes/sb-1",
+    });
+
+    expect(createOpencodeClientMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      directory: "/sandboxes/sb-1",
+    }));
+    expect(sessionList).toHaveBeenCalledWith({ directory: "/sandboxes/sb-1" });
+    expect(setWorkspaceRootMock).toHaveBeenCalledWith("/sandboxes/sb-1", ["/project"]);
+  });
+
+  it("seeds the host-level DB once from a legacy project blob, then leaves it alone", async () => {
+    hasPersistedBrowserDBMock.mockResolvedValue(false);
+    const { registerLegacyOpenCodeDbSnapshot } = await import(
+      "../src/features/opencode-browser-session"
+    );
+
+    const legacyBlob = new Uint8Array([1, 2, 3]);
+    await registerLegacyOpenCodeDbSnapshot(legacyBlob);
+    expect(importBrowserDBSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(importBrowserDBSnapshotMock).toHaveBeenCalledWith(legacyBlob);
+
+    // Later project switches never re-import over the global DB.
+    await registerLegacyOpenCodeDbSnapshot(new Uint8Array([9, 9]));
+    expect(importBrowserDBSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not seed from a legacy blob when a host-level DB already exists", async () => {
+    hasPersistedBrowserDBMock.mockResolvedValue(true);
+    const { registerLegacyOpenCodeDbSnapshot } = await import(
+      "../src/features/opencode-browser-session"
+    );
+
+    await registerLegacyOpenCodeDbSnapshot(new Uint8Array([1, 2, 3]));
+    expect(importBrowserDBSnapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("re-imports the active project's legacy blob after a recovery reset", async () => {
+    hasPersistedBrowserDBMock.mockResolvedValue(true);
+    const sessionList = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("out of memory"))
+      .mockResolvedValueOnce([]);
+    createOpencodeClientMock.mockReturnValue({
+      session: {
+        list: sessionList,
+      },
+    });
+
+    const { listOpenCodeBrowserSessions, registerLegacyOpenCodeDbSnapshot } = await import(
+      "../src/features/opencode-browser-session"
+    );
+
+    const legacyBlob = new Uint8Array([4, 5, 6]);
+    await registerLegacyOpenCodeDbSnapshot(legacyBlob);
+    expect(importBrowserDBSnapshotMock).not.toHaveBeenCalled();
+
+    await listOpenCodeBrowserSessions({
+      container: createFakeContainer() as never,
+      cwd: "/project",
+      env: {},
+    });
+
+    expect(resetBrowserDBMock).toHaveBeenCalledTimes(1);
+    expect(importBrowserDBSnapshotMock).toHaveBeenCalledWith(legacyBlob);
   });
 
   it("does not reset the browser DB for unrelated session list failures", async () => {

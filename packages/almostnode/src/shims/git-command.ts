@@ -6,12 +6,20 @@ import { structuredPatch } from 'diff';
 import type { VirtualFS } from '../virtual-fs';
 import * as path from './path';
 import { readGhToken } from './gh-auth';
+import { downloadAndExtract } from '../npm/tarball';
 
 const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?url=';
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 type GitHttpRequestOptions = Parameters<typeof httpClient.request>[0];
 type GitHttpResponse = Awaited<ReturnType<typeof httpClient.request>>;
+
+interface SparseCloneMetadata {
+  url: string;
+  owner: string;
+  repo: string;
+  ref: string;
+}
 
 function createProxiedHttp(corsProxy: string) {
   return {
@@ -792,7 +800,7 @@ export async function runGitCommand(
         '',
         'Supported commands:',
         '  init, clone, status, add, commit, log, branch, checkout, remote',
-        '  diff, reset, rebase, fetch, pull, push, rev-parse, rev-list',
+        '  diff, reset, rebase, fetch, pull, push, sparse-checkout, rev-parse, rev-list',
         '',
       ].join('\n'),
       stderr: '',
@@ -818,6 +826,8 @@ export async function runGitCommand(
         return handleBranch(normalized.args.slice(1), commandCtx, vfs);
       case 'checkout':
         return handleCheckout(normalized.args.slice(1), commandCtx, vfs);
+      case 'merge':
+        return handleMerge(normalized.args.slice(1), commandCtx, vfs);
       case 'remote':
         return handleRemote(normalized.args.slice(1), commandCtx, vfs);
       case 'diff':
@@ -832,6 +842,8 @@ export async function runGitCommand(
         return handlePull(normalized.args.slice(1), commandCtx, vfs);
       case 'push':
         return handlePush(normalized.args.slice(1), commandCtx, vfs);
+      case 'sparse-checkout':
+        return handleSparseCheckout(normalized.args.slice(1), commandCtx, vfs);
       case 'rev-parse':
         return handleRevParse(normalized.args.slice(1), commandCtx, vfs);
       case 'rev-list':
@@ -1187,12 +1199,6 @@ async function handleCommit(args: string[], ctx: CommandContext, vfs: VirtualFS)
 
   const oid = await writeCommitAsync(vfs, dir, commit);
   setRefSha(vfs, dir, branch, oid);
-  await git.checkout({
-    fs: createGitFs(vfs),
-    dir,
-    ref: branch,
-    force: true,
-  });
   await syncIndexToHead(vfs, dir);
 
   return success(`[${branch} ${oid.slice(0, 7)}] ${message}\n`);
@@ -1449,6 +1455,109 @@ async function handleCheckout(args: string[], ctx: CommandContext, vfs: VirtualF
 
   await restoreTree(vfs, dir, targetSha);
   return success(`Switched to '${ref}'\n`);
+}
+
+async function handleMerge(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
+  const positionals: string[] = [];
+  let abort = false;
+  let message: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--abort') {
+      abort = true;
+      continue;
+    }
+    if ((arg === '-m' || arg === '--message') && index + 1 < args.length) {
+      message = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--message=')) {
+      message = arg.slice('--message='.length);
+      continue;
+    }
+    if (arg === '--no-edit' || arg === '--ff') {
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git merge: unsupported option '${arg}'`, 2);
+    }
+    positionals.push(arg);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+
+  if (abort) {
+    // Merges here are atomic: isomorphic-git aborts on conflict without
+    // touching the working tree or index, so there is never an in-progress
+    // merge to unwind. Accept --abort for script compatibility.
+    return success('');
+  }
+
+  if (positionals.length === 0) {
+    return failure('git merge: missing branch to merge', 2);
+  }
+  if (positionals.length > 1) {
+    return failure('git merge: merging multiple branches at once is not supported', 2);
+  }
+
+  const theirs = positionals[0];
+  const gitFs = createGitFs(vfs);
+  const gitEnv = resolveGitEnv(ctx.env, vfs);
+
+  const ours = await git.currentBranch({ fs: gitFs, dir, fullname: false });
+  if (!ours) {
+    return failure('git merge: detached HEAD is not supported', 1);
+  }
+
+  const theirsSha = await resolveToSha(vfs, dir, theirs);
+  if (!theirsSha) {
+    return failure(`merge: ${theirs} - not something we can merge`, 1);
+  }
+
+  const author = {
+    name: gitEnv.authorName,
+    email: gitEnv.authorEmail,
+  };
+
+  try {
+    const result = await git.merge({
+      fs: gitFs,
+      dir,
+      ours,
+      theirs,
+      author,
+      committer: author,
+      message: message ?? `Merge branch '${theirs}' into ${ours}`,
+    });
+
+    if (result.alreadyMerged) {
+      return success('Already up to date.\n');
+    }
+
+    // isomorphic-git's merge only moves the branch ref — refresh the working
+    // tree (and this shim's index) to the merged commit.
+    await git.checkout({ fs: gitFs, dir, ref: ours, force: true });
+    await syncIndexToHead(vfs, dir);
+
+    if (result.fastForward) {
+      return success('Fast-forward\n');
+    }
+    return success("Merge made by the 'recursive' strategy.\n");
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === 'MergeConflictError' || code === 'MergeNotSupportedError') {
+      const filepaths = (error as { data?: { filepaths?: string[] } }).data?.filepaths ?? [];
+      const lines = filepaths.map(
+        (filepath) => `CONFLICT (content): Merge conflict in ${filepath}`,
+      );
+      lines.push('Automatic merge failed; fix conflicts and then commit the result.');
+      // The merge aborted without touching the working tree or index.
+      return failure(`${lines.join('\n')}\n`, 1);
+    }
+    return mapGitError(error);
+  }
 }
 
 async function handleRemote(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
@@ -1887,14 +1996,11 @@ async function handleRebase(args: string[], ctx: CommandContext, vfs: VirtualFS)
     currentParentSha = await writeCommitAsync(vfs, dir, newCommit);
   }
 
-  // Update branch ref and restore working tree
+  // Restore from this shim's mirrored tree instead of forcing an isomorphic-git
+  // checkout, which rewrites the Git index and can fail in the browser Buffer
+  // polyfill for large generated project trees.
+  await restoreTree(vfs, dir, currentParentSha);
   setRefSha(vfs, dir, currentBranch, currentParentSha);
-  await git.checkout({
-    fs: createGitFs(vfs),
-    dir,
-    ref: currentBranch,
-    force: true,
-  });
   await syncIndexToHead(vfs, dir);
 
   return success(`Successfully rebased '${currentBranch}' onto '${upstreamRef}'.\n`);
@@ -2088,6 +2194,7 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
   let depth: number | undefined;
   let singleBranch = false;
   let ref: string | undefined;
+  let sparse = false;
   const positionals: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -2095,6 +2202,17 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
 
     if (arg === '--single-branch') {
       singleBranch = true;
+      continue;
+    }
+    if (arg === '--sparse') {
+      sparse = true;
+      continue;
+    }
+    if (arg === '--filter' && i + 1 < args.length) {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--filter=')) {
       continue;
     }
     if ((arg === '-b' || arg === '--branch') && i + 1 < args.length) {
@@ -2138,6 +2256,19 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
     return failure('git clone: --depth must be a positive number', 2);
   }
 
+  const githubRepo = parseGithubHttpsRepoUrl(url);
+  if (sparse && githubRepo) {
+    vfs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+    writeJSON(vfs, path.join(sgDir(dir), 'sparse-clone.json'), {
+      url,
+      owner: githubRepo.owner,
+      repo: githubRepo.repo,
+      ref: ref || 'HEAD',
+    } satisfies SparseCloneMetadata);
+    writeIndex(vfs, dir, {});
+    return success(`Cloned ${url} into ${dir}\n`);
+  }
+
   const gitEnv = resolveGitEnv(ctx.env, vfs);
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
   await git.clone({
@@ -2153,6 +2284,63 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
   await syncIndexToHead(vfs, dir);
 
   return success(`Cloned ${url} into ${dir}\n`);
+}
+
+async function handleSparseCheckout(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<JustBashExecResult> {
+  const action = args[0];
+  if (action !== 'set') {
+    return failure(`git sparse-checkout: unsupported subcommand '${action || ''}'`, 2);
+  }
+
+  const requestedPaths: string[] = [];
+  for (const arg of args.slice(1)) {
+    if (!arg || arg === '--cone' || arg === '--no-cone') {
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return failure(`git sparse-checkout set: unsupported option '${arg}'`, 2);
+    }
+    const normalized = normalizeSparseCheckoutPath(arg);
+    if (!normalized) {
+      return failure(`git sparse-checkout set: invalid path '${arg}'`, 2);
+    }
+    requestedPaths.push(normalized);
+  }
+
+  if (requestedPaths.length === 0) {
+    return failure('git sparse-checkout set: missing pathspec', 2);
+  }
+
+  const dir = findGitRootOrThrow(vfs, ctx.cwd);
+  const metadata = readJSON<SparseCloneMetadata>(vfs, path.join(sgDir(dir), 'sparse-clone.json'));
+  if (!metadata?.owner || !metadata.repo) {
+    return failure('git sparse-checkout: repository was not cloned with browser sparse metadata', 2);
+  }
+
+  const archiveRef = metadata.ref || 'HEAD';
+  const encodedRef = archiveRef.split('/').map(encodeURIComponent).join('/');
+  const archiveUrl = `https://codeload.github.com/${encodeURIComponent(metadata.owner)}/${encodeURIComponent(metadata.repo)}/tar.gz/${encodedRef}`;
+  const extracted = await downloadAndExtract(archiveUrl, vfs, dir, {
+    stripComponents: 1,
+    filter: (entryPath) => requestedPaths.some(
+      (requested) => entryPath === requested || entryPath.startsWith(`${requested}/`),
+    ),
+  });
+
+  if (extracted.length === 0) {
+    return failure(`git sparse-checkout set: no files matched ${requestedPaths.join(' ')}`, 1);
+  }
+
+  writeJSON(vfs, path.join(sgDir(dir), 'sparse-checkout.json'), {
+    paths: requestedPaths,
+    files: extracted.map((filePath) => toRepoRelativePath(dir, filePath)),
+  });
+  await syncIndexToHead(vfs, dir);
+  return success('');
 }
 
 async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS): Promise<JustBashExecResult> {
@@ -2491,6 +2679,38 @@ function inferCloneTarget(url: string): string {
   const parts = trimmed.split('/');
   const last = parts[parts.length - 1] || 'repo';
   return last.endsWith('.git') ? last.slice(0, -4) : last;
+}
+
+function parseGithubHttpsRepoUrl(url: string): { owner: string; repo: string } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol !== 'https:' || parsed.hostname.toLowerCase() !== 'github.com') {
+    return null;
+  }
+
+  const [owner, rawRepo, ...rest] = parsed.pathname.split('/').filter(Boolean);
+  if (!owner || !rawRepo || rest.length > 0) {
+    return null;
+  }
+
+  const repo = rawRepo.endsWith('.git') ? rawRepo.slice(0, -4) : rawRepo;
+  return repo ? { owner, repo } : null;
+}
+
+function normalizeSparseCheckoutPath(input: string): string | null {
+  const normalized = input.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/g, '');
+  if (!normalized || normalized === '.' || normalized.includes('\0')) {
+    return null;
+  }
+  if (normalized.split('/').some((segment) => segment === '..')) {
+    return null;
+  }
+  return normalized;
 }
 
 function isSshUrlLike(value: string): boolean {

@@ -1,27 +1,32 @@
 import { useEffect, useRef } from 'react';
-import { Streamdown } from 'streamdown';
+import { MarkdownContent } from '../features/docstream';
 import type { ChatMessage } from './conversation-types';
 import { ToolCallCard } from './tool-call-card';
+import { ElicitationCard } from './elicitation-card';
 
 interface TimelineFeedProps {
   messages: ChatMessage[];
   busy: boolean;
   emptyHint: string | null;
+  onRespondToElicitation?: (requestId: string, answers: string[][]) => Promise<void>;
+  onRejectElicitation?: (requestId: string) => Promise<void>;
 }
 
 function MessageMarkdown({ text }: { text: string }) {
   return (
-    <Streamdown
-      className="webide-chat-markdown"
-      lineNumbers={false}
-      mode="static"
-    >
-      {text}
-    </Streamdown>
+    <div className="webide-chat-markdown" data-docstream="">
+      <MarkdownContent markdown={text} />
+    </div>
   );
 }
 
-export function TimelineFeed({ messages, busy, emptyHint }: TimelineFeedProps) {
+export function TimelineFeed({
+  messages,
+  busy,
+  emptyHint,
+  onRespondToElicitation,
+  onRejectElicitation,
+}: TimelineFeedProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
 
@@ -59,6 +64,13 @@ export function TimelineFeed({ messages, busy, emptyHint }: TimelineFeedProps) {
       {messages.map((message) =>
         message.kind === 'tool' && message.tool ? (
           <ToolCallCard key={message.id} tool={message.tool} />
+        ) : message.kind === 'elicitation' && message.elicitation ? (
+          <ElicitationCard
+            key={message.id}
+            elicitation={message.elicitation}
+            onRespond={onRespondToElicitation ?? (async () => {})}
+            onReject={onRejectElicitation ?? (async () => {})}
+          />
         ) : (
           <div
             key={message.id}

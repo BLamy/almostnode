@@ -1,7 +1,7 @@
 /**
  * Service Worker for Mini WebContainers
  * Intercepts fetch requests and routes them to virtual servers
- * Version: 15 - cleanup: extract helpers, gate debug logs, remove test endpoints
+ * Version: 16 - multi-runtime /_npm/ routing: no-Referer fallback requires exactly one registered port
  */
 
 const DEBUG = false;
@@ -389,21 +389,30 @@ self.addEventListener('fetch', (event) => {
             }
           } catch (e) {}
         }
-        // Fall back to first registered port if Referer doesn't have virtual context
-        if (!virtualPort && registeredPorts.size > 0) {
+        // Fall back to the registered port only when exactly one runtime is
+        // registered — with 2+ runtimes a bare /_npm/ path is ambiguous.
+        if (!virtualPort && registeredPorts.size === 1) {
           virtualPort = registeredPorts.values().next().value;
         }
         // If no port yet, wait for one to be registered (startup race condition)
-        if (!virtualPort) {
+        if (!virtualPort && registeredPorts.size === 0) {
           await new Promise(function(resolve) {
             var check = setInterval(function() {
               if (registeredPorts.size > 0) { clearInterval(check); resolve(); }
             }, 50);
             setTimeout(function() { clearInterval(check); resolve(); }, 10000);
           });
-          if (registeredPorts.size > 0) {
+          if (registeredPorts.size === 1) {
             virtualPort = registeredPorts.values().next().value;
           }
+        }
+        if (!virtualPort && registeredPorts.size > 1) {
+          // Refuse to guess between runtimes — modules must carry the
+          // /__virtual__/{port}/ prefix (emitted by redirectNpmImports).
+          return new Response(
+            'console.error("[almostnode] ambiguous /_npm/ request: multiple runtimes registered for ' + npmPath.replace(/'/g, "\\'") + '");\nexport default undefined;\n',
+            { status: 503, headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' } }
+          );
         }
         if (virtualPort) {
           DEBUG && console.log('[SW] Routing /_npm/ request to virtual server:', npmPath, 'port:', virtualPort);

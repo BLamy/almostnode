@@ -5,6 +5,7 @@ This template includes shared AI project metadata for both Claude Code and OpenC
 - Claude Code uses `CLAUDE.md` and `.claude/`
 - OpenCode uses `AGENTS.md` and `.opencode/agent/`
 - Shared project skills live in `.claude/skills/`, and OpenCode can load them too
+- Shared runtime and GitBook authoring guidance lives in `.agents/agent-system-prompt.md`
 
 ## Architecture Overview
 
@@ -28,6 +29,10 @@ You are running inside the internal **almostnode** runtime that powers agent-was
 - Dev server: Vite, served via service worker
 
 There are no background daemons, no systemd, no Docker, and no system package manager. Use the browser-safe tools that already exist in the workspace.
+
+## Shared Agent System Prompt
+
+All agents must follow `.agents/agent-system-prompt.md` for the limited almostnode runtime, supported command surface, GitBook Markdown blocks, and plan/spec authoring. OpenCode loads this file automatically through `.opencode/opencode.jsonc`; include it when delegating to Claude-style subagents or when another agent asks for the shared system prompt.
 
 ## Available Commands
 
@@ -85,7 +90,7 @@ For any task involving multiple steps:
 
 1. Create a todo list first.
 2. Use the right subagent from `.opencode/agent/` when the work splits cleanly.
-3. Load a project skill from `.claude/skills/` when a task matches an existing workflow.
+3. Load a project skill from `.claude/skills/` when a task matches an existing workflow, especially `planning` and `gitbook-openapi` for durable plans and API contracts.
 4. Verify changes before reporting back.
 5. A scaffolded git hook commits file changes when a todo item moves to `completed`.
 6. When `origin` exists, that same hook pushes the new commit before the todo stays completed.

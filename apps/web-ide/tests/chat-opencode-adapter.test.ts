@@ -56,7 +56,16 @@ function makeFakeConnection(options?: {
         },
       },
     },
-    fetch: (async () => new Response(stream)) as typeof fetch,
+    fetch: (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/event')) {
+        return new Response(stream);
+      }
+      // Pending question/permission hydration and reply posts.
+      return new Response('[]', {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch,
     dispose: vi.fn(),
   };
   return {
@@ -320,6 +329,168 @@ describe('opencode conversation adapter', () => {
     await flush();
     expect(state!.messages).toHaveLength(1);
     expect(state!.messages[0].pending).toBeUndefined();
+    adapter.dispose();
+  });
+
+  it('surfaces question elicitations and replies through the question route', async () => {
+    const fake = makeFakeConnection();
+    const posts: Array<{ url: string; body: unknown }> = [];
+    const baseFetch = fake.connection.fetch;
+    fake.connection.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push({ url: String(input), body: JSON.parse(String(init.body)) });
+        return new Response('true', {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+
+    const adapter = new OpenCodeConversationAdapter({
+      session: makeSession({ resumeToken: 'sess-1' }),
+      connect: async () => fake.connection,
+    });
+    let state: ConversationState | null = null;
+    adapter.subscribe((next) => {
+      state = next;
+    });
+    await flush();
+
+    fake.emit({
+      type: 'question.asked',
+      properties: {
+        id: 'q-1',
+        sessionID: 'sess-1',
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'Option A', description: 'first' },
+              { label: 'Option B', description: 'second' },
+            ],
+          },
+        ],
+      },
+    });
+    await flush();
+
+    const ask = state!.messages.find((m) => m.kind === 'elicitation');
+    expect(ask).toBeTruthy();
+    expect(ask!.elicitation).toMatchObject({
+      requestId: 'q-1',
+      kind: 'question',
+      status: 'pending',
+    });
+    expect(ask!.elicitation!.questions[0].options.map((o) => o.label)).toEqual([
+      'Option A',
+      'Option B',
+    ]);
+    // The agent is waiting on the user — the chat must not look busy.
+    expect(state!.busy).toBe(false);
+
+    await adapter.respondToElicitation('q-1', [['Option A']]);
+    expect(posts).toEqual([
+      {
+        url: 'http://opencode.internal/question/q-1/reply',
+        body: { answers: [['Option A']] },
+      },
+    ]);
+    const answered = state!.messages.find((m) => m.kind === 'elicitation');
+    expect(answered!.elicitation).toMatchObject({
+      status: 'answered',
+      answers: [['Option A']],
+    });
+    adapter.dispose();
+  });
+
+  it('surfaces permission asks and maps replies to the permission route', async () => {
+    const fake = makeFakeConnection();
+    const posts: Array<{ url: string; body: unknown }> = [];
+    const baseFetch = fake.connection.fetch;
+    fake.connection.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push({ url: String(input), body: JSON.parse(String(init.body)) });
+        return new Response('true', {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+
+    const adapter = new OpenCodeConversationAdapter({
+      session: makeSession({ resumeToken: 'sess-1' }),
+      connect: async () => fake.connection,
+    });
+    let state: ConversationState | null = null;
+    adapter.subscribe((next) => {
+      state = next;
+    });
+    await flush();
+
+    fake.emit({
+      type: 'permission.asked',
+      properties: {
+        id: 'perm-1',
+        sessionID: 'sess-1',
+        permission: 'external_directory',
+        patterns: ['/project'],
+      },
+    });
+    await flush();
+
+    const ask = state!.messages.find((m) => m.kind === 'elicitation');
+    expect(ask!.elicitation).toMatchObject({
+      requestId: 'perm-1',
+      kind: 'permission',
+      status: 'pending',
+    });
+    expect(ask!.elicitation!.questions[0].question).toContain('external_directory');
+
+    await adapter.respondToElicitation('perm-1', [['Allow always']]);
+    expect(posts).toEqual([
+      {
+        url: 'http://opencode.internal/permission/perm-1/reply',
+        body: { reply: 'always' },
+      },
+    ]);
+    expect(
+      state!.messages.find((m) => m.kind === 'elicitation')!.elicitation!.status,
+    ).toBe('answered');
+    adapter.dispose();
+  });
+
+  it('marks elicitations resolved when answered from the TUI', async () => {
+    const fake = makeFakeConnection();
+    const adapter = new OpenCodeConversationAdapter({
+      session: makeSession({ resumeToken: 'sess-1' }),
+      connect: async () => fake.connection,
+    });
+    let state: ConversationState | null = null;
+    adapter.subscribe((next) => {
+      state = next;
+    });
+    await flush();
+
+    fake.emit({
+      type: 'question.asked',
+      properties: {
+        id: 'q-2',
+        sessionID: 'sess-1',
+        questions: [
+          { question: 'Proceed?', header: 'Plan', options: [{ label: 'Yes', description: '' }] },
+        ],
+      },
+    });
+    fake.emit({
+      type: 'question.replied',
+      properties: { sessionID: 'sess-1', requestID: 'q-2', answers: [['Yes']] },
+    });
+    await flush();
+
+    expect(
+      state!.messages.find((m) => m.kind === 'elicitation')!.elicitation,
+    ).toMatchObject({ status: 'answered', answers: [['Yes']] });
     adapter.dispose();
   });
 });

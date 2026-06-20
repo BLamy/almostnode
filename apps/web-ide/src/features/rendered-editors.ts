@@ -8,9 +8,10 @@ import {
 import type { IEditorGroup } from '@codingame/monaco-vscode-api/services';
 import { createRoot, type Root } from 'react-dom/client';
 import { createElement } from 'react';
-import { Streamdown } from 'streamdown';
 import { JsonEditor } from '@visual-json/react';
 import type { VirtualFS } from 'almostnode';
+import { GitbookEditor, GitbookStreamdown } from './docstream';
+import './gitbook-editor/gitbook-editor.css';
 import './rendered-editors.css';
 
 const MARKDOWN_EDITOR_TYPE_ID = 'almostnode.editor.markdown';
@@ -50,14 +51,17 @@ export class MarkdownEditorInput extends SimpleEditorInput {
   }
 }
 
+const MARKDOWN_SAVE_DEBOUNCE_MS = 400;
+
 class MarkdownEditorPane extends SimpleEditorPane {
   private root: Root | null = null;
   private vfsListener: ((path: string) => void) | null = null;
 
   constructor(
     group: IEditorGroup,
-    private readonly vfs: VirtualFS,
+    private readonly getVfs: () => VirtualFS,
     private readonly openFileAsText: (path: string) => void,
+    private readonly isReadOnly: () => boolean,
   ) {
     super(MARKDOWN_EDITOR_TYPE_ID, group);
   }
@@ -71,6 +75,10 @@ class MarkdownEditorPane extends SimpleEditorPane {
   async renderInput(): Promise<IDisposable> {
     const input = this.input as MarkdownEditorInput;
     const filePath = input.filePath;
+    // Resolve the VFS at render time — the active session (and its VFS)
+    // can change between renders.
+    const vfs = this.getVfs();
+    const editable = !this.isReadOnly();
 
     // Clear previous content
     while (this.container.firstChild) {
@@ -83,38 +91,81 @@ class MarkdownEditorPane extends SimpleEditorPane {
 
     // Content area
     const contentDiv = document.createElement('div');
-    contentDiv.className = 'almostnode-markdown-pane';
+    contentDiv.className = 'almostnode-markdown-pane gb-editor-host';
+    contentDiv.style.flex = '1';
+    contentDiv.style.minHeight = '0';
     this.container.appendChild(contentDiv);
 
     // React rendering
     this.root = createRoot(contentDiv);
 
-    const renderMarkdown = () => {
-      let content = '';
-      try {
-        content = this.vfs.readFileSync(filePath, 'utf8') as string;
-      } catch {
-        content = '*File not found*';
+    // Write-through save loop: edits debounce-save to the VFS; the VFS change
+    // event from our own write is suppressed by comparing against the last
+    // content we wrote (the editor additionally ignores echoed props itself).
+    let lastWritten: string | null = null;
+    let pendingMarkdown: string | null = null;
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushSave = () => {
+      if (saveTimer !== null) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
       }
+      if (pendingMarkdown === null) return;
+      const md = pendingMarkdown;
+      pendingMarkdown = null;
+      lastWritten = md;
+      try {
+        vfs.writeFileSync(filePath, md);
+      } catch (err) {
+        console.error(`[rendered-editors] Failed to save ${filePath}:`, err);
+      }
+    };
+
+    const handleChange = (md: string) => {
+      pendingMarkdown = md;
+      if (saveTimer !== null) clearTimeout(saveTimer);
+      saveTimer = setTimeout(flushSave, MARKDOWN_SAVE_DEBOUNCE_MS);
+    };
+
+    const readContent = (): string => {
+      try {
+        return vfs.readFileSync(filePath, 'utf8') as string;
+      } catch {
+        return '';
+      }
+    };
+
+    const renderEditor = (markdown: string) => {
       this.root?.render(
-        createElement(Streamdown, { mode: 'static', lineNumbers: true }, content),
+        editable
+          ? createElement(GitbookEditor, {
+              markdown,
+              onChange: handleChange,
+            })
+          : createElement(GitbookStreamdown, {
+              className: 'almostnode-markdown-preview',
+              markdown,
+            }),
       );
     };
 
-    renderMarkdown();
+    renderEditor(readContent());
 
-    // Live update on VFS changes
+    // External VFS changes re-render; our own debounced writes are skipped.
     this.vfsListener = (changedPath: string) => {
-      if (changedPath === filePath) {
-        renderMarkdown();
-      }
+      if (changedPath !== filePath) return;
+      const content = readContent();
+      if (content === lastWritten || content === pendingMarkdown) return;
+      renderEditor(content);
     };
-    this.vfs.on('change', this.vfsListener);
+    vfs.on('change', this.vfsListener);
 
     return {
       dispose: () => {
+        flushSave();
         if (this.vfsListener) {
-          this.vfs.removeListener('change', this.vfsListener);
+          vfs.off('change', this.vfsListener);
           this.vfsListener = null;
         }
         this.root?.unmount();
@@ -148,7 +199,7 @@ class JsonEditorPane extends SimpleEditorPane {
 
   constructor(
     group: IEditorGroup,
-    private readonly vfs: VirtualFS,
+    private readonly getVfs: () => VirtualFS,
     private readonly openFileAsText: (path: string) => void,
   ) {
     super(JSON_EDITOR_TYPE_ID, group);
@@ -163,6 +214,9 @@ class JsonEditorPane extends SimpleEditorPane {
   async renderInput(): Promise<IDisposable> {
     const input = this.input as JsonEditorInput;
     const filePath = input.filePath;
+    // Resolve the VFS at render time — the active session (and its VFS)
+    // can change between renders.
+    const vfs = this.getVfs();
 
     // Clear previous content
     while (this.container.firstChild) {
@@ -186,7 +240,7 @@ class JsonEditorPane extends SimpleEditorPane {
       let value: unknown = null;
       let parseError = '';
       try {
-        const raw = this.vfs.readFileSync(filePath, 'utf8') as string;
+        const raw = vfs.readFileSync(filePath, 'utf8') as string;
         value = JSON.parse(raw);
       } catch (err) {
         parseError = err instanceof Error ? err.message : String(err);
@@ -218,12 +272,12 @@ class JsonEditorPane extends SimpleEditorPane {
         renderJson();
       }
     };
-    this.vfs.on('change', this.vfsListener);
+    vfs.on('change', this.vfsListener);
 
     return {
       dispose: () => {
         if (this.vfsListener) {
-          this.vfs.removeListener('change', this.vfsListener);
+          vfs.off('change', this.vfsListener);
           this.vfsListener = null;
         }
         this.root?.unmount();
@@ -241,15 +295,18 @@ export interface RenderedEditorFactories {
 }
 
 export function registerRenderedEditors(options: {
-  vfs: VirtualFS;
+  getVfs: () => VirtualFS;
   openFileAsText: (path: string) => void;
+  /** Active session is a read-only repo base — mount the editor non-editable. */
+  isReadOnly?: () => boolean;
 }): { factories: RenderedEditorFactories; dispose: () => void } {
+  const isReadOnly = options.isReadOnly ?? (() => false);
   const mdDisposable = registerEditorPane(
     MARKDOWN_EDITOR_TYPE_ID,
-    'Markdown Preview',
+    'Markdown Editor',
     class extends MarkdownEditorPane {
       constructor(group: IEditorGroup) {
-        super(group, options.vfs, options.openFileAsText);
+        super(group, options.getVfs, options.openFileAsText, isReadOnly);
       }
     },
     [MarkdownEditorInput],
@@ -260,7 +317,7 @@ export function registerRenderedEditors(options: {
     'JSON Viewer',
     class extends JsonEditorPane {
       constructor(group: IEditorGroup) {
-        super(group, options.vfs, options.openFileAsText);
+        super(group, options.getVfs, options.openFileAsText);
       }
     },
     [JsonEditorInput],

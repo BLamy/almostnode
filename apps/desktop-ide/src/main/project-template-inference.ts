@@ -60,7 +60,11 @@ function hasAnyPath(paths: Set<string>, candidates: string[]): boolean {
 
 export function normalizeTemplateId(value: unknown): TemplateId | null {
   if (
-    value === 'vite'
+    value === 'next'
+    || value === 'vite'
+    || value === 'start'
+    || value === 'react-router'
+    || value === 'astro'
     || value === 'nextjs'
     || value === 'tanstack'
     || value === 'app-building'
@@ -83,8 +87,40 @@ export function inferTemplateIdFromProjectFiles(
   const packageJson = parsePackageJson(readTextFile);
   const deps = readDependencyNames(packageJson);
 
+  if (
+    hasAnyPath(paths, ['/project/src/lib/app-building-dashboard.ts'])
+    || packageJson?.name === 'agent-wasm-app-building-control-plane'
+    || packageJson?.name === 'almostnode-app-building-control-plane'
+  ) {
+    return 'app-building';
+  }
+
   if (hasAnyPath(paths, ['/project/app/page.jsx', '/project/app/page.tsx']) || deps.has('next')) {
-    return 'nextjs';
+    return 'next';
+  }
+
+  if (
+    hasAnyPath(paths, ['/project/astro.config.mjs', '/project/astro.config.ts', '/project/src/pages/index.astro'])
+    || deps.has('astro')
+  ) {
+    return 'astro';
+  }
+
+  if (
+    hasAnyPath(paths, ['/project/react-router.config.ts', '/project/app/root.tsx'])
+    || deps.has('@react-router/dev')
+    || deps.has('react-router')
+    || deps.has('react-router-dom')
+  ) {
+    return 'react-router';
+  }
+
+  if (
+    deps.has('@tanstack/react-start')
+    || deps.has('@tanstack/start')
+    || packageJson?.name === 'agent-wasm-tanstack-start-shadcn-starter'
+  ) {
+    return 'start';
   }
 
   if (
@@ -92,14 +128,6 @@ export function inferTemplateIdFromProjectFiles(
     || deps.has('@tanstack/react-router')
   ) {
     return 'tanstack';
-  }
-
-  if (
-    hasAnyPath(paths, ['/project/src/lib/app-building-dashboard.ts'])
-    || packageJson?.name === 'agent-wasm-app-building-control-plane'
-    || packageJson?.name === 'almostnode-app-building-control-plane'
-  ) {
-    return 'app-building';
   }
 
   return 'vite';

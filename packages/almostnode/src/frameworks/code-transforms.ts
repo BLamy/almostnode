@@ -218,6 +218,7 @@ function resolveNpmPackage(
   dependencies?: Record<string, string>,
   esmShDeps?: string,
   installedPackages?: Set<string>,
+  npmUrlPrefix?: string,
 ): string | null {
   // Skip relative, absolute, URL, virtual paths, and path alias prefixes.
   // @/ and ~/ are common path aliases (handled by import maps or bundler config),
@@ -245,7 +246,7 @@ function resolveNpmPackage(
 
   // Serve from VFS bundle if package is installed locally
   if (installedPackages?.has(scopedBasePkg)) {
-    return `/_npm/${packageName}`;
+    return `${npmUrlPrefix ?? ''}/_npm/${packageName}`;
   }
 
   // Build versioned esm.sh URL. Include major version from package.json
@@ -279,6 +280,9 @@ function resolveNpmPackage(
  *   Used to include major version in esm.sh URLs for correct subpath resolution.
  * @param installedPackages - Packages installed in VFS node_modules. These are
  *   served from /_npm/ instead of esm.sh, giving us full control over resolution.
+ * @param npmUrlPrefix - Prefix for /_npm/ URLs (e.g., '/__virtual__/3000') so
+ *   requests keep their runtime-instance context instead of relying on the
+ *   service worker's Referer-based port recovery.
  */
 export function redirectNpmImports(
   code: string,
@@ -286,12 +290,13 @@ export function redirectNpmImports(
   dependencies?: Record<string, string>,
   esmShDeps?: string,
   installedPackages?: Set<string>,
+  npmUrlPrefix?: string,
 ): string {
   const extraSet = additionalLocalPackages?.length ? new Set(additionalLocalPackages) : undefined;
   try {
-    return redirectNpmImportsAst(code, extraSet, dependencies, esmShDeps, installedPackages);
+    return redirectNpmImportsAst(code, extraSet, dependencies, esmShDeps, installedPackages, npmUrlPrefix);
   } catch {
-    return redirectNpmImportsRegex(code, extraSet, dependencies, esmShDeps, installedPackages);
+    return redirectNpmImportsRegex(code, extraSet, dependencies, esmShDeps, installedPackages, npmUrlPrefix);
   }
 }
 
@@ -301,6 +306,7 @@ function redirectNpmImportsAst(
   dependencies?: Record<string, string>,
   esmShDeps?: string,
   installedPackages?: Set<string>,
+  npmUrlPrefix?: string,
 ): string {
   const ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'module' });
 
@@ -309,7 +315,7 @@ function redirectNpmImportsAst(
 
   function processSource(sourceNode: any) {
     if (!sourceNode || sourceNode.type !== 'Literal') return;
-    const resolved = resolveNpmPackage(sourceNode.value, extraLocalPackages, dependencies, esmShDeps, installedPackages);
+    const resolved = resolveNpmPackage(sourceNode.value, extraLocalPackages, dependencies, esmShDeps, installedPackages, npmUrlPrefix);
     if (resolved) {
       // Replace the string literal (including quotes) — sourceNode.start/end include quotes
       replacements.push([sourceNode.start, sourceNode.end, JSON.stringify(resolved)]);
@@ -344,10 +350,11 @@ function redirectNpmImportsRegex(
   dependencies?: Record<string, string>,
   esmShDeps?: string,
   installedPackages?: Set<string>,
+  npmUrlPrefix?: string,
 ): string {
   const importPattern = /(from\s*['"])([^'"./][^'"]*?)(['"])/g;
   return code.replace(importPattern, (match, prefix, packageName, suffix) => {
-    const resolved = resolveNpmPackage(packageName, extraLocalPackages, dependencies, esmShDeps, installedPackages);
+    const resolved = resolveNpmPackage(packageName, extraLocalPackages, dependencies, esmShDeps, installedPackages, npmUrlPrefix);
     if (!resolved) return match;
     return `${prefix}${resolved}${suffix}`;
   });

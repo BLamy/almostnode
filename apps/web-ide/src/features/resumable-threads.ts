@@ -60,8 +60,13 @@ export function extractClaudeMessageText(content: unknown): string {
   return '';
 }
 
+/**
+ * `ownerId` is the project id today and the sandbox id once the sandbox
+ * model lands; during the transition the record carries it in both
+ * `projectId` and `sandboxId` so grouping by either key works.
+ */
 export function discoverClaudeThreads(
-  projectId: string,
+  ownerId: string,
   files: SerializedFile[],
 ): ResumableThreadRecord[] {
   const sessions = new Map<
@@ -122,8 +127,9 @@ export function discoverClaudeThreads(
 
   return Array.from(sessions.entries())
     .map(([sessionId, record]) => ({
-      id: `claude:${projectId}:${sessionId}`,
-      projectId,
+      id: `claude:${ownerId}:${sessionId}`,
+      projectId: ownerId,
+      sandboxId: ownerId,
       harness: 'claude' as const,
       title: record.title || 'Claude conversation',
       resumeToken: sessionId,
@@ -133,15 +139,17 @@ export function discoverClaudeThreads(
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
+/** See {@link discoverClaudeThreads} for the ownerId transition semantics. */
 export function toOpenCodeThreads(
-  projectId: string,
+  ownerId: string,
   sessions: OpenCodeSessionSummary[],
 ): ResumableThreadRecord[] {
   return sessions
     .filter((session) => !session.parentID)
     .map((session) => ({
-      id: `opencode:${projectId}:${session.id}`,
-      projectId,
+      id: `opencode:${ownerId}:${session.id}`,
+      projectId: ownerId,
+      sandboxId: ownerId,
       harness: 'opencode' as const,
       title: session.title?.trim() || 'OpenCode session',
       resumeToken: session.id,
@@ -151,21 +159,58 @@ export function toOpenCodeThreads(
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
+export interface CodexThreadSummary {
+  id: string;
+  title?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+/** See {@link discoverClaudeThreads} for the ownerId transition semantics. */
+export function toCodexThreads(
+  ownerId: string,
+  threads: CodexThreadSummary[],
+): ResumableThreadRecord[] {
+  return threads
+    .map((thread) => ({
+      id: `codex:${ownerId}:${thread.id}`,
+      projectId: ownerId,
+      sandboxId: ownerId,
+      harness: 'codex' as const,
+      title: thread.title?.trim() || 'Codex conversation',
+      resumeToken: thread.id,
+      createdAt: thread.createdAt ?? Date.now(),
+      updatedAt: thread.updatedAt ?? thread.createdAt ?? Date.now(),
+    }))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 export function mergeDiscoveredThreads(
-  _existing: ResumableThreadRecord[],
+  existing: ResumableThreadRecord[],
   discovered: {
     claude: ResumableThreadRecord[];
     opencode: ResumableThreadRecord[];
   },
 ): ResumableThreadRecord[] {
-  const next = new Map<string, ResumableThreadRecord>();
-
-  for (const thread of discovered.claude) {
-    next.set(thread.id, thread);
+  // A record whose sandboxId differs from its projectId was assigned to a
+  // real sandbox (e.g. a legacy repo thread resumed into a fork). Re-running
+  // repo-level discovery rebuilds records with sandboxId === projectId;
+  // carry the assignment over so resuming never forks a second sandbox.
+  const sandboxAssignments = new Map<string, string>();
+  for (const thread of existing) {
+    if (thread.sandboxId && thread.sandboxId !== thread.projectId) {
+      sandboxAssignments.set(thread.id, thread.sandboxId);
+    }
   }
 
-  for (const thread of discovered.opencode) {
-    next.set(thread.id, thread);
+  const next = new Map<string, ResumableThreadRecord>();
+
+  for (const thread of [...discovered.claude, ...discovered.opencode]) {
+    const assignedSandboxId = sandboxAssignments.get(thread.id);
+    next.set(
+      thread.id,
+      assignedSandboxId ? { ...thread, sandboxId: assignedSandboxId } : thread,
+    );
   }
 
   return Array.from(next.values()).sort((left, right) => right.updatedAt - left.updatedAt);

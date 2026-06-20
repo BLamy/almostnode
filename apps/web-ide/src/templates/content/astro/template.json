@@ -1,0 +1,4 @@
+{
+  "defaultFile": "src/pages/index.astro",
+  "runCommand": "npm run dev"
+}

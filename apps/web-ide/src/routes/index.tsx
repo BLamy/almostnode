@@ -4,7 +4,7 @@ import {
   preloadWorkbenchScreen,
   scheduleWorkbenchScreenPreload,
 } from '../desktop/workbench-screen-lazy';
-import type { TemplateId } from '../features/workspace-seed';
+import { TEMPLATE_IDS, type TemplateId } from '../features/workspace-seed';
 import almostnodeLogoUrl from '../../readme-assets/logos/app-building.svg?url';
 import codexLogoUrl from '../../readme-assets/logos/codex-openai.svg?url';
 import opencodeLogoUrl from '../../readme-assets/logos/opencode.svg?url';
@@ -56,7 +56,7 @@ export const Route = createFileRoute('/')({
   component: Homepage,
 });
 
-const TEMPLATE_IDS: TemplateId[] = ['vite', 'nextjs', 'tanstack', 'app-building'];
+const HOMEPAGE_TEMPLATE_IDS: readonly TemplateId[] = TEMPLATE_IDS;
 
 const LOGOS = {
   almostnode: almostnodeLogoUrl,
@@ -214,7 +214,7 @@ function Homepage() {
     goto,
   } = Route.useSearch();
 
-  const templateFromQuery = TEMPLATE_IDS.find((id) => id === template);
+  const templateFromQuery = HOMEPAGE_TEMPLATE_IDS.find((id) => id === template);
 
   useEffect(() => {
     if (!templateFromQuery) return;

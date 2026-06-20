@@ -1,4 +1,6 @@
 import type {
+  ChatElicitation,
+  ChatElicitationQuestion,
   ChatMessage,
   ChatToolCall,
   ConversationAdapter,
@@ -36,6 +38,71 @@ interface OpenCodePart {
 interface OpenCodeBusEvent {
   type?: string;
   properties?: Record<string, unknown>;
+}
+
+interface OpenCodeQuestionRequest {
+  id?: string;
+  sessionID?: string;
+  questions?: Array<{
+    question?: string;
+    header?: string;
+    options?: Array<{ label?: string; description?: string }>;
+    multiple?: boolean;
+    custom?: boolean;
+  }>;
+}
+
+interface OpenCodePermissionRequest {
+  id?: string;
+  sessionID?: string;
+  permission?: string;
+  patterns?: string[];
+}
+
+const PERMISSION_OPTION_LABELS = ['Allow once', 'Allow always', 'Reject'] as const;
+
+const PERMISSION_REPLY_BY_LABEL: Record<string, 'once' | 'always' | 'reject'> = {
+  'Allow once': 'once',
+  'Allow always': 'always',
+  Reject: 'reject',
+};
+
+function questionRequestToElicitation(
+  request: OpenCodeQuestionRequest,
+): ChatElicitation | null {
+  if (!request.id || !Array.isArray(request.questions)) return null;
+  const questions: ChatElicitationQuestion[] = request.questions.map((q) => ({
+    question: q.question ?? '',
+    header: q.header ?? '',
+    options: (q.options ?? []).map((option) => ({
+      label: option.label ?? '',
+      description: option.description ?? '',
+    })),
+    multiple: q.multiple,
+    custom: q.custom !== false,
+  }));
+  return { requestId: request.id, kind: 'question', questions, status: 'pending' };
+}
+
+function permissionRequestToElicitation(
+  request: OpenCodePermissionRequest,
+): ChatElicitation | null {
+  if (!request.id) return null;
+  const patterns = (request.patterns ?? []).join(', ');
+  return {
+    requestId: request.id,
+    kind: 'permission',
+    questions: [
+      {
+        question: `Permission required: ${request.permission ?? 'action'}${patterns ? ` — ${patterns}` : ''}`,
+        header: 'Permission',
+        options: PERMISSION_OPTION_LABELS.map((label) => ({ label, description: '' })),
+        multiple: false,
+        custom: false,
+      },
+    ],
+    status: 'pending',
+  };
 }
 
 interface OpenCodeSessionMessage {
@@ -165,6 +232,12 @@ export class OpenCodeConversationAdapter implements ConversationAdapter {
   private readonly listeners = new Set<(state: ConversationState) => void>();
   private readonly messagesById = new Map<string, TrackedMessage>();
   private messageOrder: string[] = [];
+  /** Pending/resolved agent asks (questions + non-auto-approved permissions). */
+  private readonly elicitationsById = new Map<
+    string,
+    { elicitation: ChatElicitation; timestamp: number }
+  >();
+  private elicitationOrder: string[] = [];
   private pendingMessages: ChatMessage[] = [];
   private pendingCounter = 0;
   private sessionId: string | null;
@@ -244,6 +317,8 @@ export class OpenCodeConversationAdapter implements ConversationAdapter {
       this.connection = connection;
       await this.hydrate(connection);
       void this.streamEvents(connection);
+      // Off the live path: pending asks raised before the chat attached.
+      void this.hydratePendingElicitations(connection);
     } catch (error) {
       console.warn('[chat] opencode adapter failed to connect', error);
     }
@@ -281,6 +356,37 @@ export class OpenCodeConversationAdapter implements ConversationAdapter {
       }
     }
     this.publish();
+  }
+
+  /** Pick up asks issued before the chat attached (e.g. mid-plan questions). */
+  private async hydratePendingElicitations(
+    connection: OpenCodeChatConnection,
+  ): Promise<void> {
+    const fetchList = async <T>(path: string): Promise<T[]> => {
+      try {
+        const response = await connection.fetch(`http://opencode.internal${path}`);
+        if (!response.ok) return [];
+        const data = unwrapData<T[]>(await response.json());
+        return Array.isArray(data) ? data : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const [questions, permissions] = await Promise.all([
+      fetchList<OpenCodeQuestionRequest>('/question/'),
+      fetchList<OpenCodePermissionRequest>('/permission/'),
+    ]);
+    for (const request of questions) {
+      if (this.matchesSession(request.sessionID)) {
+        this.upsertElicitation(questionRequestToElicitation(request));
+      }
+    }
+    for (const request of permissions) {
+      if (this.matchesSession(request.sessionID)) {
+        this.upsertElicitation(permissionRequestToElicitation(request));
+      }
+    }
   }
 
   private async streamEvents(connection: OpenCodeChatConnection): Promise<void> {
@@ -354,7 +460,124 @@ export class OpenCodeConversationAdapter implements ConversationAdapter {
         }
         return;
       }
+      case 'question.asked': {
+        const request = properties as OpenCodeQuestionRequest;
+        if (!this.matchesSession(request.sessionID)) return;
+        this.upsertElicitation(questionRequestToElicitation(request));
+        return;
+      }
+      case 'permission.asked': {
+        const request = properties as OpenCodePermissionRequest;
+        if (!this.matchesSession(request.sessionID)) return;
+        this.upsertElicitation(permissionRequestToElicitation(request));
+        return;
+      }
+      case 'question.replied': {
+        this.resolveElicitation(
+          properties.requestID as string | undefined,
+          'answered',
+          properties.answers as string[][] | undefined,
+        );
+        return;
+      }
+      case 'question.rejected': {
+        this.resolveElicitation(properties.requestID as string | undefined, 'rejected');
+        return;
+      }
+      case 'permission.replied': {
+        const reply = properties.reply as string | undefined;
+        this.resolveElicitation(
+          properties.requestID as string | undefined,
+          reply === 'reject' ? 'rejected' : 'answered',
+        );
+        return;
+      }
       default:
+    }
+  }
+
+  /**
+   * Whether an event belongs to this adapter's session. Before the session
+   * id is known (fresh TUI session, no traffic yet), accept everything —
+   * the in-browser server hosts one interactive session per TUI.
+   */
+  private matchesSession(sessionID: string | undefined): boolean {
+    return !this.sessionId || !sessionID || sessionID === this.sessionId;
+  }
+
+  private upsertElicitation(elicitation: ChatElicitation | null): void {
+    if (!elicitation) return;
+    const existing = this.elicitationsById.get(elicitation.requestId);
+    if (existing) {
+      existing.elicitation = { ...elicitation, status: existing.elicitation.status };
+    } else {
+      this.elicitationsById.set(elicitation.requestId, {
+        elicitation,
+        timestamp: Date.now(),
+      });
+      this.elicitationOrder.push(elicitation.requestId);
+    }
+    this.publish();
+  }
+
+  private resolveElicitation(
+    requestId: string | undefined,
+    status: 'answered' | 'rejected',
+    answers?: string[][],
+  ): void {
+    if (!requestId) return;
+    const tracked = this.elicitationsById.get(requestId);
+    if (!tracked || tracked.elicitation.status !== 'pending') return;
+    tracked.elicitation = {
+      ...tracked.elicitation,
+      status,
+      answers: answers ?? tracked.elicitation.answers,
+    };
+    this.publish();
+  }
+
+  async respondToElicitation(requestId: string, answers: string[][]): Promise<void> {
+    const tracked = this.elicitationsById.get(requestId);
+    if (!tracked) {
+      throw new Error('This request is no longer pending.');
+    }
+    const connection = await this.waitForConnection();
+    if (tracked.elicitation.kind === 'permission') {
+      const reply = PERMISSION_REPLY_BY_LABEL[answers[0]?.[0] ?? ''] ?? 'once';
+      await this.postJson(connection, `/permission/${requestId}/reply`, { reply });
+      this.resolveElicitation(requestId, reply === 'reject' ? 'rejected' : 'answered', answers);
+      return;
+    }
+    await this.postJson(connection, `/question/${requestId}/reply`, { answers });
+    this.resolveElicitation(requestId, 'answered', answers);
+  }
+
+  async rejectElicitation(requestId: string): Promise<void> {
+    const tracked = this.elicitationsById.get(requestId);
+    if (!tracked) {
+      throw new Error('This request is no longer pending.');
+    }
+    const connection = await this.waitForConnection();
+    if (tracked.elicitation.kind === 'permission') {
+      await this.postJson(connection, `/permission/${requestId}/reply`, { reply: 'reject' });
+    } else {
+      await this.postJson(connection, `/question/${requestId}/reject`, {});
+    }
+    this.resolveElicitation(requestId, 'rejected');
+  }
+
+  private async postJson(
+    connection: OpenCodeChatConnection,
+    path: string,
+    body: unknown,
+  ): Promise<void> {
+    const response = await connection.fetch(`http://opencode.internal${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw new Error(`Reply failed (${response.status}).`);
     }
   }
 
@@ -461,11 +684,28 @@ export class OpenCodeConversationAdapter implements ConversationAdapter {
       );
     }
 
+    const elicitationMessages: ChatMessage[] = this.elicitationOrder
+      .map((requestId) => this.elicitationsById.get(requestId))
+      .filter((tracked): tracked is NonNullable<typeof tracked> => Boolean(tracked))
+      .map((tracked) => ({
+        id: `elicitation-${tracked.elicitation.requestId}`,
+        role: 'assistant' as const,
+        kind: 'elicitation' as const,
+        text: '',
+        timestamp: tracked.timestamp,
+        elicitation: tracked.elicitation,
+      }));
+
+    const hasPendingElicitation = elicitationMessages.some(
+      (message) => message.elicitation?.status === 'pending',
+    );
+
     this.state = {
       harness: 'opencode',
       sessionId: this.sessionId,
-      messages: [...messages, ...this.pendingMessages],
-      busy: this.busy || this.pendingMessages.length > 0,
+      messages: [...messages, ...elicitationMessages, ...this.pendingMessages],
+      // A pending ask means the agent is waiting on the user, not working.
+      busy: (this.busy || this.pendingMessages.length > 0) && !hasPendingElicitation,
     };
     for (const listener of this.listeners) {
       listener(this.state);

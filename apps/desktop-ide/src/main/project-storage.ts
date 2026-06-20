@@ -394,7 +394,16 @@ function generateProjectId(): string {
 }
 
 function normalizeTemplateIdOrDefault(value: unknown): TemplateId {
-  return (value === 'vite' || value === 'nextjs' || value === 'tanstack') ? value : 'vite';
+  return (
+    value === 'next'
+    || value === 'vite'
+    || value === 'start'
+    || value === 'react-router'
+    || value === 'astro'
+    || value === 'nextjs'
+    || value === 'tanstack'
+    || value === 'app-building'
+  ) ? value : 'vite';
 }
 
 export function listRecentProjects(): RecentProjectItem[] {
@@ -612,9 +621,7 @@ export function setupProjectStorageHandlers(): void {
   });
 
   ipcMain.handle('project-directory:seed-active-if-empty', (event, payload: { templateId?: unknown } = {}) => {
-    const templateId: TemplateId = (payload?.templateId === 'vite' || payload?.templateId === 'nextjs' || payload?.templateId === 'tanstack')
-      ? payload.templateId
-      : 'vite';
+    const templateId = normalizeTemplateIdOrDefault(payload?.templateId);
     return seedActiveProjectDirectoryIfEmpty(event.sender.id, templateId);
   });
 }

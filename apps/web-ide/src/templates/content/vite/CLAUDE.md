@@ -4,6 +4,7 @@ This template ships with shared AI project metadata for both Claude Code and Ope
 - Claude Code uses `CLAUDE.md` and `.claude/`
 - OpenCode uses `AGENTS.md` and `.opencode/agent/`
 - Shared project skills live in `.claude/skills/`
+- Shared runtime and GitBook authoring guidance lives in `.agents/agent-system-prompt.md`
 
 ## Architecture Overview
 
@@ -25,6 +26,10 @@ You are running inside the internal **almostnode** runtime that powers agent-was
 - **Package manager**: Real npm packages installed and bundled via esbuild-wasm
 - **Shell**: `just-bash` — a bash emulator with built-in commands (see below)
 - **Dev server**: Vite, served via service worker at `/__virtual__/{port}/`
+
+## Shared Agent System Prompt
+
+All agents must follow `.agents/agent-system-prompt.md` for the limited almostnode runtime, supported command surface, GitBook Markdown blocks, and plan/spec authoring. OpenCode loads this file automatically through `.opencode/opencode.jsonc`; include it when delegating to Claude subagents or when another agent asks for the shared system prompt.
 
 ## Available Commands
 
@@ -176,7 +181,9 @@ Steps 1 and 2 can run in parallel. Step 3 runs after both complete.
 ## Planning Workflows
 
 For structured approaches to different task types, see `.claude/skills/planning/SKILL.md`:
-- **New Feature**: spec → schema → components → pages → QA
+- Load `.claude/skills/gitbook-openapi/SKILL.md` for plans, API contracts, endpoint docs, and Markdown output that should render as GitBook docs.
+- Every plan includes an OpenAPI 3.1 `API Contract` section, even when the contract is explicitly `paths: {}` for no API changes.
+- **New Feature**: spec → API contract → schema → components → pages → QA
 - **Bug Fix**: triage → diagnose → fix → verify
 - **Schema Change**: design → migrate → update queries → verify
 - **UI-Only Change**: design → implement → verify
