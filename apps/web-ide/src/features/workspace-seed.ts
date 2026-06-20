@@ -10,7 +10,13 @@ export const WORKSPACE_TEST_METADATA_PATH = `${WORKSPACE_TESTS_ROOT}/.almostnode
 export const DEFAULT_FILE = `${WORKSPACE_ROOT}/src/App.tsx`;
 export const DEFAULT_RUN_COMMAND = "npm run dev";
 
-export const TEMPLATE_IDS = ["vite", "nextjs", "tanstack", "app-building"] as const;
+export const SHADCN_TEMPLATE_IDS = ["next", "vite", "start", "react-router", "astro"] as const;
+export const TEMPLATE_IDS = [
+  ...SHADCN_TEMPLATE_IDS,
+  "nextjs",
+  "tanstack",
+  "app-building",
+] as const;
 
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
 
@@ -28,8 +34,11 @@ export interface TemplateDefinition {
   files: Record<string, string>;
 }
 
-function buildTemplate(id: TemplateId): TemplateDefinition {
-  const raw = templates[id];
+function buildTemplate(id: TemplateId, sourceId: string = id): TemplateDefinition {
+  const raw = templates[sourceId];
+  if (!raw) {
+    throw new Error(`Missing workspace template source: ${sourceId}`);
+  }
   const files: Record<string, string> = {};
   for (const [rel, content] of Object.entries(raw.files)) {
     files[`${WORKSPACE_ROOT}/${rel}`] = content;
@@ -47,7 +56,11 @@ function buildTemplate(id: TemplateId): TemplateDefinition {
 }
 
 const TEMPLATES: Record<TemplateId, TemplateDefinition> = {
+  next: buildTemplate("next", "nextjs"),
   vite: buildTemplate("vite"),
+  start: buildTemplate("start"),
+  "react-router": buildTemplate("react-router"),
+  astro: buildTemplate("astro"),
   nextjs: buildTemplate("nextjs"),
   tanstack: buildTemplate("tanstack"),
   "app-building": buildTemplate("app-building"),

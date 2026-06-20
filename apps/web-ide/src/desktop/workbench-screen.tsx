@@ -245,6 +245,7 @@ export function WorkbenchScreen({
       // Wire project manager to host
       manager.setHost({
         getVfs: () => host.getVfs(),
+        getVfsForProject: (projectId) => host.getVfsForProject(projectId),
         getTemplateId: () => host.getTemplateId(),
         hasGitHubCredentials: () => host.hasGitHubCredentials(),
         requestGitHubLogin: () => host.requestGitHubLogin(),
@@ -257,12 +258,62 @@ export function WorkbenchScreen({
           host.attachProjectContext(tid, dbPrefix, defaultDatabaseName),
         switchProjectWorkspace: (tid, files, dbPrefix, defaultDatabaseName) =>
           host.switchProjectWorkspace(tid, files, dbPrefix, defaultDatabaseName),
-        collectAgentStateSnapshot: () => host.collectAgentStateSnapshot(),
+        switchProjectWorkspaceToSession: (
+          projectId,
+          tid,
+          files,
+          dbPrefix,
+          defaultDatabaseName,
+        ) =>
+          host.switchProjectWorkspaceToSession(
+            projectId,
+            tid,
+            files,
+            dbPrefix,
+            defaultDatabaseName,
+          ),
+        openSandboxSession: (
+          repo,
+          sandbox,
+          savedFiles,
+          baseFiles,
+          dbPrefix,
+          defaultDatabaseName,
+        ) =>
+          host.openSandboxSession(
+            repo,
+            sandbox,
+            savedFiles,
+            baseFiles,
+            dbPrefix,
+            defaultDatabaseName,
+          ),
+        getVfsForSession: (sessionId) => host.getVfsForSession(sessionId),
+        getLiveSessionIds: () => host.getLiveSessionIds(),
+        getActiveSessionId: () => host.getActiveSessionId(),
+        runSessionCommand: (sessionId, command) =>
+          host.runSessionCommand(sessionId, command),
+        disposeSession: (sessionId) => host.disposeSession(sessionId),
+        markActiveSessionReadOnly: () => host.markActiveSessionReadOnly(),
+        getProjectIdForSession: (sessionId) =>
+          host.getProjectIdForSession(sessionId),
+        collectAgentStateSnapshotForSession: (sessionId) =>
+          host.collectAgentStateSnapshotForSession(sessionId),
+        setSessionPersistence: (persist) => host.setSessionPersistence(persist),
+        collectAgentStateSnapshot: (projectId) =>
+          host.collectAgentStateSnapshot(projectId),
         restoreAgentStateSnapshot: (snapshot) =>
           host.restoreAgentStateSnapshot(snapshot),
         teardownActiveProject: () => host.teardownActiveProject(),
         discoverActiveProjectThreads: (projectId) =>
           host.discoverActiveProjectThreads(projectId),
+        discoverSandboxOpenCodeThreads: (sandboxId) =>
+          host.discoverSandboxOpenCodeThreads(sandboxId),
+        // Without this forward the manager's optional-chained call silently
+        // resolves to [] and Codex threads never reach the sidebar, even
+        // though the host records them correctly.
+        discoverSandboxCodexThreads: (sandboxId) =>
+          host.discoverSandboxCodexThreads(sandboxId),
         resumeResumableThread: (thread) => host.resumeResumableThread(thread),
       });
       void manager.init();

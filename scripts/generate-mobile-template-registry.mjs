@@ -49,7 +49,11 @@ const sharedFiles = (() => {
 })();
 
 const templates = {};
-for (const entry of readdirSync(templatesRoot, { withFileTypes: true })) {
+const templateAliases = {
+  next: "nextjs",
+};
+
+for (const entry of readdirSync(templatesRoot, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
   if (!entry.isDirectory() || entry.name === "_shared") {
     continue;
   }
@@ -75,6 +79,16 @@ for (const entry of readdirSync(templatesRoot, { withFileTypes: true })) {
     runCommand: metadata.runCommand,
     directories: collectDirectories(Object.keys(files)).map((directory) => posix.join("/project", directory)),
     files,
+  };
+}
+
+for (const [aliasId, sourceId] of Object.entries(templateAliases)) {
+  if (!templates[sourceId]) {
+    throw new Error(`Missing mobile template alias source: ${sourceId}`);
+  }
+  templates[aliasId] = {
+    ...templates[sourceId],
+    id: aliasId,
   };
 }
 

@@ -13,19 +13,29 @@ export interface TemplateOption {
 
 export const TEMPLATE_OPTIONS: TemplateOption[] = [
   {
+    id: "next",
+    label: "Next.js",
+    description: "App Router starter with shadcn component metadata.",
+  },
+  {
     id: "vite",
     label: "Vite",
     description: "Fast React starter with the full agent-wasm demo stack.",
   },
   {
-    id: "nextjs",
-    label: "Next.js",
-    description: "App Router starter for server-style routing in the browser sandbox.",
+    id: "start",
+    label: "TanStack Start",
+    description: "TanStack route starter with shadcn component aliases.",
   },
   {
-    id: "tanstack",
-    label: "TanStack",
-    description: "File-based TanStack Router starter for SPA workflows.",
+    id: "react-router",
+    label: "React Router",
+    description: "React Router starter with shadcn components.",
+  },
+  {
+    id: "astro",
+    label: "Astro",
+    description: "Astro project scaffold with shadcn metadata.",
   },
 ];
 

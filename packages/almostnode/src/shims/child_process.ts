@@ -72,7 +72,7 @@ type ManagedFrameworkDevServer = {
   port: number;
   stop: () => void;
   clearInstalledPackagesCache?: () => void;
-  setHMRTarget?: (targetWindow: Window) => void;
+  setHMRTarget?: (targetWindow: Window | null) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -162,6 +162,8 @@ export interface ChildProcessExecutionContext {
   onStdout: ((data: string) => void) | null;
   onStderr: ((data: string) => void) | null;
   signal: AbortSignal | null;
+  /** Aborted by the `kill` shell command (independent of the caller's signal). */
+  killController: AbortController;
   /** Keep the execution alive until it explicitly exits or is aborted. */
   interactive: boolean;
   activeProcessStdin: ActiveProcessStdin | null;
@@ -175,8 +177,20 @@ export interface ChildProcessExecutionContext {
   rows: number;
 }
 
+export type ProcessPidTarget =
+  | { kind: "server"; key: string }
+  | { kind: "execution"; executionId: string };
+
+export interface ChildProcessStreamingCallbacks {
+  onStdout: ((data: string) => void) | null;
+  onStderr: ((data: string) => void) | null;
+  signal: AbortSignal | null;
+}
+
 export interface ChildProcessController {
   id: string;
+  /** Owning ContainerInstance.id (matches ServerRegistrationMetadata.ownerId), if any. */
+  containerId: string | null;
   vfs: VirtualFS;
   vfsAdapter: VirtualFSAdapter;
   bashInstance: Bash;
@@ -184,6 +198,12 @@ export interface ChildProcessController {
   onInstallMutation:
     | ((summary: PackageManagerMutationSummary) => void | Promise<void>)
     | null;
+  /** Default streaming hooks applied to executions created without explicit callbacks. */
+  legacyStreamingCallbacks: ChildProcessStreamingCallbacks;
+  /** Stable synthetic PIDs shared by the `ps` and `kill` shell commands. */
+  processPids: Map<number, ProcessPidTarget>;
+  processPidByKey: Map<string, number>;
+  nextProcessPid: number;
   frameworkDevServers: Map<string, ManagedFrameworkDevServer>;
   executions: Map<string, ChildProcessExecutionContext>;
   builtinShellCommands: Map<string, RegisteredShellCommand>;
@@ -258,28 +278,21 @@ Object.defineProperty = function (
   return _realDefineProperty.call(Object, target, key, descriptor) as object;
 } as typeof Object.defineProperty;
 
-// Legacy compatibility hooks used by existing tests and callers that still rely
-// on the singleton-style "next command" streaming configuration.
-let legacyStreamingCallbacks: {
-  onStdout: ((data: string) => void) | null;
-  onStderr: ((data: string) => void) | null;
-  signal: AbortSignal | null;
-} = {
-  onStdout: null,
-  onStderr: null,
-  signal: null,
-};
-
 /**
  * Set streaming callbacks for the next command execution.
  * Used by container.run() to enable streaming output from custom commands.
+ *
+ * @deprecated Module-level alias kept for back-compat — it writes to the
+ * default controller's per-controller streaming callbacks. Multi-container
+ * callers should pass callbacks via createExecution() instead.
  */
 export function setStreamingCallbacks(opts: {
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
   signal?: AbortSignal;
 }): void {
-  legacyStreamingCallbacks = {
+  if (!defaultChildProcessController) return;
+  defaultChildProcessController.legacyStreamingCallbacks = {
     onStdout: opts.onStdout || null,
     onStderr: opts.onStderr || null,
     signal: opts.signal || null,
@@ -288,9 +301,12 @@ export function setStreamingCallbacks(opts: {
 
 /**
  * Clear streaming callbacks after command execution.
+ *
+ * @deprecated See setStreamingCallbacks.
  */
 export function clearStreamingCallbacks(): void {
-  legacyStreamingCallbacks = {
+  if (!defaultChildProcessController) return;
+  defaultChildProcessController.legacyStreamingCallbacks = {
     onStdout: null,
     onStderr: null,
     signal: null,
@@ -314,6 +330,7 @@ function createExecutionContext(
     onStdout: opts?.onStdout || null,
     onStderr: opts?.onStderr || null,
     signal: opts?.signal || null,
+    killController: new AbortController(),
     interactive: !!opts?.interactive,
     activeProcessStdin: null,
     activeProcess: null,
@@ -370,6 +387,10 @@ function getControllerById(
   return controllersById.get(controllerId) ?? null;
 }
 
+// Internal call sites resolve a controller through the runtime binding
+// (createChildProcessModule) or CONTROLLER_ID_ENV_KEY. The default-controller
+// fallback only exists for the module-level exec/spawn/... exports used
+// outside a runtime, and is ambiguous once multiple containers exist.
 function getActiveController(
   binding?: ChildProcessModuleBinding,
   env?: Record<string, string>,
@@ -411,9 +432,9 @@ function applyLegacyStreamingDefaults(
 ): ChildProcessExecutionContext {
   if (execution) return execution;
   return createExecutionContext(controller, {
-    onStdout: legacyStreamingCallbacks.onStdout || undefined,
-    onStderr: legacyStreamingCallbacks.onStderr || undefined,
-    signal: legacyStreamingCallbacks.signal || undefined,
+    onStdout: controller.legacyStreamingCallbacks.onStdout || undefined,
+    onStderr: controller.legacyStreamingCallbacks.onStderr || undefined,
+    signal: controller.legacyStreamingCallbacks.signal || undefined,
   });
 }
 
@@ -753,12 +774,7 @@ async function runCommandInController(
     ? (controller.executions.get(executionId) ?? null)
     : null;
   const execution =
-    existingExecution ??
-    createExecutionContext(controller, {
-      onStdout: legacyStreamingCallbacks.onStdout || undefined,
-      onStderr: legacyStreamingCallbacks.onStderr || undefined,
-      signal: legacyStreamingCallbacks.signal || undefined,
-    });
+    existingExecution ?? applyLegacyStreamingDefaults(controller, null);
   const ownsExecution = !existingExecution;
   const resolvedCwd = options?.cwd ?? "/";
   const resolvedEnv = addNodeModuleBinPaths(
@@ -788,7 +804,7 @@ async function runCommandInController(
       envWithContext,
     );
     result ??= await controller.bashInstance.exec(
-      stripQuotesForBash(normalizeQuotes(command)),
+      normalizeQuotes(command),
       {
         cwd: resolvedCwd,
         env: envWithContext,
@@ -991,10 +1007,9 @@ async function maybeRunAlmostnodeLspBridgeCommand(
 }
 
 /**
- * Intercept known custom commands and dispatch them directly, bypassing
- * just-bash's lexer which fails on quoted arguments (e.g.
- * `playwright-cli fill e3 "Buy groceries"`, `pg "SELECT 1 as test"`).
- * Uses splitCommandArgs for proper quote-aware tokenization.
+ * Intercept known custom commands and dispatch them directly without going
+ * through just-bash (e.g. `playwright-cli fill e3 "Buy groceries"`,
+ * `pg "SELECT 1 as test"`). Uses splitCommandArgs for quote-aware tokenization.
  */
 function maybeRunCustomCommandDirect(
   controller: ChildProcessController,
@@ -1045,47 +1060,6 @@ function maybeRunCustomCommandDirect(
   })();
 }
 
-/**
- * Strip quotes from a command string so just-bash's broken lexer won't crash.
- * Tokenizes properly, then rejoins — but re-wraps originally-quoted tokens
- * in double quotes when they contain shell metacharacters like `(` or `)`.
- * This prevents just-bash's lexer from treating parentheses in SQL statements
- * (e.g. `INSERT INTO users (col) VALUES ('x')`) as subshell operators.
- */
-function stripQuotesForBash(command: string): string {
-  if (!command.includes('"') && !command.includes("'")) return command;
-
-  const result: string[] = [];
-  const matcher = /"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|([^\s]+)/g;
-  let match: RegExpExecArray | null = null;
-
-  while ((match = matcher.exec(command)) !== null) {
-    if (match[1] !== undefined) {
-      // Was double-quoted — unescape, then re-quote if it contains
-      // characters that would confuse just-bash's lexer.
-      const content = match[1].replace(/\\(["\\$`!])/g, "$1");
-      if (/[()$`]/.test(content) || /\s/.test(content)) {
-        result.push('"' + content.replace(/["\\$`]/g, "\\$&") + '"');
-      } else {
-        result.push(content);
-      }
-    } else if (match[2] !== undefined) {
-      // Was single-quoted — unescape, then re-quote if needed.
-      const content = match[2].replace(/\\(['\\!])/g, "$1");
-      if (/[()$`]/.test(content) || /\s/.test(content)) {
-        result.push('"' + content.replace(/["\\$`]/g, "\\$&") + '"');
-      } else {
-        result.push(content);
-      }
-    } else if (match[3] !== undefined) {
-      // Was unquoted — pass through as-is (preserves legit shell syntax)
-      result.push(match[3]);
-    }
-  }
-
-  return result.join(" ");
-}
-
 function normalizeCommandCwd(cwd?: string): string {
   if (!cwd) return "/";
   if (path.isAbsolute(cwd)) return path.normalize(cwd);
@@ -1129,6 +1103,73 @@ function stopManagedFrameworkServersOnPort(
       stopManagedFrameworkServer(controller, key);
     }
   }
+}
+
+/** Bridge ownership id for servers launched by this controller's commands. */
+function devServerOwnerId(controller: ChildProcessController): string {
+  return controller.containerId ?? controller.id;
+}
+
+/**
+ * If the requested dev-server port is still registered with the bridge by
+ * another owner, pick the next free port. Returns the resolved port plus the
+ * "Port X is in use, trying Y..." notice (matching next/vite CLI output) for
+ * the caller to stream/return.
+ */
+function resolveDevServerPortConflict(
+  controller: ChildProcessController,
+  bridge: {
+    getServerPorts(): number[];
+    getServerMetadata(port: number): { ownerId?: string } | undefined;
+    findFreePort(preferred: number): number;
+  },
+  port: number,
+): { port: number; notice: string } {
+  const ownerId = devServerOwnerId(controller);
+  let resolved = port;
+  let notice = "";
+  while (
+    bridge.getServerPorts().includes(resolved) &&
+    bridge.getServerMetadata(resolved)?.ownerId !== ownerId
+  ) {
+    const next = bridge.findFreePort(resolved + 1);
+    notice += `Port ${resolved} is in use, trying ${next}...\n`;
+    resolved = next;
+  }
+  return { port: resolved, notice };
+}
+
+/**
+ * Tear down a controller when its container is disposed: stop its framework
+ * dev servers, drop its executions, and remove it from the module registries.
+ */
+export function disposeChildProcessController(
+  controller: ChildProcessController,
+): void {
+  stopAllManagedFrameworkServers(controller);
+  for (const executionId of [...controller.executions.keys()]) {
+    destroyExecutionContext(controller, executionId);
+  }
+  controllersById.delete(controller.id);
+  if (controllersByVfs.get(controller.vfs) === controller) {
+    controllersByVfs.delete(controller.vfs);
+  }
+  if (defaultChildProcessController === controller) {
+    defaultChildProcessController = null;
+  }
+}
+
+/**
+ * Agent process bridges set this env var so managed framework dev servers
+ * DETACH: the command returns right after startup instead of holding the
+ * shell until abort (interactive-terminal Ctrl+C semantics). The server
+ * keeps running under `controller.frameworkDevServers` either way — an
+ * agent must be able to start a dev server and move on with its turn.
+ */
+export const DETACH_DEV_SERVERS_ENV = "ALMOSTNODE_DETACH_DEV_SERVERS";
+
+function shouldDetachDevServer(env: Record<string, string>): boolean {
+  return env[DETACH_DEV_SERVERS_ENV] === "1";
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
@@ -1432,9 +1473,17 @@ function decodeKeypressEvents(
 /**
  * Send data to the stdin of the currently running node process.
  * Emits both 'data' and 'keypress' events (vitest uses readline keypress events).
+ * The module-level export targets the default controller; runtime-bound
+ * modules (createChildProcessModule) target their own controller.
  */
 export function sendStdin(data: string): void {
-  const controller = defaultChildProcessController;
+  sendStdinToController(defaultChildProcessController, data);
+}
+
+function sendStdinToController(
+  controller: ChildProcessController | null,
+  data: string,
+): void {
   if (!controller) return;
   const interactiveExecutions = Array.from(
     controller.executions.values(),
@@ -1493,10 +1542,15 @@ export function initChildProcess(
     onInstallMutation?: (
       summary: PackageManagerMutationSummary,
     ) => void | Promise<void>;
+    /** ContainerInstance.id of the owning container, for server ownership tagging. */
+    containerId?: string;
   } = {},
 ): ChildProcessController {
   const existing = controllersByVfs.get(vfs);
   if (existing) {
+    if (options.containerId && !existing.containerId) {
+      existing.containerId = options.containerId;
+    }
     defaultChildProcessController = existing;
     return existing;
   }
@@ -1573,6 +1627,9 @@ export function initChildProcess(
       cwd: ctx.cwd,
       env,
       childProcessController: controller,
+      // Servers this script starts attribute to the owning container from
+      // construction — never from the last-write-wins active-process global.
+      ownerId: devServerOwnerId(controller),
       onConsole: (method, consoleArgs) => {
         const msg = consoleArgs.map((arg) => String(arg)).join(" ") + "\n";
         if (method === "error") {
@@ -1587,9 +1644,18 @@ export function initChildProcess(
 
     const proc = runtime.getProcess();
     execution.activeProcess = proc;
+    // Legacy debugging hook with no in-repo consumer; per-execution lookups go
+    // through execution.activeProcess. Save/restore keeps nesting safe, but
+    // the global is last-write-wins under interleaved runs across containers.
     const globalScope = globalThis as { __almostnodeActiveProcess?: Process };
     const previousActiveProcess = globalScope.__almostnodeActiveProcess;
     globalScope.__almostnodeActiveProcess = proc;
+    // Stamp the owning container so http.Server.listen can attribute raw
+    // servers to a container: same-owner re-listen silently replaces (the
+    // historical restart path), cross-owner collisions get EADDRINUSE.
+    (
+      proc as Process & { __almostnodeOwnerId?: string }
+    ).__almostnodeOwnerId = controller.containerId ?? controller.id;
     proc.exit = ((code = 0) => {
       if (!exitCalled) {
         exitCalled = true;
@@ -1722,21 +1788,26 @@ module.exports = (async () => {
         exitPromise.then(() => "exit" as const),
       ];
 
-      let removeAbortListener = () => {};
-      if (execution.signal) {
-        if (execution.signal.aborted) return "abort";
+      const removeAbortListeners: Array<() => void> = [];
+      const abortSignals = [
+        execution.signal,
+        execution.killController.signal,
+      ].filter((value): value is AbortSignal => Boolean(value));
+      for (const signal of abortSignals) {
+        if (signal.aborted) return "abort";
         raceEntries.push(
           new Promise<"abort">((resolve) => {
             const onAbort = () => resolve("abort");
-            execution.signal!.addEventListener("abort", onAbort, {
-              once: true,
+            signal.addEventListener("abort", onAbort, { once: true });
+            removeAbortListeners.push(() => {
+              signal.removeEventListener("abort", onAbort);
             });
-            removeAbortListener = () => {
-              execution.signal!.removeEventListener("abort", onAbort);
-            };
           }),
         );
       }
+      const removeAbortListener = () => {
+        for (const remove of removeAbortListeners) remove();
+      };
 
       try {
         return await Promise.race(raceEntries);
@@ -1791,8 +1862,11 @@ module.exports = (async () => {
         return { stdout, stderr, exitCode };
       }
 
+      const isCompletedPackageExecCli = isNpxExec && isNodeModulesCli;
       const MAX_TOTAL_MS = isLongIdleNodeModulesCli ? 5 * 60 * 1000 : 60_000;
-      const IDLE_TIMEOUT_MS = isLongIdleNodeModulesCli
+      const IDLE_TIMEOUT_MS = isCompletedPackageExecCli
+        ? 300
+        : isLongIdleNodeModulesCli
         ? 10_000
         : isNodeModulesCli
           ? 300
@@ -1825,6 +1899,7 @@ module.exports = (async () => {
 
       while (!exitCalled) {
         if (execution.signal?.aborted) break;
+        if (execution.killController.signal.aborted) break;
 
         const raceResult = await Promise.race([
           exitPromise.then(() => "exit" as const),
@@ -1835,6 +1910,7 @@ module.exports = (async () => {
 
         if (raceResult === "exit" || exitCalled) break;
         if (execution.signal?.aborted) break;
+        if (execution.killController.signal.aborted) break;
 
         const currentLen = stdout.length + stderr.length;
         if (currentLen > lastOutputLen) {
@@ -1848,6 +1924,7 @@ module.exports = (async () => {
 
         const keepAliveForInteractiveInput =
           !!execution.signal &&
+          !isCompletedPackageExecCli &&
           (stdinRawMode || hasActiveStdinListeners(proc.stdin));
         if (keepAliveForInteractiveInput) {
           continue;
@@ -1967,7 +2044,11 @@ module.exports = (async () => {
     }
   });
 
-  const npxCommand = defineCommand("npx", async (args, ctx) => {
+  const runPackageExecCommand = async (
+    commandLabel: "npx" | "bunx",
+    args: string[],
+    ctx: ShellCommandContext,
+  ): Promise<JustBashExecResult> => {
     const env = envToRecord(ctx.env);
     const execution = getExecutionContextFromEnv(controller, env);
     let packageSpec: string | null = null;
@@ -1994,12 +2075,12 @@ module.exports = (async () => {
       return {
         stdout: "",
         stderr:
-          "npx: missing command\nUsage: npx [options] <command> [args...]\n",
+          `${commandLabel}: missing command\nUsage: ${commandLabel} [options] <command> [args...]\n`,
         exitCode: 1,
       };
     }
 
-    const LONG_RUNNING_NPX_COMMANDS = new Set<string>([
+    const LONG_RUNNING_PACKAGE_EXEC_COMMANDS = new Set<string>([
       // 'shadcn', 'npm', 'npx'
     ]);
 
@@ -2056,11 +2137,11 @@ module.exports = (async () => {
       : "reuse-or-install";
 
     almostnodeDebugLog(
-      "npx",
-      `[almostnode DEBUG] npx parsed: command=${commandName} installSpec=${installSpec} package=${pkgName} version=${requestedVersion || "latest"} bin=${binName} cwd=${ctx.cwd} mode=${controller.installMode} decision=${installDecision}`,
+      commandLabel,
+      `[almostnode DEBUG] ${commandLabel} parsed: command=${commandName} installSpec=${installSpec} package=${pkgName} version=${requestedVersion || "latest"} bin=${binName} cwd=${ctx.cwd} mode=${controller.installMode} decision=${installDecision}`,
     );
 
-    let npxSuppressedCount = 0;
+    let packageExecSuppressedCount = 0;
     const emitInstallProgress = (message: string) => {
       // Suppress per-dep spam (same logic as handleNpmInstall)
       if (
@@ -2068,7 +2149,7 @@ module.exports = (async () => {
         /^\s+Downloading\s+/.test(message) ||
         /^Skipping\s+/.test(message)
       ) {
-        npxSuppressedCount++;
+        packageExecSuppressedCount++;
         return;
       }
       // Don't stream — let output return in the final result to avoid
@@ -2099,26 +2180,26 @@ module.exports = (async () => {
         .map((line) => line.trim())
         .find((line) => line.length > 0);
 
-      let diagnostic = `npx: command "${binName}" exited with code ${result.exitCode} while running ${executionTarget}\n`;
+      let diagnostic = `${commandLabel}: command "${binName}" exited with code ${result.exitCode} while running ${executionTarget}\n`;
       if (firstStderrLine) {
-        diagnostic += `npx: first stderr line: ${firstStderrLine}\n`;
+        diagnostic += `${commandLabel}: first stderr line: ${firstStderrLine}\n`;
       }
-      if (isAlmostnodeDebugEnabled("npx")) {
+      if (isAlmostnodeDebugEnabled(commandLabel)) {
         const stderrTail = formatOutputTail(stderrText, 40, 4000);
         if (stderrTail && stderrTail !== firstStderrLine) {
-          diagnostic += `npx: stderr tail:\n${stderrTail}\n`;
+          diagnostic += `${commandLabel}: stderr tail:\n${stderrTail}\n`;
         }
         const stdoutTail = formatOutputTail(result.stdout || "", 40, 4000);
         if (stdoutTail) {
-          diagnostic += `npx: stdout tail:\n${stdoutTail}\n`;
+          diagnostic += `${commandLabel}: stdout tail:\n${stdoutTail}\n`;
         }
       } else if (!stderrText.trim()) {
         const stdoutTail = formatOutputTail(result.stdout || "");
         if (stdoutTail) {
-          diagnostic += `npx: stdout tail:\n${stdoutTail}\n`;
+          diagnostic += `${commandLabel}: stdout tail:\n${stdoutTail}\n`;
         }
       }
-      almostnodeDebugError("npx", `[almostnode DEBUG] ${diagnostic.trimEnd()}`);
+      almostnodeDebugError(commandLabel, `[almostnode DEBUG] ${diagnostic.trimEnd()}`);
 
       return {
         ...result,
@@ -2150,7 +2231,7 @@ module.exports = (async () => {
       const pm = await createPackageManager(controller, installCwd || "/");
       try {
         await pm.install(installSpec, { onProgress: emitInstallProgress });
-        npxSuppressedCount = 0;
+        packageExecSuppressedCount = 0;
       } finally {
         pm.dispose();
       }
@@ -2159,14 +2240,14 @@ module.exports = (async () => {
     let { binPath, resolvedBinTarget } = resolveBin(ctx.cwd);
     let useExtendedNodeIdle = false;
     almostnodeDebugLog(
-      "npx",
-      `[almostnode DEBUG] npx resolve before install: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} mode=${controller.installMode}`,
+      commandLabel,
+      `[almostnode DEBUG] ${commandLabel} resolve before install: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} mode=${controller.installMode}`,
     );
 
     if (forceLatestInstall && (binPath || resolvedBinTarget)) {
       almostnodeDebugLog(
-        "npx",
-        `[almostnode DEBUG] npx skipping @latest reinstall: already resolved binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"}`,
+        commandLabel,
+        `[almostnode DEBUG] ${commandLabel} skipping @latest reinstall: already resolved binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"}`,
       );
     }
 
@@ -2174,39 +2255,39 @@ module.exports = (async () => {
       useExtendedNodeIdle = true;
       try {
         almostnodeDebugLog(
-          "npx",
-          `[almostnode DEBUG] npx install start: spec=${installSpec} cwd=${ctx.cwd} mode=${controller.installMode}`,
+          commandLabel,
+          `[almostnode DEBUG] ${commandLabel} install start: spec=${installSpec} cwd=${ctx.cwd} mode=${controller.installMode}`,
         );
         await installPackage(ctx.cwd);
         ({ binPath, resolvedBinTarget } = resolveBin(ctx.cwd));
         almostnodeDebugLog(
-          "npx",
-          `[almostnode DEBUG] npx resolve after install: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} cwd=${ctx.cwd}`,
+          commandLabel,
+          `[almostnode DEBUG] ${commandLabel} resolve after install: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} cwd=${ctx.cwd}`,
         );
         if (!binPath && !resolvedBinTarget && ctx.cwd !== "/") {
           emitInstallProgress(
-            "npx: retrying install in / to resolve command bin...",
+            `${commandLabel}: retrying install in / to resolve command bin...`,
           );
           almostnodeDebugLog(
-            "npx",
-            `[almostnode DEBUG] npx install retry in /: spec=${installSpec} originalCwd=${ctx.cwd} mode=${controller.installMode}`,
+            commandLabel,
+            `[almostnode DEBUG] ${commandLabel} install retry in /: spec=${installSpec} originalCwd=${ctx.cwd} mode=${controller.installMode}`,
           );
           await installPackage("/");
           ({ binPath, resolvedBinTarget } = resolveBin("/"));
           almostnodeDebugLog(
-            "npx",
-            `[almostnode DEBUG] npx resolve after root retry: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} cwd=/`,
+            commandLabel,
+            `[almostnode DEBUG] ${commandLabel} resolve after root retry: binPath=${binPath || "-"} resolvedBinTarget=${resolvedBinTarget || "-"} cwd=/`,
           );
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         almostnodeDebugError(
-          "npx",
-          `[almostnode DEBUG] npx install failed: spec=${installSpec} cwd=${ctx.cwd} -> ${msg}`,
+          commandLabel,
+          `[almostnode DEBUG] ${commandLabel} install failed: spec=${installSpec} cwd=${ctx.cwd} -> ${msg}`,
         );
         return {
           stdout: "",
-          stderr: `npx: install failed: ${msg}\n`,
+          stderr: `${commandLabel}: install failed: ${msg}\n`,
           exitCode: 1,
         };
       }
@@ -2214,12 +2295,12 @@ module.exports = (async () => {
 
     if (!binPath && !resolvedBinTarget) {
       almostnodeDebugError(
-        "npx",
-        `[almostnode DEBUG] npx command not found after resolution: package=${pkgName} bin=${binName} cwd=${ctx.cwd}`,
+        commandLabel,
+        `[almostnode DEBUG] ${commandLabel} command not found after resolution: package=${pkgName} bin=${binName} cwd=${ctx.cwd}`,
       );
       return {
         stdout: "",
-        stderr: `npx: command not found: ${binName}\n`,
+        stderr: `${commandLabel}: command not found: ${binName}\n`,
         exitCode: 1,
       };
     }
@@ -2227,7 +2308,7 @@ module.exports = (async () => {
     if (!ctx.exec) {
       return {
         stdout: "",
-        stderr: "npx: command execution not available in this context\n",
+        stderr: `${commandLabel}: command execution not available in this context\n`,
         exitCode: 1,
       };
     }
@@ -2235,10 +2316,11 @@ module.exports = (async () => {
     const shouldUseExtendedNodeIdle =
       execution?.interactive ||
       useExtendedNodeIdle ||
-      LONG_RUNNING_NPX_COMMANDS.has(commandName);
+      LONG_RUNNING_PACKAGE_EXEC_COMMANDS.has(commandName);
     const execEnv = {
       ...env,
       ...(shouldUseExtendedNodeIdle ? { ALMOSTNODE_LONG_NODE_IDLE: "1" } : {}),
+      ALMOSTNODE_PACKAGE_EXEC: commandLabel,
       ALMOSTNODE_NPX_EXEC: "1",
     };
 
@@ -2247,8 +2329,8 @@ module.exports = (async () => {
         .map((value) => quoteArg(value))
         .join(" ");
       almostnodeDebugLog(
-        "npx",
-        `[almostnode DEBUG] npx exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? "1" : "0"}`,
+        commandLabel,
+        `[almostnode DEBUG] ${commandLabel} exec target: node ${resolvedBinTarget} args=${commandArgs.length} interactive=${execution?.interactive ? "1" : "0"}`,
       );
       const result = await ctx.exec(fullCommand, {
         cwd: ctx.cwd,
@@ -2260,7 +2342,7 @@ module.exports = (async () => {
     if (!binPath) {
       return {
         stdout: "",
-        stderr: `npx: command not found: ${binName}\n`,
+        stderr: `${commandLabel}: command not found: ${binName}\n`,
         exitCode: 1,
       };
     }
@@ -2269,12 +2351,20 @@ module.exports = (async () => {
       .map((value) => quoteArg(value))
       .join(" ");
     almostnodeDebugLog(
-      "npx",
-      `[almostnode DEBUG] npx exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? "1" : "0"}`,
+      commandLabel,
+      `[almostnode DEBUG] ${commandLabel} exec target: ${binPath} args=${commandArgs.length} interactive=${execution?.interactive ? "1" : "0"}`,
     );
     const result = await ctx.exec(fullCommand, { cwd: ctx.cwd, env: execEnv });
     return withNpxExecDiagnostics(result, binPath);
-  });
+  };
+
+  const npxCommand = defineCommand("npx", async (args, ctx) =>
+    runPackageExecCommand("npx", args, ctx),
+  );
+
+  const bunxCommand = defineCommand("bunx", async (args, ctx) =>
+    runPackageExecCommand("bunx", args, ctx),
+  );
 
   const tarCommand = defineCommand("tar", async (args, ctx) => {
     const parsed = parseTarOptions(args, ctx.cwd);
@@ -2391,7 +2481,7 @@ module.exports = (async () => {
       }
     }
 
-    const key = `next:${port}`;
+    let key = `next:${port}`;
     stopManagedFrameworkServersOnPort(controller, port);
 
     try {
@@ -2409,6 +2499,13 @@ module.exports = (async () => {
         }
       }
 
+      const portConflict = resolveDevServerPortConflict(controller, bridge, port);
+      if (portConflict.port !== port) {
+        port = portConflict.port;
+        key = `next:${port}`;
+        stopManagedFrameworkServersOnPort(controller, port);
+      }
+
       const root = normalizedCwd;
       const server = new NextDevServer(controller.vfs, {
         port,
@@ -2424,12 +2521,17 @@ module.exports = (async () => {
         createBridgeServerWrapper(server) as any,
         port,
         "0.0.0.0",
-        { purpose: "workspace-preview", framework: "next", root },
+        {
+          purpose: "workspace-preview",
+          framework: "next",
+          root,
+          ownerId: devServerOwnerId(controller),
+        },
       );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
-      const startup = `next dev server running at ${url} (host: ${hostname}, root: ${root})\n`;
+      const startup = `${portConflict.notice}next dev server running at ${url} (host: ${hostname}, root: ${root})\n`;
       emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
@@ -2437,7 +2539,7 @@ module.exports = (async () => {
         framework: "next",
         port,
         clearInstalledPackagesCache: () => server.clearInstalledPackagesCache(),
-        setHMRTarget: (targetWindow: Window) =>
+        setHMRTarget: (targetWindow: Window | null) =>
           server.setHMRTarget(targetWindow),
         stop: () => {
           try {
@@ -2448,7 +2550,7 @@ module.exports = (async () => {
         },
       });
 
-      if (execution?.signal) {
+      if (execution?.signal && !shouldDetachDevServer(env)) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
         return { stdout: startup, stderr: "", exitCode: 130 };
@@ -2554,7 +2656,7 @@ module.exports = (async () => {
       }
     }
 
-    const key = `vite:${port}`;
+    let key = `vite:${port}`;
     stopManagedFrameworkServersOnPort(controller, port);
 
     try {
@@ -2572,6 +2674,13 @@ module.exports = (async () => {
         }
       }
 
+      const portConflict = resolveDevServerPortConflict(controller, bridge, port);
+      if (portConflict.port !== port) {
+        port = portConflict.port;
+        key = `vite:${port}`;
+        stopManagedFrameworkServersOnPort(controller, port);
+      }
+
       // Auto-detect TanStack Router/Start from package.json
       let spaFallback = false;
       let aliases: Record<string, string> | undefined;
@@ -2582,7 +2691,11 @@ module.exports = (async () => {
           controller.vfs.readFileSync(pkgPath, "utf8") as string,
         );
         const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
-        if (allDeps["@tanstack/react-router"] || allDeps["@tanstack/start"]) {
+        if (
+          allDeps["@tanstack/react-router"]
+          || allDeps["@tanstack/react-start"]
+          || allDeps["@tanstack/start"]
+        ) {
           spaFallback = true;
           aliases = { "~/": "src/", "@/": "src/" };
           tanstackRouter = true;
@@ -2605,6 +2718,7 @@ module.exports = (async () => {
         spaFallback,
         aliases,
         tanstackRouter,
+        deploymentBasePath: bridge.getBasePath(),
       });
 
       // Generate initial route tree before server starts
@@ -2625,12 +2739,17 @@ module.exports = (async () => {
         createBridgeServerWrapper(server) as any,
         port,
         "0.0.0.0",
-        { purpose: "workspace-preview", framework: "vite", root },
+        {
+          purpose: "workspace-preview",
+          framework: "vite",
+          root,
+          ownerId: devServerOwnerId(controller),
+        },
       );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
-      const startup = `vite dev server running at ${url} (host: ${host}, root: ${root})\n`;
+      const startup = `${portConflict.notice}vite dev server running at ${url} (host: ${host}, root: ${root})\n`;
       emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
@@ -2645,7 +2764,7 @@ module.exports = (async () => {
                   server as { clearInstalledPackagesCache: () => void }
                 ).clearInstalledPackagesCache()
             : undefined,
-        setHMRTarget: (targetWindow: Window) =>
+        setHMRTarget: (targetWindow: Window | null) =>
           server.setHMRTarget(targetWindow),
         stop: () => {
           try {
@@ -2656,7 +2775,7 @@ module.exports = (async () => {
         },
       });
 
-      if (execution?.signal) {
+      if (execution?.signal && !shouldDetachDevServer(env)) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
         return { stdout: startup, stderr: "", exitCode: 130 };
@@ -2805,7 +2924,7 @@ module.exports = (async () => {
       };
     }
 
-    const key = `wrangler:${port}`;
+    let key = `wrangler:${port}`;
     stopManagedFrameworkServersOnPort(controller, port);
 
     try {
@@ -2822,6 +2941,13 @@ module.exports = (async () => {
         } catch {
           // Service worker is optional for shell command usage.
         }
+      }
+
+      const portConflict = resolveDevServerPortConflict(controller, bridge, port);
+      if (portConflict.port !== port) {
+        port = portConflict.port;
+        key = `wrangler:${port}`;
+        stopManagedFrameworkServersOnPort(controller, port);
       }
 
       const server = new CloudflareWorkerDevServer(controller.vfs, {
@@ -2841,12 +2967,13 @@ module.exports = (async () => {
           purpose: "workspace-preview",
           framework: "wrangler",
           root: normalizedCwd,
+          ownerId: devServerOwnerId(controller),
         },
       );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
-      const startup = `wrangler dev server running at ${url} (host: ${host}, entry: ${entry})\n`;
+      const startup = `${portConflict.notice}wrangler dev server running at ${url} (host: ${host}, entry: ${entry})\n`;
       emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
@@ -2862,7 +2989,7 @@ module.exports = (async () => {
         },
       });
 
-      if (execution?.signal) {
+      if (execution?.signal && !shouldDetachDevServer(env)) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
         return { stdout: startup, stderr: "", exitCode: 130 };
@@ -3020,7 +3147,7 @@ module.exports = (async () => {
       };
     }
 
-    const key = `wrangler-pages:${port}`;
+    let key = `wrangler-pages:${port}`;
     stopManagedFrameworkServersOnPort(controller, port);
 
     try {
@@ -3039,6 +3166,13 @@ module.exports = (async () => {
         }
       }
 
+      const portConflict = resolveDevServerPortConflict(controller, bridge, port);
+      if (portConflict.port !== port) {
+        port = portConflict.port;
+        key = `wrangler-pages:${port}`;
+        stopManagedFrameworkServersOnPort(controller, port);
+      }
+
       const server = new CloudflarePagesDevServer(controller.vfs, {
         port,
         root: normalizedCwd,
@@ -3053,12 +3187,13 @@ module.exports = (async () => {
           purpose: "workspace-preview",
           framework: "wrangler-pages",
           root: normalizedCwd,
+          ownerId: devServerOwnerId(controller),
         },
       );
       server.start();
 
       const url = `${bridge.getServerUrl(port)}/`;
-      const startup = `wrangler pages dev server running at ${url} (host: ${host}, assets: ${assetsDir}, protocol: ${localProtocol})\n`;
+      const startup = `${portConflict.notice}wrangler pages dev server running at ${url} (host: ${host}, assets: ${assetsDir}, protocol: ${localProtocol})\n`;
       emitStreamData(execution, startup, "stdout");
 
       controller.frameworkDevServers.set(key, {
@@ -3074,7 +3209,7 @@ module.exports = (async () => {
         },
       });
 
-      if (execution?.signal) {
+      if (execution?.signal && !shouldDetachDevServer(env)) {
         await waitForAbort(execution.signal);
         stopManagedFrameworkServer(controller, key);
         return { stdout: startup, stderr: "", exitCode: 130 };
@@ -3462,13 +3597,22 @@ module.exports = (async () => {
     };
   });
 
+  const assignProcessPid = (key: string, target: ProcessPidTarget): number => {
+    const existing = controller.processPidByKey.get(key);
+    if (existing !== undefined) return existing;
+    const pid = controller.nextProcessPid++;
+    controller.processPidByKey.set(key, pid);
+    controller.processPids.set(pid, target);
+    return pid;
+  };
+
   const psCommand = defineCommand("ps", async (args, _ctx) => {
     const lines: string[] = [];
     lines.push("  PID TTY      STAT  COMMAND");
     lines.push("    1 ?        Ss    bash");
 
-    let pid = 3001;
-    for (const [, server] of controller.frameworkDevServers) {
+    for (const [key, server] of controller.frameworkDevServers) {
+      const pid = assignProcessPid(`server:${key}`, { kind: "server", key });
       const cmd =
         server.framework === "next"
           ? `next dev (port ${server.port})`
@@ -3478,19 +3622,87 @@ module.exports = (async () => {
               ? `wrangler dev (port ${server.port})`
               : `wrangler pages dev (port ${server.port})`;
       lines.push(`${String(pid).padStart(5)} ?        Sl    ${cmd}`);
-      pid += 1000;
     }
 
     for (const [id, exec] of controller.executions) {
       if (exec.activeProcessStdin) {
+        const pid = assignProcessPid(`execution:${id}`, {
+          kind: "execution",
+          executionId: id,
+        });
         lines.push(
           `${String(pid).padStart(5)} ?        S+    node [interactive] (${id})`,
         );
-        pid += 1;
       }
     }
 
     return { stdout: lines.join("\n") + "\n", stderr: "", exitCode: 0 };
+  });
+
+  const killCommand = defineCommand("kill", async (args, _ctx) => {
+    const pids: number[] = [];
+    const stderrLines: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "-s" || arg === "--signal") {
+        i++; // skip the signal name; all signals terminate here
+        continue;
+      }
+      if (/^-(\d+|[A-Za-z]+)$/.test(arg)) {
+        continue; // -9, -KILL, -SIGTERM, ...
+      }
+      const pid = Number(arg);
+      if (!Number.isInteger(pid)) {
+        stderrLines.push(`kill: illegal pid: ${arg}`);
+        continue;
+      }
+      pids.push(pid);
+    }
+
+    if (pids.length === 0 && stderrLines.length === 0) {
+      return {
+        stdout: "",
+        stderr: "usage: kill [-signal] pid ...\n",
+        exitCode: 1,
+      };
+    }
+
+    let failed = stderrLines.length > 0;
+    for (const pid of pids) {
+      if (pid === 1) {
+        stderrLines.push(`kill: (1) - Operation not permitted`);
+        failed = true;
+        continue;
+      }
+      const target = controller.processPids.get(pid);
+      if (!target) {
+        stderrLines.push(`kill: (${pid}) - No such process`);
+        failed = true;
+        continue;
+      }
+      if (target.kind === "server") {
+        if (!controller.frameworkDevServers.has(target.key)) {
+          stderrLines.push(`kill: (${pid}) - No such process`);
+          failed = true;
+          continue;
+        }
+        stopManagedFrameworkServer(controller, target.key);
+        continue;
+      }
+      const execution = controller.executions.get(target.executionId);
+      if (!execution) {
+        stderrLines.push(`kill: (${pid}) - No such process`);
+        failed = true;
+        continue;
+      }
+      execution.killController.abort();
+    }
+
+    return {
+      stdout: "",
+      stderr: stderrLines.length ? stderrLines.join("\n") + "\n" : "",
+      exitCode: failed ? 1 : 0,
+    };
   });
 
   const jinaCommand = defineCommand("jina", async (args, ctx) => {
@@ -3569,11 +3781,16 @@ module.exports = (async () => {
 
   controller = {
     id: controllerId,
+    containerId: options.containerId || null,
     vfs,
     vfsAdapter,
     bashInstance,
     installMode: options.installMode || "auto",
     onInstallMutation: options.onInstallMutation || null,
+    legacyStreamingCallbacks: { onStdout: null, onStderr: null, signal: null },
+    processPids: new Map(),
+    processPidByKey: new Map(),
+    nextProcessPid: 2001,
     frameworkDevServers: new Map(),
     executions: new Map(),
     builtinShellCommands: new Map(),
@@ -3652,6 +3869,7 @@ module.exports = (async () => {
     createRegisteredShellCommand(nodeCommand.name, nodeCommand),
     createRegisteredShellCommand(npmCommand.name, npmCommand),
     createRegisteredShellCommand(npxCommand.name, npxCommand),
+    createRegisteredShellCommand(bunxCommand.name, bunxCommand),
     createRegisteredShellCommand(tarCommand.name, tarCommand),
     createRegisteredShellCommand(nextCommand.name, nextCommand, {
       interceptShellParsing: true,
@@ -3736,6 +3954,7 @@ module.exports = (async () => {
     createRegisteredShellCommand(fdCommand.name, fdCommand),
     createRegisteredShellCommand(whichCommand.name, whichCommand),
     createRegisteredShellCommand(psCommand.name, psCommand),
+    createRegisteredShellCommand(killCommand.name, killCommand),
     createRegisteredShellCommand(jinaCommand.name, jinaCommand),
   ];
 
@@ -4341,6 +4560,7 @@ const SYNTHETIC_WHICH_TARGETS: Record<string, string> = {
   node: "/usr/bin/node",
   npm: "/usr/bin/npm",
   npx: "/usr/bin/npx",
+  bunx: "/usr/bin/bunx",
   rec: "/usr/bin/rec",
   rg: "/usr/bin/rg",
   sh: "/bin/sh",
@@ -4787,23 +5007,85 @@ function parseSyntheticShellExec(args: string[]): {
 
 export function splitCommandArgs(command: string): string[] {
   const tokens: string[] = [];
-  const matcher = /"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|([^\s]+)/g;
+  let current = "";
+  let hasToken = false;
+  let i = 0;
 
-  let match: RegExpExecArray | null = null;
-  while ((match = matcher.exec(command)) !== null) {
-    if (match[1] !== undefined) {
-      tokens.push(match[1].replace(/\\(["\\$`!])/g, "$1"));
+  const pushToken = () => {
+    if (hasToken) tokens.push(current);
+    current = "";
+    hasToken = false;
+  };
+
+  while (i < command.length) {
+    const ch = command[i];
+
+    if (ch === " " || ch === "\t" || ch === "\n") {
+      pushToken();
+      i++;
       continue;
     }
-    if (match[2] !== undefined) {
-      tokens.push(match[2].replace(/\\(['\\!])/g, "$1"));
+
+    if (ch === "'") {
+      // Single quotes: literal until the closing quote. As a leniency for
+      // AI-generated commands, \' \\ and \! inside single quotes are treated
+      // as escapes (POSIX would not allow this). This stays compatible with
+      // POSIX `'\''` concatenation because there the backslash sits outside
+      // the quoted region.
+      hasToken = true;
+      i++;
+      while (i < command.length && command[i] !== "'") {
+        if (
+          command[i] === "\\" &&
+          i + 1 < command.length &&
+          /['\\!]/.test(command[i + 1])
+        ) {
+          current += command[i + 1];
+          i += 2;
+          continue;
+        }
+        current += command[i];
+        i++;
+      }
+      i++; // skip closing quote (or end of string if unterminated)
       continue;
     }
-    if (match[3] !== undefined) {
-      tokens.push(match[3]);
+
+    if (ch === '"') {
+      // Double quotes: backslash escapes ", \, $, ` and !.
+      hasToken = true;
+      i++;
+      while (i < command.length && command[i] !== '"') {
+        if (
+          command[i] === "\\" &&
+          i + 1 < command.length &&
+          /["\\$`!]/.test(command[i + 1])
+        ) {
+          current += command[i + 1];
+          i += 2;
+          continue;
+        }
+        current += command[i];
+        i++;
+      }
+      i++; // skip closing quote
+      continue;
     }
+
+    if (ch === "\\" && i + 1 < command.length) {
+      // Unquoted backslash escapes the next character.
+      hasToken = true;
+      current += command[i + 1];
+      i += 2;
+      continue;
+    }
+
+    hasToken = true;
+    current += ch;
+    i++;
   }
 
+  pushToken();
   return tokens;
 }
 
@@ -4863,13 +5145,10 @@ function maybeRunSyntheticShellCommand(
     return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
   }
 
-  // Intercept custom commands before just-bash's broken lexer
+  // Intercept custom commands before handing the script to just-bash
   return (
     maybeRunCustomCommandDirect(controller, parsed.script, cwd, env) ??
-    controller.bashInstance.exec(
-      stripQuotesForBash(normalizeQuotes(parsed.script)),
-      { cwd, env },
-    )
+    controller.bashInstance.exec(normalizeQuotes(parsed.script), { cwd, env })
   );
 }
 
@@ -4986,19 +5265,24 @@ function execSyncWithBinding(
   command: string,
   options?: ExecOptions,
 ): string | Buffer {
+  const baseEnv = getBindingDefaultEnv(binding);
   const controller = getActiveController(binding, {
-    ...getBindingDefaultEnv(binding),
+    ...baseEnv,
     ...(options?.env || {}),
   });
   if (!controller) {
     throw new Error("child_process not initialized");
   }
 
-  const syntheticOutput = getSyntheticExecSyncOutput(
-    controller,
-    command,
-    options || {},
-  );
+  // Resolve defaults through the binding (the calling runtime's process) —
+  // the synthetic helpers' own fallback is globalThis.process, which is the
+  // page polyfill (or the host process under vitest) and identical across
+  // containers.
+  const syntheticOutput = getSyntheticExecSyncOutput(controller, command, {
+    ...options,
+    cwd: options?.cwd ?? getBindingDefaultCwd(binding),
+    env: { ...baseEnv, ...(options?.env || {}) },
+  });
   if (syntheticOutput !== null) {
     return normalizeExecSyncResult(syntheticOutput, options?.encoding);
   }
@@ -5524,6 +5808,8 @@ function forkWithBinding(
     cwd,
     env: withExecutionEnv(controller, execution, env),
     childProcessController: controller,
+    // Forked children stay attributed to the owning container.
+    ownerId: devServerOwnerId(controller),
     onConsole: (method, consoleArgs) => {
       const msg = consoleArgs.map((a) => String(a)).join(" ");
       if (method === "error" || method === "warn") {
@@ -5782,7 +6068,11 @@ export function createChildProcessModule(binding?: ChildProcessModuleBinding) {
     initChildProcess,
     setStreamingCallbacks,
     clearStreamingCallbacks,
-    sendStdin,
+    sendStdin: (data: string) =>
+      sendStdinToController(
+        binding?.controller ?? defaultChildProcessController,
+        data,
+      ),
   };
 }
 

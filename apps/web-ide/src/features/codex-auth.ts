@@ -20,6 +20,14 @@ const CODEX_LOGIN_SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-
 interface CodexAuthVfs
   extends Pick<VirtualFS, "mkdirSync" | "writeFileSync"> {}
 
+interface CodexAuthRefreshVfs
+  extends Pick<VirtualFS, "mkdirSync" | "writeFileSync" | "readFileSync" | "existsSync"> {}
+
+export interface RefreshCodexAuthOptions {
+  vfs: CodexAuthRefreshVfs;
+  oauthFetchOptions?: OAuthFetchOptions;
+}
+
 export interface CodexLoginResult {
   stdout: string;
   stderr: string;
@@ -172,6 +180,8 @@ export async function runCodexDeviceCodeLogin(
       deviceCode.userCode,
     );
     options.writeStdout?.(prompt);
+    // Copy the one-time code before opening the tab so it's ready to paste.
+    await copyDeviceCodeToClipboard(deviceCode.userCode, options.writeStdout);
     openLoginUrl(deviceCode.verificationUrl);
 
     const authorization = await pollCodexDeviceAuthorization(
@@ -217,6 +227,22 @@ function buildCodexAuthorizeUrl(input: {
   url.searchParams.set("state", input.state);
   url.searchParams.set("originator", CODEX_OAUTH_ORIGINATOR);
   return url.toString();
+}
+
+async function copyDeviceCodeToClipboard(
+  userCode: string,
+  writeStdout?: (data: string) => void,
+): Promise<void> {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(userCode);
+    writeStdout?.("\nThe one-time code has been copied to your clipboard.\n");
+  } catch {
+    // Clipboard access can be denied (no user activation / permissions);
+    // the code is already printed in the terminal.
+  }
 }
 
 function openLoginUrl(authUrl: string): void {
@@ -454,6 +480,86 @@ async function obtainApiKey(
   } catch {
     return null;
   }
+}
+
+/**
+ * Refresh the persisted Codex ChatGPT tokens via the OAuth refresh-token
+ * grant and rewrite `auth.json`. Returns the refreshed auth env vars — this
+ * backs the WASM build's `auth/refresh` host shim, invoked when the Codex
+ * backend responds with 401.
+ */
+export async function refreshCodexAuth(
+  options: RefreshCodexAuthOptions,
+): Promise<Record<string, string>> {
+  const { vfs } = options;
+  if (!vfs.existsSync(CODEX_AUTH_PATH)) {
+    throw new Error("Codex auth.json is missing; sign in to Codex again.");
+  }
+  const existing = JSON.parse(vfs.readFileSync(CODEX_AUTH_PATH, "utf8")) as {
+    OPENAI_API_KEY?: unknown;
+    tokens?: {
+      id_token?: unknown;
+      access_token?: unknown;
+      refresh_token?: unknown;
+    };
+  };
+  const refreshToken =
+    typeof existing.tokens?.refresh_token === "string"
+      ? existing.tokens.refresh_token.trim()
+      : "";
+  if (!refreshToken) {
+    throw new Error("Codex auth.json has no refresh token; sign in to Codex again.");
+  }
+
+  const response = await oauthFetch(
+    `${CODEX_OAUTH_ISSUER}/oauth/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: CODEX_OAUTH_CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    },
+    options.oauthFetchOptions,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Codex token refresh failed with status ${response.status}: ${await response.text()}`,
+    );
+  }
+  const parsed = (await response.json()) as Partial<ExchangedCodexTokens>;
+  const accessToken = typeof parsed.access_token === "string" ? parsed.access_token : "";
+  if (!accessToken) {
+    throw new Error("Codex token refresh response did not include an access token.");
+  }
+  const idToken =
+    typeof parsed.id_token === "string" && parsed.id_token
+      ? parsed.id_token
+      : typeof existing.tokens?.id_token === "string"
+        ? existing.tokens.id_token
+        : "";
+  if (!idToken) {
+    throw new Error("Codex token refresh response did not include an id token.");
+  }
+
+  const apiKey =
+    typeof existing.OPENAI_API_KEY === "string" && existing.OPENAI_API_KEY.trim()
+      ? existing.OPENAI_API_KEY.trim()
+      : undefined;
+  return persistCodexAuth(
+    vfs,
+    {
+      id_token: idToken,
+      access_token: accessToken,
+      refresh_token:
+        typeof parsed.refresh_token === "string" && parsed.refresh_token
+          ? parsed.refresh_token
+          : refreshToken,
+    },
+    apiKey,
+  );
 }
 
 function persistCodexAuth(

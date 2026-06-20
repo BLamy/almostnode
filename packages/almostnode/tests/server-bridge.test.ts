@@ -1,7 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ServerBridge, resetServerBridge, getServerBridge } from '../src/server-bridge';
-import type { InitServiceWorkerOptions } from '../src/server-bridge';
+import type { IVirtualServer, InitServiceWorkerOptions, ServerRegistrationMetadata } from '../src/server-bridge';
 import { createServer, setServerListenCallback, setServerCloseCallback } from '../src/shims/http';
+import { Buffer } from '../src/shims/stream';
+
+function createVirtualServer(body: string): IVirtualServer {
+  return {
+    listening: true,
+    address: () => ({ port: 0, address: '0.0.0.0', family: 'IPv4' }),
+    handleRequest: async () => ({
+      statusCode: 200,
+      statusMessage: 'OK',
+      headers: { 'Content-Type': 'text/plain' },
+      body: Buffer.from(body),
+    }),
+  };
+}
 
 describe('ServerBridge', () => {
   beforeEach(() => {
@@ -203,6 +217,64 @@ describe('ServerBridge', () => {
 
       bridge.unregisterServer(3000);
       expect(bridge.getServerPorts()).not.toContain(3000);
+    });
+
+    it('should store ownerId metadata and expose it via getServerMetadata', () => {
+      const bridge = new ServerBridge();
+      bridge.registerServer(createVirtualServer('a'), 3000, '0.0.0.0', {
+        framework: 'vite',
+        ownerId: 'container-a',
+      });
+
+      expect(bridge.getServerMetadata(3000)?.ownerId).toBe('container-a');
+      expect(bridge.getServerMetadata(3000)?.framework).toBe('vite');
+      expect(bridge.getServerMetadata(9999)).toBeUndefined();
+    });
+
+    it('should pass ownerId metadata to server-ready listeners', () => {
+      const bridge = new ServerBridge();
+      const seen: Array<[number, string, ServerRegistrationMetadata | undefined]> = [];
+      bridge.on('server-ready', (...args: unknown[]) => {
+        seen.push(args as [number, string, ServerRegistrationMetadata | undefined]);
+      });
+
+      bridge.registerServer(createVirtualServer('a'), 3000, '0.0.0.0', { ownerId: 'container-a' });
+      bridge.registerServer(createVirtualServer('b'), 3001);
+
+      expect(seen).toHaveLength(2);
+      expect(seen[0][0]).toBe(3000);
+      expect(seen[0][2]?.ownerId).toBe('container-a');
+      expect(seen[1][0]).toBe(3001);
+      expect(seen[1][2]).toBeUndefined();
+    });
+
+    it('should unregister only servers owned by the given owner', () => {
+      const bridge = new ServerBridge();
+      bridge.registerServer(createVirtualServer('a1'), 3000, '0.0.0.0', { ownerId: 'container-a' });
+      bridge.registerServer(createVirtualServer('a2'), 3001, '0.0.0.0', { ownerId: 'container-a' });
+      bridge.registerServer(createVirtualServer('b1'), 3002, '0.0.0.0', { ownerId: 'container-b' });
+      bridge.registerServer(createVirtualServer('unowned'), 3003);
+
+      bridge.unregisterServersByOwner('container-a');
+
+      expect(bridge.getServerPorts().sort()).toEqual([3002, 3003]);
+    });
+  });
+
+  describe('findFreePort', () => {
+    it('should return the preferred port when free', () => {
+      const bridge = new ServerBridge();
+      expect(bridge.findFreePort(3000)).toBe(3000);
+    });
+
+    it('should skip past registered ports', () => {
+      const bridge = new ServerBridge();
+      bridge.registerServer(createVirtualServer('a'), 3000);
+      bridge.registerServer(createVirtualServer('b'), 3001);
+      bridge.registerServer(createVirtualServer('c'), 3003);
+
+      expect(bridge.findFreePort(3000)).toBe(3002);
+      expect(bridge.findFreePort(3003)).toBe(3004);
     });
   });
 });

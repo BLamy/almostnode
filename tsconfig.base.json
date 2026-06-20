@@ -19,6 +19,7 @@
         "packages/codex-wasm/src/app-server-browser-worker.ts"
       ],
       "almostnode-sdk": ["packages/almostnode-sdk/src/index.ts"],
+      "almostnode-sdk/auth": ["packages/almostnode-sdk/src/auth/index.ts"],
       "almostnode-react": ["packages/almostnode-react/src/index.ts"],
       "almostnode/internal": ["packages/almostnode/src/internal.ts"],
       "@webide/*": ["apps/web-ide/src/*"]

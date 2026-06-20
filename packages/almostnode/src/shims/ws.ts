@@ -29,12 +29,23 @@ const MessageEventPolyfill = typeof MessageEvent !== 'undefined' ? MessageEvent 
   }
 };
 
-// Message channel for communication between WebSocket server and clients
-let messageChannel: BroadcastChannel | null = null;
-try {
-  messageChannel = new BroadcastChannel('vite-ws-channel');
-} catch {
-  // BroadcastChannel not available in some environments
+// BroadcastChannel transport between WebSocket servers and clients.
+// Channel names are scoped per container (`almostnode-ws:{ownerId}` via
+// createWsModule) so two containers' servers can't both claim a client's
+// connect — the page-wide legacy channel made every server answer every
+// client, cross-wiring traffic between sandboxes (and between browser
+// tabs). Each endpoint opens its OWN BroadcastChannel instance: a
+// BroadcastChannel never delivers to itself, so a single shared object
+// could never connect a client and server living in the same page realm.
+const LEGACY_WS_CHANNEL_NAME = 'vite-ws-channel';
+
+function openWsChannel(name: string): BroadcastChannel | null {
+  try {
+    return new BroadcastChannel(name);
+  } catch {
+    // BroadcastChannel not available in some environments
+    return null;
+  }
 }
 
 // Track all server instances
@@ -63,6 +74,8 @@ export class WebSocket extends EventEmitter {
   private _requestedProtocols?: string | string[];
   private _server: WebSocketServer | null = null;
   private _nativeWs: globalThis.WebSocket | null = null;
+  private readonly _channelName: string;
+  private _channel: BroadcastChannel | null = null;
 
   // Event handler properties
   onopen: ((event: Event) => void) | null = null;
@@ -70,10 +83,15 @@ export class WebSocket extends EventEmitter {
   onerror: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
 
-  constructor(url: string, protocols?: string | string[]) {
+  constructor(
+    url: string,
+    protocols?: string | string[],
+    channelName: string = LEGACY_WS_CHANNEL_NAME,
+  ) {
     super();
     this.url = url;
     this._id = `client-${++clientIdCounter}`;
+    this._channelName = channelName;
 
     if (protocols) {
       this.protocol = Array.isArray(protocols) ? protocols[0] : protocols;
@@ -102,7 +120,8 @@ export class WebSocket extends EventEmitter {
     }
 
     // For all other URLs, use BroadcastChannel (internal Vite HMR)
-    if (!messageChannel) {
+    this._channel = openWsChannel(this._channelName);
+    if (!this._channel) {
       setTimeout(() => {
         this.readyState = WebSocket.OPEN;
         this.emit('open');
@@ -112,14 +131,14 @@ export class WebSocket extends EventEmitter {
     }
 
     // Try to connect to a server via BroadcastChannel
-    messageChannel.postMessage({
+    this._channel.postMessage({
       type: 'connect',
       clientId: this._id,
       url: this.url,
     });
 
     // Listen for responses
-    const channel = messageChannel;
+    const channel = this._channel;
     const handler = (event: MessageEvent) => {
       const data = event.data;
 
@@ -148,6 +167,10 @@ export class WebSocket extends EventEmitter {
           this.emit('close', closeEvent);
           if (this.onclose) this.onclose(closeEvent as unknown as CloseEvent);
           channel.removeEventListener('message', handler);
+          channel.close();
+          if (this._channel === channel) {
+            this._channel = null;
+          }
           break;
 
         case 'error':
@@ -246,8 +269,8 @@ export class WebSocket extends EventEmitter {
     }
 
     // Send via BroadcastChannel
-    if (messageChannel) {
-      messageChannel.postMessage({
+    if (this._channel) {
+      this._channel.postMessage({
         type: 'message',
         clientId: this._id,
         url: this.url,
@@ -269,8 +292,8 @@ export class WebSocket extends EventEmitter {
       return;
     }
 
-    if (messageChannel) {
-      messageChannel.postMessage({
+    if (this._channel) {
+      this._channel.postMessage({
         type: 'disconnect',
         clientId: this._id,
         url: this.url,
@@ -281,6 +304,8 @@ export class WebSocket extends EventEmitter {
 
     setTimeout(() => {
       this.readyState = WebSocket.CLOSED;
+      this._channel?.close();
+      this._channel = null;
       const closeEvent = new CloseEventPolyfill('close', {
         code: code || 1000,
         reason: reason || '',
@@ -304,6 +329,8 @@ export class WebSocket extends EventEmitter {
       this._nativeWs.close();
       this._nativeWs = null;
     }
+    this._channel?.close();
+    this._channel = null;
     this.readyState = WebSocket.CLOSED;
     const closeEvent = new CloseEventPolyfill('close', {
       code: 1006,
@@ -341,12 +368,18 @@ export class WebSocketServer extends EventEmitter {
   clients: Set<WebSocket> = new Set();
   options: ServerOptions;
   private _path: string;
+  private readonly _channelName: string;
+  private _channel: BroadcastChannel | null = null;
   private _channelHandler: ((event: MessageEvent) => void) | null = null;
 
-  constructor(options: ServerOptions = {}) {
+  constructor(
+    options: ServerOptions = {},
+    channelName: string = LEGACY_WS_CHANNEL_NAME,
+  ) {
     super();
     this.options = options;
     this._path = options.path || '/';
+    this._channelName = channelName;
 
     // If not noServer, set up listening
     if (!options.noServer) {
@@ -358,15 +391,16 @@ export class WebSocketServer extends EventEmitter {
   }
 
   private _setupListener(): void {
-    if (!messageChannel) return;
+    this._channel = openWsChannel(this._channelName);
+    if (!this._channel) return;
 
-    const channel = messageChannel;
+    const channel = this._channel;
     this._channelHandler = (event: MessageEvent) => {
       const data = event.data;
 
       if (data.type === 'connect') {
         // Create a new WebSocket for this client
-        const ws = new WebSocket('internal://' + this._path);
+        const ws = new WebSocket('internal://' + this._path, undefined, this._channelName);
         ws._setServer(this);
         (ws as unknown as { _clientId: string })._clientId = data.clientId;
         this.clients.add(ws);
@@ -443,10 +477,12 @@ export class WebSocketServer extends EventEmitter {
     servers.delete(this._path);
 
     // Remove channel listener
-    if (this._channelHandler && messageChannel) {
-      messageChannel.removeEventListener('message', this._channelHandler);
+    if (this._channelHandler && this._channel) {
+      this._channel.removeEventListener('message', this._channelHandler);
       this._channelHandler = null;
     }
+    this._channel?.close();
+    this._channel = null;
 
     this.emit('close');
 
@@ -473,3 +509,33 @@ export const Server = WebSocketServer;
 export const createWebSocketStream = () => {
   throw new Error('createWebSocketStream is not supported in browser');
 };
+
+/**
+ * Per-runtime ws module whose BroadcastChannel transport is scoped to the
+ * owning container. Servers and clients created inside one container only
+ * see each other; the page-wide legacy channel let any container's server
+ * claim any container's client connect.
+ */
+export function createWsModule(ownerId: string): Record<string, unknown> {
+  const channelName = `almostnode-ws:${ownerId}`;
+
+  class OwnedWebSocket extends WebSocket {
+    constructor(url: string, protocols?: string | string[]) {
+      super(url, protocols, channelName);
+    }
+  }
+
+  class OwnedWebSocketServer extends WebSocketServer {
+    constructor(options: ServerOptions = {}) {
+      super(options, channelName);
+    }
+  }
+
+  const scoped = {
+    WebSocket: OwnedWebSocket,
+    WebSocketServer: OwnedWebSocketServer,
+    Server: OwnedWebSocketServer,
+    createWebSocketStream,
+  };
+  return { ...scoped, default: OwnedWebSocket };
+}

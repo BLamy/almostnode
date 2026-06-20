@@ -39,6 +39,29 @@ interface ProjectBootstrapState {
   hydrateFromDisk: boolean;
 }
 
+const SUPPORTED_TEMPLATE_IDS = [
+  'next',
+  'vite',
+  'start',
+  'react-router',
+  'astro',
+  'nextjs',
+  'tanstack',
+  'app-building',
+] as const satisfies readonly TemplateId[];
+
+const NEW_PROJECT_TEMPLATES: Array<{ id: TemplateId; label: string }> = [
+  { id: 'next', label: 'Next.js' },
+  { id: 'vite', label: 'Vite' },
+  { id: 'start', label: 'TanStack Start' },
+  { id: 'react-router', label: 'React Router' },
+  { id: 'astro', label: 'Astro' },
+];
+
+function isSupportedTemplateId(value: unknown): value is TemplateId {
+  return typeof value === 'string' && (SUPPORTED_TEMPLATE_IDS as readonly string[]).includes(value);
+}
+
 function updateBootstrapPhase(setPhase: (value: string) => void, value: string): void {
   console.log(`[desktop-bootstrap] ${value}`);
   setPhase(value);
@@ -77,7 +100,7 @@ function normalizeBootstrapIntent(value: unknown): BootstrapIntent {
   }
   if (
     record.kind === 'template'
-    && (record.templateId === 'vite' || record.templateId === 'nextjs' || record.templateId === 'tanstack')
+    && isSupportedTemplateId(record.templateId)
   ) {
     return { kind: 'template', templateId: record.templateId };
   }
@@ -119,15 +142,16 @@ function SplashScreen({
         <div>
           <div className="desktop-eyebrow">New project</div>
           <div className="desktop-template-grid">
-            <button type="button" className="desktop-button" onClick={() => onCreateProject('vite')}>
-              Vite
-            </button>
-            <button type="button" className="desktop-button" onClick={() => onCreateProject('nextjs')}>
-              Next.js
-            </button>
-            <button type="button" className="desktop-button" onClick={() => onCreateProject('tanstack')}>
-              TanStack
-            </button>
+            {NEW_PROJECT_TEMPLATES.map((template) => (
+              <button
+                key={template.id}
+                type="button"
+                className="desktop-button"
+                onClick={() => onCreateProject(template.id)}
+              >
+                {template.label}
+              </button>
+            ))}
           </div>
         </div>
       </section>

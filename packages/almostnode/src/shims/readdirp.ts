@@ -20,6 +20,13 @@ export interface ReaddirpOptions {
   type?: 'files' | 'directories' | 'files_directories' | 'all';
   lstat?: boolean;
   alwaysStat?: boolean;
+  /**
+   * VFS to walk (internal). Per-runtime modules from
+   * {@link createReaddirpModule} inject it; without it the walk falls back
+   * to the module-level setVFS() instance, which is last-write-wins when
+   * several containers are live.
+   */
+  vfs?: VirtualFS;
 }
 
 export interface EntryInfo {
@@ -36,10 +43,14 @@ class ReaddirpStream {
   private entries: EntryInfo[] = [];
   private index = 0;
   private collected = false;
+  private vfs: VirtualFS | null;
 
   constructor(root: string, options: ReaddirpOptions = {}) {
     this.root = root;
     this.options = options;
+    // Capture at construction: the module-level VFS is last-write-wins
+    // across containers; per-runtime modules inject their own via options.
+    this.vfs = options.vfs ?? globalVFS;
   }
 
   private matchFilter(
@@ -83,18 +94,19 @@ class ReaddirpStream {
   }
 
   private collect(dir: string, depth: number, relativePath: string = ''): void {
-    if (!globalVFS) return;
+    const vfs = this.vfs;
+    if (!vfs) return;
     if (this.options.depth !== undefined && depth > this.options.depth) return;
 
     try {
-      const entries = globalVFS.readdirSync(dir);
+      const entries = vfs.readdirSync(dir);
 
       for (const name of entries) {
         const fullPath = dir === '/' ? '/' + name : dir + '/' + name;
         const relPath = relativePath ? relativePath + '/' + name : name;
 
         try {
-          const stats = globalVFS.statSync(fullPath);
+          const stats = vfs.statSync(fullPath);
           const isDir = stats.isDirectory();
 
           const entry: EntryInfo = {
@@ -226,3 +238,28 @@ export async function readdirpPromise(root: string, options?: ReaddirpOptions): 
 
 export default readdirp;
 export { ReaddirpStream };
+
+/**
+ * Per-runtime readdirp module bound to one VFS (see createChokidarModule
+ * for the rationale — the module-level setVFS() binding is last-write-wins
+ * across containers).
+ */
+export function createReaddirpModule(vfs: VirtualFS): Record<string, unknown> {
+  const boundReaddirp = (
+    root: string,
+    options?: ReaddirpOptions,
+  ): ReaddirpStream =>
+    readdirp(root, { ...options, vfs: options?.vfs ?? vfs });
+  const boundPromise = (
+    root: string,
+    options?: ReaddirpOptions,
+  ): Promise<EntryInfo[]> =>
+    readdirpPromise(root, { ...options, vfs: options?.vfs ?? vfs });
+  return {
+    readdirp: boundReaddirp,
+    readdirpPromise: boundPromise,
+    ReaddirpStream,
+    setVFS,
+    default: boundReaddirp,
+  };
+}

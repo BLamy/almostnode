@@ -2,63 +2,113 @@ import { useMemo } from 'react';
 import { ScrollArea } from '../ui/scroll-area';
 import { useSidebar } from './sidebar-context';
 import { ProjectItem } from './project-item';
+import { SandboxItem } from './sandbox-item';
 import { ResumableThreadItem } from './resumable-thread-item';
+import { isThreadRunning } from './running-agents';
 import { groupSidebarProjects } from './github-projects';
-import type { ProjectRecord } from '../features/project-db';
+import type { ProjectRecord, ResumableThreadRecord } from '../features/project-db';
 
 interface ProjectListProps {
-  onSelectProject: (id: string) => void;
-  onToggleProject: (id: string) => void;
-  onRenameProject: (id: string, name: string) => void;
-  onDeleteProject: (id: string) => void;
+  onSelectRepo: (id: string) => void;
+  onToggleRepo: (id: string) => void;
+  onRenameRepo: (id: string, name: string) => void;
+  onDeleteRepo: (id: string) => void;
+  onCreateSandbox: (repoId: string) => void;
+  onSelectSandbox: (id: string) => void;
+  onToggleSandbox: (id: string) => void;
+  onNewChat: (sandboxId: string) => void;
   onSelectThread: (id: string) => void;
-  onNewThread: (projectId: string) => void;
+  onCreatePr: (sandboxId: string) => void;
+  onMergeToMain: (sandboxId: string) => void;
+  onDeleteSandbox: (sandboxId: string) => void;
 }
 
 export function ProjectList({
-  onSelectProject,
-  onToggleProject,
-  onRenameProject,
-  onDeleteProject,
+  onSelectRepo,
+  onToggleRepo,
+  onRenameRepo,
+  onDeleteRepo,
+  onCreateSandbox,
+  onSelectSandbox,
+  onToggleSandbox,
+  onNewChat,
   onSelectThread,
-  onNewThread,
+  onCreatePr,
+  onMergeToMain,
+  onDeleteSandbox,
 }: ProjectListProps) {
   const { state } = useSidebar();
-  // Only imported projects are listed — un-imported GitHub repositories are
+  // Only imported repos are listed — un-imported GitHub repositories are
   // added through the New Project dialog, never shown here.
   const groups = useMemo(
-    () => groupSidebarProjects(state.projects, null),
-    [state.projects],
+    () => groupSidebarProjects(state.repos, null),
+    [state.repos],
   );
 
-  const renderProject = (project: ProjectRecord) => {
-    const threads = state.projectThreads[project.id] ?? [];
-    const isExpanded = state.expandedProjectIds.includes(project.id);
+  const renderThread = (thread: ResumableThreadRecord) => (
+    <ResumableThreadItem
+      key={thread.id}
+      thread={thread}
+      isActive={thread.id === state.activeChatId}
+      isRunning={isThreadRunning(thread, state.runningThreadKeys)}
+      onSelect={onSelectThread}
+    />
+  );
+
+  const renderRepo = (repo: ProjectRecord) => {
+    const sandboxes = state.sandboxesByRepo[repo.id] ?? [];
+    const legacyThreads = state.legacyRepoThreads[repo.id] ?? [];
+    const isExpanded = state.expandedRepoIds.includes(repo.id);
+    const isRepoRunning = sandboxes.some((sandbox) =>
+      state.runningSandboxIds.includes(sandbox.id),
+    );
     return (
       <ProjectItem
-        key={project.id}
-        project={project}
-        isActive={project.id === state.activeProjectId}
+        key={repo.id}
+        project={repo}
+        isActive={repo.id === state.activeRepoId && !state.activeSandboxId}
         isExpanded={isExpanded}
-        onSelect={onSelectProject}
-        onToggleExpanded={onToggleProject}
-        onRename={onRenameProject}
-        onDelete={onDeleteProject}
-        onNewThread={onNewThread}
+        isRunning={isRepoRunning}
+        onSelect={onSelectRepo}
+        onToggleExpanded={onToggleRepo}
+        onRename={onRenameRepo}
+        onDelete={onDeleteRepo}
+        onNewSandbox={onCreateSandbox}
       >
         <div className="almostnode-project-group__threads">
-          {threads.length === 0 ? (
-            <div className="almostnode-project-group__empty">No threads</div>
-          ) : (
-            threads.map((thread) => (
-              <ResumableThreadItem
-                key={thread.id}
-                thread={thread}
-                isActive={thread.id === state.activeThreadId}
-                onSelect={onSelectThread}
-              />
-            ))
+          {sandboxes.length === 0 && legacyThreads.length === 0 && (
+            <div className="almostnode-project-group__empty">No sandboxes</div>
           )}
+          {sandboxes.map((sandbox) => {
+            const chats = state.chatsBySandbox[sandbox.id] ?? [];
+            return (
+              <SandboxItem
+                key={sandbox.id}
+                sandbox={sandbox}
+                isActive={sandbox.id === state.activeSandboxId}
+                isExpanded={state.expandedSandboxIds.includes(sandbox.id)}
+                isRunning={state.runningSandboxIds.includes(sandbox.id)}
+                hasGitRemote={Boolean(repo.gitRemote)}
+                onSelect={onSelectSandbox}
+                onToggleExpanded={onToggleSandbox}
+                onNewChat={onNewChat}
+                onCreatePr={onCreatePr}
+                onMergeToMain={onMergeToMain}
+                onDelete={onDeleteSandbox}
+              >
+                <div className="almostnode-sandbox-group__chats">
+                  {chats.length === 0 ? (
+                    <div className="almostnode-project-group__empty is-nested">
+                      No chats
+                    </div>
+                  ) : (
+                    chats.map(renderThread)
+                  )}
+                </div>
+              </SandboxItem>
+            );
+          })}
+          {legacyThreads.map(renderThread)}
         </div>
       </ProjectItem>
     );
@@ -76,7 +126,7 @@ export function ProjectList({
               Import repositories from the New project dialog.
             </div>
           ) : (
-            groups.unlistedGitHubProjects.map(renderProject)
+            groups.unlistedGitHubProjects.map(renderRepo)
           )}
         </div>
 
@@ -89,7 +139,7 @@ export function ProjectList({
               Local-only projects appear here.
             </div>
           ) : (
-            groups.noSourceControl.map(renderProject)
+            groups.noSourceControl.map(renderRepo)
           )}
         </div>
       </div>

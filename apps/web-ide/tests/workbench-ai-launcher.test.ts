@@ -7,9 +7,8 @@ const loadProjectFilesIntoVfsMock = vi.fn();
 const replaceProjectFilesInVfsMock = vi.fn();
 const collectScopedFilesBase64Mock = vi.fn();
 const replaceScopedFilesInVfsMock = vi.fn();
-const collectOpenCodeBrowserSnapshotMock = vi.fn();
 const listOpenCodeBrowserSessionsMock = vi.fn();
-const restoreOpenCodeBrowserSnapshotMock = vi.fn();
+const registerLegacyOpenCodeDbSnapshotMock = vi.fn();
 const readGhTokenMock = vi.fn();
 const createModelReferenceMock = vi.fn();
 const getModelMock = vi.fn();
@@ -112,9 +111,9 @@ vi.mock("../src/features/network-session", () => ({
 }));
 vi.mock("../src/features/opencode-browser-session", () => ({
   mountOpenCodeBrowserSession: vi.fn(),
-  collectOpenCodeBrowserSnapshot: collectOpenCodeBrowserSnapshotMock,
   listOpenCodeBrowserSessions: listOpenCodeBrowserSessionsMock,
-  restoreOpenCodeBrowserSnapshot: restoreOpenCodeBrowserSnapshotMock,
+  registerLegacyOpenCodeDbSnapshot: registerLegacyOpenCodeDbSnapshotMock,
+  disposeOpenCodeInstance: vi.fn(async () => undefined),
 }));
 vi.mock("../src/features/claude-ide-bridge", () => ({
   buildClaudeIdeMcpConfig: buildClaudeIdeMcpConfigMock,
@@ -306,9 +305,8 @@ beforeEach(() => {
   replaceProjectFilesInVfsMock.mockReset();
   collectScopedFilesBase64Mock.mockReset();
   replaceScopedFilesInVfsMock.mockReset();
-  collectOpenCodeBrowserSnapshotMock.mockReset();
   listOpenCodeBrowserSessionsMock.mockReset();
-  restoreOpenCodeBrowserSnapshotMock.mockReset();
+  registerLegacyOpenCodeDbSnapshotMock.mockReset();
   readGhTokenMock.mockReset();
   createModelReferenceMock.mockReset();
   getModelMock.mockReset();

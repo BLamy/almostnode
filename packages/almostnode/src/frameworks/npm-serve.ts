@@ -21,15 +21,60 @@ const ALWAYS_EXTERNAL = [
   'react-dom/client',
 ];
 
-/** In-memory cache: specifier → bundled ESM code. */
-const bundleCache = new Map<string, string>();
+interface NpmServeState {
+  /** In-memory cache: specifier → bundled ESM code. */
+  cache: Map<string, string>;
+  /** Epoch the cache was last validated against (see clearNpmBundleCache). */
+  epoch: number;
+}
 
-/** VFS instance for resolving package entry points. */
+/**
+ * Per-VFS bundle state. Keyed weakly so disposed containers don't retain
+ * their bundle caches. The no-arg clearNpmBundleCache() can't iterate a
+ * WeakMap, so it bumps `clearAllEpoch` instead and caches are invalidated
+ * lazily on next access.
+ */
+const npmServeStateByVfs = new WeakMap<VirtualFS, NpmServeState>();
+let clearAllEpoch = 0;
+
+/** Fallback state for legacy callers that never provided a VFS. */
+const fallbackState: NpmServeState = { cache: new Map(), epoch: 0 };
+
+/** Legacy VFS instance used when bundleNpmModuleForBrowser gets no vfs arg. */
 let moduleVFS: VirtualFS | null = null;
 
-/** Clear the bundle cache (e.g., after npm install). */
-export function clearNpmBundleCache(): void {
-  bundleCache.clear();
+function getNpmServeState(vfs: VirtualFS | null): NpmServeState {
+  let state: NpmServeState;
+  if (vfs) {
+    const existing = npmServeStateByVfs.get(vfs);
+    if (existing) {
+      state = existing;
+    } else {
+      state = { cache: new Map(), epoch: clearAllEpoch };
+      npmServeStateByVfs.set(vfs, state);
+    }
+  } else {
+    state = fallbackState;
+  }
+  if (state.epoch !== clearAllEpoch) {
+    state.cache.clear();
+    state.epoch = clearAllEpoch;
+  }
+  return state;
+}
+
+/**
+ * Clear the bundle cache (e.g., after npm install).
+ * Pass a VFS to clear only that instance's cache; no-arg clears all.
+ */
+export function clearNpmBundleCache(vfs?: VirtualFS): void {
+  if (vfs) {
+    npmServeStateByVfs.get(vfs)?.cache.clear();
+    return;
+  }
+  clearAllEpoch++;
+  fallbackState.cache.clear();
+  fallbackState.epoch = clearAllEpoch;
 }
 
 /**
@@ -73,14 +118,17 @@ function resolveExportEntry(entry: unknown): string | undefined {
 }
 
 /** Check that a VFS path is an existing file (not a directory). */
-function isFile(path: string): boolean {
-  if (!moduleVFS) return false;
-  if (!moduleVFS.existsSync(path)) return false;
-  try { return !moduleVFS.statSync(path).isDirectory(); } catch { return false; }
+function isFile(vfs: VirtualFS, path: string): boolean {
+  if (!vfs.existsSync(path)) return false;
+  try { return !vfs.statSync(path).isDirectory(); } catch { return false; }
 }
 
-function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): string | null {
-  if (!moduleVFS) return null;
+function resolvePackageEntry(
+  vfs: VirtualFS | null,
+  specifier: string,
+  searchRoots: string[] = ['/'],
+): string | null {
+  if (!vfs) return null;
 
   const parts = specifier.split('/');
   const isScoped = parts[0].startsWith('@');
@@ -91,12 +139,12 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
     const normalizedRoot = root === '/' ? '' : root.replace(/\/$/, '');
     const pkgDir = `${normalizedRoot}/node_modules/${pkgName}`.replace(/\/+/g, '/');
     const pkgJsonPath = pkgDir + '/package.json';
-    if (!moduleVFS.existsSync(pkgJsonPath)) {
+    if (!vfs.existsSync(pkgJsonPath)) {
       continue;
     }
 
     try {
-      const pkgJson = JSON.parse(moduleVFS.readFileSync(pkgJsonPath, 'utf8'));
+      const pkgJson = JSON.parse(vfs.readFileSync(pkgJsonPath, 'utf8'));
       const exports = pkgJson.exports;
 
       if (exports && typeof exports === 'object') {
@@ -107,7 +155,7 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
           const resolved = resolveExportEntry(entry);
           if (resolved) {
             const fullPath = pkgDir + '/' + resolved.replace(/^\.\//, '');
-            if (isFile(fullPath)) return fullPath;
+            if (isFile(vfs, fullPath)) return fullPath;
           }
         }
 
@@ -127,7 +175,7 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
               if (targetPath) {
                 const expanded = targetPath.replace('*', matched);
                 const fullPath = pkgDir + '/' + expanded.replace(/^\.\//, '');
-                if (isFile(fullPath)) return fullPath;
+                if (isFile(vfs, fullPath)) return fullPath;
               }
             }
           }
@@ -138,14 +186,14 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
         const mainEntry = pkgJson.module || pkgJson.main;
         if (mainEntry) {
           const fullPath = pkgDir + '/' + mainEntry.replace(/^\.\//, '');
-          if (isFile(fullPath)) return fullPath;
+          if (isFile(vfs, fullPath)) return fullPath;
         }
         const defaultPath = pkgDir + '/index.js';
-        if (isFile(defaultPath)) return defaultPath;
+        if (isFile(vfs, defaultPath)) return defaultPath;
       } else {
         const directPath = pkgDir + '/' + subPath;
         for (const ext of ['', '.js', '.cjs', '.mjs', '.json']) {
-          if (isFile(directPath + ext)) return directPath + ext;
+          if (isFile(vfs, directPath + ext)) return directPath + ext;
         }
         // Infer subpath location from main/module fields.
         // e.g., main="dist/es5/index.js" + subPath="constants"
@@ -157,7 +205,7 @@ function resolvePackageEntry(specifier: string, searchRoots: string[] = ['/']): 
           const dir = field.slice(0, lastSlash + 1).replace(/^\.\//, '');
           for (const ext of ['', '.js', '.cjs', '.mjs', '.json']) {
             const inferredPath = pkgDir + '/' + dir + subPath + ext;
-            if (isFile(inferredPath)) return inferredPath;
+            if (isFile(vfs, inferredPath)) return inferredPath;
           }
         }
       }
@@ -246,22 +294,30 @@ function patchExternalRequires(code: string): string {
  * Bundle an npm package from VFS node_modules into a single ESM file.
  *
  * @param specifier - The bare npm specifier (e.g., "@ai-sdk/react", "zod/v4")
+ * @param searchRoots - VFS roots whose node_modules are searched, in order
+ * @param vfs - VFS to bundle from; falls back to the initNpmServe() instance
  * @returns The bundled ESM code string
  */
-export async function bundleNpmModuleForBrowser(specifier: string, searchRoots: string[] = ['/']): Promise<string> {
+export async function bundleNpmModuleForBrowser(
+  specifier: string,
+  searchRoots: string[] = ['/'],
+  vfs?: VirtualFS,
+): Promise<string> {
+  const resolvedVfs = vfs ?? moduleVFS;
+  const { cache } = getNpmServeState(resolvedVfs);
   const cacheKey = `${searchRoots.join('|')}::${specifier}`;
   // Check cache first
-  const cached = bundleCache.get(cacheKey);
+  const cached = cache.get(cacheKey);
   if (cached) return cached;
 
   // Resolve the package entry directly from VFS.
-  const entryPath = resolvePackageEntry(specifier, searchRoots);
+  const entryPath = resolvePackageEntry(resolvedVfs, specifier, searchRoots);
 
   // Extract likely named exports from CJS entries before bundling.
   let exportNames: string[] = [];
-  if (entryPath && moduleVFS) {
+  if (entryPath && resolvedVfs) {
     try {
-      const entryContent = moduleVFS.readFileSync(entryPath, 'utf8');
+      const entryContent = resolvedVfs.readFileSync(entryPath, 'utf8');
       exportNames = extractCjsExportNames(entryContent);
     } catch { /* ignore read errors */ }
   }
@@ -277,6 +333,7 @@ export async function bundleNpmModuleForBrowser(specifier: string, searchRoots: 
       target: 'esnext',
       external: ALWAYS_EXTERNAL,
       write: false,
+      vfs: resolvedVfs ?? undefined,
     });
   } else {
     // Fallback: use stdin with bare specifier (for packages without exports field)
@@ -292,6 +349,7 @@ export async function bundleNpmModuleForBrowser(specifier: string, searchRoots: 
       target: 'esnext',
       external: ALWAYS_EXTERNAL,
       write: false,
+      vfs: resolvedVfs ?? undefined,
     });
   }
 
@@ -326,6 +384,6 @@ export async function bundleNpmModuleForBrowser(specifier: string, searchRoots: 
     code = addNamedExports(code, exportNames);
   }
 
-  bundleCache.set(cacheKey, code);
+  cache.set(cacheKey, code);
   return code;
 }

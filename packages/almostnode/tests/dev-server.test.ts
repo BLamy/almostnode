@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VirtualFS } from '../src/virtual-fs';
 import { DevServer, ResponseData } from '../src/dev-server';
 import { ViteDevServer } from '../src/frameworks/vite-dev-server';
+import { NextDevServer } from '../src/frameworks/next-dev-server';
 import { Buffer } from '../src/shims/stream';
 
 /**
@@ -936,5 +937,120 @@ describe('ViteDevServer with ServerBridge integration', () => {
       expect(typeof key).toBe('string');
       expect(typeof value).toBe('string');
     }
+  });
+});
+
+describe('port-prefixed /_npm/ URLs', () => {
+  // The full esbuild transform only runs in real browsers, so exercise each
+  // server's redirectNpmImports wrapper directly — it threads the
+  // /__virtual__/{port} prefix into the shared transform so /_npm/ requests
+  // keep their runtime-instance context when multiple runtimes are registered.
+  type NpmRedirector = { redirectNpmImports(code: string): string };
+
+  function installPackage(vfs: VirtualFS, name: string): void {
+    vfs.mkdirSync(`/node_modules/${name}`, { recursive: true });
+    vfs.writeFileSync(
+      `/node_modules/${name}/package.json`,
+      JSON.stringify({ name, version: '1.0.0', main: 'index.js' })
+    );
+    vfs.writeFileSync(`/node_modules/${name}/index.js`, 'module.exports = {};');
+  }
+
+  describe('ViteDevServer', () => {
+    it('rewrites installed package imports to its /__virtual__/{port}/_npm/ URL', () => {
+      const vfs = new VirtualFS();
+      installPackage(vfs, 'left-pad');
+      const server = new ViteDevServer(vfs, { port: 3000 });
+
+      try {
+        const result = (server as unknown as NpmRedirector)
+          .redirectNpmImports(`import leftPad from 'left-pad';`);
+
+        expect(result).toContain('"/__virtual__/3000/_npm/left-pad"');
+      } finally {
+        server.stop();
+      }
+    });
+
+    it('includes deploymentBasePath in /_npm/ URLs', () => {
+      const vfs = new VirtualFS();
+      installPackage(vfs, 'left-pad');
+      const server = new ViteDevServer(vfs, { port: 3100, deploymentBasePath: '/agent-wasm' });
+
+      try {
+        const result = (server as unknown as NpmRedirector)
+          .redirectNpmImports(`import leftPad from 'left-pad';`);
+
+        expect(result).toContain('"/agent-wasm/__virtual__/3100/_npm/left-pad"');
+      } finally {
+        server.stop();
+      }
+    });
+
+    it('serves /_npm/ requests that retain the /__virtual__/{port} prefix', async () => {
+      const vfs = new VirtualFS();
+      installPackage(vfs, 'left-pad');
+      const server = new ViteDevServer(vfs, { port: 3000 });
+
+      try {
+        const direct = await server.handleRequest('GET', '/_npm/left-pad', {});
+        const prefixed = await server.handleRequest('GET', '/__virtual__/3000/_npm/left-pad', {});
+
+        expect(prefixed.statusCode).toBe(200);
+        expect(prefixed.headers['Content-Type']).toContain('javascript');
+        expect(prefixed.body.toString()).toBe(direct.body.toString());
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
+  describe('NextDevServer', () => {
+    it('rewrites installed package imports to its /__virtual__/{port}/_npm/ URL', () => {
+      const vfs = new VirtualFS();
+      installPackage(vfs, 'left-pad');
+      const server = new NextDevServer(vfs, { port: 3001 });
+
+      try {
+        const result = (server as unknown as NpmRedirector)
+          .redirectNpmImports(`import leftPad from 'left-pad';`);
+
+        expect(result).toContain('"/__virtual__/3001/_npm/left-pad"');
+      } finally {
+        server.stop();
+      }
+    });
+
+    it('includes deploymentBasePath in /_npm/ URLs', () => {
+      const vfs = new VirtualFS();
+      installPackage(vfs, 'left-pad');
+      const server = new NextDevServer(vfs, { port: 3200, deploymentBasePath: '/agent-wasm' });
+
+      try {
+        const result = (server as unknown as NpmRedirector)
+          .redirectNpmImports(`import leftPad from 'left-pad';`);
+
+        expect(result).toContain('"/agent-wasm/__virtual__/3200/_npm/left-pad"');
+      } finally {
+        server.stop();
+      }
+    });
+
+    it('serves /_npm/ requests that retain the /__virtual__/{port} prefix', async () => {
+      const vfs = new VirtualFS();
+      installPackage(vfs, 'left-pad');
+      const server = new NextDevServer(vfs, { port: 3001 });
+
+      try {
+        const direct = await server.handleRequest('GET', '/_npm/left-pad', {});
+        const prefixed = await server.handleRequest('GET', '/__virtual__/3001/_npm/left-pad', {});
+
+        expect(prefixed.statusCode).toBe(200);
+        expect(prefixed.headers['Content-Type']).toContain('javascript');
+        expect(prefixed.body.toString()).toBe(direct.body.toString());
+      } finally {
+        server.stop();
+      }
+    });
   });
 });

@@ -62,6 +62,81 @@ type BrowserExecCallback = (
 let processBridge: BrowserProcessBridge | null = null;
 const scopedProcessBridge = new AsyncLocalStorage<BrowserProcessBridge>();
 
+/**
+ * Per-root process bridges, mirroring fs.browser's workspace-bridge
+ * registry: an exec/spawn cwd lives under a sandbox-unique namespace root
+ * (`/sandboxes/{id}`, `/repos/{id}`), so prefix-matching the cwd routes the
+ * command to the right container even when requests from several sandboxes
+ * are in flight at once. The AsyncLocalStorage shim is a plain stack whose
+ * getStore() returns the most recently entered scope — under interleaved
+ * awaits that is the WRONG bridge, so the ambient scope is only a fallback
+ * for calls that carry no namespaced cwd.
+ */
+const processBridgesByRoot = new Map<string, BrowserProcessBridge[]>();
+
+export function registerProcessBridgeForRoot(
+  root: string,
+  bridge: BrowserProcessBridge,
+): void {
+  const normalizedRoot = normalizeRootPath(root);
+  const stack = processBridgesByRoot.get(normalizedRoot);
+  if (stack) {
+    stack.push(bridge);
+  } else {
+    processBridgesByRoot.set(normalizedRoot, [bridge]);
+  }
+}
+
+/**
+ * Removes exactly this bridge's registration (stack semantics): a transient
+ * client's dispose never tears down the mounted TUI's registration for the
+ * same root, and vice versa.
+ */
+export function unregisterProcessBridgeForRoot(
+  root: string,
+  bridge: BrowserProcessBridge,
+): void {
+  const normalizedRoot = normalizeRootPath(root);
+  const stack = processBridgesByRoot.get(normalizedRoot);
+  if (!stack) return;
+  const index = stack.lastIndexOf(bridge);
+  if (index >= 0) {
+    stack.splice(index, 1);
+  }
+  if (stack.length === 0) {
+    processBridgesByRoot.delete(normalizedRoot);
+  }
+}
+
+function normalizeRootPath(p: string): string {
+  const parts = p.split("/").filter(Boolean);
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === "..") resolved.pop();
+    else if (part !== ".") resolved.push(part);
+  }
+  return `/${resolved.join("/")}`;
+}
+
+function resolveProcessBridgeByCwd(
+  cwd: string | undefined,
+): BrowserProcessBridge | null {
+  if (!cwd) return null;
+  let best: BrowserProcessBridge | null = null;
+  let bestLength = -1;
+  for (const [root, stack] of processBridgesByRoot) {
+    if (
+      stack.length > 0
+      && (cwd === root || cwd.startsWith(`${root}/`))
+      && root.length > bestLength
+    ) {
+      best = stack[stack.length - 1];
+      bestLength = root.length;
+    }
+  }
+  return best;
+}
+
 export function attachProcessBridge(bridge: BrowserProcessBridge): void {
   processBridge = bridge;
 }
@@ -366,7 +441,9 @@ async function executeCommand(
     return runRipgrep(args, cwd);
   }
 
-  const bridge = scopedProcessBridge.getStore() ?? processBridge;
+  const bridge = resolveProcessBridgeByCwd(cwd)
+    ?? scopedProcessBridge.getStore()
+    ?? processBridge;
   if (bridge) {
     return bridge.exec({
       command,
@@ -455,14 +532,17 @@ export async function runBrowserCommand(input: {
 
 export function spawn(command: string, argsOrOpts?: unknown, maybeOpts?: Record<string, unknown>): FakeChildProcess {
   const { args, opts } = normalizeSpawnInput(command, argsOrOpts as string[] | Record<string, unknown>, maybeOpts);
-  const bridge = scopedProcessBridge.getStore() ?? processBridge;
+  const spawnCwd = typeof opts.cwd === "string"
+    ? opts.cwd
+    : typeof globalThis.process?.cwd === "function"
+      ? globalThis.process.cwd()
+      : "/workspace";
+  const bridge = resolveProcessBridgeByCwd(spawnCwd)
+    ?? scopedProcessBridge.getStore()
+    ?? processBridge;
   if (bridge?.spawn) {
     const child = new FakeChildProcess();
-    const cwd = typeof opts.cwd === "string"
-      ? opts.cwd
-      : typeof globalThis.process?.cwd === "function"
-        ? globalThis.process.cwd()
-        : "/workspace";
+    const cwd = spawnCwd;
 
     const handle = bridge.spawn({
       command,

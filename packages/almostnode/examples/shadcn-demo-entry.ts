@@ -1,6 +1,6 @@
 import { createContainer } from '../src/index';
 
-const COMMAND = 'npx shadcn@latest create';
+const COMMAND = 'bunx shadcn@latest create';
 const WORK_DIR = '/project';
 
 const terminalElement = document.getElementById('terminal') as HTMLDivElement;

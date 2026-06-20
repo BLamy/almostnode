@@ -2,6 +2,7 @@ import type { MessagePortLike } from "./message-port-transport";
 
 export type CodexHostOperation =
   | "auth/env"
+  | "auth/refresh"
   | "fs/readFile"
   | "fs/writeFile"
   | "fs/applyPatch"
@@ -50,6 +51,16 @@ export interface CreateCodexHostBridgeOptions {
   container: CodexHostContainer;
   defaultCwd?: string;
   env?: Record<string, string>;
+  auth?: CodexHostAuthController;
+}
+
+export interface CodexHostAuthController {
+  /**
+   * Refresh the Codex credentials (e.g. via the OAuth refresh-token grant)
+   * and return the updated auth env vars (CODEX_ACCESS_TOKEN, ...). Called by
+   * the WASM build when the API responds with 401.
+   */
+  refresh(): Promise<Record<string, string>>;
 }
 
 export interface CodexHostContainer {
@@ -190,7 +201,11 @@ export class CodexHostBridge {
   private nextProcessId = 1;
   private detachPort: (() => void) | null = null;
 
-  constructor(private readonly options: CreateCodexHostBridgeOptions) {}
+  private env: Record<string, string>;
+
+  constructor(private readonly options: CreateCodexHostBridgeOptions) {
+    this.env = { ...options.env };
+  }
 
   attach(port: MessagePortLike): () => void {
     const listener = (event: MessageEvent<unknown>) => {
@@ -256,7 +271,9 @@ export class CodexHostBridge {
   ): Promise<unknown> {
     switch (request.op) {
       case "auth/env":
-        return { env: { ...this.options.env } };
+        return { env: { ...this.env } };
+      case "auth/refresh":
+        return this.refreshAuth();
       case "fs/readFile":
         return this.readFile(request.params);
       case "fs/writeFile":
@@ -381,6 +398,16 @@ export class CodexHostBridge {
       mtimeMs: stats.mtimeMs,
       mode: stats.mode,
     };
+  }
+
+  private async refreshAuth(): Promise<unknown> {
+    const auth = this.options.auth;
+    if (!auth) {
+      throw new Error("Codex host bridge container does not expose auth/refresh.");
+    }
+    const refreshed = await auth.refresh();
+    this.env = { ...this.env, ...refreshed };
+    return { env: { ...this.env } };
   }
 
   private async fetchNetwork(params: unknown): Promise<unknown> {
@@ -687,9 +714,8 @@ function applyCodexPatch(
   for (const hunk of hunks) {
     if (hunk.type === "add") {
       const filePath = resolveCodexPath(cwd, hunk.path);
-      if (pathExists(vfs, filePath)) {
-        throw new Error(`apply_patch verification failed: File already exists: ${hunk.path}`);
-      }
+      // Matches codex-rs apply-patch: Add File overwrites an existing file
+      // (models emit Add File to wholesale-replace files).
       ensureParentDirectory(vfs, filePath);
       vfs.writeFileSync(filePath, linesToText(hunk.lines, true));
       changes.push({ kind: "add", path: hunk.path });

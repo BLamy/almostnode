@@ -381,6 +381,14 @@ export interface RuntimeOptions {
   builtinModules?: Record<string, unknown>;
   network?: NetworkOptions;
   networkController?: NetworkController;
+  /**
+   * Owning container id (ContainerInstance.id). Servers created through
+   * this runtime's http/https modules carry it as their owner, so port
+   * conflicts, server-ready routing, and dispose cleanup attribute raw
+   * `http.listen` servers to the right container without consulting
+   * last-write-wins ambient globals.
+   */
+  ownerId?: string;
 }
 
 export interface RequireFunction {
@@ -654,12 +662,13 @@ function setXhrReadyState(
 
 function getXhrRoute(
   rawUrl: string,
+  networkController?: NetworkController | null,
 ): {
   route: 'browser' | 'tailscale';
   effectiveUrl: string;
   proxied: boolean;
 } {
-  const controller = getDefaultNetworkController();
+  const controller = networkController ?? getDefaultNetworkController();
   const policy = getResolvedControllerPolicy(
     controller,
     typeof location !== 'undefined' ? location : null,
@@ -1716,13 +1725,21 @@ export class Runtime {
           ? getDefaultNetworkController()
           : createNetworkController(options.network)
       );
-    setDefaultNetworkController(
-      this.networkController,
-      !options.networkController && !shouldReuseDefaultController,
-    );
+    // Set-if-unset: a runtime with its own controller must not steal the page
+    // default from an earlier container (multi-instance).
+    if (!options.networkController || !hasExplicitDefaultNetworkController()) {
+      setDefaultNetworkController(
+        this.networkController,
+        !options.networkController && !shouldReuseDefaultController,
+      );
+    }
     if ((options.networkController || shouldReuseDefaultController) && options.network) {
       void this.networkController.configure(options.network);
     }
+    // Captured by the page-global fetch/XHR patches below. They are installed
+    // once (by the first runtime), so route through that runtime's controller
+    // rather than whatever the default happens to be later.
+    const runtimeNetworkController = this.networkController;
     this.explicitEnvKeys = new Set(Object.keys(options.env || {}));
     // Create process first so we can get cwd for fs shim
     this.process = createProcess({
@@ -1735,14 +1752,66 @@ export class Runtime {
     this.networkController.subscribe(() => {
       this.applyNetworkPolicy();
     });
-    // Create fs shim with cwd getter for relative path resolution
-    this.fsShim = createFsShim(vfs, () => this.process.cwd());
+    // Create fs shim with cwd getter for relative path resolution.
+    // Std-fd writes (fs.writeSync(1|2, ...) — used by Go WASM binaries like
+    // tsgo-wasm) route to this runtime's process streams.
+    const stdioDecoder = new TextDecoder();
+    this.fsShim = createFsShim(vfs, () => this.process.cwd(), {
+      writeStdout: (data) => {
+        this.process.stdout.write(stdioDecoder.decode(data));
+      },
+      writeStderr: (data) => {
+        this.process.stderr.write(stdioDecoder.decode(data));
+      },
+    });
     this.builtinModules = {
       ...builtinModules,
       fs: this.fsShim,
       'fs/promises': this.fsShim.promises,
       process: this.process,
-      child_process: childProcessShim,
+      // Bound module: exec/spawn defaults (cwd, env, controller) come from
+      // THIS runtime's process — the raw namespace would read
+      // globalThis.process, which is the page polyfill (or the host process
+      // under vitest) and identical across containers.
+      child_process: childProcessShim.createChildProcessModule({
+        controller: options.childProcessController ?? null,
+        getDefaultCwd: () => this.process.cwd(),
+        getDefaultEnv: () => {
+          const env: Record<string, string> = {};
+          for (const [key, value] of Object.entries(this.process.env)) {
+            if (typeof value === 'string') {
+              env[key] = value;
+            }
+          }
+          return env;
+        },
+      }),
+      // Per-runtime VFS-bound modules: the shared copies resolve their VFS
+      // through module-level setVFS() bindings, which are last-write-wins
+      // when several containers are live — a watcher armed (or build
+      // started) after another container boots would read the wrong tree.
+      chokidar: chokidarShim.createChokidarModule(vfs),
+      readdirp: readdirpShim.createReaddirpModule(vfs),
+      esbuild: esbuildShim.createEsbuildModule(vfs),
+      // Per-runtime http/https: servers constructed here carry this
+      // container's owner id from birth (EADDRINUSE checks, server-ready
+      // routing, and dispose cleanup all attribute by it).
+      ...(options.ownerId
+        ? {
+            http: httpShim.createOwnedHttpModule(
+              options.ownerId,
+              builtinModules.http as Record<string, unknown>,
+            ),
+            https: httpShim.createOwnedHttpModule(
+              options.ownerId,
+              builtinModules.https as Record<string, unknown>,
+            ),
+            // Per-runtime ws transport: this container's WebSocket
+            // servers/clients only see each other (the legacy page-wide
+            // channel cross-wired containers and even browser tabs).
+            ws: wsShim.createWsModule(options.ownerId),
+          }
+        : {}),
       ...(options.builtinModules || {}),
     };
     this.options = {
@@ -1769,11 +1838,13 @@ export class Runtime {
       createRequire: (fromPath: string) => this.createLegacyRequire(pathShim.dirname(fromPath)),
     });
 
-    // Initialize file watcher shims with VFS
+    // Module-level VFS fallbacks for callers OUTSIDE any runtime (direct
+    // library imports). Last-write-wins by design and therefore wrong with
+    // several containers — code required inside a runtime never reaches
+    // these: it gets the per-runtime bound modules wired into
+    // builtinModules above.
     chokidarShim.setVFS(vfs);
     readdirpShim.setVFS(vfs);
-
-    // Initialize esbuild shim with VFS for file access
     esbuildShim.setVFS(vfs);
 
     // Polyfill Node.js `global` (alias for globalThis) so ESM modules served via
@@ -1796,7 +1867,7 @@ export class Runtime {
       (globalThis as any).__almostnodeNativeFetch = origFetch;
       (globalThis as any).fetch = Object.assign(
         async (input: RequestInfo | URL, init?: RequestInit) => {
-          return networkFetch(input, init, getDefaultNetworkController());
+          return networkFetch(input, init, runtimeNetworkController ?? getDefaultNetworkController());
         },
         { __almostnode: true },
       );
@@ -1830,7 +1901,7 @@ export class Runtime {
         password?: string | null
       ) {
         const requestedUrl = typeof url === 'string' ? url : String(url);
-        const transport = getXhrRoute(requestedUrl);
+        const transport = getXhrRoute(requestedUrl, runtimeNetworkController);
         const xhr = this as AlmostnodePatchedXMLHttpRequest;
         xhr.__almostnodeOriginalUrl = requestedUrl;
         xhr.__almostnodeRequestMethod = method;
@@ -1927,7 +1998,7 @@ export class Runtime {
               credentials: xhr.withCredentials ? 'include' : 'same-origin',
               redirect: 'follow',
             });
-            const response = await networkFetch(request, undefined, getDefaultNetworkController());
+            const response = await networkFetch(request, undefined, runtimeNetworkController ?? getDefaultNetworkController());
             if (xhr.__almostnodeAborted) {
               return;
             }
@@ -2042,13 +2113,30 @@ export class Runtime {
         return handle;
       };
 
+      // process.exit() unwinds by throwing "Process exited with code N" — when
+      // that fires inside a timer callback (e.g. Go WASM scheduler ticks) it
+      // must not escape to the host as an uncaught error.
+      const swallowProcessExit = (run: () => unknown): unknown => {
+        try {
+          return run();
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message.startsWith('Process exited with code')
+          ) {
+            return undefined;
+          }
+          throw error;
+        }
+      };
+
       (globalThis as any).setTimeout = Object.assign((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
         const owner = getActiveTimerOwner();
         let handle: AlmostNodeTimerHandle;
         const wrappedCallback = typeof callback === 'function'
           ? (...callbackArgs: unknown[]) => {
             owner?.unregisterPendingTimer(handle);
-            return withActiveTimerOwner(owner, () => (callback as (...cbArgs: unknown[]) => unknown)(...callbackArgs));
+            return swallowProcessExit(() => withActiveTimerOwner(owner, () => (callback as (...cbArgs: unknown[]) => unknown)(...callbackArgs)));
           }
           : callback;
         const id = origSetTimeout(wrappedCallback as TimerHandler, delay, ...args);
@@ -2059,7 +2147,7 @@ export class Runtime {
       (globalThis as any).setInterval = Object.assign((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
         const owner = getActiveTimerOwner();
         const wrappedCallback = typeof callback === 'function'
-          ? (...callbackArgs: unknown[]) => withActiveTimerOwner(owner, () => (callback as (...cbArgs: unknown[]) => unknown)(...callbackArgs))
+          ? (...callbackArgs: unknown[]) => swallowProcessExit(() => withActiveTimerOwner(owner, () => (callback as (...cbArgs: unknown[]) => unknown)(...callbackArgs)))
           : callback;
         const id = origSetInterval(wrappedCallback as TimerHandler, delay, ...args);
         return createTimerHandle(id, owner);

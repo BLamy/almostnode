@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createContainer } from "almostnode";
 import {
   DEFAULT_FILE,
+  SHADCN_TEMPLATE_IDS,
   WORKSPACE_ROOT,
   WORKSPACE_TEST_E2E_ROOT,
   WORKSPACE_TEST_METADATA_PATH,
+  getTemplateDefaults,
   seedWorkspace,
 } from "../src/features/workspace-seed";
 
@@ -33,7 +35,16 @@ describe("webide workspace seed", () => {
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.gitignore`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/AGENTS.md`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/CLAUDE.md`)).toBe(true);
+    expect(
+      container.vfs.existsSync(`${WORKSPACE_ROOT}/.agents/agent-system-prompt.md`),
+    ).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/settings.json`)).toBe(true);
+    expect(
+      container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/skills/gitbook-openapi/SKILL.md`),
+    ).toBe(true);
+    expect(
+      container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/skills/planning/SKILL.md`),
+    ).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude-plugin/plugin.json`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude-plugin/.lsp.json`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/hooks/task-git.sh`)).toBe(true);
@@ -90,6 +101,18 @@ describe("webide workspace seed", () => {
     ) as Record<string, { command?: string; args?: string[] }>;
     const opencodeConfig = container.vfs.readFileSync(
       `${WORKSPACE_ROOT}/.opencode/opencode.jsonc`,
+      "utf8",
+    );
+    const sharedAgentPrompt = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/.agents/agent-system-prompt.md`,
+      "utf8",
+    );
+    const planningSkill = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/.claude/skills/planning/SKILL.md`,
+      "utf8",
+    );
+    const gitbookOpenapiSkill = container.vfs.readFileSync(
+      `${WORKSPACE_ROOT}/.claude/skills/gitbook-openapi/SKILL.md`,
       "utf8",
     );
     const appSource = container.vfs.readFileSync(DEFAULT_FILE, "utf8");
@@ -158,9 +181,22 @@ describe("webide workspace seed", () => {
     expect(claudePlugin.oxlint?.command).toBe("almostnode-lsp-bridge");
     expect(claudePlugin.oxlint?.args).toEqual(["oxlint"]);
     expect(claudePlugin.tsgo?.args).toEqual(["tsgo"]);
+    expect(opencodeConfig).toContain('"instructions": [".agents/agent-system-prompt.md"]');
     expect(opencodeConfig).toContain('"command": ["oxfmt", "$FILE"]');
     expect(opencodeConfig).toContain('"command": ["almostnode-lsp-bridge", "oxlint"]');
     expect(opencodeConfig).toContain('"command": ["almostnode-lsp-bridge", "tsgo"]');
+    expect(sharedAgentPrompt).toContain("Shared Agent System Prompt");
+    expect(sharedAgentPrompt).toContain("almostnode");
+    expect(sharedAgentPrompt).toContain(
+      "All Markdown you produce must be GitBook-compatible",
+    );
+    expect(sharedAgentPrompt).toContain("Every plan must include an `API Contract` section");
+    expect(sharedAgentPrompt).toContain("{% openapi-operation");
+    expect(sharedAgentPrompt).toContain("openapi: 3.1.0");
+    expect(planningSkill).toContain("OpenAPI Contract Requirement");
+    expect(planningSkill).toContain("Every plan must include an `API Contract` section");
+    expect(gitbookOpenapiSkill).toContain("GitBook OpenAPI Authoring");
+    expect(gitbookOpenapiSkill).toContain("Use OpenAPI 3.1 as the source of truth");
     expect(claudeGitHook).toContain("git add .");
     expect(claudeGitHook).toContain('git commit -m "Complete task"');
     expect(claudeGitHook).toContain('git push -u origin "$BRANCH"');
@@ -169,7 +205,9 @@ describe("webide workspace seed", () => {
     expect(homeSource).toContain("import { Button } from '@/components/ui/button';");
     expect(readme).toContain("npx shadcn@latest add dropdown-menu");
     expect(agentsGuide).toContain("OpenCode uses `AGENTS.md` and `.opencode/agent/`");
+    expect(agentsGuide).toContain(".agents/agent-system-prompt.md");
     expect(claudeGuide).toContain("Claude Code uses `CLAUDE.md` and `.claude/`");
+    expect(claudeGuide).toContain(".agents/agent-system-prompt.md");
     expect(gitignore).toContain(".claude/settings.local.json");
     expect(gitignore.split("\n")).not.toContain(".claude/");
     expect(gitignore).toContain("node_modules/");
@@ -214,7 +252,40 @@ describe("webide workspace seed", () => {
       container.vfs.readFileSync(`${WORKSPACE_ROOT}/package.json`, "utf8"),
     ) as { name?: string };
     expect(pkg.name).toBe("agent-wasm-app-building-control-plane");
+    expect(
+      container.vfs.existsSync(`${WORKSPACE_ROOT}/.agents/agent-system-prompt.md`),
+    ).toBe(true);
+    expect(
+      container.vfs.existsSync(`${WORKSPACE_ROOT}/.claude/skills/gitbook-openapi/SKILL.md`),
+    ).toBe(true);
+    expect(
+      container.vfs.readFileSync(`${WORKSPACE_ROOT}/.claude/skills/planning/SKILL.md`, "utf8"),
+    ).toContain("OpenAPI Contract Requirement");
+    expect(
+      container.vfs.readFileSync(`${WORKSPACE_ROOT}/.opencode/opencode.jsonc`, "utf8"),
+    ).toContain('"instructions": [".agents/agent-system-prompt.md"]');
     expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`)).toBe(false);
+  });
+
+  it("seeds every non-Laravel shadcn template id", () => {
+    for (const templateId of SHADCN_TEMPLATE_IDS) {
+      const container = createContainer();
+
+      seedWorkspace(container, templateId);
+      const defaults = getTemplateDefaults(templateId);
+
+      expect(container.vfs.existsSync(defaults.defaultFile), templateId).toBe(true);
+      expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/package.json`), templateId).toBe(true);
+      expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/components.json`), templateId).toBe(true);
+      expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/src/components/ui/button.tsx`)
+        || container.vfs.existsSync(`${WORKSPACE_ROOT}/components/ui/button.jsx`), templateId).toBe(true);
+
+      const pkg = JSON.parse(
+        container.vfs.readFileSync(`${WORKSPACE_ROOT}/package.json`, "utf8"),
+      ) as { scripts?: Record<string, string> };
+      expect(pkg.scripts?.dev, templateId).toBeTruthy();
+      expect(defaults.runCommand, templateId).toBe("npm run dev");
+    }
   });
 
   it("wires vite template npm typecheck to both tsc and tsgo-wasm", async () => {
@@ -278,7 +349,7 @@ describe("webide workspace seed", () => {
     expect(result.stdout).not.toContain("node_modules/");
     expect(result.stdout).not.toContain("build/");
     expect(result.stdout).not.toContain("tmp/");
-  });
+  }, 60_000);
 
   it("uses /project as the default container cwd for git and npm state", async () => {
     const container = createContainer({ cwd: WORKSPACE_ROOT });

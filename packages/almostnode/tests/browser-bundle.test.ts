@@ -66,8 +66,19 @@ describe('Browser bundle compatibility', () => {
   it('should contain the browser-compatible fileURLToPath shim', () => {
     const content = fs.readFileSync(indexMjs, 'utf-8');
 
+    // The shim may live in the entry itself or in a local chunk it imports
+    // (Rollup chunking moves it as the bundle grows).
+    const localImports = [...content.matchAll(/from\s+["'](\.\/[^"']+\.(?:m?js))["']/g)]
+      .map((match) => match[1]);
+    const sources = [
+      content,
+      ...localImports.map((relative) =>
+        fs.readFileSync(path.join(distPath, relative), 'utf-8'),
+      ),
+    ];
+
     // The shim defines its own fileURLToPath function
-    expect(content).toContain('function fileURLToPath');
+    expect(sources.some((source) => source.includes('function fileURLToPath'))).toBe(true);
   });
 
   it('should use dynamic require for Node.js modules in getServiceWorkerContent', () => {

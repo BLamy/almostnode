@@ -11,6 +11,7 @@ import { almostnodeDebugLog, almostnodeDebugWarn } from '../utils/debug';
 export type { Stats, FSWatcher, WatchListener, WatchEventType };
 
 const _encoder = new TextEncoder();
+const _decoder = new TextDecoder();
 const asyncDisposeSymbol = (Symbol as typeof Symbol & { asyncDispose?: symbol }).asyncDispose ?? Symbol.for('Symbol.asyncDispose');
 const disposeSymbol = Symbol.dispose ?? Symbol.for('Symbol.dispose');
 
@@ -71,6 +72,10 @@ export interface FsShim {
   lstat(path: string, callback: (err: Error | null, stats?: Stats) => void): void;
   lstat(path: string, options: unknown, callback: (err: Error | null, stats?: Stats) => void): void;
   fstat(fd: number, callback: (err: Error | null, stats?: Stats) => void): void;
+  open(path: PathLike, flags: string | number, mode: number | undefined, callback: (err: Error | null, fd?: number) => void): void;
+  close(fd: number, callback: (err: Error | null) => void): void;
+  read(fd: number, buffer: Buffer | Uint8Array, offset: number, length: number, position: number | null, callback: (err: Error | null, bytesRead?: number, buffer?: Buffer | Uint8Array) => void): void;
+  write(fd: number, buffer: Buffer | Uint8Array | string, offset?: number | null, length?: number | null, position?: number | null, callback?: (err: Error | null, bytesWritten?: number, buffer?: Buffer | Uint8Array | string) => void): void;
   readdir(path: string, callback: (err: Error | null, files?: string[]) => void): void;
   mkdir(path: string, callback: (err: Error | null) => void): void;
   mkdir(path: string, options: { recursive?: boolean; mode?: number }, callback: (err: Error | null) => void): void;
@@ -292,6 +297,29 @@ function joinPath(base: string, next: string): string {
   return normalizeAbsolutePath(`${base.endsWith('/') ? base.slice(0, -1) : base}/${next}`);
 }
 
+/**
+ * Invoke a callback-style fs callback, swallowing the intentional
+ * "Process exited with code" unwind that process.exit() throws when the
+ * callback resumes a Go WASM program which then exits.
+ */
+function invokeFsCallback<A extends unknown[]>(
+  callback: (...args: A) => void,
+  ...args: A
+): void {
+  try {
+    callback(...args);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('Process exited with code') ||
+        error.message === 'Go program has already exited')
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
 function getOpenFileDescriptor(fd: number): FileDescriptor {
   const entry = fdMap.get(fd);
   if (!entry) {
@@ -498,10 +526,76 @@ function normalizeOpenFlags(flags: string | number, constants: FsConstants): Nor
     : normalizeStringOpenFlags(flags);
 }
 
-export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
+export interface FsShimStdio {
+  writeStdout?: (data: Uint8Array) => void;
+  writeStderr?: (data: Uint8Array) => void;
+}
+
+/** Stats for the std fds (0/1/2): a character device like a real TTY. */
+function createStdioStats(): Stats {
+  const now = new Date(0);
+  return {
+    isFile: () => false,
+    isDirectory: () => false,
+    isSymbolicLink: () => false,
+    isBlockDevice: () => false,
+    isCharacterDevice: () => true,
+    isFIFO: () => false,
+    isSocket: () => false,
+    size: 0,
+    mode: 0o20666,
+    mtime: now,
+    atime: now,
+    ctime: now,
+    birthtime: now,
+    mtimeMs: 0,
+    atimeMs: 0,
+    ctimeMs: 0,
+    birthtimeMs: 0,
+    nlink: 1,
+    uid: 1000,
+    gid: 1000,
+    dev: 0,
+    ino: 0,
+    rdev: 0,
+    blksize: 4096,
+    blocks: 0,
+  };
+}
+
+export function createFsShim(
+  vfs: VirtualFS,
+  getCwd?: () => string,
+  stdio?: FsShimStdio,
+): FsShim {
   // Helper to resolve paths with cwd
   const resolvePath = (pathLike: unknown) => toPath(pathLike, getCwd);
   let shim!: FsShim;
+
+  // Go WASM binaries (e.g. tsgo-wasm) and other node CLIs write stdout/stderr
+  // through fs.writeSync(1|2, ...). Route those to the runtime's process
+  // streams instead of throwing EBADF, which wedges the Go scheduler.
+  const writeToStdFd = (fd: 1 | 2, bytes: Uint8Array): void => {
+    const writer = fd === 1 ? stdio?.writeStdout : stdio?.writeStderr;
+    if (writer) {
+      writer(bytes);
+      return;
+    }
+    const text = _decoder.decode(bytes);
+    if (fd === 1) console.log(text.replace(/\n$/, ''));
+    else console.error(text.replace(/\n$/, ''));
+  };
+
+  const sliceWriteInput = (
+    buffer: Buffer | Uint8Array | string,
+    offset?: number,
+    length?: number,
+  ): Uint8Array => {
+    if (typeof buffer === 'string') return _encoder.encode(buffer);
+    const start = offset ?? 0;
+    const len = length ?? buffer.length - start;
+    return buffer.subarray(start, start + len);
+  };
   const constants: FsConstants = {
     F_OK: 0,
     R_OK: 4,
@@ -515,6 +609,12 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     O_TRUNC: 512,
     O_APPEND: 1024,
     O_NOFOLLOW: 131072,
+    // Go WASM binaries (syscall/js) read O_DIRECTORY from fs.constants to
+    // open directories for ReadDir — without it the flag mapping fails and
+    // directory walks silently return empty.
+    O_DIRECTORY: 65536,
+    O_NOCTTY: 256,
+    O_NONBLOCK: 2048,
   };
 
   const ensureExistingPath = (pathLike: unknown, syscall: string): string => {
@@ -1173,6 +1273,9 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     fstatSync(fd: number): Stats {
       const entry = fdMap.get(fd);
       if (!entry) {
+        if (fd >= 0 && fd <= 2) {
+          return createStdioStats();
+        }
         const err = new Error(`EBADF: bad file descriptor, fstat`) as Error & { code: string; errno: number };
         err.code = 'EBADF';
         err.errno = -9;
@@ -1186,6 +1289,33 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
       const normalizedFlags = normalizeOpenFlags(flags, constants);
 
       let exists = vfs.existsSync(path);
+
+      // Directories can be opened read-only (Go's os.ReadDir opens with
+      // O_DIRECTORY, fstats the fd, then readdirs by path).
+      if (exists && vfs.statSync(path).isDirectory()) {
+        if (normalizedFlags.writable || normalizedFlags.truncate) {
+          throw createNodeError('EISDIR', 'open', path);
+        }
+        const fd = nextFd++;
+        fdMap.set(fd, {
+          state: {
+            path,
+            writable: false,
+            append: false,
+            content: new Uint8Array(0),
+            vfs,
+          },
+          position: 0,
+          flags: normalizedFlags.flagStr,
+        });
+        return fd;
+      }
+      if (
+        typeof flags === 'number' &&
+        (flags & constants.O_DIRECTORY) !== 0
+      ) {
+        throw createNodeError(exists ? 'ENOTDIR' : 'ENOENT', 'open', path);
+      }
 
       if (exists && normalizedFlags.create && normalizedFlags.exclusive) {
         throw createNodeError('EEXIST', 'open', path);
@@ -1239,6 +1369,9 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     readSync(fd: number, buffer: Buffer | Uint8Array, offset: number, length: number, position: number | null): number {
       const entry = fdMap.get(fd);
       if (!entry) {
+        if (fd >= 0 && fd <= 2) {
+          return 0; // std fds: report EOF instead of EBADF
+        }
         const err = new Error(`EBADF: bad file descriptor, read`) as Error & { code: string; errno: number };
         err.code = 'EBADF';
         err.errno = -9;
@@ -1264,6 +1397,11 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
     },
 
     writeSync(fd: number, buffer: Buffer | Uint8Array | string, offset?: number, length?: number, position?: number | null): number {
+      if ((fd === 1 || fd === 2) && !fdMap.has(fd)) {
+        const bytes = sliceWriteInput(buffer, offset, length);
+        writeToStdFd(fd, bytes);
+        return bytes.length;
+      }
       return writeToFdSync(fd, buffer, offset, length, position);
     },
 
@@ -1545,11 +1683,20 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         ? optionsOrCallback as (err: Error | null, stats?: Stats) => void
         : callback;
       if (!cb) return;
-      try {
-        queueMicrotask(() => cb(null, shim.statSync(pathLike as PathLike)));
-      } catch (err) {
-        queueMicrotask(() => cb(err as Error));
-      }
+      // The sync call must run inside the microtask with its own try/catch:
+      // wrapping only the queueMicrotask() call leaves a throwing statSync
+      // uncaught AND the callback never invoked, which permanently parks
+      // callers that await the callback (e.g. Go WASM goroutines).
+      queueMicrotask(() => {
+        let stats: Stats;
+        try {
+          stats = shim.statSync(pathLike as PathLike);
+        } catch (err) {
+          invokeFsCallback(cb, err as Error);
+          return;
+        }
+        invokeFsCallback(cb, null, stats);
+      });
     },
 
     lstat(
@@ -1561,19 +1708,113 @@ export function createFsShim(vfs: VirtualFS, getCwd?: () => string): FsShim {
         ? optionsOrCallback as (err: Error | null, stats?: Stats) => void
         : callback;
       if (!cb) return;
-      try {
-        queueMicrotask(() => cb(null, shim.lstatSync(pathLike as PathLike)));
-      } catch (err) {
-        queueMicrotask(() => cb(err as Error));
-      }
+      queueMicrotask(() => {
+        let stats: Stats;
+        try {
+          stats = shim.lstatSync(pathLike as PathLike);
+        } catch (err) {
+          invokeFsCallback(cb, err as Error);
+          return;
+        }
+        invokeFsCallback(cb, null, stats);
+      });
     },
 
     fstat(fd: number, callback: (err: Error | null, stats?: Stats) => void): void {
+      queueMicrotask(() => {
+        let stats: Stats;
+        try {
+          stats = shim.fstatSync(fd);
+        } catch (err) {
+          invokeFsCallback(callback, err as Error);
+          return;
+        }
+        invokeFsCallback(callback, null, stats);
+      });
+    },
+
+    // Callback-style fd APIs used by Go WASM binaries via syscall/js
+    // (globalThis.fs in wasm_exec.js): open, close, read, write.
+    // Callbacks run synchronously, matching upstream wasm_exec.js — deferring
+    // them can resume the Go scheduler after the program has already exited.
+    // Invoking a callback can resume the Go program, which may then call
+    // process.exit() — that unwinds with a "Process exited with code" throw
+    // that must not be reported back into Go (or escape to the host).
+    open(
+      pathLike: unknown,
+      flags: string | number,
+      mode: number | undefined,
+      callback: (err: Error | null, fd?: number) => void,
+    ): void {
+      let fd: number;
       try {
-        queueMicrotask(() => callback(null, shim.fstatSync(fd)));
+        fd = shim.openSync(resolvePath(pathLike) as string, flags, mode);
       } catch (err) {
-        queueMicrotask(() => callback(err as Error));
+        invokeFsCallback(callback, err as Error);
+        return;
       }
+      invokeFsCallback(callback, null, fd);
+    },
+
+    close(fd: number, callback: (err: Error | null) => void): void {
+      try {
+        shim.closeSync(fd);
+      } catch (err) {
+        invokeFsCallback(callback, err as Error);
+        return;
+      }
+      invokeFsCallback(callback, null);
+    },
+
+    read(
+      fd: number,
+      buffer: Buffer | Uint8Array,
+      offset: number,
+      length: number,
+      position: number | null,
+      callback: (err: Error | null, bytesRead?: number, buffer?: Buffer | Uint8Array) => void,
+    ): void {
+      let bytesRead: number;
+      try {
+        bytesRead = shim.readSync(fd, buffer, offset, length, position);
+      } catch (err) {
+        invokeFsCallback(callback, err as Error);
+        return;
+      }
+      invokeFsCallback(callback, null, bytesRead, buffer);
+    },
+
+    write(
+      fd: number,
+      buffer: Buffer | Uint8Array | string,
+      offset?: number | null,
+      length?: number | null,
+      position?: number | null,
+      callback?: (err: Error | null, bytesWritten?: number, buffer?: Buffer | Uint8Array | string) => void,
+    ): void {
+      // Trailing-callback variants: fs.write(fd, data, cb), (fd, data, offset, cb), ...
+      const args = [offset, length, position];
+      let cb = callback;
+      for (let i = args.length - 1; i >= 0 && !cb; i--) {
+        if (typeof args[i] === 'function') {
+          cb = args[i] as NonNullable<typeof callback>;
+          args[i] = null;
+        }
+      }
+      let bytesWritten: number;
+      try {
+        bytesWritten = shim.writeSync(
+          fd,
+          buffer,
+          (args[0] as number | null) ?? undefined,
+          (args[1] as number | null) ?? undefined,
+          args[2] as number | null,
+        );
+      } catch (err) {
+        if (cb) invokeFsCallback(cb, err as Error);
+        return;
+      }
+      if (cb) invokeFsCallback(cb, null, bytesWritten, buffer);
     },
 
     readdir(

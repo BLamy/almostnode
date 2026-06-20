@@ -96,9 +96,12 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   private pendingChanges = new Map<string, IFileChange>();
   private pendingFlush: { cancel: () => void } | null = null;
   private pendingNodeModulesFlush: ReturnType<typeof setTimeout> | null = null;
+  private workspaceWatcher: { close: () => void } | null = null;
+  private readOnly = false;
+  private readOnlyWriteListener: (() => void) | null = null;
 
   constructor(
-    private readonly vfs: VirtualFS,
+    private vfs: VirtualFS,
     private readonly workspaceRoot: string,
   ) {
     this.disposables.add(
@@ -113,7 +116,13 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
       }),
     );
 
-    const workspaceWatcher = this.vfs.watch(this.workspaceRoot, { recursive: true }, (eventType, filename) => {
+    this.armWorkspaceWatcher();
+
+    this.disposables.add(toDisposable(() => this.workspaceWatcher?.close()));
+  }
+
+  private armWorkspaceWatcher(): void {
+    this.workspaceWatcher = this.vfs.watch(this.workspaceRoot, { recursive: true }, (eventType, filename) => {
       if (!filename) {
         return;
       }
@@ -129,8 +138,53 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
 
       this.queueWatchedPathChange(fullPath, eventType, type, resource);
     });
+  }
 
-    this.disposables.add(toDisposable(() => workspaceWatcher.close()));
+  /**
+   * Rebind the provider to a different session's VFS: close the old root
+   * watcher, re-arm it on the new VFS, and fire a workspace-root change so
+   * the explorer and open documents re-read from the new tree.
+   */
+  setVfs(vfs: VirtualFS): void {
+    if (vfs === this.vfs) {
+      return;
+    }
+
+    this.workspaceWatcher?.close();
+    this.vfs = vfs;
+    this.armWorkspaceWatcher();
+    this.queueFileChanges([
+      { resource: URI.file(this.workspaceRoot), type: FileChangeType.UPDATED },
+    ]);
+  }
+
+  /**
+   * Repo-base (main) workspaces attach read-only — write/mkdir/delete/rename
+   * refuse and notify the host so it can offer forking a sandbox instead.
+   * Set per attach by the workbench host; reads stay unrestricted.
+   */
+  setReadOnly(readOnly: boolean): void {
+    this.readOnly = readOnly;
+  }
+
+  /** Invoked on every refused mutation while read-only. */
+  onReadOnlyWriteAttempt(listener: (() => void) | null): void {
+    this.readOnlyWriteListener = listener;
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnly;
+  }
+
+  private assertWritable(): void {
+    if (!this.readOnly) {
+      return;
+    }
+    this.readOnlyWriteListener?.();
+    throw createFileSystemProviderError(
+      "This repo's main branch is read-only. Create a sandbox to make changes.",
+      FileSystemProviderErrorCode.NoPermissions,
+    );
   }
 
   private assertWorkspaceResource(resource: URI): string {
@@ -206,6 +260,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   }
 
   async writeFile(resource: URI, content: Uint8Array, options: IFileWriteOptions): Promise<void> {
+    this.assertWritable();
     try {
       const path = this.assertWorkspaceResource(resource);
       const exists = this.vfs.existsSync(path);
@@ -223,6 +278,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   }
 
   async mkdir(resource: URI): Promise<void> {
+    this.assertWritable();
     try {
       this.vfs.mkdirSync(this.assertWorkspaceResource(resource), { recursive: true });
       this.queueFileChanges([{ resource, type: FileChangeType.ADDED }]);
@@ -274,6 +330,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   }
 
   async delete(resource: URI, options: IFileDeleteOptions): Promise<void> {
+    this.assertWritable();
     try {
       const path = this.assertWorkspaceResource(resource);
       const stats = this.vfs.statSync(path);
@@ -293,6 +350,7 @@ export class VfsFileSystemProvider implements IFileSystemProviderWithFileReadWri
   }
 
   async rename(from: URI, to: URI, options: IFileOverwriteOptions): Promise<void> {
+    this.assertWritable();
     try {
       const fromPath = this.assertWorkspaceResource(from);
       const toPath = this.assertWorkspaceResource(to);

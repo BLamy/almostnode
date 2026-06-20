@@ -91,6 +91,29 @@ function padVersion(v: string): string {
   return parts.join('.');
 }
 
+function parseComparator(raw: string): { op: string; version: string } | null {
+  const match = raw.trim().match(/^(>=|<=|>|<|=)?\s*(\d+(?:\.\d+){0,2}(?:-[^\s]+)?)$/);
+  if (!match) return null;
+  return {
+    op: match[1] || '=',
+    version: padVersion(match[2]),
+  };
+}
+
+function satisfiesComparator(version: string, rawComparator: string): boolean {
+  const comparator = parseComparator(rawComparator);
+  if (!comparator) return false;
+
+  switch (comparator.op) {
+    case '>=': return compareVersions(version, comparator.version) >= 0;
+    case '<=': return compareVersions(version, comparator.version) <= 0;
+    case '>': return compareVersions(version, comparator.version) > 0;
+    case '<': return compareVersions(version, comparator.version) < 0;
+    case '=': return compareVersions(version, comparator.version) === 0;
+    default: return compareVersions(version, comparator.version) === 0;
+  }
+}
+
 /**
  * Check if a version satisfies a semver range
  */
@@ -129,24 +152,16 @@ function satisfies(version: string, range: string): boolean {
     return compareVersions(version, min) >= 0 && compareVersions(version, max) <= 0;
   }
 
-  // Compound ranges with operators: >= 2.1.2 < 3.0.0
+  // Compound ranges with operators: >= 2.1.2 < 3.0.0, >= 2.1.2 < 3
   // Parse all operators and versions from the range
-  const operatorMatches = range.match(/(>=|<=|>|<|=)?\s*(\d+\.\d+\.\d+(?:-[^\s]*)?)/g);
-  if (operatorMatches && operatorMatches.length > 1) {
-    return operatorMatches.every((match) => {
-      const m = match.match(/^(>=|<=|>|<|=)?\s*(\d+\.\d+\.\d+(?:-[^\s]*)?)$/);
-      if (!m) return true;
-      const op = m[1] || '=';
-      const ver = m[2];
-      switch (op) {
-        case '>=': return compareVersions(version, ver) >= 0;
-        case '<=': return compareVersions(version, ver) <= 0;
-        case '>': return compareVersions(version, ver) > 0;
-        case '<': return compareVersions(version, ver) < 0;
-        case '=': return compareVersions(version, ver) === 0;
-        default: return compareVersions(version, ver) === 0;
-      }
-    });
+  const operatorMatches = range.match(/(>=|<=|>|<|=)?\s*\d+(?:\.\d+){0,2}(?:-[^\s]+)?/g);
+  if (operatorMatches) {
+    const compactRange = range.replace(/\s+/g, '');
+    const compactMatches = operatorMatches.map(match => match.replace(/\s+/g, '')).join('');
+    const hasOperator = operatorMatches.some(match => /^(>=|<=|>|<|=)/.test(match.trim()));
+    if (compactRange === compactMatches && (hasOperator || operatorMatches.length > 1)) {
+      return operatorMatches.every(match => satisfiesComparator(version, match));
+    }
   }
 
   // Caret range: ^1.2.3 means >=1.2.3 <2.0.0 (or <1.3.0 if major is 0)

@@ -5,6 +5,7 @@ This workspace is the orchestration layer for remote Fly.io app-building workers
 - Claude Code uses `CLAUDE.md` and `.claude/`
 - OpenCode uses `AGENTS.md` and `.opencode/agent/`
 - Shared project skills live in `.claude/skills/`
+- Shared runtime and GitBook authoring guidance lives in `.agents/agent-system-prompt.md`
 
 ## Core rule
 
@@ -34,6 +35,7 @@ app-building stop <job-id>
 - `src/App.tsx` — control-plane dashboard
 - `src/lib/app-building-dashboard.ts` — IndexedDB reader for builder jobs/config
 - `.claude/skills/app-building-orchestration/SKILL.md` — orchestration workflow
+- `.claude/skills/gitbook-openapi/SKILL.md` — GitBook Markdown and OpenAPI contract authoring
 
 ## Internal almostnode runtime
 
@@ -44,10 +46,15 @@ This is an agent-wasm workspace running on the internal almostnode runtime:
 - no Docker or host-side daemons
 - use existing shell surfaces instead of inventing side scripts
 
+## Shared Agent System Prompt
+
+All agents must follow `.agents/agent-system-prompt.md` for the limited almostnode runtime, supported command surface, GitBook Markdown blocks, and plan/spec authoring. OpenCode loads this file automatically through `.opencode/opencode.jsonc`; include it when delegating to Claude-style subagents or when another agent asks for the shared system prompt.
+
 ## Workflow expectations
 
 1. Keep a concise ledger of active jobs in the conversation.
 2. Create workers with explicit prompts and app names.
 3. Use `status` and `logs` before sending corrective prompts.
 4. Prefer `message` to continue work over manual edits inside target repos.
-5. Stop workers when they are no longer needed.
+5. Use the `planning` and `gitbook-openapi` skills for durable plans; every plan includes an OpenAPI 3.1 `API Contract` section.
+6. Stop workers when they are no longer needed.

@@ -17,3 +17,4 @@ export {
   createOpenCodeAgentAdapter,
   createWorkspace,
 } from "./workspace";
+export * from "./auth";

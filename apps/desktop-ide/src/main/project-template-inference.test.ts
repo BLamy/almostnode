@@ -12,20 +12,57 @@ function createReader(files: Record<string, string>) {
 
 describe('project template inference', () => {
   it('normalizes supported template ids', () => {
+    expect(normalizeTemplateId('next')).toBe('next');
     expect(normalizeTemplateId('vite')).toBe('vite');
+    expect(normalizeTemplateId('start')).toBe('start');
+    expect(normalizeTemplateId('react-router')).toBe('react-router');
+    expect(normalizeTemplateId('astro')).toBe('astro');
     expect(normalizeTemplateId('nextjs')).toBe('nextjs');
     expect(normalizeTemplateId('tanstack')).toBe('tanstack');
     expect(normalizeTemplateId('app-building')).toBe('app-building');
     expect(normalizeTemplateId('unknown')).toBeNull();
   });
 
-  it('infers nextjs and tanstack projects from files and dependencies', () => {
+  it('infers shadcn template projects from files and dependencies', () => {
     expect(
       inferTemplateIdFromProjectFiles(
         ['/project/app/page.tsx'],
         createReader({}),
       ),
-    ).toBe('nextjs');
+    ).toBe('next');
+
+    expect(
+      inferTemplateIdFromProjectFiles(
+        ['/project/package.json'],
+        createReader({
+          '/project/package.json': JSON.stringify({
+            dependencies: {
+              astro: '^6.0.0',
+            },
+          }),
+        }),
+      ),
+    ).toBe('astro');
+
+    expect(
+      inferTemplateIdFromProjectFiles(
+        ['/project/react-router.config.ts'],
+        createReader({}),
+      ),
+    ).toBe('react-router');
+
+    expect(
+      inferTemplateIdFromProjectFiles(
+        ['/project/package.json'],
+        createReader({
+          '/project/package.json': JSON.stringify({
+            dependencies: {
+              '@tanstack/react-start': '^1.0.0',
+            },
+          }),
+        }),
+      ),
+    ).toBe('start');
 
     expect(
       inferTemplateIdFromProjectFiles(

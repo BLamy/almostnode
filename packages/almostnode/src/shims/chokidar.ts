@@ -29,6 +29,14 @@ export interface ChokidarOptions {
   awaitWriteFinish?: boolean | { stabilityThreshold?: number; pollInterval?: number };
   ignorePermissionErrors?: boolean;
   atomic?: boolean | number;
+  /**
+   * VFS to watch (internal). Per-runtime modules from
+   * {@link createChokidarModule} inject it so a watcher always walks its
+   * own container's tree; without it the watcher falls back to the
+   * module-level setVFS() instance, which is last-write-wins when several
+   * containers are live.
+   */
+  vfs?: VirtualFS;
 }
 
 export class FSWatcher extends EventEmitter {
@@ -41,10 +49,11 @@ export class FSWatcher extends EventEmitter {
 
   constructor(options: ChokidarOptions = {}) {
     super();
-    if (!globalVFS) {
+    const vfs = options.vfs ?? globalVFS;
+    if (!vfs) {
       throw new Error('chokidar: VirtualFS not initialized. Call setVFS first.');
     }
-    this.vfs = globalVFS;
+    this.vfs = vfs;
     this.options = options;
   }
 
@@ -312,3 +321,27 @@ export function watch(
 }
 
 export default { watch, FSWatcher, setVFS };
+
+/**
+ * Per-runtime chokidar module bound to one VFS. The module-level setVFS()
+ * binding is last-write-wins across containers — booting container B
+ * rebinds it, so any watcher container A arms afterwards would walk B's
+ * tree. Runtimes hand their code this bound module instead.
+ */
+export function createChokidarModule(vfs: VirtualFS): Record<string, unknown> {
+  class BoundFSWatcher extends FSWatcher {
+    constructor(options: ChokidarOptions = {}) {
+      super({ ...options, vfs: options.vfs ?? vfs });
+    }
+  }
+  const boundWatch = (
+    paths: string | readonly string[],
+    options?: ChokidarOptions,
+  ): FSWatcher => {
+    const watcher = new BoundFSWatcher(options);
+    watcher.add(paths);
+    return watcher;
+  };
+  const scoped = { watch: boundWatch, FSWatcher: BoundFSWatcher, setVFS };
+  return { ...scoped, default: scoped };
+}

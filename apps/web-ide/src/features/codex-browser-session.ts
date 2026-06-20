@@ -6,6 +6,7 @@ import {
   type CodexClientInfo,
   type CodexInitializeParams,
 } from "codex-wasm";
+import { refreshCodexAuth } from "./codex-auth";
 
 declare const __CODEX_WASM_MODULE_URL__: string;
 
@@ -42,6 +43,9 @@ export function createWebIdeCodexBrowserSession(
     worker,
     defaultCwd: options.cwd,
     env: options.env,
+    auth: {
+      refresh: () => refreshCodexAuth({ vfs: options.container.vfs }),
+    },
     clientInfo: options.clientInfo ?? {
       name: "agent_wasm_web_ide",
       title: "agent-wasm Web IDE",

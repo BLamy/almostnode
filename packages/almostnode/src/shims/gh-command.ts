@@ -1602,6 +1602,572 @@ async function runRepo(
   }
 }
 
+// ── PR subcommands ──────────────────────────────────────────────────────────
+
+interface GitHubApiResult {
+  status: number;
+  ok: boolean;
+  body: any;
+  text: string;
+}
+
+async function githubApiJson(
+  token: string,
+  url: string,
+  init: RequestInit = {},
+): Promise<GitHubApiResult> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    ...(init.headers as Record<string, string> | undefined),
+  };
+  const response = await fetchViaProxy(url, { ...init, headers });
+  const text = await response.text();
+  let body: any = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    // non-JSON response body
+  }
+  return { status: response.status, ok: response.ok, body, text };
+}
+
+function prState(pr: Record<string, any>): string {
+  if (pr.merged_at) return 'MERGED';
+  return typeof pr.state === 'string' ? pr.state.toUpperCase() : 'OPEN';
+}
+
+function prStateDisplay(pr: Record<string, any>): string {
+  if (pr.merged_at) return 'Merged';
+  if (pr.state === 'closed') return 'Closed';
+  if (pr.draft) return 'Draft';
+  return 'Open';
+}
+
+const PR_JSON_FIELDS: Record<string, (pr: Record<string, any>) => any> = {
+  number: (pr) => pr.number,
+  title: (pr) => pr.title,
+  state: (pr) => prState(pr),
+  url: (pr) => pr.html_url,
+  baseRefName: (pr) => pr.base?.ref ?? null,
+  headRefName: (pr) => pr.head?.ref ?? null,
+  isDraft: (pr) => Boolean(pr.draft),
+};
+
+function formatPrJson(pr: Record<string, any>, fields: string[]): Record<string, any> {
+  const obj: Record<string, any> = {};
+  for (const field of fields) {
+    obj[field] = PR_JSON_FIELDS[field] ? PR_JSON_FIELDS[field](pr) : (pr[field] ?? null);
+  }
+  return obj;
+}
+
+async function currentGitBranch(ctx: CommandContext, vfs: VirtualFS): Promise<string | null> {
+  try {
+    const result = await runGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], ctx, vfs);
+    if (result.exitCode !== 0) return null;
+    const branch = result.stdout.trim();
+    return branch && branch !== 'HEAD' ? branch : null;
+  } catch {
+    return null;
+  }
+}
+
+// Extracts the latest commit message from `git log -n 1` output (lines indented
+// by four spaces after the header block).
+async function latestCommitMessage(
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<{ title: string; body: string } | null> {
+  let result: JustBashExecResult;
+  try {
+    result = await runGitCommand(['log', '-n', '1'], ctx, vfs);
+  } catch {
+    return null;
+  }
+  if (result.exitCode !== 0 || !result.stdout.trim()) {
+    return null;
+  }
+
+  const messageLines: string[] = [];
+  let inMessage = false;
+  for (const line of result.stdout.split('\n')) {
+    if (!inMessage) {
+      if (line === '') inMessage = true;
+      continue;
+    }
+    if (line.startsWith('    ')) {
+      messageLines.push(line.slice(4));
+    } else if (line === '') {
+      messageLines.push('');
+    }
+  }
+  while (messageLines.length > 0 && messageLines[messageLines.length - 1] === '') {
+    messageLines.pop();
+  }
+  if (messageLines.length === 0) {
+    return null;
+  }
+
+  return {
+    title: messageLines[0],
+    body: messageLines.slice(1).join('\n').trim(),
+  };
+}
+
+async function findOpenPrForBranch(
+  token: string,
+  coordinates: RepoCoordinates,
+  branch: string,
+): Promise<{ error: JustBashExecResult } | { pr: Record<string, any> | null }> {
+  const url =
+    `https://api.github.com/repos/${encodeURIComponent(coordinates.owner)}/${encodeURIComponent(coordinates.repoName)}/pulls` +
+    `?head=${encodeURIComponent(coordinates.owner)}:${encodeURIComponent(branch)}&state=open`;
+  const result = await githubApiJson(token, url);
+  if (!result.ok) {
+    return { error: err(`gh: API error (${result.status}): ${result.text}\n`) };
+  }
+  const pulls = Array.isArray(result.body) ? result.body : [];
+  return { pr: pulls.length > 0 ? pulls[0] : null };
+}
+
+async function prCreate(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<JustBashExecResult> {
+  const host = 'github.com';
+  const config = readGhToken(vfs, host);
+  if (!config || !config.oauth_token) {
+    return err('gh: not logged in. Run `gh auth login` first.\n');
+  }
+
+  let title: string | undefined;
+  let bodyText: string | undefined;
+  let base: string | undefined;
+  let head: string | undefined;
+  let repoOption: string | undefined;
+  let draft = false;
+  let fill = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === '--draft' || arg === '-d') {
+      draft = true;
+      continue;
+    }
+    if (arg === '--fill' || arg === '-f') {
+      fill = true;
+      continue;
+    }
+
+    const titleValue = readAlternateFlagValue(args, index, ['--title', '-t']);
+    if (titleValue.value !== undefined) {
+      title = titleValue.value;
+      index = titleValue.nextIndex;
+      continue;
+    }
+
+    const bodyValue = readAlternateFlagValue(args, index, ['--body', '-b']);
+    if (bodyValue.value !== undefined) {
+      bodyText = bodyValue.value;
+      index = bodyValue.nextIndex;
+      continue;
+    }
+
+    const baseValue = readAlternateFlagValue(args, index, ['--base', '-B']);
+    if (baseValue.value !== undefined) {
+      base = baseValue.value;
+      index = baseValue.nextIndex;
+      continue;
+    }
+
+    const headValue = readAlternateFlagValue(args, index, ['--head', '-H']);
+    if (headValue.value !== undefined) {
+      head = headValue.value;
+      index = headValue.nextIndex;
+      continue;
+    }
+
+    const repoValue = readAlternateFlagValue(args, index, ['--repo', '-R']);
+    if (repoValue.value !== undefined) {
+      repoOption = repoValue.value;
+      index = repoValue.nextIndex;
+      continue;
+    }
+
+    if (arg.startsWith('-')) {
+      return err(`gh pr create: unsupported option '${arg}'\n`, 2);
+    }
+    return err('gh pr create: too many arguments\n', 2);
+  }
+
+  const coordinates = await resolveRepoTarget(undefined, repoOption, ctx, vfs, config.user);
+  if ('exitCode' in coordinates) {
+    return err(`gh pr create: ${coordinates.stderr.replace(/^gh repo:\s*/, '')}`, coordinates.exitCode);
+  }
+
+  if (!head) {
+    const branch = await currentGitBranch(ctx, vfs);
+    if (!branch) {
+      return err('gh pr create: could not determine the current branch. Specify one with --head.\n', 2);
+    }
+    head = branch;
+  }
+
+  if (fill && (title === undefined || bodyText === undefined)) {
+    const commit = await latestCommitMessage(ctx, vfs);
+    if (!commit) {
+      return err('gh pr create: --fill requires at least one commit on the current branch\n', 2);
+    }
+    title ??= commit.title;
+    bodyText ??= commit.body;
+  }
+
+  if (!title) {
+    return err('gh pr create: --title or --fill is required\n', 2);
+  }
+
+  const repoApiUrl =
+    `https://api.github.com/repos/${encodeURIComponent(coordinates.owner)}/${encodeURIComponent(coordinates.repoName)}`;
+
+  try {
+    if (!base) {
+      const repoInfo = await githubApiJson(config.oauth_token, repoApiUrl);
+      if (!repoInfo.ok) {
+        return err(`gh: API error (${repoInfo.status}): ${repoInfo.text}\n`);
+      }
+      base = typeof repoInfo.body?.default_branch === 'string' ? repoInfo.body.default_branch : 'main';
+    }
+
+    const result = await githubApiJson(config.oauth_token, `${repoApiUrl}/pulls`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        head,
+        base,
+        body: bodyText ?? '',
+        draft,
+      }),
+    });
+
+    if (!result.ok) {
+      // 422 with a `head` field error means the branch was never pushed.
+      const headInvalid = result.status === 422 && Array.isArray(result.body?.errors)
+        && result.body.errors.some((e: any) => e?.field === 'head');
+      if (headInvalid) {
+        return err(
+          `gh pr create: the head branch '${head}' does not exist on ${coordinates.owner}/${coordinates.repoName}.\n` +
+          `Push it first with: git push -u origin ${head}\n`,
+        );
+      }
+      return err(`gh: API error (${result.status}): ${result.text}\n`);
+    }
+
+    const htmlUrl = typeof result.body?.html_url === 'string'
+      ? result.body.html_url
+      : `https://github.com/${coordinates.owner}/${coordinates.repoName}/pull/${result.body?.number ?? ''}`;
+    return ok(`${htmlUrl}\n`);
+  } catch (e) {
+    return err(`gh: ${e instanceof Error ? e.message : String(e)}\n`);
+  }
+}
+
+async function prView(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<JustBashExecResult> {
+  const host = 'github.com';
+  const config = readGhToken(vfs, host);
+  if (!config || !config.oauth_token) {
+    return err('gh: not logged in. Run `gh auth login` first.\n');
+  }
+
+  let numberInput: string | undefined;
+  let repoOption: string | undefined;
+  let jsonFields: string[] | null = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    const repoValue = readAlternateFlagValue(args, index, ['--repo', '-R']);
+    if (repoValue.value !== undefined) {
+      repoOption = repoValue.value;
+      index = repoValue.nextIndex;
+      continue;
+    }
+    if (arg === '--json' && index + 1 < args.length) {
+      jsonFields = args[++index].split(',');
+      continue;
+    }
+    if (arg.startsWith('--json=')) {
+      jsonFields = arg.slice('--json='.length).split(',');
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return err(`gh pr view: unsupported option '${arg}'\n`, 2);
+    }
+    if (numberInput) {
+      return err('gh pr view: too many arguments\n', 2);
+    }
+    numberInput = arg;
+  }
+
+  const coordinates = await resolveRepoTarget(undefined, repoOption, ctx, vfs, config.user);
+  if ('exitCode' in coordinates) {
+    return err(`gh pr view: ${coordinates.stderr.replace(/^gh repo:\s*/, '')}`, coordinates.exitCode);
+  }
+
+  try {
+    let pr: Record<string, any>;
+    if (numberInput) {
+      const number = parseInt(numberInput.replace(/^#/, ''), 10);
+      if (!Number.isFinite(number)) {
+        return err(`gh pr view: invalid pull request number '${numberInput}'\n`, 2);
+      }
+      const result = await githubApiJson(
+        config.oauth_token,
+        `https://api.github.com/repos/${encodeURIComponent(coordinates.owner)}/${encodeURIComponent(coordinates.repoName)}/pulls/${number}`,
+      );
+      if (!result.ok) {
+        return err(`gh: API error (${result.status}): ${result.text}\n`);
+      }
+      pr = result.body ?? {};
+    } else {
+      const branch = await currentGitBranch(ctx, vfs);
+      if (!branch) {
+        return err('gh pr view: could not determine the current branch. Specify a pull request number.\n', 2);
+      }
+      const found = await findOpenPrForBranch(config.oauth_token, coordinates, branch);
+      if ('error' in found) {
+        return found.error;
+      }
+      if (!found.pr) {
+        return err(`no pull requests found for branch "${branch}"\n`);
+      }
+      pr = found.pr;
+    }
+
+    if (jsonFields) {
+      return ok(`${JSON.stringify(formatPrJson(pr, jsonFields), null, 2)}\n`);
+    }
+
+    const lines = [
+      `${pr.title} #${pr.number}`,
+      `${prStateDisplay(pr)} • ${pr.user?.login ?? 'unknown'} wants to merge into ${pr.base?.ref ?? '?'} from ${pr.head?.ref ?? '?'}`,
+    ];
+    if (pr.body) {
+      lines.push('', String(pr.body).trimEnd());
+    }
+    lines.push('', `View this pull request on GitHub: ${pr.html_url}`);
+    return ok(`${lines.join('\n')}\n`);
+  } catch (e) {
+    return err(`gh: ${e instanceof Error ? e.message : String(e)}\n`);
+  }
+}
+
+async function prList(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<JustBashExecResult> {
+  const host = 'github.com';
+  const config = readGhToken(vfs, host);
+  if (!config || !config.oauth_token) {
+    return err('gh: not logged in. Run `gh auth login` first.\n');
+  }
+
+  let state = 'open';
+  let limit = 30;
+  let repoOption: string | undefined;
+  let jsonFields: string[] | null = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    const stateValue = readAlternateFlagValue(args, index, ['--state', '-s']);
+    if (stateValue.value !== undefined) {
+      state = stateValue.value.toLowerCase();
+      index = stateValue.nextIndex;
+      continue;
+    }
+
+    const limitValue = readAlternateFlagValue(args, index, ['--limit', '-L']);
+    if (limitValue.value !== undefined) {
+      limit = parseInt(limitValue.value, 10) || 30;
+      index = limitValue.nextIndex;
+      continue;
+    }
+
+    const repoValue = readAlternateFlagValue(args, index, ['--repo', '-R']);
+    if (repoValue.value !== undefined) {
+      repoOption = repoValue.value;
+      index = repoValue.nextIndex;
+      continue;
+    }
+
+    if (arg === '--json' && index + 1 < args.length) {
+      jsonFields = args[++index].split(',');
+      continue;
+    }
+    if (arg.startsWith('--json=')) {
+      jsonFields = arg.slice('--json='.length).split(',');
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      return err(`gh pr list: unsupported option '${arg}'\n`, 2);
+    }
+    return err('gh pr list: too many arguments\n', 2);
+  }
+
+  if (!['open', 'closed', 'merged', 'all'].includes(state)) {
+    return err(`gh pr list: invalid state '${state}'\n`, 2);
+  }
+
+  const coordinates = await resolveRepoTarget(undefined, repoOption, ctx, vfs, config.user);
+  if ('exitCode' in coordinates) {
+    return err(`gh pr list: ${coordinates.stderr.replace(/^gh repo:\s*/, '')}`, coordinates.exitCode);
+  }
+
+  // REST has no `merged` state; fetch closed PRs and filter on merged_at.
+  const apiState = state === 'merged' ? 'closed' : state;
+  const perPage = Math.min(Math.max(limit, 30), 100);
+
+  try {
+    const result = await githubApiJson(
+      config.oauth_token,
+      `https://api.github.com/repos/${encodeURIComponent(coordinates.owner)}/${encodeURIComponent(coordinates.repoName)}/pulls` +
+        `?state=${apiState}&per_page=${perPage}`,
+    );
+    if (!result.ok) {
+      return err(`gh: API error (${result.status}): ${result.text}\n`);
+    }
+
+    let pulls: Record<string, any>[] = Array.isArray(result.body) ? result.body : [];
+    if (state === 'merged') {
+      pulls = pulls.filter((pr) => pr.merged_at);
+    }
+    pulls = pulls.slice(0, limit);
+
+    if (jsonFields) {
+      return ok(`${JSON.stringify(pulls.map((pr) => formatPrJson(pr, jsonFields!)), null, 2)}\n`);
+    }
+
+    if (pulls.length === 0) {
+      return ok(`no pull requests match your search in ${coordinates.owner}/${coordinates.repoName}\n`);
+    }
+
+    const lines = pulls.map(
+      (pr) => `#${pr.number}\t${pr.title}\t${pr.head?.ref ?? ''}\t${prState(pr)}`,
+    );
+    return ok(`${lines.join('\n')}\n`);
+  } catch (e) {
+    return err(`gh: ${e instanceof Error ? e.message : String(e)}\n`);
+  }
+}
+
+async function prStatus(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<JustBashExecResult> {
+  const host = 'github.com';
+  const config = readGhToken(vfs, host);
+  if (!config || !config.oauth_token) {
+    return err('gh: not logged in. Run `gh auth login` first.\n');
+  }
+
+  let repoOption: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const repoValue = readAlternateFlagValue(args, index, ['--repo', '-R']);
+    if (repoValue.value !== undefined) {
+      repoOption = repoValue.value;
+      index = repoValue.nextIndex;
+      continue;
+    }
+    return err(`gh pr status: unsupported option '${args[index]}'\n`, 2);
+  }
+
+  const coordinates = await resolveRepoTarget(undefined, repoOption, ctx, vfs, config.user);
+  if ('exitCode' in coordinates) {
+    return err(`gh pr status: ${coordinates.stderr.replace(/^gh repo:\s*/, '')}`, coordinates.exitCode);
+  }
+
+  const branch = await currentGitBranch(ctx, vfs);
+
+  try {
+    const result = await githubApiJson(
+      config.oauth_token,
+      `https://api.github.com/repos/${encodeURIComponent(coordinates.owner)}/${encodeURIComponent(coordinates.repoName)}/pulls` +
+        '?state=open&per_page=100',
+    );
+    if (!result.ok) {
+      return err(`gh: API error (${result.status}): ${result.text}\n`);
+    }
+
+    const pulls: Record<string, any>[] = Array.isArray(result.body) ? result.body : [];
+    const currentPrs = branch ? pulls.filter((pr) => pr.head?.ref === branch) : [];
+    const minePrs = pulls.filter((pr) => pr.user?.login === config.user);
+
+    const formatLine = (pr: Record<string, any>): string =>
+      `  #${pr.number}  ${pr.title} [${pr.head?.ref ?? ''}]${pr.draft ? ' • Draft' : ''}`;
+
+    const lines = [`Relevant pull requests in ${coordinates.owner}/${coordinates.repoName}`, ''];
+
+    lines.push('Current branch');
+    if (!branch) {
+      lines.push('  There is no current branch');
+    } else if (currentPrs.length === 0) {
+      lines.push(`  There is no pull request associated with [${branch}]`);
+    } else {
+      lines.push(...currentPrs.map(formatLine));
+    }
+
+    lines.push('', 'Created by you');
+    if (minePrs.length === 0) {
+      lines.push('  You have no open pull requests');
+    } else {
+      lines.push(...minePrs.map(formatLine));
+    }
+
+    return ok(`${lines.join('\n')}\n`);
+  } catch (e) {
+    return err(`gh: ${e instanceof Error ? e.message : String(e)}\n`);
+  }
+}
+
+async function runPr(
+  args: string[],
+  ctx: CommandContext,
+  vfs: VirtualFS,
+): Promise<JustBashExecResult> {
+  const sub = args[0];
+
+  switch (sub) {
+    case 'create':
+      return prCreate(args.slice(1), ctx, vfs);
+    case 'view':
+      return prView(args.slice(1), ctx, vfs);
+    case 'list':
+    case 'ls':
+      return prList(args.slice(1), ctx, vfs);
+    case 'status':
+      return prStatus(args.slice(1), ctx, vfs);
+    default:
+      return err(
+        `Usage: gh pr <command>\n\n` +
+          `Available commands:\n` +
+          `  create      Create a pull request\n` +
+          `  view        View a pull request\n` +
+          `  list, ls    List pull requests in a repository\n` +
+          `  status      Show status of relevant pull requests\n`
+      );
+  }
+}
+
 // ── Main dispatcher ─────────────────────────────────────────────────────────
 
 export async function runGhCommand(
@@ -1618,7 +2184,8 @@ export async function runGhCommand(
         `Available commands:\n` +
         `  auth        Authenticate gh and git with GitHub\n` +
         `  api         Make an authenticated GitHub API request\n` +
-        `  repo        Manage repositories\n\n` +
+        `  repo        Manage repositories\n` +
+        `  pr          Manage pull requests\n\n` +
         `Run 'gh <command> --help' for more information about a command.\n`
     );
   }
@@ -1634,6 +2201,8 @@ export async function runGhCommand(
       return runApi(args.slice(1), ctx, vfs);
     case 'repo':
       return runRepo(args.slice(1), ctx, vfs);
+    case 'pr':
+      return runPr(args.slice(1), ctx, vfs);
     default:
       return err(`gh: '${sub}' is not a gh command. See 'gh --help'.\n`);
   }

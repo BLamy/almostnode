@@ -968,6 +968,14 @@ export default defineConfig(async ({ mode }) => {
           find: /^@napi-rs\/wasm-runtime$/,
           replacement: napiWasmRuntimePath,
         },
+        {
+          find: /^use-sync-external-store(\/shim)?(\/index\.js)?$/,
+          replacement: resolve(__dirname, "src/shims/use-sync-external-store.ts"),
+        },
+        {
+          find: /^use-sync-external-store\/(shim\/)?with-selector(\.js)?$/,
+          replacement: resolve(__dirname, "src/shims/use-sync-external-store-with-selector.ts"),
+        },
         ...(isTest ? [] : [
         {
           find: /^@codingame\/monaco-vscode-api\/vscode\/src\/(.*)$/,

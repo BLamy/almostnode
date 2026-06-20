@@ -119,6 +119,14 @@ describe("runCodexChatGptLogin", () => {
 
 describe("runCodexBrowserLogin", () => {
   it("runs the Codex device-code flow without a localhost callback", async () => {
+    const clipboardWrites: string[] = [];
+    vi.stubGlobal("navigator", {
+      clipboard: {
+        writeText: async (text: string) => {
+          clipboardWrites.push(text);
+        },
+      },
+    });
     const vfs = new FakeVfs();
     const idToken = fakeCodexJwt({
       email: "brett@example.com",
@@ -182,6 +190,8 @@ describe("runCodexBrowserLogin", () => {
     expect(result.stdout).toBe("");
     expect(stdout).toContain("https://auth.openai.com/codex/device");
     expect(stdout).toContain("CODE-12345");
+    expect(clipboardWrites).toEqual(["CODE-12345"]);
+    expect(stdout).toContain("copied to your clipboard");
     expect(result.stderr).toContain("Successfully logged in");
     expect(result.env).toMatchObject({
       CODEX_ACCESS_TOKEN: "device-access",

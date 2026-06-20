@@ -75,3 +75,18 @@ export function showClaudeImagePasteUnsupportedToast(
     duration: 6000,
   });
 }
+
+/** Sandbox row actions (Create PR / Merge to main) report through toasts. */
+export function showSandboxActionSuccessToast(
+  message: string,
+  description?: string,
+): void {
+  toast.success(message, { description, duration: 5000 });
+}
+
+export function showSandboxActionErrorToast(
+  message: string,
+  description?: string,
+): void {
+  toast.error(message, { description, duration: 8000 });
+}

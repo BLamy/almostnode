@@ -143,6 +143,13 @@ describe('npm', () => {
         expect(satisfies('3.24.9', '>=3.25')).toBe(false);
       });
 
+      it('should match compound comparator ranges with partial bounds', () => {
+        expect(satisfies('2.1.2', '>= 2.1.2 < 3')).toBe(true);
+        expect(satisfies('2.1.5', '>= 2.1.2 < 3')).toBe(true);
+        expect(satisfies('3.0.0', '>= 2.1.2 < 3')).toBe(false);
+        expect(satisfies('2.1.1', '>= 2.1.2 < 3')).toBe(false);
+      });
+
       it('should match hyphen ranges', () => {
         expect(satisfies('1.5.0', '1.0.0 - 2.0.0')).toBe(true);
         expect(satisfies('1.0.0', '1.0.0 - 2.0.0')).toBe(true);
@@ -180,6 +187,12 @@ describe('npm', () => {
         expect(findBestVersion(onlyV4, '^3.25 || ^4.0')).toBe('4.1.0');
         // Simple OR with exact versions
         expect(findBestVersion(versions, '1.0.0 || 2.0.0')).toBe('1.0.0');
+      });
+
+      it('should find versions for compound comparator ranges with partial bounds', () => {
+        expect(
+          findBestVersion(['2.1.1', '2.1.2', '2.1.5', '3.0.0'], '>= 2.1.2 < 3'),
+        ).toBe('2.1.5');
       });
     });
   });

@@ -12,11 +12,13 @@ interface ProjectItemProps {
   project: ProjectRecord;
   isActive: boolean;
   isExpanded: boolean;
+  /** Any of the repo's sandboxes has a running agent (rolled-up spinner). */
+  isRunning: boolean;
   onSelect: (id: string) => void;
   onToggleExpanded: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
-  onNewThread: (projectId: string) => void;
+  onNewSandbox: (repoId: string) => void;
   children?: ReactNode;
 }
 
@@ -24,11 +26,12 @@ export function ProjectItem({
   project,
   isActive,
   isExpanded,
+  isRunning,
   onSelect,
   onToggleExpanded,
   onRename,
   onDelete,
-  onNewThread,
+  onNewSandbox,
   children,
 }: ProjectItemProps) {
   const [isRenaming, setIsRenaming] = useState(false);
@@ -115,16 +118,24 @@ export function ProjectItem({
           </>
         )}
 
+        {!isRenaming && isRunning && (
+          <span
+            className="almostnode-sidebar__row-spinner"
+            role="status"
+            aria-label={`Agent running in ${project.name}`}
+          />
+        )}
+
         {!isRenaming && (
           <button
             className="almostnode-project-item__menu-trigger"
             onClick={(event) => {
               event.stopPropagation();
-              onNewThread(project.id);
+              onNewSandbox(project.id);
             }}
             type="button"
-            aria-label={`New thread in ${project.name}`}
-            title="New thread"
+            aria-label={`New sandbox in ${project.name}`}
+            title="New sandbox"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
               <path
@@ -159,8 +170,8 @@ export function ProjectItem({
             />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" sideOffset={0}>
-            <DropdownMenuItem onSelect={() => onNewThread(project.id)}>
-              New thread
+            <DropdownMenuItem onSelect={() => onNewSandbox(project.id)}>
+              New sandbox
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {

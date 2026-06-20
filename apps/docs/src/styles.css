@@ -1,0 +1,368 @@
+/* GitBook-inspired documentation theme.
+   Defines the shadcn-style design tokens that docstream's styles.css consumes
+   (--card, --foreground, --primary, --border, ...) plus the surrounding shell. */
+
+:root {
+  color-scheme: light;
+
+  /* Neutral palette */
+  --background: #ffffff;
+  --foreground: #1b1b1f;
+  --card: #ffffff;
+  --card-foreground: #1b1b1f;
+  --muted: #f4f5f7;
+  --muted-foreground: #6b7280;
+  --accent: #f4f5f7;
+  --accent-foreground: #1b1b1f;
+  --border: #e8e9ed;
+
+  /* GitBook signature orange */
+  --primary: #ff4d12;
+  --primary-foreground: #ffffff;
+  --destructive: #e5484d;
+
+  /* Hint accents */
+  --chart-1: #1f9d55;
+  --chart-2: #2d7ff9;
+  --chart-3: #e5a936;
+
+  --radius: 10px;
+
+  --sidebar-width: 300px;
+  --aside-width: 220px;
+
+  font-family:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* ---------- Shell ---------- */
+
+.gb-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--aside-width);
+  min-height: 100vh;
+}
+
+/* ---------- Sidebar ---------- */
+
+.gb-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 22px 16px 48px;
+  border-right: 1px solid var(--border);
+  background: var(--background);
+}
+
+.gb-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 4px 8px 18px;
+  text-decoration: none;
+  color: var(--foreground);
+}
+
+.gb-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--foreground);
+  color: var(--background);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.gb-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.gb-brand-text strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.gb-brand-text small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.gb-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 4px 22px;
+  padding: 0 12px;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  background: var(--background);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.gb-search:focus-within {
+  border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 14%, transparent);
+}
+
+.gb-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.gb-search input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.gb-nav-group {
+  margin-bottom: 22px;
+}
+
+.gb-nav-group h2 {
+  margin: 0 8px 8px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.gb-nav-group div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.gb-nav-group a {
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: color-mix(in oklab, var(--foreground) 78%, var(--muted-foreground));
+  text-decoration: none;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.gb-nav-group a:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.gb-nav-group a.active {
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  color: var(--primary);
+  font-weight: 550;
+}
+
+/* ---------- Main ---------- */
+
+.gb-main {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0 40px;
+}
+
+.gb-page {
+  width: 100%;
+  max-width: 780px;
+  padding: 56px 0 120px;
+}
+
+.gb-page-header {
+  margin-bottom: 8px;
+}
+
+.gb-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+
+.gb-breadcrumb span:nth-child(2) {
+  opacity: 0.5;
+}
+
+.gb-status {
+  margin-left: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.gb-status-current {
+  background: color-mix(in oklab, var(--chart-1) 16%, transparent);
+  color: var(--chart-1);
+}
+
+.gb-status-extracting {
+  background: color-mix(in oklab, var(--chart-3) 18%, transparent);
+  color: #9a6a04;
+}
+
+.gb-status-planned {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.gb-page-header h1 {
+  margin: 14px 0 0;
+  font-size: 2.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.gb-lead {
+  margin: 14px 0 0;
+  font-size: 1.12rem;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+}
+
+.gb-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.gb-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.gb-stats span {
+  font-size: 1.7rem;
+  font-weight: 700;
+  color: var(--foreground);
+}
+
+/* docstream's .docs-article centers itself; reset within our column. */
+.gb-page .docs-article {
+  max-width: none;
+  margin: 0;
+  padding: 24px 0 0;
+}
+
+/* ---------- Right rail ---------- */
+
+.gb-aside {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  padding: 56px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gb-aside-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.gb-vote {
+  display: flex;
+  gap: 8px;
+}
+
+.gb-vote button {
+  width: 40px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--background);
+  font-size: 15px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.gb-vote button:hover {
+  background: var(--muted);
+}
+
+.gb-vote button.active {
+  border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 1180px) {
+  .gb-shell {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  }
+  .gb-aside {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .gb-shell {
+    grid-template-columns: 1fr;
+  }
+  .gb-sidebar {
+    position: static;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .gb-main {
+    padding: 0 22px;
+  }
+  .gb-page {
+    padding-top: 32px;
+  }
+}

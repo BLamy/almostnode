@@ -93,6 +93,40 @@ describe('ModuleGraphLoader', () => {
     expect(globalThis.process as unknown).toBe(hostProcess);
   });
 
+  it('does not inject runtime global aliases over top-level ESM bindings', async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync(
+      '/entry.mjs',
+      'const global = "local"; const globalThis = "localThis"; export default [global, globalThis];\n',
+    );
+
+    const loader = new ModuleGraphLoader({
+      vfs,
+      runtimeId: 'test-runtime',
+      builtinModules: {},
+      console: console as unknown as Record<string, unknown>,
+      process: {} as Record<string, unknown>,
+      globalObject: { console, process: {}, Buffer } as unknown as Record<string, unknown>,
+      requireCjs: () => ({}),
+      createRequire: () => {
+        const requireFn = (() => ({})) as ((id: string) => unknown) & { resolve?: (id: string) => string };
+        requireFn.resolve = (id: string) => id;
+        return requireFn;
+      },
+    }) as ModuleGraphLoader & {
+      buildModuleSource: (descriptor: unknown) => Promise<string>;
+    };
+
+    const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
+    const source = await loader.buildModuleSource(descriptor);
+
+    expect(source).toContain('const __almostnode_global =');
+    expect(source).not.toContain('const global = __almostnode_global;');
+    expect(source).not.toContain('const globalThis = __almostnode_global;');
+    expect(source).toContain('const global = "local";');
+    expect(source).toContain('const globalThis = "localThis";');
+  });
+
   it('provides file-based import.meta values for graph-loaded ESM modules', async () => {
     const vfs = new VirtualFS();
     vfs.writeFileSync(

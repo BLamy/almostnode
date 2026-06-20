@@ -27,14 +27,27 @@ export async function loadPGliteAssets(): Promise<{ wasmModule: WebAssembly.Modu
 
 const instances = new Map<string, PGlite>();
 
+/**
+ * Instance key. The instance map is page-global while database names are
+ * per-namespace — every sandbox typically calls its database "default" —
+ * so an unqualified name would hand one sandbox's queries the instance
+ * opened for another. The bare name stays the key for the default
+ * namespace so legacy single-workspace callers are unaffected.
+ */
+function instanceKey(name: string, namespace?: string): string {
+  return namespace && namespace !== 'global' ? `${namespace}::${name}` : name;
+}
+
 export async function initPGliteInstance(
   name: string,
   schemaSQL: string | null,
   idbPath?: string,
+  namespace?: string,
 ): Promise<void> {
+  const key = instanceKey(name, namespace);
   // Close existing instance with this name
-  if (instances.has(name)) {
-    await closePGliteInstance(name);
+  if (instances.has(key)) {
+    await closePGliteInstance(name, namespace);
   }
 
   const { PGlite: PGliteClass } = await import('@electric-sql/pglite');
@@ -43,7 +56,7 @@ export async function initPGliteInstance(
     ? new PGliteClass(idbPath, { wasmModule, fsBundle })
     : new PGliteClass({ wasmModule, fsBundle });
 
-  instances.set(name, db);
+  instances.set(key, db);
 
   // Run schema SQL if provided
   if (schemaSQL) {
@@ -52,25 +65,40 @@ export async function initPGliteInstance(
   }
 }
 
-export async function closePGliteInstance(name: string): Promise<void> {
-  const db = instances.get(name);
+export async function closePGliteInstance(
+  name: string,
+  namespace?: string,
+): Promise<void> {
+  const key = instanceKey(name, namespace);
+  const db = instances.get(key);
   if (db) {
     await db.close();
-    instances.delete(name);
+    instances.delete(key);
   }
 }
 
 export async function closeAllPGlite(): Promise<void> {
-  const names = [...instances.keys()];
-  await Promise.all(names.map((n) => closePGliteInstance(n)));
+  const keys = [...instances.keys()];
+  await Promise.all(
+    keys.map(async (key) => {
+      const db = instances.get(key);
+      if (db) {
+        await db.close();
+        instances.delete(key);
+      }
+    }),
+  );
 }
 
 export function getInstanceNames(): string[] {
   return [...instances.keys()];
 }
 
-export function getInstance(name: string): PGlite | undefined {
-  return instances.get(name);
+export function getInstance(
+  name: string,
+  namespace?: string,
+): PGlite | undefined {
+  return instances.get(instanceKey(name, namespace));
 }
 
 // ── Migration support ──
@@ -78,8 +106,9 @@ export function getInstance(name: string): PGlite | undefined {
 export async function applyPendingMigrations(
   vfs: import('../virtual-fs').VirtualFS,
   dbName: string,
+  namespace?: string,
 ): Promise<{ applied: string[]; errors: string[] }> {
-  const db = instances.get(dbName);
+  const db = instances.get(instanceKey(dbName, namespace));
   if (!db) return { applied: [], errors: ['Database not initialized'] };
 
   // Ensure migrations table exists
@@ -125,9 +154,10 @@ export async function initAndMigrate(
   name: string,
   vfs: import('../virtual-fs').VirtualFS,
   idbPath?: string,
+  namespace?: string,
 ): Promise<void> {
   // Init with no schema SQL — migrations will handle it
-  await initPGliteInstance(name, null, idbPath);
+  await initPGliteInstance(name, null, idbPath, namespace);
 
   // Check for drizzle/ migrations first
   const hasDrizzleDir = (() => {
@@ -140,7 +170,7 @@ export async function initAndMigrate(
   })();
 
   if (hasDrizzleDir) {
-    const { applied, errors } = await applyPendingMigrations(vfs, name);
+    const { applied, errors } = await applyPendingMigrations(vfs, name, namespace);
     if (applied.length > 0) {
       console.log(`[pglite] Applied ${applied.length} migration(s) for "${name}"`);
     }
@@ -154,7 +184,7 @@ export async function initAndMigrate(
   try {
     const raw = vfs.readFileSync('/project/schema.sql');
     const schemaSQL = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
-    const db = instances.get(name);
+    const db = instances.get(instanceKey(name, namespace));
     if (db && schemaSQL) {
       await db.exec(schemaSQL);
       console.log(`[pglite] Schema applied for "${name}" (legacy schema.sql)`);
@@ -175,10 +205,23 @@ export async function handleDatabaseRequest(
   operation: string,
   body: any,
   dbName?: string,
+  namespace?: string,
 ): Promise<DatabaseRequestResult> {
-  // Resolve which instance to use
-  const name = dbName || instances.keys().next().value;
-  const db = name ? instances.get(name) : undefined;
+  // Resolve which instance to use. With a namespace (multi-sandbox: the
+  // middleware resolves it from the owning container's session) lookups
+  // stay inside that namespace — never fall back to "whatever instance
+  // exists", which would be another sandbox's database. The legacy
+  // namespace-less path keeps the first-instance fallback for
+  // single-workspace embeds.
+  let db: PGlite | undefined;
+  if (namespace !== undefined) {
+    const { getActiveDatabase } = await import('./db-manager');
+    const name = dbName || getActiveDatabase(namespace) || undefined;
+    db = name ? instances.get(instanceKey(name, namespace)) : undefined;
+  } else {
+    const name = dbName || instances.keys().next().value;
+    db = name ? instances.get(name) : undefined;
+  }
 
   if (!db) {
     return {
