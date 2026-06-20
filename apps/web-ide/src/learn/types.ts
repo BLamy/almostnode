@@ -95,6 +95,9 @@ export interface Step {
   messages?: Message[];
   /** override the autoplay dwell time for this step (ms) */
   autoAdvanceMs?: number;
+  /** For audio-synced chapters: when this step should appear — a phrase to find
+   *  in the chapter's narration transcript, or an absolute time in seconds. */
+  cue?: string | number;
 }
 
 export interface Story {

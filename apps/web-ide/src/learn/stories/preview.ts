@@ -1,11 +1,7 @@
 import type { Story } from '../types';
 
-// Chapter: how the preview iframe is driven and recorded. Generated from
-// packages/almostnode/public/__sw__.js (eruda injection + console/network
-// bridge), packages/almostnode/src/frameworks/vite-dev-server.ts
-// (REPLAY_CAPTURE_SCRIPT + rrweb → simulationData), shims/replayio-command.ts
-// (@@replay-nut extraction + upload to dispatch.replay.io), and
-// shims/playwright-command.ts (a Playwright-style DOM driver over the iframe).
+// Chapter: how the preview iframe is driven and recorded. Step order follows the
+// narration audio: inspect → drive → record → replay.
 export const previewStory: Story = {
   title: 'Driving & recording the preview',
   subtitle: 'Playwright, eruda, and rrweb watching a live preview iframe',
@@ -36,6 +32,7 @@ export const previewStory: Story = {
   steps: [
     {
       id: 'cover',
+      cue: 0,
       chapter: 'Chapter 4',
       cover: true,
       title: 'Driving & recording the preview',
@@ -44,6 +41,7 @@ export const previewStory: Story = {
     },
     {
       id: 'iframe',
+      cue: 'sandboxed iframe',
       chapter: 'The preview',
       title: 'Your app lives in an iframe',
       narration:
@@ -54,6 +52,7 @@ export const previewStory: Story = {
     },
     {
       id: 'inject',
+      cue: 'developer console',
       chapter: 'Inspecting it',
       title: 'eruda is injected into the page',
       narration:
@@ -64,6 +63,7 @@ export const previewStory: Story = {
     },
     {
       id: 'cdp',
+      cue: 'every log every request',
       chapter: 'Inspecting it',
       title: 'It streams DevTools data back',
       narration:
@@ -73,26 +73,8 @@ export const previewStory: Story = {
       messages: [{ from: 'eruda', to: 'host', kind: 'event', label: 'console · network' }],
     },
     {
-      id: 'rrweb',
-      chapter: 'Recording it',
-      title: 'rrweb records the session',
-      narration:
-        'The dev server also injects a capture script (`REPLAY_CAPTURE_SCRIPT`) that starts **rrweb**. It records every DOM mutation into a growing `simulationData` array — a structural recording, no video.',
-      reveal: ['rrweb'],
-      highlight: ['iframe', 'rrweb'],
-      messages: [{ from: 'iframe', to: 'rrweb', kind: 'data', label: 'DOM mutations' }],
-    },
-    {
-      id: 'interactions',
-      chapter: 'Recording it',
-      title: 'Clicks, network, and errors too',
-      narration:
-        'Alongside the DOM, the script captures clicks, keydowns, scrolls, inputs, every `fetch`, and any thrown errors — all appended to `simulationData`. Together they’re everything you need to reconstruct exactly what happened.',
-      highlight: ['rrweb'],
-      badges: [{ node: 'rrweb', text: 'simulationData', tone: 'info' }],
-    },
-    {
       id: 'playwright',
+      cue: 'browser automation shim',
       chapter: 'Driving it',
       title: 'Playwright drives — without a browser',
       narration:
@@ -106,6 +88,7 @@ export const previewStory: Story = {
     },
     {
       id: 'act',
+      cue: 'real click inside',
       chapter: 'Driving it',
       title: 'Click and type, for real',
       narration:
@@ -114,19 +97,29 @@ export const previewStory: Story = {
       messages: [{ from: 'playwright', to: 'iframe', kind: 'request', label: 'click e3 · fill' }],
     },
     {
-      id: 'sees',
-      chapter: 'Why it matters',
-      title: 'The agent can see and act',
+      id: 'rrweb',
+      cue: 'third record',
+      chapter: 'Recording it',
+      title: 'rrweb records the session',
       narration:
-        'Put it together: eruda streams console + network back, the Playwright shim returns a DOM snapshot, and clicks go in. A coding **agent** (Chapter 3) can now *observe* the app it built and *drive* it — a real feedback loop, all in the tab.',
-      highlight: ['eruda', 'host', 'playwright', 'iframe'],
-      messages: [
-        { from: 'eruda', to: 'host', kind: 'event', label: 'what happened', duration: 700 },
-        { from: 'host', to: 'playwright', kind: 'request', label: 'do this', delay: 800 },
-      ],
+        'The dev server also injects a capture script (`REPLAY_CAPTURE_SCRIPT`) that starts **rrweb**. It records every DOM mutation into a growing `simulationData` array — a structural recording, no video.',
+      reveal: ['rrweb'],
+      highlight: ['iframe', 'rrweb'],
+      messages: [{ from: 'iframe', to: 'rrweb', kind: 'data', label: 'DOM mutations' }],
+    },
+    {
+      id: 'interactions',
+      cue: 'structural not a video',
+      chapter: 'Recording it',
+      title: 'Clicks, network, and errors too',
+      narration:
+        'Alongside the DOM, the script captures clicks, keydowns, scrolls, inputs, every `fetch`, and any thrown errors — all appended to `simulationData`. Together they’re everything you need to reconstruct exactly what happened.',
+      highlight: ['rrweb'],
+      badges: [{ node: 'rrweb', text: 'simulationData', tone: 'info' }],
     },
     {
       id: 'extract',
+      cue: 'ask for the recording',
       chapter: 'The recording',
       title: 'Capturing the recording',
       narration:
@@ -139,6 +132,7 @@ export const previewStory: Story = {
     },
     {
       id: 'upload',
+      cue: 'replay service',
       chapter: 'The recording',
       title: 'A replayable recording',
       narration:
@@ -148,7 +142,21 @@ export const previewStory: Story = {
       messages: [{ from: 'host', to: 'replay', kind: 'data', label: 'upload · gzip' }],
     },
     {
+      id: 'sees',
+      cue: 'eyes and hands',
+      chapter: 'Why it matters',
+      title: 'The agent can see and act',
+      narration:
+        'Put it together: eruda streams console + network back, the Playwright shim returns a DOM snapshot, and clicks go in. A coding **agent** (Chapter 3) can now *observe* the app it built and *drive* it — a real feedback loop, all in the tab.',
+      highlight: ['eruda', 'host', 'playwright', 'iframe'],
+      messages: [
+        { from: 'eruda', to: 'host', kind: 'event', label: 'what happened', duration: 700 },
+        { from: 'host', to: 'playwright', kind: 'request', label: 'do this', delay: 800 },
+      ],
+    },
+    {
       id: 'recap',
+      cue: 'watch its own work',
       chapter: 'The whole picture',
       title: 'One iframe, fully observable',
       narration:

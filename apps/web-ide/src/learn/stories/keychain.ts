@@ -38,6 +38,7 @@ export const keychainStory: Story = {
   steps: [
     {
       id: 'cover',
+      cue: 0,
       chapter: 'Chapter 2',
       cover: true,
       title: 'The Keychain',
@@ -46,6 +47,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'problem',
+      cue: "command line tools",
       chapter: 'The setup',
       title: 'Real CLIs, running in your browser',
       narration:
@@ -56,6 +58,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'signin',
+      cue: "normal login command",
       chapter: 'A secret enters',
       title: 'You sign in',
       narration:
@@ -69,6 +72,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'watch',
+      cue: "sees that file appear",
       chapter: 'The keychain wakes up',
       title: 'The keychain is watching',
       narration:
@@ -79,6 +83,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'slots',
+      cue: "registered locations",
       chapter: 'The keychain wakes up',
       title: 'Only registered paths count',
       narration:
@@ -88,6 +93,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'passkey',
+      cue: "asks your passkey",
       chapter: 'Locking it down',
       title: 'Your passkey makes the key',
       narration:
@@ -101,6 +107,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'encrypt',
+      cue: "local storage",
       chapter: 'Locking it down',
       title: 'Encrypted at rest',
       narration:
@@ -112,6 +119,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'unlock',
+      cue: "reopen the environment",
       chapter: 'Coming back',
       title: 'Reopening the IDE',
       narration:
@@ -124,6 +132,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'cli-reads',
+      cue: "simply there",
       chapter: 'Coming back',
       title: 'The tools just work',
       narration:
@@ -133,6 +142,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'mirror',
+      cue: "live only mirror",
       chapter: 'Without unlocking',
       title: 'A fast, unencrypted mirror',
       narration:
@@ -144,6 +154,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'multi',
+      cue: "several sandboxes",
       chapter: 'Many sandboxes at once',
       title: 'One keychain, many filesystems',
       narration:
@@ -159,6 +170,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'oauth',
+      cue: "outside services",
       chapter: 'Connecting services',
       title: 'Adding an OAuth service',
       narration:
@@ -172,6 +184,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'tokens',
+      cue: "same journey",
       chapter: 'Connecting services',
       title: 'Tokens take the same path',
       narration:
@@ -185,6 +198,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'refresh',
+      cue: "refreshes tokens",
       chapter: 'Connecting services',
       title: 'Kept fresh automatically',
       narration:
@@ -198,6 +212,7 @@ export const keychainStory: Story = {
     },
     {
       id: 'recap',
+      cue: "that's the keychain",
       chapter: 'The whole picture',
       title: 'That’s the keychain',
       narration:

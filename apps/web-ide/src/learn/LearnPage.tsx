@@ -1,16 +1,44 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Presentation } from './engine/Presentation';
 import { ChevronLeft, ChevronRight } from './engine/icons';
 import { chapters } from './stories';
 
+const chapterIds = chapters.map((c) => c.id);
+
+// Resolve a `chapter` deep-link from the URL: ?chapter=3 (1-based) or
+// ?chapter=tailscale, in the query string *or* tacked onto the hash, e.g.
+// `#learn?chapter=3`. Returns a chapter id, or null.
+function chapterFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const fromQs = (qs: string) => new URLSearchParams(qs).get('chapter');
+  let raw = fromQs(window.location.search);
+  if (!raw) {
+    const hash = window.location.hash.replace(/^#/, '');
+    const q = hash.indexOf('?');
+    if (q >= 0) raw = fromQs(hash.slice(q + 1));
+  }
+  if (!raw) return null;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 1 && n <= chapters.length) return chapters[n - 1].id;
+  return chapterIds.includes(raw) ? raw : null;
+}
+
+function hashWantsLearn(): boolean {
+  if (typeof window === 'undefined') return false;
+  const hash = window.location.hash.replace(/^#/, '');
+  return hash === 'learn' || hash.startsWith('learn?') || hash.startsWith('learn&');
+}
+
 // The /learn page. Desktop (≥1024px): a fixed left sidebar of chapters next to
 // the player. Tablet and smaller: a top toolbar whose hamburger opens the same
 // list as a drawer. First view doesn't auto-play (a play overlay waits for a
-// click); once started, every following chapter auto-plays.
+// click); once started, every following chapter auto-plays. A `chapter` URL
+// param deep-links to a chapter (without auto-playing).
 export function LearnPage({ embedded = false }: { embedded?: boolean }) {
-  const [selectedId, setSelectedId] = useState(chapters[0].id);
+  const [selectedId, setSelectedId] = useState(() => chapterFromUrl() ?? chapters[0].id);
   const [started, setStarted] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   const selectedIndex = chapters.findIndex((c) => c.id === selectedId);
   const chapter = chapters[selectedIndex] ?? chapters[0];
@@ -23,8 +51,31 @@ export function LearnPage({ embedded = false }: { embedded?: boolean }) {
     setMenuOpen(false);
   };
 
+  // Deep-link: select the chapter named in the URL, and (when embedded on a
+  // larger page) scroll the Learn section into view. Never auto-plays.
+  useEffect(() => {
+    const apply = () => {
+      const id = chapterFromUrl();
+      if (id) {
+        setSelectedId(id);
+        setMenuOpen(false);
+      }
+      if (embedded && (id || hashWantsLearn())) {
+        const target = (rootRef.current?.closest('#learn') as HTMLElement | null) ?? rootRef.current;
+        target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    };
+    apply();
+    window.addEventListener('hashchange', apply);
+    window.addEventListener('popstate', apply);
+    return () => {
+      window.removeEventListener('hashchange', apply);
+      window.removeEventListener('popstate', apply);
+    };
+  }, [embedded]);
+
   return (
-    <div className={`learn${embedded ? ' learn-embedded' : ''}`}>
+    <div ref={rootRef} className={`learn${embedded ? ' learn-embedded' : ''}`}>
       {/* toolbar — only shown on tablet and smaller (CSS) */}
       <header className="learn-bar">
         <button
@@ -89,6 +140,9 @@ export function LearnPage({ embedded = false }: { embedded?: boolean }) {
           <Presentation
             key={chapter.id}
             story={chapter.story}
+            audioUrl={chapter.audio}
+            transcript={chapter.transcript}
+            audioEnd={chapter.audioEnd}
             autoStart={started}
             onStart={onStart}
             nextChapterTitle={nextChapter?.title}

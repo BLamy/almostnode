@@ -40,6 +40,7 @@ export const codingAgentsStory: Story = {
   steps: [
     {
       id: 'cover',
+      cue: 0,
       chapter: 'Chapter 3',
       cover: true,
       title: 'How the coding agents work',
@@ -48,6 +49,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'agents',
+      cue: "coding agent living in the tab",
       chapter: 'The cast',
       title: 'Real agents, in the browser',
       narration:
@@ -57,6 +59,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'chat',
+      cue: "chat panel",
       chapter: 'Driving the agent',
       title: 'You type in the chat panel',
       narration:
@@ -67,6 +70,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'stdin',
+      cue: "types your prompt",
       chapter: 'Driving the agent',
       title: 'The prompt becomes keystrokes',
       narration:
@@ -77,6 +81,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'wasm',
+      cue: "opaque webassembly",
       chapter: 'Inside Codex',
       title: 'Codex is WASM in a worker',
       narration:
@@ -86,6 +91,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'bridge',
+      cue: "host bridge",
       chapter: 'Inside Codex',
       title: 'It asks a host bridge',
       narration:
@@ -96,6 +102,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'model',
+      cue: "call its model",
       chapter: 'Calling the model',
       title: 'Reach the model — through a proxy',
       narration:
@@ -110,6 +117,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'auth',
+      cue: "sitting in a file",
       chapter: 'Calling the model',
       title: 'Auth comes from a file',
       narration:
@@ -119,6 +127,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'stream',
+      cue: "streams its reply back",
       chapter: 'Calling the model',
       title: 'The model streams back tool calls',
       narration:
@@ -132,6 +141,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'fs',
+      cue: "change a file becomes a patch",
       chapter: 'The agent acts',
       title: 'Editing the (virtual) filesystem',
       narration:
@@ -145,6 +155,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'shell',
+      cue: "run a command opens a terminal",
       chapter: 'The agent acts',
       title: 'Running real commands',
       narration:
@@ -159,6 +170,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'loop',
+      cue: "think act observe",
       chapter: 'The agent acts',
       title: 'Results go back — and it loops',
       narration:
@@ -173,6 +185,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'events',
+      cue: "messages and tool call",
       chapter: 'Back to you',
       title: 'Every step streams to the UI',
       narration:
@@ -185,6 +198,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'opencode',
+      cue: "sibling agent plugs",
       chapter: 'The other agent',
       title: 'opencode: same slots, different agent',
       narration:
@@ -199,6 +213,7 @@ export const codingAgentsStory: Story = {
     },
     {
       id: 'recap',
+      cue: "same machinery",
       chapter: 'The whole picture',
       title: 'An agent loop in a tab',
       narration:

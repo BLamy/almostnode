@@ -3,8 +3,14 @@ import type { Step, Story } from '../types';
 import { Diagram } from './Diagram';
 import { NarrationPanel } from './NarrationPanel';
 import { cancelSpeech, isSpeechSupported, speak, speechify } from './speech';
+import { resolveCues, type Transcript } from './align';
 
 const AUTO_NEXT_SECONDS = 10;
+
+// Vite's deploy base ("/" locally, "/almostnode/" on GitHub Pages). Cast avoids
+// needing vite/client ambient types in the host app.
+const ASSET_BASE =
+  (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
 
 /** Spoken text for a step (cover subtitle or narration, smoothed), or its override. */
 function spokenText(step: Step): string {
@@ -48,6 +54,9 @@ export function Presentation({
   onNextChapter,
   autoStart = true,
   onStart,
+  audioUrl,
+  transcript,
+  audioEnd,
 }: {
   story: Story;
   onExit?: () => void;
@@ -57,22 +66,52 @@ export function Presentation({
   autoStart?: boolean;
   /** called the first time playback starts, so the host can auto-play the rest */
   onStart?: () => void;
+  /** narration MP3 for this chapter; when present, the engine runs in audio mode */
+  audioUrl?: string;
+  /** word-timestamp transcript used to sync step reveals to the narration */
+  transcript?: Transcript;
+  /** stop playback at this time (seconds) — e.g. to trim a bad audio tail */
+  audioEnd?: number;
 }) {
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(autoStart);
   const [muted, setMuted] = useState(false);
   const [finished, setFinished] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(AUTO_NEXT_SECONDS);
+  const [progress, setProgress] = useState(0);
   const reduced = usePrefersReducedMotion();
   const speechSupported = isSpeechSupported();
+
+  const audioMode = !!audioUrl;
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const last = story.steps.length - 1;
   const step = story.steps[index];
 
-  const durations = useMemo(
-    () => story.steps.map((s) => estDuration(s, muted, speechSupported)),
-    [story, muted, speechSupported]
+  const totalTime = useMemo(
+    () => audioEnd ?? transcript?.duration ?? 0,
+    [audioEnd, transcript]
   );
+  const cueTimes = useMemo(
+    () => (audioMode ? resolveCues(story.steps, transcript, totalTime || 1) : []),
+    [audioMode, story, transcript, totalTime]
+  );
+
+  const durations = useMemo(() => {
+    if (audioMode) {
+      return story.steps.map((_, i) => {
+        const start = cueTimes[i] ?? 0;
+        const end = i < last ? cueTimes[i + 1] ?? totalTime : totalTime;
+        return Math.max(200, (end - start) * 1000);
+      });
+    }
+    return story.steps.map((s) => estDuration(s, muted, speechSupported));
+  }, [audioMode, cueTimes, totalTime, story, last, muted, speechSupported]);
+
+  const indexRef = useRef(index);
+  useEffect(() => {
+    indexRef.current = index;
+  }, [index]);
 
   const togglePlay = useCallback(() => {
     setFinished(false);
@@ -94,11 +133,24 @@ export function Presentation({
     if (playing) onStart?.();
   }, [playing, onStart]);
 
-  const next = useCallback(() => setIndex((i) => Math.min(last, i + 1)), [last]);
+  // Jump to a step. In audio mode this seeks the track to that step's cue time.
+  const goTo = useCallback(
+    (i: number) => {
+      const t = Math.max(0, Math.min(last, i));
+      if (audioMode && audioRef.current) {
+        audioRef.current.currentTime = cueTimes[t] ?? 0;
+        setFinished(false);
+      }
+      setIndex(t);
+    },
+    [audioMode, cueTimes, last]
+  );
+
+  const next = useCallback(() => goTo(indexRef.current + 1), [goTo]);
   const prev = useCallback(() => {
-    setPlaying(false);
-    setIndex((i) => Math.max(0, i - 1));
-  }, []);
+    if (!audioMode) setPlaying(false);
+    goTo(indexRef.current - 1);
+  }, [audioMode, goTo]);
 
   // Keyboard navigation.
   useEffect(() => {
@@ -113,20 +165,77 @@ export function Presentation({
         e.preventDefault();
         togglePlay();
       } else if (e.key === 'Home') {
-        setIndex(0);
+        goTo(0);
       } else if (e.key === 'End') {
-        setIndex(last);
+        goTo(last);
       } else if (e.key === 'Escape' && onExit) {
         onExit();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [next, prev, last, onExit, togglePlay]);
+  }, [next, prev, goTo, last, onExit, togglePlay]);
 
-  // Autoplay. When sound is on, the narration's end (below) advances the slide,
-  // so playback waits for the audio. When muted, it falls back to a dwell timer.
+  // ---- AUDIO MODE: the MP3 drives playback ---------------------------------
+  // Play / pause the track with the play state.
   useEffect(() => {
+    if (!audioMode) return;
+    const a = audioRef.current;
+    if (!a) return;
+    if (playing) {
+      if (totalTime && a.currentTime >= totalTime - 0.05) {
+        a.currentTime = cueTimes[indexRef.current] ?? 0;
+      }
+      void a.play().catch(() => {});
+    } else {
+      a.pause();
+    }
+  }, [playing, audioMode, totalTime, cueTimes]);
+
+  // Mirror the mute toggle onto the track.
+  useEffect(() => {
+    if (audioMode && audioRef.current) audioRef.current.muted = muted;
+  }, [muted, audioMode]);
+
+  // Drive the step index + progress from the track's clock; finish at the end.
+  useEffect(() => {
+    if (!audioMode) return;
+    const a = audioRef.current;
+    if (!a) return;
+    const onTime = () => {
+      const t = a.currentTime;
+      if (totalTime && t >= totalTime) {
+        a.pause();
+        setProgress(1);
+        setPlaying(false);
+        setFinished(true);
+        return;
+      }
+      let idx = 0;
+      for (let k = 0; k < cueTimes.length; k++) {
+        if (t >= cueTimes[k] - 0.02) idx = k;
+        else break;
+      }
+      setIndex(idx);
+      setProgress(totalTime ? Math.min(1, t / totalTime) : 0);
+    };
+    const onEnded = () => {
+      setProgress(1);
+      setPlaying(false);
+      setFinished(true);
+    };
+    a.addEventListener('timeupdate', onTime);
+    a.addEventListener('ended', onEnded);
+    return () => {
+      a.removeEventListener('timeupdate', onTime);
+      a.removeEventListener('ended', onEnded);
+    };
+  }, [audioMode, cueTimes, totalTime]);
+
+  // ---- TTS FALLBACK (no audio file) ----------------------------------------
+  // Autoplay via a dwell timer when muted / speech unsupported.
+  useEffect(() => {
+    if (audioMode) return;
     if (!playing) return;
     if (!muted && speechSupported) return; // narration drives advancing & finishing
     const t = window.setTimeout(() => {
@@ -138,19 +247,16 @@ export function Presentation({
       }
     }, dwellFor(step));
     return () => window.clearTimeout(t);
-  }, [playing, index, last, step, muted, speechSupported]);
+  }, [audioMode, playing, index, last, step, muted, speechSupported]);
 
-  // Narration is driven by PLAY, not the sound button: it only speaks while the
-  // slideshow is *playing* and unmuted. The sound button is just a mute toggle —
-  // it controls whether audio comes out, never playback. When a slide's audio
-  // finishes, advance to the next slide (so playback waits for the voice).
+  // Speak each step and advance on the utterance's end.
   useEffect(() => {
+    if (audioMode) return;
     if (!playing || muted || !speechSupported) {
       cancelSpeech();
       return;
     }
     const text = spokenText(step);
-
     let fired = false;
     let cancelled = false;
     let advanceTimer = 0;
@@ -166,20 +272,16 @@ export function Presentation({
         }
       }, 450);
     };
-
     speak(text, { onend: onDone, onerror: onDone });
-
-    // Backstop so a silently-failing voice can't stall playback forever.
     const words = text.split(/\s+/).filter(Boolean).length;
     const backstop = window.setTimeout(onDone, Math.min(45000, Math.max(8000, words * 420 + 4000)));
-
     return () => {
       cancelled = true;
       window.clearTimeout(advanceTimer);
       window.clearTimeout(backstop);
       cancelSpeech();
     };
-  }, [playing, muted, index, last, step, speechSupported]);
+  }, [audioMode, playing, muted, index, last, step, speechSupported]);
 
   // Leaving the last slide dismisses the end-of-chapter card.
   useEffect(() => {
@@ -200,6 +302,14 @@ export function Presentation({
 
   return (
     <div className="presentation">
+      {audioMode && (
+        <audio
+          ref={audioRef}
+          src={ASSET_BASE + (audioUrl ?? '').replace(/^\//, '')}
+          preload="auto"
+        />
+      )}
+
       {onExit && (
         <button className="chapters-btn" onClick={onExit} aria-label="Back to chapters">
           ← Chapters
@@ -262,12 +372,13 @@ export function Presentation({
         playing={playing}
         muted={muted}
         durations={durations}
+        progress={audioMode ? progress : undefined}
         finished={finished}
         onPrev={prev}
         onNext={next}
         onTogglePlay={togglePlay}
-        onToggleSound={speechSupported ? () => setMuted((m) => !m) : undefined}
-        onSeek={(i) => setIndex(i)}
+        onToggleSound={audioMode || speechSupported ? () => setMuted((m) => !m) : undefined}
+        onSeek={goTo}
       />
     </div>
   );

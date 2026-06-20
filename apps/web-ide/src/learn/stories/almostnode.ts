@@ -39,6 +39,7 @@ export const almostnodeStory: Story = {
   steps: [
     {
       id: 'cover',
+      cue: 0,
       chapter: 'Chapter 1',
       cover: true,
       title: 'How almostnode works',
@@ -47,6 +48,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'intro',
+      cue: 'little world',
       chapter: 'The idea',
       title: 'Node.js, but in the browser',
       narration:
@@ -57,6 +59,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'vfs',
+      cue: 'real disk',
       chapter: 'The filesystem',
       title: 'Everything is a file in memory',
       narration:
@@ -66,6 +69,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'install',
+      cue: 'install a dependency',
       chapter: 'Bringing in packages',
       title: 'npm install, inside the tab',
       narration:
@@ -79,6 +83,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'run',
+      cue: 'actually run your code',
       chapter: 'Running code',
       title: 'The Runtime executes your code',
       narration:
@@ -89,6 +94,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'shims',
+      cue: 'no real node',
       chapter: 'Running code',
       title: 'There is no Node — only shims',
       narration:
@@ -99,6 +105,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'shims-vfs',
+      cue: 'reads and writes that same',
       chapter: 'Running code',
       title: 'Shims read the same filesystem',
       narration:
@@ -108,6 +115,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'devserver',
+      cue: 'serve a live web app',
       chapter: 'A real dev server',
       title: 'Now serve a live app',
       narration:
@@ -118,6 +126,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'listen',
+      cue: 'nothing actually binds',
       chapter: 'A real dev server',
       title: 'A server with no socket',
       narration:
@@ -127,6 +136,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'preview',
+      cue: 'preview is an iframe',
       chapter: 'The preview',
       title: 'The iframe asks for the page',
       narration:
@@ -137,6 +147,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'route',
+      cue: 'reads the virtual port',
       chapter: 'The preview',
       title: 'Routing by virtual port',
       narration:
@@ -146,6 +157,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'transforms',
+      cue: 'compiled to webassembly',
       chapter: 'The preview',
       title: 'JSX & TypeScript, compiled in-browser',
       narration:
@@ -160,6 +172,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'response',
+      cue: 'perfectly normal response',
       chapter: 'The preview',
       title: 'A real HTTP response',
       narration:
@@ -169,6 +182,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'hmr',
+      cue: 'hot reload needs no network',
       chapter: 'Staying live',
       title: 'Hot reload with no network',
       narration:
@@ -181,6 +195,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'worker',
+      cue: 'off the main thread',
       chapter: 'Keeping it smooth',
       title: 'Optional: off the main thread',
       narration:
@@ -190,6 +205,7 @@ export const almostnodeStory: Story = {
     },
     {
       id: 'recap',
+      cue: 'step back and look',
       chapter: 'The whole picture',
       title: 'A dev environment in a tab',
       narration:

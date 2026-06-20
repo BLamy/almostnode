@@ -30,6 +30,7 @@ export const tailscaleStory: Story = {
   steps: [
     {
       id: 'cover',
+      cue: 0,
       chapter: 'Chapter 5',
       cover: true,
       title: 'How Tailscale works',
@@ -38,6 +39,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'problem',
+      cue: "reach something private",
       chapter: 'The problem',
       title: 'A sandbox wants on your tailnet',
       narration:
@@ -47,6 +49,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'login',
+      cue: "real vpn client",
       chapter: 'Logging in',
       title: 'Log in with the Tailscale CLI',
       narration:
@@ -58,6 +61,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'connected',
+      cue: "on your private network",
       chapter: 'Logging in',
       title: 'Connected to your tailnet',
       narration:
@@ -68,6 +72,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'client',
+      cue: "this is real wireguard",
       chapter: 'The client',
       title: 'It’s WireGuard, in WASM',
       narration:
@@ -81,6 +86,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'no-udp',
+      cue: "raw udp packets",
       chapter: 'The hard part',
       title: 'But browsers can’t do UDP',
       narration:
@@ -90,6 +96,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'derp',
+      cue: "plain websocket",
       chapter: 'The hard part',
       title: 'Encrypted packets over WebSocket',
       narration:
@@ -101,6 +108,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'exit',
+      cue: "you pick an exit",
       chapter: 'Reaching the tailnet',
       title: 'Pick your exit node',
       narration:
@@ -114,6 +122,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'netstack',
+      cue: "never sees any of this",
       chapter: 'Reaching the tailnet',
       title: 'fetch() that just works',
       narration:
@@ -128,6 +137,7 @@ export const tailscaleStory: Story = {
     },
     {
       id: 'recap',
+      cue: "real encrypted vpn",
       chapter: 'The whole picture',
       title: 'A VPN in a browser tab',
       narration:

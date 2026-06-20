@@ -36,6 +36,7 @@ export const appBuilderStory: Story = {
   steps: [
     {
       id: 'cover',
+      cue: 0,
       chapter: 'Chapter 6',
       cover: true,
       title: 'The app-builder & control plane',
@@ -44,6 +45,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'idea',
+      cue: "real cloud infrastructure",
       chapter: 'The idea',
       title: 'From the browser to the cloud',
       narration:
@@ -53,6 +55,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'vault',
+      cue: "separate passkey",
       chapter: 'Credentials',
       title: 'Unlock a standalone vault',
       narration:
@@ -63,6 +66,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'container',
+      cue: "editorless sandbox",
       chapter: 'Credentials',
       title: 'A tiny container runs the logins',
       narration:
@@ -77,6 +81,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'neon',
+      cue: "real managed database",
       chapter: 'Provisioning',
       title: 'Provision a real Postgres',
       narration:
@@ -90,6 +95,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'control',
+      cue: "kanban",
       chapter: 'The control plane',
       title: 'A board of projects & jobs',
       narration:
@@ -100,6 +106,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'env',
+      cue: "bundle of settings",
       chapter: 'The control plane',
       title: 'Bundle everything into env vars',
       narration:
@@ -109,6 +116,7 @@ export const appBuilderStory: Story = {
     },
     {
       id: 'launch',
+      cue: "virtual machine in the cloud",
       chapter: 'Deploying',
       title: 'Launch a Fly machine',
       narration:

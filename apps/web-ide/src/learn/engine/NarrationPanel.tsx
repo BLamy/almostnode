@@ -20,6 +20,7 @@ export function NarrationPanel({
   playing,
   muted,
   durations,
+  progress,
   finished,
   onPrev,
   onNext,
@@ -32,6 +33,8 @@ export function NarrationPanel({
   playing: boolean;
   muted?: boolean;
   durations: number[];
+  /** when set (audio mode), drives the fill directly: 0..1 of the whole chapter */
+  progress?: number;
   finished?: boolean;
   onPrev: () => void;
   onNext: () => void;
@@ -67,6 +70,12 @@ export function NarrationPanel({
     const setFrac = (f: number) => {
       fill.style.width = `${Math.min(100, Math.max(0, f * 100))}%`;
     };
+    // Audio mode: the track's clock drives the bar (smoothed with a CSS transition).
+    if (progress != null) {
+      fill.style.transition = 'width .26s linear';
+      setFrac(finished ? 1 : progress);
+      return;
+    }
     if (finished) {
       fill.style.transition = 'width .4s ease';
       setFrac(1);
@@ -88,7 +97,7 @@ export function NarrationPanel({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, index, finished, base, dur, total]);
+  }, [playing, index, finished, base, dur, total, progress]);
 
   // Seek: clicking the bar jumps to the start of whichever slide it lands on.
   const seekTo = (e: React.MouseEvent<HTMLDivElement>) => {
