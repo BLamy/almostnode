@@ -1,9 +1,9 @@
-import type { VirtualFS } from "almostnode";
+import type { VirtualFS } from "@agent-wasm/core";
 
 import { getDesktopOAuthLoopbackBridge } from "./desktop-oauth-loopback";
-import { CODEX_AUTH_PATH } from "./keychain";
-import { generatePkcePair, randomState } from "./oauth-services/pkce";
-import { oauthFetch, type OAuthFetchOptions } from "./oauth-services/proxy-fetch";
+import { CODEX_AUTH_PATH } from "@agent-wasm/keychain";
+import { generatePkcePair, randomState } from "@agent-wasm/keychain/oauth/pkce";
+import { oauthFetch, type OAuthFetchOptions } from "@agent-wasm/keychain/oauth/proxy-fetch";
 
 const CODEX_OAUTH_ISSUER = "https://auth.openai.com";
 const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";

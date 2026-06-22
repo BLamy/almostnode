@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { Button } from '../ui/button';
+import { Button } from '@agent-wasm/react/ui';
 import {
   extractCredentials,
   type ExtractedCredentials,
@@ -43,7 +43,7 @@ import {
   ensureInfisicalFolder,
   upsertInfisicalSecret,
 } from '../../../../packages/almostnode/src/shims/infisical-auth';
-import { KEYCHAIN_STORAGE_KEY } from '../features/keychain';
+import { KEYCHAIN_STORAGE_KEY } from '@agent-wasm/keychain';
 
 type ScreenState =
   | { kind: 'loading' }

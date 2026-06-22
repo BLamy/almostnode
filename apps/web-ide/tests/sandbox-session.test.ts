@@ -6,7 +6,7 @@ const createContainerMock = vi.fn((_options: unknown) => ({
   dispose: disposeMock,
 }));
 
-vi.mock("almostnode", () => ({
+vi.mock("@agent-wasm/core", () => ({
   createContainer: (options: unknown) => createContainerMock(options),
 }));
 

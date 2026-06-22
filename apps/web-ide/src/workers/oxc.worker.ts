@@ -1,7 +1,7 @@
 import {
   runOxcOnSource,
   type RunOxcOnSourceOptions,
-} from "almostnode/internal";
+} from "@agent-wasm/core/internal";
 
 type WorkerRequest = {
   id: number;

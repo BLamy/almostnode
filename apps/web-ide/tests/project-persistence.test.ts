@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 import { diffSerializedFiles } from '../src/desktop/project-mirror';
 import {
   PROJECT_ROOT,

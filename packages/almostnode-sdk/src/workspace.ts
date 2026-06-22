@@ -5,7 +5,7 @@ import {
   type TerminalSession,
   type TerminalSessionOptions,
   type VFSSnapshot,
-} from "../../almostnode/src/index";
+} from "@agent-wasm/core";
 
 const DEFAULT_SNAPSHOT_KEY = "almostnode-sdk:workspace";
 const PROJECT_ROOT = "/project";
@@ -389,7 +389,7 @@ class WorkspaceControllerImpl implements WorkspaceController {
         : createIndexedDbSnapshotStore());
     this.template = options.template || DEFAULT_WORKSPACE_TEMPLATE;
     this.container = createContainer({
-      installMode: options.installMode,
+      installMode: options.installMode as NonNullable<Parameters<typeof createContainer>[0]>["installMode"],
       shellCommands: options.shellCommands,
     });
     this.vfs = this.container.vfs;
@@ -397,12 +397,12 @@ class WorkspaceControllerImpl implements WorkspaceController {
     this.snapshotCache = this.buildSnapshot();
 
     this.preview = {
-      start: async (command) => this.startPreview(command),
+      start: async (command?: string) => this.startPreview(command),
       stop: () => this.stopPreview(),
     };
 
     this.terminals = {
-      createSession: (sessionOptions) => {
+      createSession: (sessionOptions?: TerminalSessionOptions) => {
         const session = this.container.createTerminalSession(sessionOptions);
         const handle: TerminalSessionHandle = {
           id: crypto.randomUUID(),
@@ -431,14 +431,14 @@ class WorkspaceControllerImpl implements WorkspaceController {
     };
 
     this.agents = {
-      register: (adapter) => {
+      register: (adapter: AgentAdapter) => {
         this.registeredAgents.set(adapter.id, adapter);
       },
-      unregister: (adapterId) => {
+      unregister: (adapterId: string) => {
         this.registeredAgents.delete(adapterId);
       },
       list: () => Array.from(this.registeredAgents.values()),
-      mount: async (adapterId, context) => {
+      mount: async (adapterId: string, context: Omit<AgentMountContext, "workspace">) => {
         const adapter = this.registeredAgents.get(adapterId);
         if (!adapter) {
           throw new Error(`Unknown agent adapter: ${adapterId}`);

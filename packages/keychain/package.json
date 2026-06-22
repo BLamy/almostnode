@@ -1,0 +1,75 @@
+{
+  "name": "@agent-wasm/keychain",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./oauth": {
+      "types": "./src/oauth-services/index.ts",
+      "default": "./src/oauth-services/index.ts"
+    },
+    "./oauth/*": {
+      "types": "./src/oauth-services/*.ts",
+      "default": "./src/oauth-services/*.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/oauth-services/index.ts src/oauth-services/*.ts --tsconfig tsconfig.build.json --format esm,cjs --dts --clean --external @agent-wasm/core",
+    "test": "vitest run",
+    "type-check": "tsc --project tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@agent-wasm/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "typescript": "^5.9.3",
+    "vitest": "4.0.18",
+    "tsup": "^8.5.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BLamy/agent-wasm.git"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "main": "./dist/index.cjs",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js",
+        "require": "./dist/index.cjs",
+        "default": "./dist/index.js"
+      },
+      "./oauth": {
+        "types": "./dist/oauth-services/index.d.ts",
+        "import": "./dist/oauth-services/index.js",
+        "require": "./dist/oauth-services/index.cjs",
+        "default": "./dist/oauth-services/index.js"
+      },
+      "./oauth/*": {
+        "types": "./dist/oauth-services/*.d.ts",
+        "import": "./dist/oauth-services/*.js",
+        "require": "./dist/oauth-services/*.cjs",
+        "default": "./dist/oauth-services/*.js"
+      }
+    }
+  }
+}

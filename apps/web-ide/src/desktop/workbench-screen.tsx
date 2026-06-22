@@ -4,14 +4,17 @@ import { WebIDEHost } from '../workbench/workbench-host';
 import { ProjectManager } from '../features/project-manager';
 import { ProjectSidebar } from '../sidebar/project-sidebar';
 import { WorkbenchDrawer } from './workbench-drawer';
-import { ChatScreen } from '../chat/chat-screen';
+import { ChatScreen } from '@agent-wasm/react/chat';
+import { createConversationAdapter } from '../chat/adapter-factory';
+import { agentSessionRegistry, type ActiveAgentSession } from '@agent-wasm/chat-core';
+import type { AgentHarness } from '@agent-wasm/chat-core';
 import { AwsSetupDialog } from '../sidebar/aws-setup-dialog';
 import { AppBuildingSetupDialog } from '../sidebar/app-building-setup-dialog';
 import type { AwsSetupDraft } from '../features/aws-setup';
 import type { AppBuildingSetupDraft } from '../features/app-building-setup';
 import type { DesktopBridge } from './bridge';
 import type { SerializedFile } from './project-snapshot';
-import { Button } from '../ui/button';
+import { Button } from '@agent-wasm/react/ui';
 
 const DEBUG_STORAGE_KEY = '__almostnodeDebug';
 const CORS_PROXY_STORAGE_KEY = '__corsProxyUrl';
@@ -148,6 +151,18 @@ export function WorkbenchScreen({
   const hostRef = useRef<WebIDEHost | null>(null);
   const managerRef = useRef<ProjectManager | null>(null);
   const [hostReady, setHostReady] = useState(false);
+  // Host-specific wiring injected into the reusable @agent-wasm/react ChatScreen.
+  const startAgentSession = useCallback(
+    (harness: AgentHarness) => hostRef.current!.startAgentSession(harness),
+    [],
+  );
+  const createChatAdapter = useCallback(
+    (session: ActiveAgentSession) =>
+      hostRef.current
+        ? createConversationAdapter(hostRef.current, session, agentSessionRegistry)
+        : null,
+    [],
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const [awsSetupDraft, setAwsSetupDraft] = useState<AwsSetupDraft | null>(null);
   const [appBuildingSetupDraft, setAppBuildingSetupDraft] = useState<AppBuildingSetupDraft | null>(null);
@@ -374,7 +389,10 @@ export function WorkbenchScreen({
           ) : activeProjectId === null ? (
             <IDEEmptyState onOpenProjectLauncher={() => setProjectLaunchDialogOpen(true)} />
           ) : (
-            <ChatScreen host={hostRef.current} />
+            <ChatScreen
+              startAgentSession={startAgentSession}
+              createAdapter={createChatAdapter}
+            />
           )}
         </div>
         <WorkbenchDrawer open={drawerOpen} onOpenChange={setDrawerOpen}>

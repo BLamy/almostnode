@@ -1,11 +1,11 @@
-import type { ContainerInstance, ShellCommandDefinition } from "almostnode";
+import type { ContainerInstance, ShellCommandDefinition } from "@agent-wasm/core";
 import {
   createBrowserCodexCliShellCommand,
   createCodexCliBrowserSession,
   type CodexCliBrowserLoginHandler,
   type CodexCliBrowserSession,
   type CodexCliBrowserSessionOptions,
-} from "codex-wasm";
+} from "@agent-wasm/codex";
 import { createWebIdeCodexBrowserSession } from "./codex-browser-session";
 import { codexConversationBus } from "../chat/codex-conversation-bus";
 

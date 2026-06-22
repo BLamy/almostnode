@@ -9,7 +9,7 @@ import {
   computeRunningAgentState,
   isThreadRunning,
 } from '../src/sidebar/running-agents';
-import type { ActiveAgentSession } from '../src/chat/agent-session-registry';
+import type { ActiveAgentSession } from '@agent-wasm/chat-core';
 import type {
   ProjectRecord,
   ResumableThreadRecord,

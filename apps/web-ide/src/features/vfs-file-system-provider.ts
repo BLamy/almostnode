@@ -1,5 +1,5 @@
-import type { VirtualFS } from 'almostnode';
-import { createNodeError } from 'almostnode/internal';
+import type { VirtualFS } from '@agent-wasm/core';
+import { createNodeError } from '@agent-wasm/core/internal';
 import {
   FileChangeType,
   FileSystemProviderCapabilities,
@@ -18,7 +18,7 @@ import {
 import { Emitter } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event';
 import { DisposableStore, toDisposable } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
-import type { WatchEventType } from 'almostnode';
+import type { WatchEventType } from '@agent-wasm/core';
 
 const NODE_MODULES_EVENT_DELAY_MS = 48;
 

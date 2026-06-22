@@ -1,4 +1,4 @@
-import { createProcess } from "almostnode";
+import { createProcess } from "@agent-wasm/core";
 import {
   createWorkspace,
   type AgentBrowserEnv,
@@ -6,7 +6,7 @@ import {
   type WorkspaceController,
   type WorkspaceCreateOptions,
   type WorkspaceTemplate,
-} from "almostnode-sdk";
+} from "@agent-wasm/sdk";
 import {
   mountOpenCodeTui,
   type BrowserProcessBridge,

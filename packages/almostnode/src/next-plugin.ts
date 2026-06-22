@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * @example
  * ```typescript
  * // app/api/__sw__/route.ts (App Router)
- * import { getServiceWorkerContent } from 'almostnode/next';
+ * import { getServiceWorkerContent } from '@agent-wasm/core/next';
  *
  * export async function GET() {
  *   const content = getServiceWorkerContent();
@@ -35,7 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * @example
  * ```typescript
  * // pages/api/__sw__.ts (Pages Router)
- * import { getServiceWorkerContent } from 'almostnode/next';
+ * import { getServiceWorkerContent } from '@agent-wasm/core/next';
  * import type { NextApiRequest, NextApiResponse } from 'next';
  *
  * export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -75,7 +75,7 @@ export function getServiceWorkerContent(): string {
  * @example
  * ```javascript
  * // scripts/copy-sw.js
- * const { getServiceWorkerPath } = require('almostnode/next');
+ * const { getServiceWorkerPath } = require('@agent-wasm/core/next');
  * const fs = require('fs');
  * const path = require('path');
  *

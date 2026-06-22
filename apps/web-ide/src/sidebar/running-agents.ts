@@ -4,7 +4,7 @@
  * the spinner logic is unit-testable.
  */
 
-import type { ActiveAgentSession } from '../chat/agent-session-registry';
+import type { ActiveAgentSession } from '@agent-wasm/chat-core';
 import type { ResumableThreadRecord } from '../features/project-db';
 
 export interface RunningAgentState {

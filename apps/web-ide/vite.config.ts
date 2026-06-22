@@ -346,16 +346,18 @@ function opentuiSolidTransform() {
 function stubModulePrefixes(
   stubPath: string,
   prefixes: string[],
-  options?: { excludeImporterPrefix?: string },
+  options?: { excludeImporterPrefixes?: string[] },
 ) {
   return {
     name: "stub-module-prefixes",
     enforce: "pre" as const,
     resolveId(source: string, importer?: string) {
       if (
-        options?.excludeImporterPrefix &&
+        options?.excludeImporterPrefixes &&
         importer &&
-        sourcePath(importer).startsWith(options.excludeImporterPrefix)
+        options.excludeImporterPrefixes.some((prefix) =>
+          sourcePath(importer).startsWith(prefix),
+        )
       ) {
         return null;
       }
@@ -737,11 +739,17 @@ export default defineConfig(async ({ mode }) => {
       ]),
       // OpenCode's build stubs @pierre/diffs, but the web-ide chat surface
       // uses the real package for tool-call diff rendering — only stub it for
-      // imports coming from outside our own source tree.
+      // imports coming from outside our own source tree. The chat tool-call card
+      // now ships from @agent-wasm/react, so exclude that package's src too.
       stubModulePrefixes(
         resolve(opencodeBrowserSrc, "shims/stubs.ts"),
         ["@pierre/diffs"],
-        { excludeImporterPrefix: resolve(__dirname, "src") },
+        {
+          excludeImporterPrefixes: [
+            resolve(__dirname, "src"),
+            resolve(workspaceRoot, "packages/almostnode-react/src"),
+          ],
+        },
       ),
       stubModulePrefixes(resolve(opencodeBrowserSrc, "shims/bun-bundle.browser.ts"), [
         "bun:bundle",
@@ -945,23 +953,23 @@ export default defineConfig(async ({ mode }) => {
       dedupe: ["react", "react-dom", "solid-js"],
       alias: [
         {
-          find: /^almostnode\/internal$/,
+          find: /^@agent-wasm\/core\/internal$/,
           replacement: resolve(__dirname, "../../packages/almostnode/src/internal.ts"),
         },
         {
-          find: /^almostnode$/,
+          find: /^@agent-wasm\/core$/,
           replacement: resolve(__dirname, "../../packages/almostnode/src/browser.ts"),
         },
         {
-          find: /^codex-wasm\/cli-browser-worker$/,
+          find: /^@agent-wasm\/codex\/cli-browser-worker$/,
           replacement: resolve(__dirname, "../../packages/codex-wasm/src/cli-browser-worker.ts"),
         },
         {
-          find: /^codex-wasm\/app-server-browser-worker$/,
+          find: /^@agent-wasm\/codex\/app-server-browser-worker$/,
           replacement: resolve(__dirname, "../../packages/codex-wasm/src/app-server-browser-worker.ts"),
         },
         {
-          find: /^codex-wasm$/,
+          find: /^@agent-wasm\/codex$/,
           replacement: resolve(__dirname, "../../packages/codex-wasm/src/index.ts"),
         },
         {

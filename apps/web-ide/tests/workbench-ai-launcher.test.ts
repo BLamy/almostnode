@@ -25,7 +25,7 @@ const buildClaudeIdeMcpConfigMock = vi.fn((url: string) =>
   }),
 );
 
-vi.mock("almostnode", () => ({
+vi.mock("@agent-wasm/core", () => ({
   createContainer: vi.fn(),
   stream: { Buffer },
 }));
@@ -81,8 +81,13 @@ vi.mock("../src/workbench/workbench-surfaces", () => ({
   TestsSidebarSurface: class {},
   registerWorkbenchSurfaces: vi.fn(() => ({})),
 }));
-vi.mock("../src/features/keychain", () => ({
+vi.mock("@agent-wasm/keychain", () => ({
   Keychain: class {},
+  CredentialMirror: class {
+    hydrateFromStorage() {}
+    startWatching() {}
+    dispose() {}
+  },
   CLAUDE_AUTH_CONFIG_PATH: "/home/user/.claude/.config.json",
   CLAUDE_AUTH_CREDENTIALS_PATH: "/home/user/.claude/.credentials.json",
   CLAUDE_LEGACY_CONFIG_PATH: "/home/user/.claude.json",
@@ -100,8 +105,7 @@ vi.mock("../src/features/keychain", () => ({
   PI_MODELS_PATH: "/home/user/.pi/agent/models.json",
   TAILSCALE_SESSION_KEYCHAIN_PATH:
     "/__almostnode/keychain/tailscale-session.json",
-}));
-vi.mock("../src/features/network-session", () => ({
+  // network-session helpers now ship from the same @agent-wasm/keychain package
   clearStoredWorkbenchNetworkConfig: vi.fn(),
   clearStoredTailscaleSessionSnapshot: vi.fn(),
   readStoredWorkbenchNetworkConfig: vi.fn(() => null),

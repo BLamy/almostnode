@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClaudeTranscriptTail } from '../src/chat/claude-transcript-tail';
+import { ClaudeTranscriptTail } from '@agent-wasm/code';
 
 function line(entry: Record<string, unknown>): string {
   return `${JSON.stringify(entry)}\n`;

@@ -1,5 +1,5 @@
 import type { ExecResult as JustBashExecResult } from 'just-bash';
-import type { PlaywrightSelectorContext } from 'almostnode/internal';
+import type { PlaywrightSelectorContext } from '@agent-wasm/core/internal';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

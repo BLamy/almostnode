@@ -288,6 +288,9 @@ function Homepage() {
             ))}
           </div>
           <div className="hp-nav__actions">
+            <Link className="hp-nav__link hp-nav__link--text" to="/docs">
+              Docs
+            </Link>
             <Link className="hp-nav__link hp-nav__link--text" to="/app-builder">
               App Builder
             </Link>

@@ -9,7 +9,7 @@ import type { IEditorGroup } from '@codingame/monaco-vscode-api/services';
 import { createRoot, type Root } from 'react-dom/client';
 import { createElement } from 'react';
 import { JsonEditor } from '@visual-json/react';
-import type { VirtualFS } from 'almostnode';
+import type { VirtualFS } from '@agent-wasm/core';
 import { GitbookEditor, GitbookStreamdown } from './docstream';
 import './gitbook-editor/gitbook-editor.css';
 import './rendered-editors.css';

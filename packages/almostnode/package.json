@@ -1,5 +1,5 @@
 {
-  "name": "almostnode",
+  "name": "@agent-wasm/core",
   "version": "0.3.0",
   "description": "Node.js in your browser. Just like that.",
   "type": "module",
@@ -124,5 +124,9 @@
     "typescript": "^5.9.3",
     "vite": "^5.4.0",
     "vitest": "4.0.18"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "private": false
 }

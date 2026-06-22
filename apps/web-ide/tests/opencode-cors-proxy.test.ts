@@ -20,7 +20,7 @@ const networkMocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("almostnode", () => ({
+vi.mock("@agent-wasm/core", () => ({
   network: {
     getDefaultNetworkController: networkMocks.getDefaultNetworkController,
     networkFetch: networkMocks.networkFetch,

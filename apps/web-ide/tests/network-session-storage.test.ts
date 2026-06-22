@@ -10,7 +10,7 @@ import {
   WORKBENCH_NETWORK_SESSION_STORAGE_KEY,
   writeStoredTailscaleSessionSnapshot,
   writeStoredWorkbenchNetworkConfig,
-} from "../src/features/network-session";
+} from "@agent-wasm/keychain";
 
 class MemorySessionStorage {
   private values = new Map<string, string>();

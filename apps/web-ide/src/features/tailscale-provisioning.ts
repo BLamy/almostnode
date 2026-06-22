@@ -1,4 +1,4 @@
-import type { NetworkOptions } from "almostnode";
+import type { NetworkOptions } from "@agent-wasm/core";
 
 export const DEFAULT_TAILSCALE_AUTH_KEY_ENDPOINT = "/__api/tailscale/auth-key";
 export const TAILSCALE_HOSTNAME_STORAGE_KEY =

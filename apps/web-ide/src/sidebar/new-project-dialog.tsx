@@ -7,11 +7,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '../ui/dialog';
-import { Button } from '../ui/button';
-import { Input } from '../ui/input';
-import { ScrollArea } from '../ui/scroll-area';
-import { cn } from '../ui/cn';
+} from '@agent-wasm/react/ui';
+import { Button } from '@agent-wasm/react/ui';
+import { Input } from '@agent-wasm/react/ui';
+import { ScrollArea } from '@agent-wasm/react/ui';
+import { cn } from '@agent-wasm/react/ui';
 import type { GitHubRepositorySummary } from '../features/github-repositories';
 import { resolveProjectName } from '../features/project-names';
 import type { TemplateId } from '../features/workspace-seed';

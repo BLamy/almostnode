@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 import { ProjectManager } from '../src/features/project-manager';
 import { forkRepoIntoSandbox } from '../src/sidebar/fork-on-edit';
 import { formatSandboxBadge } from '../src/sidebar/sandbox-item';

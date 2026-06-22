@@ -34,7 +34,7 @@ export interface AlmostnodePluginOptions {
  * ```typescript
  * // vite.config.ts
  * import { defineConfig } from 'vite';
- * import { almostnodePlugin } from 'almostnode/vite';
+ * import { almostnodePlugin } from '@agent-wasm/core/vite';
  *
  * export default defineConfig({
  *   plugins: [almostnodePlugin()]

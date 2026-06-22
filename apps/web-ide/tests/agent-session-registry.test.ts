@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AgentSessionRegistry,
   type ActiveAgentSession,
-} from '../src/chat/agent-session-registry';
+} from '@agent-wasm/chat-core';
 
 function makeSession(
   overrides: Partial<ActiveAgentSession> = {},

@@ -2,7 +2,7 @@ import {
   createContainer,
   type ContainerInstance,
   type ContainerOptions,
-} from "almostnode";
+} from "@agent-wasm/core";
 import type { ClaudeIdeBridge } from "../features/claude-ide-bridge";
 import type { TemplateId } from "../features/workspace-seed";
 import type {
@@ -58,7 +58,7 @@ export class SandboxSession {
   previewStartRetryTimeoutId = 0;
   appBuildingPreviewOpenedJobs = new Set<string>();
   currentAppBuildingPreviewUrl: string | null = null;
-  pgliteMiddleware: import("almostnode/internal").RequestMiddleware | null =
+  pgliteMiddleware: import("@agent-wasm/core/internal").RequestMiddleware | null =
     null;
   currentProjectDatabaseNamespace = "global";
   currentProjectDefaultDatabaseName = "default";

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Button } from '../ui/button';
+import { Button } from '@agent-wasm/react/ui';
 import type { AppBuildingJobRecord } from '../features/project-db';
 import {
   BOARD_COLUMNS,

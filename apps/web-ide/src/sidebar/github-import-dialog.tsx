@@ -7,10 +7,10 @@ import {
   DialogHeader,
   DialogTitle,
   DialogClose,
-} from '../ui/dialog';
-import { Button } from '../ui/button';
-import { Input } from '../ui/input';
-import { ScrollArea } from '../ui/scroll-area';
+} from '@agent-wasm/react/ui';
+import { Button } from '@agent-wasm/react/ui';
+import { Input } from '@agent-wasm/react/ui';
+import { ScrollArea } from '@agent-wasm/react/ui';
 import type { GitHubRepositorySummary } from '../features/github-repositories';
 
 interface GitHubImportDialogProps {

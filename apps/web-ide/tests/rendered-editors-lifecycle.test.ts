@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { VirtualFS } from 'almostnode';
+import { VirtualFS } from '@agent-wasm/core';
 
 type EditorPaneCtor = new (group: unknown) => {
   container: HTMLElement;

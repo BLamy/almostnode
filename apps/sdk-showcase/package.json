@@ -10,9 +10,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "almostnode": "workspace:*",
-    "almostnode-react": "workspace:*",
-    "almostnode-sdk": "workspace:*",
+    "@agent-wasm/core": "workspace:*",
+    "@agent-wasm/react": "workspace:*",
+    "@agent-wasm/sdk": "workspace:*",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

@@ -1,4 +1,4 @@
-import type { VirtualFS } from 'almostnode';
+import type { VirtualFS } from '@agent-wasm/core';
 import type { DesktopBridge } from './bridge';
 import {
   PROJECT_ROOT,

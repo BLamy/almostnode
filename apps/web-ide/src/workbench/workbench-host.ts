@@ -6,11 +6,11 @@ import {
   type RunResult,
   type ServerRegistrationMetadata,
   type WorkspaceSearchProvider,
-} from "almostnode";
+} from "@agent-wasm/core";
 import {
   defaultCredentialSlots,
   getDefaultCredentialMirrorPaths,
-} from "almostnode-sdk/auth";
+} from "@agent-wasm/sdk/auth";
 import { SandboxSession } from "./sandbox-session";
 import { SESSION_POOL_CAP, selectSessionsToEvict } from "./session-pool";
 import {
@@ -32,18 +32,19 @@ import { prunePersistedWorkbenchExtensions } from "../features/persisted-extensi
 import {
   augmentClaudeLaunchCommand as augmentClaudeLaunchCommandString,
   extractResumeToken,
+  matchesAnyAgentLaunchCommand,
   matchesClaudeLaunchCommand,
   matchesCodexLaunchCommand,
   parseOpenCodeLaunchCommand,
   shouldRunWorkbenchCommandInteractively,
 } from "../features/terminal-command-routing";
-import { agentSessionRegistry } from "../chat/agent-session-registry";
+import { agentSessionRegistry } from "@agent-wasm/chat-core";
 import {
   CHAT_EFFORT_THINKING_TOKENS,
   readChatEffort,
   readChatModel,
   readChatPlanMode,
-} from "../chat/chat-preferences";
+} from "@agent-wasm/chat-core";
 import { isCloudflareLoginCommand } from "../features/cloudflare-command-routing";
 import { isFlyLoginCommand } from "../features/fly-command-routing";
 import { isNetlifyLoginCommand } from "../features/netlify-command-routing";
@@ -223,8 +224,8 @@ import {
   PI_SETTINGS_PATH,
   TAILSCALE_SESSION_KEYCHAIN_PATH,
   type KeychainState,
-} from "../features/keychain";
-import { CredentialMirror } from "../features/credential-mirror";
+} from "@agent-wasm/keychain";
+import { CredentialMirror } from "@agent-wasm/keychain";
 import {
   buildCallbackUrl,
   discoverOAuthService,
@@ -232,7 +233,7 @@ import {
   OAuthServiceRegistry,
   tokenFilePathForService,
   type OAuthServiceStatus,
-} from "../features/oauth-services";
+} from "@agent-wasm/keychain/oauth";
 import type { KeychainAddServiceFlowState } from "./surface-model-types";
 import {
   clearStoredWorkbenchNetworkConfig,
@@ -241,7 +242,7 @@ import {
   readStoredTailscaleSessionSnapshot,
   writeStoredWorkbenchNetworkConfig,
   writeStoredTailscaleSessionSnapshot,
-} from "../features/network-session";
+} from "@agent-wasm/keychain";
 import {
   createOpenCodeBrowserClient,
   disposeOpenCodeInstance,
@@ -273,7 +274,7 @@ import {
   waitForFlyMachineStarted,
   waitForWorkerReady,
   DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE as BROWSER_CLAUDE_CODE_PACKAGE,
-} from "almostnode/internal";
+} from "@agent-wasm/core/internal";
 import {
   type WebIdeOpenTarget,
   parseWebIdeOpenTarget,
@@ -1182,7 +1183,7 @@ export class WebIDEHost {
    * every live sandbox at once.
    */
   private hostPgliteMiddleware:
-    | import("almostnode/internal").RequestMiddleware
+    | import("@agent-wasm/core/internal").RequestMiddleware
     | null = null;
   private vfsProvider: VfsFileSystemProvider | null = null;
   private readonly initialProjectFiles: SerializedFile[] | null;
@@ -1380,12 +1381,12 @@ export class WebIDEHost {
     this.sessionState.currentAppBuildingPreviewUrl = value;
   }
   private get pgliteMiddleware():
-    | import("almostnode/internal").RequestMiddleware
+    | import("@agent-wasm/core/internal").RequestMiddleware
     | null {
     return this.sessionState.pgliteMiddleware;
   }
   private set pgliteMiddleware(
-    value: import("almostnode/internal").RequestMiddleware | null,
+    value: import("@agent-wasm/core/internal").RequestMiddleware | null,
   ) {
     this.sessionState.pgliteMiddleware = value;
   }
@@ -1581,6 +1582,7 @@ export class WebIDEHost {
     });
     this.keychain = new Keychain({
       vfs: this.container.vfs,
+      isAgentLaunchCommand: matchesAnyAgentLaunchCommand,
       overlayRoot:
         options.elements.workbench.parentElement ?? options.elements.workbench,
       onStateChange: (state) => {
@@ -8230,7 +8232,7 @@ export class WebIDEHost {
 
   private async runAppBuildingShellCommand(
     args: string[],
-    context: import("almostnode").ShellCommandContext,
+    context: import("@agent-wasm/core").ShellCommandContext,
   ): Promise<AppBuildingRunResult> {
     const command = parseAppBuildingCommand(args);
 
@@ -8285,7 +8287,7 @@ export class WebIDEHost {
   private createPreviewAppBuildingBridgeContext(
     stdoutChunks: string[],
     stderrChunks: string[],
-  ): import("almostnode").ShellCommandContext {
+  ): import("@agent-wasm/core").ShellCommandContext {
     const env: Record<string, string> = {};
 
     return {
@@ -8776,7 +8778,7 @@ export class WebIDEHost {
       ReturnType<typeof parseAppBuildingCommand>,
       { verb: "create" }
     >,
-    context: import("almostnode").ShellCommandContext,
+    context: import("@agent-wasm/core").ShellCommandContext,
   ): Promise<AppBuildingRunResult> {
     const projectId = this.requireActiveProjectId();
     const setup = this.requireAppBuildingSetup();

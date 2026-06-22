@@ -4,21 +4,21 @@ import { JSDOM } from "jsdom";
 import {
   OAuthRefreshError,
   OAuthServiceOrchestrator,
-} from "../../../src/features/oauth-services/orchestrator";
-import { OAuthServiceRegistry } from "../../../src/features/oauth-services/registry";
+} from "@agent-wasm/keychain/oauth/orchestrator";
+import { OAuthServiceRegistry } from "@agent-wasm/keychain/oauth/registry";
 import {
   buildTokenFile,
   readTokenFile,
   writeTokenFile,
-} from "../../../src/features/oauth-services/token-store";
+} from "@agent-wasm/keychain/oauth/token-store";
 import {
   OAUTH_CALLBACK_MESSAGE_TYPE,
-} from "../../../src/features/oauth-services/authorize-popup";
-import type { FetchLike } from "../../../src/features/oauth-services/proxy-fetch";
+} from "@agent-wasm/keychain/oauth/authorize-popup";
+import type { FetchLike } from "@agent-wasm/keychain/oauth/proxy-fetch";
 import type {
   OAuthDiscoveryPreview,
   OAuthServiceConfig,
-} from "../../../src/features/oauth-services/types";
+} from "@agent-wasm/keychain/oauth/types";
 
 let domWindow: Window;
 
@@ -57,8 +57,8 @@ class FakeVfs {
   }
 }
 
-function asVfs(fake: FakeVfs): import("almostnode").VirtualFS {
-  return fake as unknown as import("almostnode").VirtualFS;
+function asVfs(fake: FakeVfs): import("@agent-wasm/core").VirtualFS {
+  return fake as unknown as import("@agent-wasm/core").VirtualFS;
 }
 
 interface FakeKeychainCall {

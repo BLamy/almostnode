@@ -6,8 +6,8 @@ import {
   discoverProtectedResource,
   normalizeIssuerInput,
   OAuthDiscoveryError,
-} from "../../../src/features/oauth-services/discovery";
-import type { FetchLike } from "../../../src/features/oauth-services/proxy-fetch";
+} from "@agent-wasm/keychain/oauth/discovery";
+import type { FetchLike } from "@agent-wasm/keychain/oauth/proxy-fetch";
 
 interface RouteHandler {
   status?: number;

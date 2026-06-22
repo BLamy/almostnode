@@ -5,7 +5,7 @@ import {
   runCodexBrowserLogin,
   runCodexChatGptLogin,
 } from "../../src/features/codex-auth";
-import { CODEX_AUTH_PATH } from "../../src/features/keychain";
+import { CODEX_AUTH_PATH } from "@agent-wasm/keychain";
 
 const DESKTOP_OAUTH_LOOPBACK_BRIDGE_KEY = Symbol.for(
   "almostnode.desktopOAuthLoopback",

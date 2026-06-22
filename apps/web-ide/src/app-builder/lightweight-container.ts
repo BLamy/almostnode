@@ -1,4 +1,4 @@
-import { createContainer, type ContainerInstance, type VirtualFS } from 'almostnode';
+import { createContainer, type ContainerInstance, type VirtualFS } from '@agent-wasm/core';
 import { extractCredentials, type ExtractedCredentials } from './standalone-credentials';
 import type { DecryptedFileMap } from './standalone-vault';
 

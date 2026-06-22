@@ -1,1 +1,1 @@
-import "codex-wasm/app-server-browser-worker";
+import "@agent-wasm/codex/app-server-browser-worker";

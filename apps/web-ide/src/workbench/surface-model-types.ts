@@ -1,5 +1,5 @@
 import type { DomSlot } from "./framework/dom-slot";
-import type { OAuthDiscoveryPreview } from "../features/oauth-services/types";
+import type { OAuthDiscoveryPreview } from "@agent-wasm/keychain/oauth/types";
 
 export interface SlotSurfaceState {
   slot: DomSlot;

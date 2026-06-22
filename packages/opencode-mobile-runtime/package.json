@@ -17,8 +17,8 @@
     "type-check": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
-    "almostnode": "workspace:*",
-    "almostnode-sdk": "workspace:*"
+    "@agent-wasm/core": "workspace:*",
+    "@agent-wasm/sdk": "workspace:*"
   },
   "devDependencies": {
     "@babel/core": "7.28.0",

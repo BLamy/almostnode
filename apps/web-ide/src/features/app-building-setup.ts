@@ -1,4 +1,4 @@
-import type { VirtualFS } from 'almostnode';
+import type { VirtualFS } from '@agent-wasm/core';
 import type { AppBuildingConfig } from './project-db';
 
 export const APP_BUILDING_CONFIG_PATH = '/__almostnode/keychain/app-building-config.json';

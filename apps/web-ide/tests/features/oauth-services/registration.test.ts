@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   OAuthRegistrationError,
   registerDynamicClient,
-} from "../../../src/features/oauth-services/registration";
-import type { FetchLike } from "../../../src/features/oauth-services/proxy-fetch";
+} from "@agent-wasm/keychain/oauth/registration";
+import type { FetchLike } from "@agent-wasm/keychain/oauth/proxy-fetch";
 
 interface CapturedRequest {
   url: string;

@@ -201,6 +201,21 @@ export function matchesPiLaunchCommand(command: string): boolean {
 }
 
 /**
+ * True when a terminal command launches any supported agent harness
+ * (claude / codex / opencode / pi). Wired into the headless keychain via
+ * `KeychainOptions.isAgentLaunchCommand` so the engine stays free of
+ * CLI-launch heuristics.
+ */
+export function matchesAnyAgentLaunchCommand(command: string): boolean {
+  return (
+    matchesOpenCodeLaunchCommand(command)
+    || matchesClaudeLaunchCommand(command)
+    || matchesCodexLaunchCommand(command)
+    || matchesPiLaunchCommand(command)
+  );
+}
+
+/**
  * Pull the session id out of a `--resume <id>` / `--resume=<id>` argument
  * so chat can bind directly to the resumed transcript.
  */

@@ -1,11 +1,11 @@
-import type { ContainerInstance } from "almostnode";
+import type { ContainerInstance } from "@agent-wasm/core";
 import {
   createCodexBrowserSession,
   type CodexBrowserSession,
   type CodexBrowserSessionOptions,
   type CodexClientInfo,
   type CodexInitializeParams,
-} from "codex-wasm";
+} from "@agent-wasm/codex";
 import { refreshCodexAuth } from "./codex-auth";
 
 declare const __CODEX_WASM_MODULE_URL__: string;

@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import {
   OAUTH_CALLBACK_BROADCAST_CHANNEL,
   OAUTH_CALLBACK_MESSAGE_TYPE,
-} from "../features/oauth-services/authorize-popup";
+} from "@agent-wasm/keychain/oauth/authorize-popup";
 
 /**
  * The OAuth popup callback route.

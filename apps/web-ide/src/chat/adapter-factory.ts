@@ -1,7 +1,7 @@
 import type { WebIDEHost } from '../workbench/workbench-host';
-import type { ConversationAdapter } from './conversation-types';
-import type { ActiveAgentSession, AgentSessionRegistry } from './agent-session-registry';
-import { ClaudeConversationAdapter } from './adapters/claude-conversation-adapter';
+import type { ConversationAdapter } from '@agent-wasm/chat-core';
+import type { ActiveAgentSession, AgentSessionRegistry } from '@agent-wasm/chat-core';
+import { ClaudeConversationAdapter } from '@agent-wasm/code';
 import { CodexConversationAdapter } from './adapters/codex-conversation-adapter';
 import { OpenCodeConversationAdapter } from './adapters/opencode-conversation-adapter';
 import { codexConversationBus } from './codex-conversation-bus';

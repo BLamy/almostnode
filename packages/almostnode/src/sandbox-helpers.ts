@@ -219,7 +219,7 @@ export interface GenerateSandboxFilesOptions extends SandboxHtmlOptions {
  *
  * @example
  * ```typescript
- * import { generateSandboxFiles } from 'almostnode';
+ * import { generateSandboxFiles } from '@agent-wasm/core';
  * import fs from 'fs';
  *
  * const files = generateSandboxFiles();

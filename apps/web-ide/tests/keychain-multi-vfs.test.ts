@@ -12,8 +12,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { VirtualFS } from 'almostnode';
-import { Keychain } from '../src/features/keychain';
+import { VirtualFS } from '@agent-wasm/core';
+import { Keychain } from '@agent-wasm/keychain';
 
 const CODEX_AUTH_PATH = '/home/user/.codex/auth.json';
 
