@@ -844,12 +844,12 @@ export class VirtualFS {
     }
 
     // Create watcher entry
-    const entry = {
+    const entry: WatcherEntry = {
       listener: actualListener || (() => {}),
       recursive: options.recursive || false,
       closed: false,
       watcher: undefined as unknown as VirtualFSWatcher,
-    } satisfies WatcherEntry;
+    };
 
     // Add to watchers map
     if (!this.watchers.has(normalized)) {

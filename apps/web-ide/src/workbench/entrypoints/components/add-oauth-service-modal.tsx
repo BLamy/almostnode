@@ -29,7 +29,7 @@ import type {
   KeychainAddServiceFlowState,
   KeychainSidebarActions,
 } from "../../surface-model-types";
-import type { OAuthDiscoveryPreview } from "../../../features/oauth-services/types";
+import type { OAuthDiscoveryPreview } from "@agent-wasm/keychain/oauth/types";
 
 interface Props {
   flow: KeychainAddServiceFlowState;

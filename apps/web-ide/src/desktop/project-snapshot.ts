@@ -1,4 +1,4 @@
-import { stream } from 'almostnode';
+import { stream } from '@agent-wasm/core';
 
 export const PROJECT_ROOT = '/project';
 const SKIPPED_PATH_PREFIXES = [

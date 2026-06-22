@@ -2,10 +2,10 @@ import type {
   ChatMessage,
   ConversationAdapter,
   ConversationState,
-} from '../conversation-types';
-import type { ActiveAgentSession, AgentSessionRegistry } from '../agent-session-registry';
+} from '@agent-wasm/chat-core';
+import type { ActiveAgentSession, AgentSessionRegistry } from '@agent-wasm/chat-core';
 import type { CodexBusEvent, CodexConversationBus } from '../codex-conversation-bus';
-import { ensurePatchHeaders, truncateToolOutput } from '../tool-calls';
+import { ensurePatchHeaders, truncateToolOutput } from '@agent-wasm/chat-core';
 
 interface CodexNotification {
   method?: string;

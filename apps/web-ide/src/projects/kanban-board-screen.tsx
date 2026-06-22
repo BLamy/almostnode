@@ -1,7 +1,7 @@
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Button } from '../ui/button';
-import { Input } from '../ui/input';
+import { Button } from '@agent-wasm/react/ui';
+import { Input } from '@agent-wasm/react/ui';
 import {
   KANBAN_COLUMNS,
   KANBAN_COLUMN_LABELS,

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri';
 import { FileChangeType, FileType } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files';
-import { VirtualFS } from 'almostnode';
+import { VirtualFS } from '@agent-wasm/core';
 import { VfsFileSystemProvider } from '../src/features/vfs-file-system-provider';
 
 describe('VfsFileSystemProvider', () => {

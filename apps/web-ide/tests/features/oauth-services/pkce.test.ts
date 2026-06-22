@@ -4,7 +4,7 @@ import {
   generatePkcePair,
   randomState,
   randomToken,
-} from "../../../src/features/oauth-services/pkce";
+} from "@agent-wasm/keychain/oauth/pkce";
 
 describe("encodeBase64Url", () => {
   it("returns the empty string for an empty input", () => {

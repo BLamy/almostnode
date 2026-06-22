@@ -3,8 +3,8 @@ import {
   buildUnifiedPatch,
   claudeToolUseToToolCall,
   ensurePatchHeaders,
-} from '../src/chat/tool-calls';
-import { ClaudeTranscriptTail } from '../src/chat/claude-transcript-tail';
+} from '@agent-wasm/chat-core';
+import { ClaudeTranscriptTail } from '@agent-wasm/code';
 
 const line = (entry: Record<string, unknown>) => `${JSON.stringify(entry)}\n`;
 

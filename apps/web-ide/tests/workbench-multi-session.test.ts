@@ -41,7 +41,7 @@ function makeFakeContainer() {
 
 const createContainerMock = vi.fn((_options?: unknown) => makeFakeContainer());
 
-vi.mock("almostnode", () => ({
+vi.mock("@agent-wasm/core", () => ({
   createContainer: (options: unknown) => createContainerMock(options),
   stream: { Buffer },
 }));
@@ -97,8 +97,13 @@ vi.mock("../src/workbench/workbench-surfaces", () => ({
   TestsSidebarSurface: class {},
   registerWorkbenchSurfaces: vi.fn(() => ({})),
 }));
-vi.mock("../src/features/keychain", () => ({
+vi.mock("@agent-wasm/keychain", () => ({
   Keychain: class {},
+  CredentialMirror: class {
+    hydrateFromStorage() {}
+    startWatching() {}
+    dispose() {}
+  },
   CLAUDE_AUTH_CONFIG_PATH: "/home/user/.claude/.config.json",
   CLAUDE_AUTH_CREDENTIALS_PATH: "/home/user/.claude/.credentials.json",
   CLAUDE_LEGACY_CONFIG_PATH: "/home/user/.claude.json",
@@ -122,8 +127,7 @@ vi.mock("../src/features/keychain", () => ({
   PI_MODELS_PATH: "/home/user/.pi/agent/models.json",
   TAILSCALE_SESSION_KEYCHAIN_PATH:
     "/__almostnode/keychain/tailscale-session.json",
-}));
-vi.mock("../src/features/network-session", () => ({
+  // network-session helpers now ship from the same @agent-wasm/keychain package
   clearStoredWorkbenchNetworkConfig: vi.fn(),
   clearStoredTailscaleSessionSnapshot: vi.fn(),
   readStoredWorkbenchNetworkConfig: vi.fn(() => null),
@@ -298,7 +302,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 let WebIDEHost: typeof import("../src/workbench/workbench-host").WebIDEHost;
 let SandboxSession: typeof import("../src/workbench/sandbox-session").SandboxSession;
-let agentSessionRegistry: typeof import("../src/chat/agent-session-registry").agentSessionRegistry;
+let agentSessionRegistry: typeof import("@agent-wasm/chat-core").agentSessionRegistry;
 let codexConversationBus: typeof import("../src/chat/codex-conversation-bus").codexConversationBus;
 
 beforeAll(async () => {
@@ -325,7 +329,7 @@ beforeAll(async () => {
   ({ WebIDEHost } = await import("../src/workbench/workbench-host"));
   ({ SandboxSession } = await import("../src/workbench/sandbox-session"));
   ({ agentSessionRegistry } = await import(
-    "../src/chat/agent-session-registry"
+    "@agent-wasm/chat-core"
   ));
   ({ codexConversationBus } = await import(
     "../src/chat/codex-conversation-bus"

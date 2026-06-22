@@ -54,11 +54,11 @@ export default defineConfig({
           replacement: resolve(__dirname, '../web-ide/src'),
         },
         {
-          find: 'almostnode/internal',
+          find: '@agent-wasm/core/internal',
           replacement: resolve(__dirname, '../../packages/almostnode/src/internal.ts'),
         },
         {
-          find: 'almostnode',
+          find: '@agent-wasm/core',
           replacement: resolve(__dirname, '../../packages/almostnode/src/index.ts'),
         },
         {

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SidebarProvider, useSidebar } from './sidebar-context';
 import { ProjectList } from './project-list';
-import { agentSessionRegistry, type ActiveAgentSession } from '../chat/agent-session-registry';
+import { agentSessionRegistry, type ActiveAgentSession } from '@agent-wasm/chat-core';
 import { computeRunningAgentState } from './running-agents';
 import { FORK_REQUESTED_EVENT, forkRepoIntoSandbox, type ForkRequestDetail } from './fork-on-edit';
 import { NewProjectDialog } from './new-project-dialog';
-import { Button } from '../ui/button';
-import { TooltipProvider } from '../ui/tooltip';
+import { Button } from '@agent-wasm/react/ui';
+import { TooltipProvider } from '@agent-wasm/react/ui';
 import { ProjectManager } from '../features/project-manager';
 import type { GitHubRepositorySummary } from '../features/github-repositories';
 import type { TemplateId } from '../features/workspace-seed';

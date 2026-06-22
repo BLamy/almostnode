@@ -1,4 +1,4 @@
-import { network } from "almostnode";
+import { network } from "@agent-wasm/core";
 
 const CORS_PROXY_STORAGE_KEY = "__corsProxyUrl";
 const INTERNAL_CORS_PROXY_PATH = "/__api/cors-proxy?url=";

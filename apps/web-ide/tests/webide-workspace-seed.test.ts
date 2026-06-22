@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createContainer } from "almostnode";
+import { createContainer } from "@agent-wasm/core";
 import {
   DEFAULT_FILE,
   SHADCN_TEMPLATE_IDS,

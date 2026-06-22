@@ -3,8 +3,8 @@ import {
   OpenCodeConversationAdapter,
   type OpenCodeChatConnection,
 } from '../src/chat/adapters/opencode-conversation-adapter';
-import type { ActiveAgentSession } from '../src/chat/agent-session-registry';
-import type { ConversationState } from '../src/chat/conversation-types';
+import type { ActiveAgentSession } from '@agent-wasm/chat-core';
+import type { ConversationState } from '@agent-wasm/chat-core';
 
 function makeSession(overrides: Partial<ActiveAgentSession> = {}): ActiveAgentSession {
   return {

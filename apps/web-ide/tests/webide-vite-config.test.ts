@@ -48,7 +48,7 @@ describe("web-ide vite config", () => {
           typeof entry === "object"
           && "find" in entry
           && entry.find instanceof RegExp
-          && entry.find.test("almostnode")
+          && entry.find.test("@agent-wasm/core")
           && typeof entry.replacement === "string"
           && entry.replacement.endsWith("packages/almostnode/src/browser.ts"),
       ),
@@ -60,7 +60,7 @@ describe("web-ide vite config", () => {
           typeof entry === "object"
           && "find" in entry
           && entry.find instanceof RegExp
-          && entry.find.test("codex-wasm")
+          && entry.find.test("@agent-wasm/codex")
           && typeof entry.replacement === "string"
           && entry.replacement.endsWith("packages/codex-wasm/src/index.ts"),
       ),
@@ -72,7 +72,7 @@ describe("web-ide vite config", () => {
           typeof entry === "object"
           && "find" in entry
           && entry.find instanceof RegExp
-          && entry.find.test("codex-wasm/cli-browser-worker")
+          && entry.find.test("@agent-wasm/codex/cli-browser-worker")
           && typeof entry.replacement === "string"
           && entry.replacement.endsWith("packages/codex-wasm/src/cli-browser-worker.ts"),
       ),
@@ -84,7 +84,7 @@ describe("web-ide vite config", () => {
           typeof entry === "object"
           && "find" in entry
           && entry.find instanceof RegExp
-          && entry.find.test("codex-wasm/app-server-browser-worker")
+          && entry.find.test("@agent-wasm/codex/app-server-browser-worker")
           && typeof entry.replacement === "string"
           && entry.replacement.endsWith("packages/codex-wasm/src/app-server-browser-worker.ts"),
       ),
@@ -217,7 +217,7 @@ describe("web-ide vite config", () => {
           typeof entry === "object"
           && "find" in entry
           && entry.find instanceof RegExp
-          && entry.find.test("almostnode/internal")
+          && entry.find.test("@agent-wasm/core/internal")
           && typeof entry.replacement === "string"
           && entry.replacement.endsWith("packages/almostnode/src/internal.ts"),
       ),

@@ -6,7 +6,7 @@ import {
   parseStoredKeychain,
   unlockVaultKey,
   type StoredKeychain,
-} from '../features/keychain';
+} from '@agent-wasm/keychain';
 
 export interface DecryptedFileMap {
   [path: string]: string;

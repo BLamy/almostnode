@@ -7,9 +7,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '../ui/dialog';
-import { Button } from '../ui/button';
-import { Input } from '../ui/input';
+} from '@agent-wasm/react/ui';
+import { Button } from '@agent-wasm/react/ui';
+import { Input } from '@agent-wasm/react/ui';
 import {
   normalizeAwsSetupDraft,
   validateAwsSetupDraft,

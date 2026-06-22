@@ -1,10 +1,13 @@
-import { stream } from 'almostnode';
+import { stream } from '@agent-wasm/core';
 import type { SerializedFile } from '../desktop/project-snapshot';
 import type { ResumableThreadRecord } from './project-db';
+// The Claude-specific thread primitives now ship from @agent-wasm/code; this
+// demo feature still discovers threads across all agents and re-exports them.
+import { CLAUDE_PROJECTS_ROOT, extractClaudeMessageText } from '@agent-wasm/code';
 
 const { Buffer } = stream;
 
-export const CLAUDE_PROJECTS_ROOT = '/home/user/.claude/projects';
+export { CLAUDE_PROJECTS_ROOT, extractClaudeMessageText } from '@agent-wasm/code';
 
 interface ClaudeTranscriptEntry {
   type?: string;
@@ -31,33 +34,6 @@ function parseTimestamp(value: string | undefined): number {
   if (!value) return 0;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-export function extractClaudeMessageText(content: unknown): string {
-  if (typeof content === 'string') {
-    return content.trim();
-  }
-
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') {
-          return part;
-        }
-        if (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string') {
-          return part.text;
-        }
-        return '';
-      })
-      .join(' ')
-      .trim();
-  }
-
-  if (content && typeof content === 'object' && 'text' in content && typeof content.text === 'string') {
-    return content.text.trim();
-  }
-
-  return '';
 }
 
 /**

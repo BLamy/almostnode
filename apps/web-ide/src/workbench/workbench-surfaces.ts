@@ -3,7 +3,7 @@ import { SimpleEditorInput } from "@codingame/monaco-vscode-workbench-service-ov
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { strToU8, zipSync } from "fflate";
-import type { VirtualFS } from "almostnode";
+import type { VirtualFS } from "@agent-wasm/core";
 import {
   registerRenderedEditors,
   type RenderedEditorFactories,

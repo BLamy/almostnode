@@ -4,7 +4,7 @@ import "@xterm/xterm/css/xterm.css";
 import type {
   AgentBrowserEnv,
   WorkspaceController,
-} from "../../almostnode-sdk/src/index";
+} from "@agent-wasm/sdk";
 import React, {
   createContext,
   useContext,

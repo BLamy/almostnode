@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react"
-import { createProcess } from "almostnode"
-import { AlmostnodeProvider, EditorPane, PreviewPane, useWorkspace } from "almostnode-react"
-import { createWorkspace } from "almostnode-sdk"
+import { createProcess } from "@agent-wasm/core"
+import { AlmostnodeProvider, EditorPane, PreviewPane, useWorkspace } from "@agent-wasm/react"
+import { createWorkspace } from "@agent-wasm/sdk"
 import { setWorkspaceRoot } from "../../../vendor/opencode/packages/browser/src/shims/fs.browser"
 
 declare const __OPENTUI_WASM_URL__: string

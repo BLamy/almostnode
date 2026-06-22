@@ -1,3 +1,8 @@
+> **Note (2026-06):** the `codex-cli-wasm` and `codex-app-server-wasm` packages have been
+> consolidated into **`@agent-wasm/codex`** (`packages/codex-wasm`). Package/path names
+> below refer to the historical layout; the browser worker entrypoints are now
+> `@agent-wasm/codex/cli-browser-worker` and `@agent-wasm/codex/app-server-browser-worker`.
+
 # Codex CLI In Browser
 
 This follows the same shape as the OpenCode/OpenTUI browser integration:

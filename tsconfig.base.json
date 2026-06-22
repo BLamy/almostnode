@@ -10,18 +10,27 @@
     "lib": ["ES2022", "DOM"],
     "baseUrl": ".",
     "paths": {
-      "almostnode": ["packages/almostnode/src/index.ts"],
-      "codex-wasm": ["packages/codex-wasm/src/index.ts"],
-      "codex-wasm/cli-browser-worker": [
+      "@agent-wasm/core": ["packages/almostnode/src/index.ts"],
+      "@agent-wasm/core/internal": ["packages/almostnode/src/internal.ts"],
+      "@agent-wasm/core/vite": ["packages/almostnode/src/vite-plugin.ts"],
+      "@agent-wasm/core/next": ["packages/almostnode/src/next-plugin.ts"],
+      "@agent-wasm/code": ["packages/code/src/index.ts"],
+      "@agent-wasm/codex": ["packages/codex-wasm/src/index.ts"],
+      "@agent-wasm/codex/cli-browser-worker": [
         "packages/codex-wasm/src/cli-browser-worker.ts"
       ],
-      "codex-wasm/app-server-browser-worker": [
+      "@agent-wasm/codex/app-server-browser-worker": [
         "packages/codex-wasm/src/app-server-browser-worker.ts"
       ],
-      "almostnode-sdk": ["packages/almostnode-sdk/src/index.ts"],
-      "almostnode-sdk/auth": ["packages/almostnode-sdk/src/auth/index.ts"],
-      "almostnode-react": ["packages/almostnode-react/src/index.ts"],
-      "almostnode/internal": ["packages/almostnode/src/internal.ts"],
+      "@agent-wasm/sdk": ["packages/almostnode-sdk/src/index.ts"],
+      "@agent-wasm/sdk/auth": ["packages/almostnode-sdk/src/auth/index.ts"],
+      "@agent-wasm/react": ["packages/almostnode-react/src/index.ts"],
+      "@agent-wasm/react/chat": ["packages/almostnode-react/src/chat/index.ts"],
+      "@agent-wasm/react/ui": ["packages/almostnode-react/src/ui/index.ts"],
+      "@agent-wasm/chat-core": ["packages/chat-core/src/index.ts"],
+      "@agent-wasm/keychain": ["packages/keychain/src/index.ts"],
+      "@agent-wasm/keychain/oauth": ["packages/keychain/src/oauth-services/index.ts"],
+      "@agent-wasm/keychain/oauth/*": ["packages/keychain/src/oauth-services/*"],
       "@webide/*": ["apps/web-ide/src/*"]
     }
   }

@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ClaudeConversationAdapter,
   type ClaudeAdapterVfs,
-} from '../src/chat/adapters/claude-conversation-adapter';
+} from '@agent-wasm/code';
 import {
   AgentSessionRegistry,
   type ActiveAgentSession,
-} from '../src/chat/agent-session-registry';
-import type { ConversationState } from '../src/chat/conversation-types';
+} from '@agent-wasm/chat-core';
+import type { ConversationState } from '@agent-wasm/chat-core';
 
 const ROOT = '/home/user/.claude/projects';
 

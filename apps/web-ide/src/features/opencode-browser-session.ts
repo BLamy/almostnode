@@ -1,9 +1,9 @@
-import type { TerminalSession } from "almostnode";
+import type { TerminalSession } from "@agent-wasm/core";
 import {
   getShellCommandFromInvocation,
   quoteShellArg,
 } from "./opencode-shell-invocation";
-import { DETACH_DEV_SERVERS_ENV } from "almostnode/internal";
+import { DETACH_DEV_SERVERS_ENV } from "@agent-wasm/core/internal";
 import { WORKSPACE_ROOT } from "./workspace-seed";
 import type { ReturnTypeOfCreateContainer } from "../workbench/workbench-host";
 import { configureBrowserProcess } from "../shims/node-process";

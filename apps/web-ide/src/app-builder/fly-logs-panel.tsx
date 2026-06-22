@@ -3,7 +3,7 @@ import {
   fetchFlyLogsSince,
   type FlyLogsEntry,
 } from '../../../../packages/almostnode/src/shims/app-building-remote';
-import { Button } from '../ui/button';
+import { Button } from '@agent-wasm/react/ui';
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_ENTRIES = 500;

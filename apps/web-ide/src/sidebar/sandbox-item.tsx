@@ -6,7 +6,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
+} from '@agent-wasm/react/ui';
 
 interface SandboxItemProps {
   sandbox: SandboxRecord;

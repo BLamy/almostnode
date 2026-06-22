@@ -3,7 +3,7 @@ import { createElement, useState, useEffect, useRef, useCallback } from 'react';
 // @ts-ignore — no @types/react-dom; works at runtime via Vite bundling
 import { createRoot } from 'react-dom/client';
 
-import type { PlaywrightCommandListener } from 'almostnode/internal';
+import type { PlaywrightCommandListener } from '@agent-wasm/core/internal';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

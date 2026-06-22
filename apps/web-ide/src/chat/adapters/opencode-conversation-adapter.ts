@@ -5,9 +5,9 @@ import type {
   ChatToolCall,
   ConversationAdapter,
   ConversationState,
-} from '../conversation-types';
-import type { ActiveAgentSession } from '../agent-session-registry';
-import { buildUnifiedPatch, truncateToolOutput } from '../tool-calls';
+} from '@agent-wasm/chat-core';
+import type { ActiveAgentSession } from '@agent-wasm/chat-core';
+import { buildUnifiedPatch, truncateToolOutput } from '@agent-wasm/chat-core';
 
 interface OpenCodeMessageInfo {
   id?: string;

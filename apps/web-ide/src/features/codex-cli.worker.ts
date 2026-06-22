@@ -1,1 +1,1 @@
-import "codex-wasm/cli-browser-worker";
+import "@agent-wasm/codex/cli-browser-worker";

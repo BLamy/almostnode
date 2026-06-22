@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 import { ProjectManager } from '../src/features/project-manager';
 import { PROJECT_ROOT } from '../src/desktop/project-snapshot';
 import type { ProjectRecord, SandboxRecord } from '../src/features/project-db';

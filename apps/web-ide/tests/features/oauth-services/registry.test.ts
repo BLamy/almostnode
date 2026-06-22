@@ -5,8 +5,8 @@ import {
   OAUTH_TOKEN_DIR,
   OAuthServiceRegistry,
   tokenFilePathForService,
-} from "../../../src/features/oauth-services/registry";
-import type { OAuthServiceConfig } from "../../../src/features/oauth-services/types";
+} from "@agent-wasm/keychain/oauth/registry";
+import type { OAuthServiceConfig } from "@agent-wasm/keychain/oauth/types";
 
 interface MemoryStorage {
   store: Map<string, string>;

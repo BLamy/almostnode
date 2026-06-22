@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { VirtualFS } from 'almostnode';
+import { VirtualFS } from '@agent-wasm/core';
 import { VfsFileSystemProvider } from '../src/features/vfs-file-system-provider';
 
 vi.mock('@codingame/monaco-vscode-api/vscode/vs/base/common/uri', () => ({

@@ -5,20 +5,20 @@ import {
   readTokenFile,
   secondsUntilExpiry,
   writeTokenFile,
-} from "../../../src/features/oauth-services/token-store";
+} from "@agent-wasm/keychain/oauth/token-store";
 import {
   OAUTH_TOKEN_DIR,
   tokenFilePathForService,
-} from "../../../src/features/oauth-services/registry";
+} from "@agent-wasm/keychain/oauth/registry";
 import type {
   OAuthServiceConfig,
   OAuthTokenFile,
-} from "../../../src/features/oauth-services/types";
+} from "@agent-wasm/keychain/oauth/types";
 
 /**
  * Minimal in-memory implementation of the small VFS surface the token-store
  * uses. Mirrors `existsSync` / `mkdirSync` / `readFileSync` / `writeFileSync` /
- * `unlinkSync` from {@link import("almostnode").VirtualFS}.
+ * `unlinkSync` from {@link import("@agent-wasm/core").VirtualFS}.
  */
 class FakeVfs {
   files = new Map<string, string>();
@@ -52,10 +52,10 @@ class FakeVfs {
   }
 }
 
-function asVfs(fake: FakeVfs): import("almostnode").VirtualFS {
+function asVfs(fake: FakeVfs): import("@agent-wasm/core").VirtualFS {
   // The real VirtualFS has many more methods, but token-store only uses the
   // five above. Cast through unknown so the structural check passes.
-  return fake as unknown as import("almostnode").VirtualFS;
+  return fake as unknown as import("@agent-wasm/core").VirtualFS;
 }
 
 function makeService(overrides: Partial<OAuthServiceConfig> = {}): OAuthServiceConfig {

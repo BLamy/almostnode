@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 import {
   ProjectManager,
   parsePrCreateOutput,

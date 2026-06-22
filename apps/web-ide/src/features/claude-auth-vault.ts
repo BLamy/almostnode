@@ -21,10 +21,10 @@ export {
   detectWebAuthnPrfSupport,
   parseStoredKeychain,
   serializeStoredKeychain,
-} from './keychain';
+} from '@agent-wasm/keychain';
 
-import type { StoredKeychain } from './keychain';
-import { parseStoredKeychain, serializeStoredKeychain } from './keychain';
+import type { StoredKeychain } from '@agent-wasm/keychain';
+import { parseStoredKeychain, serializeStoredKeychain } from '@agent-wasm/keychain';
 
 // v1-shaped compat types used by existing tests
 export interface StoredClaudeAuthVault {

@@ -10,13 +10,13 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { VirtualFS } from 'almostnode';
+import { VirtualFS } from '@agent-wasm/core';
 import {
   Keychain,
   KEYCHAIN_QUARANTINE_KEY,
   KEYCHAIN_STORAGE_KEY,
   parseSnapshotPayload,
-} from '../src/features/keychain';
+} from '@agent-wasm/keychain';
 
 describe('parseSnapshotPayload', () => {
   it('keeps entries whose paths are not currently managed', () => {

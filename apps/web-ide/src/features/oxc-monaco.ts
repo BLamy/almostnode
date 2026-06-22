@@ -1,11 +1,11 @@
-import type { ContainerInstance } from "almostnode";
+import type { ContainerInstance } from "@agent-wasm/core";
 import {
   isSupportedOxcPath,
   resolveOxcConfigForFile,
   type OxcDiagnostic,
   type RunOxcOnSourceOptions,
   type RunOxcOnSourceResult,
-} from "almostnode/internal";
+} from "@agent-wasm/core/internal";
 import * as monaco from "monaco-editor";
 import OxcWorker from "../workers/oxc.worker?worker";
 

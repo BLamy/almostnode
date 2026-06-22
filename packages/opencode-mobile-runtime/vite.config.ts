@@ -305,11 +305,11 @@ export default defineConfig(async ({ mode }) => {
           replacement: solidJsRoot,
         },
         {
-          find: "almostnode",
+          find: "@agent-wasm/core",
           replacement: resolve(__dirname, "../../packages/almostnode/src/index.ts"),
         },
         {
-          find: "almostnode-sdk",
+          find: "@agent-wasm/sdk",
           replacement: resolve(__dirname, "../../packages/almostnode-sdk/src/index.ts"),
         },
         {

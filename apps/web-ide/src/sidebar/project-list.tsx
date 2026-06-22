@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { ScrollArea } from '../ui/scroll-area';
+import { ScrollArea } from '@agent-wasm/react/ui';
 import { useSidebar } from './sidebar-context';
 import { ProjectItem } from './project-item';
 import { SandboxItem } from './sandbox-item';

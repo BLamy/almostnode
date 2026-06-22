@@ -3,7 +3,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { VirtualFS } from 'almostnode';
+import { VirtualFS } from '@agent-wasm/core';
+import { matchesAnyAgentLaunchCommand } from '../src/features/terminal-command-routing';
 import {
   CLAUDE_AUTH_CONFIG_PATH,
   CLAUDE_AUTH_CREDENTIALS_PATH,
@@ -36,13 +37,13 @@ import {
   TAILSCALE_SESSION_KEYCHAIN_PATH,
   deriveVaultKeyFromPrf,
   parseStoredKeychain,
-} from '../src/features/keychain';
+} from '@agent-wasm/keychain';
 import {
   clearStoredTailscaleSessionSnapshot,
   readStoredTailscaleSessionSnapshot,
   writeStoredTailscaleSessionSnapshot,
   type TailscaleSessionSnapshot,
-} from '../src/features/network-session';
+} from '@agent-wasm/keychain';
 import {
   AWS_AUTH_PATH,
   AWS_CONFIG_PATH,
@@ -192,6 +193,7 @@ function createVault(vfs = new VirtualFS()): ClaudeAuthVault {
 function createKeychain(vfs = new VirtualFS()): Keychain {
   const kc = new Keychain({
     vfs,
+    isAgentLaunchCommand: matchesAnyAgentLaunchCommand,
     overlayRoot: document.getElementById('overlay'),
   });
   kc.registerSlot('tailscale', [TAILSCALE_SESSION_KEYCHAIN_PATH]);

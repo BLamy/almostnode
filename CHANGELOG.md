@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Monorepo split into publishable `@agent-wasm/*` packages.** The runtime and the
+  reusable IDE layers are now scoped packages, re-consumed by the `web-ide` demo:
+  - `almostnode` → **`@agent-wasm/core`** (the browser Node runtime; `./internal`,
+    `./vite`, `./next` subpaths unchanged).
+  - `almostnode-sdk` → **`@agent-wasm/sdk`** (workspace/agent lifecycle + `./auth`
+    credential manifest).
+  - `almostnode-react` → **`@agent-wasm/react`** (expanded): the agent chat surface
+    (`ChatScreen` now takes injected `startAgentSession` + `createAdapter` instead of
+    the workbench host), Radix UI primitives, and the Editor/Preview/Terminal panes —
+    `@agent-wasm/react/chat` and `@agent-wasm/react/ui` subpaths.
+  - `codex-wasm` → **`@agent-wasm/codex`**; the redundant `codex-cli-wasm` and
+    `codex-app-server-wasm` packages were removed (consolidated into it).
+  - New **`@agent-wasm/chat-core`** — dependency-free chat domain (conversation types,
+    tool-call encoders, agent-session registry, chat preferences).
+  - New **`@agent-wasm/keychain`** — the headless credential/OAuth/vault engine
+    (`@agent-wasm/keychain/oauth` subpath). The CLI-launch heuristic it used for
+    auto-restore is now an injected `isAgentLaunchCommand` callback, so the engine
+    carries no terminal-routing coupling.
+  - New **`@agent-wasm/code`** — the Claude Code transcript parser + conversation
+    adapter, plus the reusable half of the IDE bridge: the MCP-over-SSE JSON-RPC
+    server (`ClaudeIdeVirtualServer`), protocol DTOs, and `buildClaudeIdeMcpConfig`.
+    The server takes injected handlers (an editor-state provider), so only the
+    Monaco editor-state reads stay in the demo's `ClaudeIdeBridge`.
+  - OpenCode stays vendored (`vendor/opencode`), consumed via the existing bun shims.
+
+### Added
+- **Docs are now a page in the web-ide demo** (`/docs` route) rendering the shared
+  docs content; the standalone `apps/docs` app stays as a thin host over the same
+  module.
+
 ## [0.3.0] - 2026-06-10
 
 ### Added
