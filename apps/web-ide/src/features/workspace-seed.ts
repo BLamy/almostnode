@@ -146,6 +146,26 @@ test('todo-crud', async ({ page }) => {
 });
 `;
 
+const CHECKOUT_TEST_SPEC = `import { test, expect } from '@playwright/test';
+
+test('stripe-emulator-checkout', async ({ page }) => {
+  await page.goto('/');
+
+  await expect(page.getByRole('heading', { name: /emulated Stripe Checkout flow/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Add Focus Task Lamp to cart' }).click();
+  await expect(page.getByText('price_vibecoder_task_lamp')).toBeVisible();
+  await expect(page.getByText('$89.00')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Checkout with Stripe' }).click();
+  await expect(page.getByText('Test Mode')).toBeVisible();
+  await expect(page.getByText('Focus Task Lamp')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Pay $89.00' }).click();
+  await expect(page).toHaveURL(/\\/success\\?session_id=cs_/);
+  await expect(page.getByText('Stripe emulator checkout succeeded.')).toBeVisible();
+});
+`;
+
 const DEMO_TEST_METADATA = JSON.stringify({
   tests: [
     {
@@ -155,12 +175,23 @@ const DEMO_TEST_METADATA = JSON.stringify({
       createdAt: "2026-03-16T00:00:00.000Z",
       status: "pending",
     },
+    {
+      id: "test-seed-stripe-emulator-checkout",
+      name: "stripe-emulator-checkout",
+      specPath: `${WORKSPACE_TEST_E2E_ROOT}/stripe-emulator-checkout.spec.ts`,
+      createdAt: "2026-06-24T00:00:00.000Z",
+      status: "pending",
+    },
   ],
 }, null, 2);
 
 function seedDemoTests(container: ReturnTypeOfCreateContainer): void {
   ensureDirectory(container, WORKSPACE_TEST_E2E_ROOT);
   container.vfs.writeFileSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`, DEMO_TEST_SPEC);
+  container.vfs.writeFileSync(
+    `${WORKSPACE_TEST_E2E_ROOT}/stripe-emulator-checkout.spec.ts`,
+    CHECKOUT_TEST_SPEC,
+  );
   if (!container.vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)) {
     container.vfs.writeFileSync(WORKSPACE_TEST_METADATA_PATH, DEMO_TEST_METADATA);
   }

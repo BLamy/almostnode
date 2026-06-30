@@ -1423,11 +1423,15 @@ function createRequire(
     // yoga-layout v3 uses top-level await in its default entry, which cannot
     // be synchronously required from transformed CJS. node command preloads it.
     if (id === 'yoga-layout') {
-      const preloadedYoga = (globalThis as any).__almostnodeYogaLayout;
+      const preloadedYoga =
+        (runtimeGlobalObject as any).__almostnodeYogaLayout ??
+        (globalThis as any).__almostnodeYogaLayout;
       if (preloadedYoga) {
         return preloadedYoga;
       }
-      const yogaLoadError = (globalThis as any).__almostnodeYogaLayoutError;
+      const yogaLoadError =
+        (runtimeGlobalObject as any).__almostnodeYogaLayoutError ??
+        (globalThis as any).__almostnodeYogaLayoutError;
       if (yogaLoadError) {
         throw yogaLoadError instanceof Error
           ? yogaLoadError
@@ -1623,6 +1627,7 @@ function createRuntimeGlobalObject(
 ): Record<string, unknown> {
   const hostGlobal = globalThis as Record<PropertyKey, unknown>;
   const overlay = new Map<PropertyKey, unknown>();
+  const descriptorOverlay = new Map<PropertyKey, PropertyDescriptor>();
   let runtimeGlobal!: Record<string, unknown>;
 
   for (const [key, value] of Object.entries(overrides)) {
@@ -1631,22 +1636,62 @@ function createRuntimeGlobalObject(
 
   runtimeGlobal = new Proxy(Object.create(null) as Record<string, unknown>, {
     get(_target, prop) {
+      const descriptor = descriptorOverlay.get(prop);
+      if (descriptor) {
+        if ('value' in descriptor) {
+          return descriptor.value;
+        }
+        return descriptor.get?.call(runtimeGlobal);
+      }
       if (overlay.has(prop)) {
         return overlay.get(prop);
       }
       return Reflect.get(hostGlobal, prop, hostGlobal);
     },
     set(_target, prop, value) {
+      const descriptor = descriptorOverlay.get(prop);
+      if (descriptor) {
+        if (descriptor.set) {
+          descriptor.set.call(runtimeGlobal, value);
+          return true;
+        }
+        if (!descriptor.writable) {
+          return false;
+        }
+      }
+      descriptorOverlay.delete(prop);
       overlay.set(prop, value);
       return true;
     },
     has(_target, prop) {
-      return overlay.has(prop) || Reflect.has(hostGlobal, prop);
+      return descriptorOverlay.has(prop) || overlay.has(prop) || Reflect.has(hostGlobal, prop);
     },
     ownKeys() {
-      return Array.from(new Set([...Reflect.ownKeys(hostGlobal), ...overlay.keys()]));
+      const keys = new Set<string | symbol>();
+      for (const key of Reflect.ownKeys(hostGlobal)) {
+        keys.add(key);
+      }
+      for (const key of overlay.keys()) {
+        if (typeof key === 'string' || typeof key === 'symbol') {
+          keys.add(key);
+        }
+      }
+      for (const key of descriptorOverlay.keys()) {
+        if (typeof key === 'string' || typeof key === 'symbol') {
+          keys.add(key);
+        }
+      }
+      return Array.from(keys);
     },
     getOwnPropertyDescriptor(_target, prop) {
+      const overlayDescriptor = descriptorOverlay.get(prop);
+      if (overlayDescriptor) {
+        return {
+          ...overlayDescriptor,
+          configurable: true,
+        };
+      }
+
       if (overlay.has(prop)) {
         return {
           configurable: true,
@@ -1668,13 +1713,19 @@ function createRuntimeGlobalObject(
     },
     defineProperty(_target, prop, descriptor) {
       if ('value' in descriptor) {
+        descriptorOverlay.delete(prop);
         overlay.set(prop, descriptor.value);
       } else {
-        overlay.set(prop, undefined);
+        overlay.delete(prop);
+        descriptorOverlay.set(prop, {
+          ...descriptor,
+          configurable: descriptor.configurable ?? true,
+        });
       }
       return true;
     },
     deleteProperty(_target, prop) {
+      descriptorOverlay.delete(prop);
       return overlay.delete(prop);
     },
   });
@@ -2077,7 +2128,7 @@ export class Runtime {
       const origClearInterval = globalThis.clearInterval.bind(globalThis);
 
       const createTimerHandle = (
-        id: ReturnType<typeof origSetTimeout>,
+        id: unknown,
         owner: TimerTrackingOwner | null,
       ): AlmostNodeTimerHandle => {
         const handle: AlmostNodeTimerHandle = {
@@ -2468,6 +2519,27 @@ export class Runtime {
   }
 
   private requireCommonJsModule(resolvedPath: string): unknown {
+    if (
+      resolvedPath === 'rollup' ||
+      resolvedPath.includes('/node_modules/rollup/') ||
+      resolvedPath.includes('/node_modules/@rollup/')
+    ) {
+      return this.builtinModules['rollup'];
+    }
+    if (
+      resolvedPath === 'esbuild' ||
+      resolvedPath.includes('/node_modules/esbuild/') ||
+      resolvedPath.includes('/node_modules/@esbuild/')
+    ) {
+      return this.builtinModules['esbuild'];
+    }
+    if (
+      resolvedPath === 'prettier' ||
+      resolvedPath.includes('/node_modules/prettier/')
+    ) {
+      return this.builtinModules['prettier'];
+    }
+
     const module = this.loadModule(resolvedPath);
     let loadedExports = module.exports;
     if (resolvedPath.includes('/node_modules/')) {
@@ -2629,7 +2701,7 @@ export class Runtime {
     );
     materializeNetworkCaBundle(this.vfs, policy);
     this.projectedNetworkEnv = syncProjectedNetworkEnv(
-      this.process.env,
+      this.process.env as Record<string, string>,
       this.explicitEnvKeys,
       this.projectedNetworkEnv,
       policy.env,

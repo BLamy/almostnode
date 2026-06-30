@@ -53,7 +53,7 @@ function cardsToMarkdown(items: readonly CardItem[]): string {
   return `<table data-view="cards"><tbody>${rows}</tbody></table>`;
 }
 
-function codeToMarkdown(example: CodeExample): string {
+export function codeToMarkdown(example: CodeExample): string {
   return `\`\`\`${example.language}\n${example.code}\n\`\`\``;
 }
 
@@ -61,7 +61,7 @@ function checklistToMarkdown(items: readonly string[]): string {
   return items.map((item) => `- [ ] ${item}`).join("\n");
 }
 
-function blockToMarkdown(block: DocsBlock): string {
+export function blockToMarkdown(block: DocsBlock): string {
   switch (block.type) {
     case "paragraphs":
       return paragraphsToMarkdown(block.items);

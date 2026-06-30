@@ -31,6 +31,32 @@ stable while the repo and applications use the agent-wasm brand.
 
 ---
 
+## Composable Packages
+
+The Web IDE is the full reference product, but agent-wasm is built as a set of
+packages that can be composed into smaller apps:
+
+| Package | Role |
+| --- | --- |
+| `@agent-wasm/core` | Browser Node runtime, VFS, package manager, command shims, service-worker preview routing, framework servers, and network primitives |
+| `@agent-wasm/sdk` | Workspace lifecycle, templates, previews, terminal sessions, snapshots, agent adapters, auth manifest metadata, and `@agent-wasm/sdk/plugins` |
+| `@agent-wasm/react` | React workbench, chat, and UI subpaths: `/workbench`, `/chat`, and `/ui` |
+| `@agent-wasm/vscode` | VS Code-shaped React and non-React shell APIs for panels, custom editors, command routing, VFS file access, and Playwright target metadata |
+| `@agent-wasm/chat-core` | Framework-free conversation types, tool-call encoders, and live session registry |
+| `@agent-wasm/code` | Claude Code transcript parsing, conversation adapter, and IDE bridge helpers |
+| `@agent-wasm/codex` | Codex WASM browser sessions, CLI workers, and host bridge contracts |
+| `@agent-wasm/keychain` | Headless credential vault, OAuth orchestration, credential mirroring, and session persistence |
+| `@agent-wasm/tailscale-connect` | WASM Tailscale client used by private-network workspace support |
+
+Use `@agent-wasm/core` for runtime playgrounds, add `@agent-wasm/sdk` for
+workspace apps, load reusable Claude/Codex/agent-wasm contributions through
+`@agent-wasm/sdk/plugins`, add `@agent-wasm/react` for React workbenches, and
+add `@agent-wasm/vscode` when the host wants plugin-powered VS Code panels or
+custom editors. See [Composing agent-wasm apps](docs/composing-agent-wasm-apps.md)
+for concrete recipes and ownership rules.
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -130,13 +156,13 @@ graph TB
 ### Installation
 
 ```bash
-npm install almostnode
+npm install @agent-wasm/core
 ```
 
 ### Basic Usage
 
 ```typescript
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 
 // Create a Node.js container in the browser
 const container = createContainer();
@@ -159,7 +185,7 @@ console.log(result.exports); // "Hello from the browser!"
 ### Running Untrusted Code Securely
 
 ```typescript
-import { createRuntime, VirtualFS } from 'almostnode';
+import { createRuntime, VirtualFS } from '@agent-wasm/core';
 
 const vfs = new VirtualFS();
 
@@ -177,7 +203,7 @@ See [Sandbox Setup](#sandbox-setup) for deployment instructions.
 ### Working with Virtual File System
 
 ```typescript
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 
 const container = createContainer();
 const { vfs } = container;
@@ -200,7 +226,7 @@ const result = container.runFile('/src/index.js');
 ### With npm Packages
 
 ```typescript
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 
 const container = createContainer();
 
@@ -218,7 +244,7 @@ container.execute(`
 ### Running Shell Commands
 
 ```typescript
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 
 const container = createContainer();
 
@@ -283,7 +309,7 @@ controller.abort();
 ### With Next.js Dev Server
 
 ```typescript
-import { VirtualFS, NextDevServer, getServerBridge } from 'almostnode';
+import { VirtualFS, NextDevServer, getServerBridge } from '@agent-wasm/core';
 
 const vfs = new VirtualFS();
 
@@ -325,8 +351,8 @@ almostnode uses a Service Worker to intercept HTTP requests and route them to vi
 | Use Case | Setup Required |
 |----------|----------------|
 | Cross-origin sandbox (recommended for untrusted code) | `generateSandboxFiles()` - includes everything |
-| Same-origin with Vite | `almostnodePlugin` from `almostnode/vite` |
-| Same-origin with Next.js | `getServiceWorkerContent` from `almostnode/next` |
+| Same-origin with Vite | `almostnodePlugin` from `@agent-wasm/core/vite` |
+| Same-origin with Next.js | `getServiceWorkerContent` from `@agent-wasm/core/next` |
 | Same-origin with other frameworks | Manual copy to public directory |
 
 ---
@@ -338,7 +364,7 @@ When using `createRuntime()` with a cross-origin `sandbox` URL, the service work
 The `generateSandboxFiles()` helper generates all required files:
 
 ```typescript
-import { generateSandboxFiles } from 'almostnode';
+import { generateSandboxFiles } from '@agent-wasm/core';
 import fs from 'fs';
 
 const files = generateSandboxFiles();
@@ -371,7 +397,7 @@ For trusted code using `dangerouslyAllowSameOrigin: true`:
 ```typescript
 // vite.config.ts
 import { defineConfig } from 'vite';
-import { almostnodePlugin } from 'almostnode/vite';
+import { almostnodePlugin } from '@agent-wasm/core/vite';
 
 export default defineConfig({
   plugins: [almostnodePlugin()]
@@ -400,7 +426,7 @@ For trusted code using `dangerouslyAllowSameOrigin: true`:
 
 ```typescript
 // app/__sw__.js/route.ts
-import { getServiceWorkerContent } from 'almostnode/next';
+import { getServiceWorkerContent } from '@agent-wasm/core/next';
 
 export async function GET() {
   return new Response(getServiceWorkerContent(), {
@@ -416,7 +442,7 @@ export async function GET() {
 
 ```typescript
 // pages/api/__sw__.ts
-import { getServiceWorkerContent } from 'almostnode/next';
+import { getServiceWorkerContent } from '@agent-wasm/core/next';
 import type { NextApiRequest, NextApiResponse } from 'next';
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -436,7 +462,7 @@ await bridge.initServiceWorker({ swUrl: '/__sw__.js' });
 await bridge.initServiceWorker({ swUrl: '/api/__sw__' });
 ```
 
-**Available exports from `almostnode/next`:**
+**Available exports from `@agent-wasm/core/next`:**
 
 | Export | Description |
 |--------|-------------|
@@ -450,13 +476,13 @@ await bridge.initServiceWorker({ swUrl: '/api/__sw__' });
 Copy the service worker to your public directory:
 
 ```bash
-cp node_modules/almostnode/dist/__sw__.js ./public/
+cp node_modules/@agent-wasm/core/dist/__sw__.js ./public/
 ```
 
 Or programmatically:
 
 ```typescript
-import { getServiceWorkerPath } from 'almostnode/next';
+import { getServiceWorkerPath } from '@agent-wasm/core/next';
 import fs from 'fs';
 
 fs.copyFileSync(getServiceWorkerPath(), './public/__sw__.js');
@@ -487,7 +513,7 @@ fs.copyFileSync(getServiceWorkerPath(), './public/__sw__.js');
 ### Example: Code Playground
 
 ```typescript
-import { createContainer } from 'almostnode';
+import { createContainer } from '@agent-wasm/core';
 
 function createPlayground() {
   const container = createContainer();
@@ -632,7 +658,7 @@ const module = runtime.require('/path/to/module.js');
 For advanced use cases, use `createRuntime` to create a runtime with security options:
 
 ```typescript
-import { createRuntime, VirtualFS } from 'almostnode';
+import { createRuntime, VirtualFS } from '@agent-wasm/core';
 
 const vfs = new VirtualFS();
 
@@ -673,7 +699,7 @@ For running untrusted code securely, deploy a cross-origin sandbox. The key requ
 ### Quick Setup (Vercel)
 
 ```typescript
-import { generateSandboxFiles } from 'almostnode';
+import { generateSandboxFiles } from '@agent-wasm/core';
 import fs from 'fs';
 
 const files = generateSandboxFiles();
@@ -908,7 +934,7 @@ These modules export empty objects or no-op functions:
 ### Vite
 
 ```typescript
-import { VirtualFS, ViteDevServer, getServerBridge } from 'almostnode';
+import { VirtualFS, ViteDevServer, getServerBridge } from '@agent-wasm/core';
 
 const vfs = new VirtualFS();
 

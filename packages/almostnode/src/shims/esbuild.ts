@@ -966,6 +966,39 @@ export async function context(_options: BuildOptions): Promise<unknown> {
   throw new Error('esbuild context API is not supported in browser');
 }
 
+// Diagnostic message formatting (used by tools like vitest for error output).
+type EsbuildMessageLike =
+  | string
+  | { text?: string; location?: { file?: string; line?: number; column?: number } | null };
+
+function formatOneMessage(m: EsbuildMessageLike): string {
+  if (typeof m === 'string') return m;
+  const loc = m.location ? ` (${m.location.file ?? ''}:${m.location.line ?? 0}:${m.location.column ?? 0})` : '';
+  return `${m.text ?? ''}${loc}`;
+}
+
+export async function formatMessages(
+  messages: ReadonlyArray<EsbuildMessageLike>,
+  _options?: unknown,
+): Promise<string[]> {
+  return (messages ?? []).map(formatOneMessage);
+}
+
+export function formatMessagesSync(
+  messages: ReadonlyArray<EsbuildMessageLike>,
+  _options?: unknown,
+): string[] {
+  return (messages ?? []).map(formatOneMessage);
+}
+
+export async function analyzeMetafile(_metafile: unknown, _options?: unknown): Promise<string> {
+  return '';
+}
+
+export function analyzeMetafileSync(_metafile: unknown, _options?: unknown): string {
+  return '';
+}
+
 // Default export matching esbuild's API
 export default {
   initialize,
@@ -979,6 +1012,10 @@ export default {
   version,
   setWasmURL,
   setVFS,
+  formatMessages,
+  formatMessagesSync,
+  analyzeMetafile,
+  analyzeMetafileSync,
 };
 
 /**

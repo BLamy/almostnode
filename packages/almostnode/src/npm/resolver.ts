@@ -128,6 +128,9 @@ function satisfies(version: string, range: string): boolean {
 
   range = range.trim();
 
+  // A leading '=' is an exact pin (npm/semver treats '=1.2.3' as '1.2.3').
+  if (range.startsWith('=')) range = range.slice(1).trim();
+
   // Exact version
   if (/^\d+\.\d+\.\d+/.test(range) && !range.includes(' ')) {
     const rangeMatch = range.match(/^(\d+\.\d+\.\d+(?:-[^\s]+)?)/);

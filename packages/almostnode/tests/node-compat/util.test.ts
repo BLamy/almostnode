@@ -10,6 +10,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import util, {
   format,
+  formatWithOptions,
   inspect,
   inherits,
   deprecate,
@@ -113,6 +114,11 @@ describe('util module (Node.js compat)', () => {
         const result = format({ a: 1 } as any);
         expect(result).toContain('a');
       });
+    });
+
+    it('should expose formatWithOptions as a format-compatible helper', () => {
+      assert.strictEqual(formatWithOptions({ colors: false }, 'hello %s', 'world'), 'hello world');
+      expect(util.formatWithOptions).toBe(formatWithOptions);
     });
   });
 

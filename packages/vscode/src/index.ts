@@ -1,0 +1,27 @@
+export {
+  VSCode,
+  useVSCodeShell,
+  type VSCodeProps,
+} from "./react";
+export {
+  createVSCodeShell,
+  defineVSCodeCustomEditor,
+  defineVSCodePanel,
+  type DisposableLike,
+  type OpenResourceResult,
+  type VSCodeCommandContext,
+  type VSCodeCommandDefinition,
+  type VSCodeCommandHandler,
+  type VSCodeContributionModuleLoader,
+  type VSCodeCustomEditorDefinition,
+  type VSCodeCustomEditorRenderContext,
+  type VSCodeCustomEditorRenderer,
+  type VSCodeFileProvider,
+  type VSCodePanelDefinition,
+  type VSCodePanelRenderContext,
+  type VSCodePanelRenderer,
+  type VSCodePlaywrightTarget,
+  type VSCodePlaywrightTargetRequest,
+  type VSCodeShell,
+  type VSCodeShellOptions,
+} from "./shell";

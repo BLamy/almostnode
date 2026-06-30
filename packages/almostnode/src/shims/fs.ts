@@ -8,7 +8,22 @@ import type { Stats, FSWatcher, WatchListener, WatchEventType } from '../virtual
 import { Buffer } from './stream';
 import { almostnodeDebugLog, almostnodeDebugWarn } from '../utils/debug';
 
-export type { Stats, FSWatcher, WatchListener, WatchEventType };
+export type { FSWatcher, WatchListener, WatchEventType };
+
+// Node exposes `Stats` and `Dir` as runtime values (classes); some tools (e.g.
+// vitest) do `import { Stats } from 'fs'`. The vfs returns plain stat objects, so
+// these are lightweight runtime stand-ins so the named imports resolve.
+class StatsValue {
+  isFile(): boolean { return false; }
+  isDirectory(): boolean { return false; }
+  isBlockDevice(): boolean { return false; }
+  isCharacterDevice(): boolean { return false; }
+  isSymbolicLink(): boolean { return false; }
+  isFIFO(): boolean { return false; }
+  isSocket(): boolean { return false; }
+}
+class DirValue {}
+export { StatsValue as Stats, DirValue as Dir };
 
 const _encoder = new TextEncoder();
 const _decoder = new TextDecoder();
@@ -222,6 +237,17 @@ function createBuffer(data: Uint8Array): Buffer {
  * Handles URL objects (file:// protocol) and Buffer
  */
 
+// Modules are served over http in the browser runtime, so CJS deps (e.g. vite)
+// can hand fs an http(s) URL for their own files. Map it back to the vfs path
+// (mirrors url.fileURLToPath's http handling).
+function httpUrlToVfsPath(urlObj: URL): string {
+  const moduleId = urlObj.searchParams.get('id');
+  if (moduleId && moduleId.startsWith('/')) return moduleId;
+  if (moduleId && moduleId.startsWith('file://')) return decodeURIComponent(new URL(moduleId).pathname);
+  if (urlObj.pathname.startsWith('/@fs/')) return decodeURIComponent(urlObj.pathname.slice(4));
+  return decodeURIComponent(urlObj.pathname);
+}
+
 function toPath(pathLike: unknown, getCwd?: () => string): string {
   let path: string;
 
@@ -232,6 +258,8 @@ function toPath(pathLike: unknown, getCwd?: () => string): string {
     if (pathLike.protocol === 'file:') {
       // Remove file:// prefix and decode
       path = decodeURIComponent(pathLike.pathname);
+    } else if (pathLike.protocol === 'http:' || pathLike.protocol === 'https:') {
+      path = httpUrlToVfsPath(pathLike);
     } else {
       throw new Error(`Unsupported URL protocol: ${pathLike.protocol}`);
     }
@@ -241,6 +269,15 @@ function toPath(pathLike: unknown, getCwd?: () => string): string {
     path = String(pathLike);
   } else {
     throw new TypeError(`Path must be a string, URL, or Buffer. Received: ${typeof pathLike}`);
+  }
+
+  // A string http(s) URL (e.g. from import.meta.url) → map to its vfs path too.
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    try {
+      path = httpUrlToVfsPath(new URL(path));
+    } catch {
+      /* leave as-is */
+    }
   }
 
   // Resolve relative paths against cwd
@@ -2073,6 +2110,11 @@ export function createFsShim(
     createWriteStream(pathLike: unknown): unknown {
       return vfs.createWriteStream(resolvePath(pathLike));
     },
+
+    // Class-like exports some tools import by name from 'fs'.
+    Stats: StatsValue,
+    Dir: DirValue,
+    Dirent,
 
     promises,
     constants,

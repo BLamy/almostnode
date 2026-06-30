@@ -53,9 +53,11 @@ interface InteropRegistry {
   builtins: Map<string, Record<string, unknown>>;
   cjsRequire: Map<string, (resolvedPath: string) => unknown>;
   requireFactories: Map<string, ModuleGraphLoaderOptions['createRequire']>;
+  loaders: Map<string, ModuleGraphLoader>;
   moduleUrls: Map<string, Map<string, string>>;
   runtimeGlobals: Map<string, Record<string, unknown>>;
   processes: Map<string, Record<string, unknown>>;
+  importModule: (runtimeId: string, specifier: string, fromPath?: string) => Promise<Record<string, unknown>>;
   hasBuiltin: (runtimeId: string, builtinId: string) => boolean;
   getRuntimeGlobal: (runtimeId: string) => Record<string, unknown>;
   getProcess: (runtimeId: string) => Record<string, unknown> | undefined;
@@ -105,6 +107,7 @@ export class ModuleGraphLoader {
     registry.builtins.set(this.runtimeId, this.builtinModules);
     registry.cjsRequire.set(this.runtimeId, this.requireCjs);
     registry.requireFactories.set(this.runtimeId, this.createRequire);
+    registry.loaders.set(this.runtimeId, this);
     if (!registry.moduleUrls.has(this.runtimeId)) {
       registry.moduleUrls.set(this.runtimeId, new Map());
     }
@@ -272,7 +275,12 @@ export class ModuleGraphLoader {
           default:
             try {
               result = await this.buildEsmModuleSource(descriptor);
-            } catch {
+            } catch (error) {
+              almostnodeDebugLog(
+                'modules',
+                `[almostnode DEBUG] module ESM build fallback: ${descriptor.resolvedPath}`,
+                error,
+              );
               // ESM parsing failed (e.g. CJS code in a "type":"module" package) — fall back to CJS wrapper
               result = this.buildCjsModuleSource(descriptor);
             }
@@ -295,7 +303,10 @@ export class ModuleGraphLoader {
     }
 
     const rewritten = await this.rewriteEsmSpecifiers(code, descriptor.resolvedPath);
-    const runtimePreamble = this.createRuntimePreamble(rewritten.topLevelBindings);
+    const runtimePreamble = this.createRuntimePreamble(
+      rewritten.topLevelBindings,
+      descriptor.resolvedPath,
+    );
     if (!rewritten.metaNeedsPreamble) {
       return [runtimePreamble, rewritten.code].join('\n');
     }
@@ -314,12 +325,18 @@ export class ModuleGraphLoader {
     ].join('\n');
   }
 
-  private createRuntimePreamble(topLevelBindings?: Set<string>): string {
+  private createRuntimePreamble(topLevelBindings?: Set<string>, fromPath = '/'): string {
     const lines = [
       'const __almostnode_hostGlobal = Function("return globalThis")();',
       `const __almostnode_global = __almostnode_hostGlobal.__almostnodeModuleInterop.getRuntimeGlobal(${JSON.stringify(this.runtimeId)});`,
       `const __almostnode_dynamic_import = (specifier) => {`,
       `  if (typeof specifier === "string") {`,
+      `    if (specifier.startsWith("file://")) {`,
+      `      let filePath = new URL(specifier).pathname || "/";`,
+      `      try { filePath = decodeURIComponent(filePath); } catch {}`,
+      `      if (filePath.startsWith("/@id/")) filePath = filePath.slice("/@id/".length);`,
+      `      return __almostnode_hostGlobal.__almostnodeModuleInterop.importModule(${JSON.stringify(this.runtimeId)}, filePath, ${JSON.stringify(fromPath)});`,
+      `    }`,
       `    const builtinId = specifier.startsWith("node:") ? specifier.slice(5) : specifier;`,
       `    if (__almostnode_hostGlobal.__almostnodeModuleInterop.hasBuiltin(${JSON.stringify(this.runtimeId)}, builtinId)) {`,
       `      const mod = __almostnode_hostGlobal.__almostnodeModuleInterop.getBuiltin(${JSON.stringify(this.runtimeId)}, builtinId);`,
@@ -330,10 +347,12 @@ export class ModuleGraphLoader {
       `};`,
     ];
 
-    for (const name of ['globalThis', 'global']) {
-      if (!topLevelBindings?.has(name)) {
-        lines.splice(2, 0, `const ${name} = __almostnode_global;`);
-      }
+    if (!topLevelBindings?.has('globalThis')) {
+      lines.splice(2, 0, 'const globalThis = __almostnode_global;');
+    }
+    if (!topLevelBindings?.has('global')) {
+      const insertAt = topLevelBindings?.has('globalThis') ? 2 : 3;
+      lines.splice(insertAt, 0, 'const global = __almostnode_global;');
     }
 
     for (const name of ['console', 'process', 'Buffer']) {
@@ -498,7 +517,15 @@ export class ModuleGraphLoader {
         case 'ImportExpression':
           replacements.push([node.start, node.start + 'import'.length, '__almostnode_dynamic_import']);
           if (node.source?.type === 'Literal') {
-            await addSpecifierReplacement(node.source);
+            try {
+              await addSpecifierReplacement(node.source);
+            } catch (error) {
+              almostnodeDebugLog(
+                'modules',
+                `[almostnode DEBUG] leaving unresolved dynamic import ${JSON.stringify(node.source.value)} in ${filename}`,
+                error,
+              );
+            }
           }
           break;
         case 'MetaProperty':
@@ -699,6 +726,7 @@ function getInteropRegistry(): InteropRegistry {
     const builtins = new Map<string, Record<string, unknown>>();
     const cjsRequire = new Map<string, (resolvedPath: string) => unknown>();
     const requireFactories = new Map<string, ModuleGraphLoaderOptions['createRequire']>();
+    const loaders = new Map<string, ModuleGraphLoader>();
     const moduleUrls = new Map<string, Map<string, string>>();
     const runtimeGlobals = new Map<string, Record<string, unknown>>();
     const processes = new Map<string, Record<string, unknown>>();
@@ -707,9 +735,17 @@ function getInteropRegistry(): InteropRegistry {
       builtins,
       cjsRequire,
       requireFactories,
+      loaders,
       moduleUrls,
       runtimeGlobals,
       processes,
+      importModule(runtimeId: string, specifier: string, fromPath = '/'): Promise<Record<string, unknown>> {
+        const loader = loaders.get(runtimeId);
+        if (!loader) {
+          throw new Error(`Missing module graph loader for runtime '${runtimeId}'`);
+        }
+        return loader.importModule(specifier, fromPath).then((record) => record.namespace || {});
+      },
       hasBuiltin(runtimeId: string, builtinId: string): boolean {
         return Object.prototype.hasOwnProperty.call(builtins.get(runtimeId) || {}, builtinId);
       },

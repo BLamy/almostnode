@@ -41,6 +41,8 @@ run(
   },
 );
 
+rmSync(resolve(outDir, ".gitignore"), { force: true });
+
 function run(command, args, options) {
   const wasmRustFlags = [
     process.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS,

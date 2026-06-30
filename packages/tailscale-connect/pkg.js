@@ -598,11 +598,11 @@ export async function createIPN(config) {
 
 /**
  * Run an SSH session in a terminal container (stub — xterm dependencies removed).
- * Import the full @tailscale/connect package if SSH terminal support is needed.
+ * Import the full @agent-wasm/tailscale-connect package if SSH terminal support is needed.
  */
 export function runSSHSession() {
   throw new Error(
     "runSSHSession is not available in this minimal build. " +
-    "Use the full @tailscale/connect package for SSH terminal support.",
+    "Use the full @agent-wasm/tailscale-connect package for SSH terminal support.",
   );
 }

@@ -9,7 +9,17 @@ export {
   DETACH_DEV_SERVERS_ENV,
 } from './shims/child_process';
 export type { PlaywrightCommandListener, PlaywrightSelectorContext } from './shims/playwright-command';
-export type { RequestMiddleware } from './server-bridge';
+export {
+  createFetchVirtualServer,
+  registerFetchVirtualServer,
+} from './fetch-virtual-server';
+export type {
+  FetchHandler,
+  FetchVirtualServerOptions,
+  RegisteredFetchVirtualServer,
+  RegisterFetchVirtualServerOptions,
+} from './fetch-virtual-server';
+export type { IVirtualServer, RequestMiddleware } from './server-bridge';
 export type {
   OxcDiagnostic,
   OxcFileAccessor,

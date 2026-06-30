@@ -25,11 +25,7 @@ describe('ModuleGraphLoader', () => {
           requireFn.resolve = (id: string) => id;
           return requireFn;
         },
-      }) as ModuleGraphLoader & {
-        transportMode: 'service-worker';
-        ensureBridgeReady: () => Promise<void>;
-        getModuleUrl: (descriptor: unknown) => Promise<string>;
-      };
+      }) as any;
 
       loader.transportMode = 'service-worker';
       loader.ensureBridgeReady = vi.fn().mockResolvedValue(undefined);
@@ -77,9 +73,7 @@ describe('ModuleGraphLoader', () => {
         requireFn.resolve = (id: string) => id;
         return requireFn;
       },
-    }) as ModuleGraphLoader & {
-      buildModuleSource: (descriptor: unknown) => Promise<string>;
-    };
+    }) as any;
 
     const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
     const source = await loader.buildModuleSource(descriptor);
@@ -127,6 +121,37 @@ describe('ModuleGraphLoader', () => {
     expect(source).toContain('const globalThis = "localThis";');
   });
 
+  it('routes file URL dynamic imports through the module graph', async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync('/entry.mjs', 'export const load = (specifier) => import(specifier);\n');
+
+    const loader = new ModuleGraphLoader({
+      vfs,
+      runtimeId: 'test-runtime-file-import',
+      builtinModules: {},
+      console: console as unknown as Record<string, unknown>,
+      process: { cwd: () => '/' } as unknown as Record<string, unknown>,
+      globalObject: {
+        console,
+        process: { cwd: () => '/' },
+        Buffer,
+      } as unknown as Record<string, unknown>,
+      requireCjs: () => ({}),
+      createRequire: () => {
+        const requireFn = (() => ({})) as ((id: string) => unknown) & { resolve?: (id: string) => string };
+        requireFn.resolve = (id: string) => id;
+        return requireFn;
+      },
+    }) as any;
+
+    const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
+    const source = await loader.buildModuleSource(descriptor);
+
+    expect(source).toContain('specifier.startsWith("file://")');
+    expect(source).toContain('__almostnodeModuleInterop.importModule');
+    expect(source).toContain('__almostnode_dynamic_import(specifier)');
+  });
+
   it('provides file-based import.meta values for graph-loaded ESM modules', async () => {
     const vfs = new VirtualFS();
     vfs.writeFileSync(
@@ -168,9 +193,7 @@ describe('ModuleGraphLoader', () => {
         requireFn.resolve = (id: string) => `${fromPath}:${id}`;
         return requireFn;
       },
-    }) as ModuleGraphLoader & {
-      getModuleUrl: (descriptor: unknown) => Promise<string>;
-    };
+    }) as any;
 
     const descriptor = loader.resolve('/entry.mjs', '/entry.mjs');
     const url = await loader.getModuleUrl(descriptor);

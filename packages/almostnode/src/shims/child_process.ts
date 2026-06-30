@@ -1656,14 +1656,26 @@ export function initChildProcess(
     (
       proc as Process & { __almostnodeOwnerId?: string }
     ).__almostnodeOwnerId = controller.containerId ?? controller.id;
-    proc.exit = ((code = 0) => {
+    const normalizeProcessExitCode = (code?: number): number => {
+      if (typeof code === "number" && Number.isFinite(code)) {
+        return Math.trunc(code);
+      }
+      const processExitCode = (proc as { exitCode?: unknown }).exitCode;
+      if (typeof processExitCode === "number" && Number.isFinite(processExitCode)) {
+        return Math.trunc(processExitCode);
+      }
+      return 0;
+    };
+    proc.exit = ((code?: number) => {
+      const finalCode = normalizeProcessExitCode(code);
       if (!exitCalled) {
         exitCalled = true;
-        exitCode = code;
-        proc.emit("exit", code);
-        exitResolve!(code);
+        exitCode = finalCode;
+        (proc as { exitCode?: number }).exitCode = finalCode;
+        proc.emit("exit", finalCode);
+        exitResolve!(finalCode);
       }
-      throw new Error(`Process exited with code ${code}`);
+      throw new Error(`Process exited with code ${finalCode}`);
     }) as (code?: number) => never;
     proc.argv = ["node", resolvedPath, ...args.slice(1)];
 
@@ -1775,6 +1787,10 @@ module.exports = (async () => {
     const drainPostExitRejections = async (): Promise<void> => {
       await Promise.resolve();
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    };
+    const getEffectiveExitCode = (): number => {
+      if (exitCalled) return exitCode;
+      return normalizeProcessExitCode();
     };
 
     const runInitialFile = async (): Promise<"runFile" | "exit" | "abort"> => {
@@ -1922,10 +1938,17 @@ module.exports = (async () => {
           pendingTimerIdleMs += CHECK_MS;
         }
 
+        const hasStdinListeners = hasActiveStdinListeners(proc.stdin);
+        // Completed npx package CLIs usually exit after startup output; raw-mode TUIs need stdin to stay attached.
+        const keepAliveForCompletedPackageTui =
+          isCompletedPackageExecCli &&
+          isLongIdleNodeModulesCli &&
+          stdinRawMode &&
+          hasStdinListeners;
         const keepAliveForInteractiveInput =
           !!execution.signal &&
-          !isCompletedPackageExecCli &&
-          (stdinRawMode || hasActiveStdinListeners(proc.stdin));
+          (keepAliveForCompletedPackageTui ||
+            (!isCompletedPackageExecCli && (stdinRawMode || hasStdinListeners)));
         if (keepAliveForInteractiveInput) {
           continue;
         }
@@ -1981,7 +2004,7 @@ module.exports = (async () => {
       return {
         stdout,
         stderr,
-        exitCode: exitCalled ? exitCode : aborted ? 130 : 0,
+        exitCode: aborted ? 130 : getEffectiveExitCode(),
       };
     } finally {
       // Free all cached module data (parsed ASTs, transformed code, resolver caches)
@@ -2081,7 +2104,9 @@ module.exports = (async () => {
     }
 
     const LONG_RUNNING_PACKAGE_EXEC_COMMANDS = new Set<string>([
-      // 'shadcn', 'npm', 'npx'
+      "@earendil-works/pi-coding-agent",
+      "pi-coding-agent",
+      "pi",
     ]);
 
     const commandName = cmdArgs[0];
@@ -2313,10 +2338,14 @@ module.exports = (async () => {
       };
     }
 
+    const isKnownLongRunningPackageExec =
+      LONG_RUNNING_PACKAGE_EXEC_COMMANDS.has(commandName) ||
+      LONG_RUNNING_PACKAGE_EXEC_COMMANDS.has(pkgName) ||
+      LONG_RUNNING_PACKAGE_EXEC_COMMANDS.has(binName);
     const shouldUseExtendedNodeIdle =
       execution?.interactive ||
       useExtendedNodeIdle ||
-      LONG_RUNNING_PACKAGE_EXEC_COMMANDS.has(commandName);
+      isKnownLongRunningPackageExec;
     const execEnv = {
       ...env,
       ...(shouldUseExtendedNodeIdle ? { ALMOSTNODE_LONG_NODE_IDLE: "1" } : {}),
@@ -2791,6 +2820,17 @@ module.exports = (async () => {
         exitCode: 1,
       };
     }
+  });
+
+  const vitestCommand = defineCommand("vitest", async (args, ctx) => {
+    return execInstalledPackageBin(
+      controller,
+      "vitest",
+      "vitest",
+      args,
+      ctx,
+      { ALMOSTNODE_LONG_NODE_IDLE: "1" },
+    );
   });
 
   const runWranglerWorkerDev = async (
@@ -3877,6 +3917,9 @@ module.exports = (async () => {
     createRegisteredShellCommand(viteCommand.name, viteCommand, {
       interceptShellParsing: true,
     }),
+    createRegisteredShellCommand(vitestCommand.name, vitestCommand, {
+      interceptShellParsing: true,
+    }),
     createRegisteredShellCommand(gitCommand.name, gitCommand, {
       interceptShellParsing: true,
     }),
@@ -4059,6 +4102,7 @@ async function execInstalledPackageBin(
   binName: string,
   args: string[],
   ctx: CommandContext,
+  envOverrides: Record<string, string> = {},
 ): Promise<JustBashExecResult> {
   if (!ctx.exec) {
     return {
@@ -4068,7 +4112,7 @@ async function execInstalledPackageBin(
     };
   }
 
-  const env = envToRecord(ctx.env);
+  const env = { ...envToRecord(ctx.env), ...envOverrides };
   const normalizedCwd = normalizeCommandCwd(ctx.cwd);
   const resolvedTarget =
     getPackageBinTarget(controller, pkgName, binName, normalizedCwd) ||
@@ -5274,17 +5318,22 @@ function execSyncWithBinding(
     throw new Error("child_process not initialized");
   }
 
-  // Resolve defaults through the binding (the calling runtime's process) —
-  // the synthetic helpers' own fallback is globalThis.process, which is the
-  // page polyfill (or the host process under vitest) and identical across
-  // containers.
-  const syntheticOutput = getSyntheticExecSyncOutput(controller, command, {
-    ...options,
+  const syncOptions: ExecOptions = {
+    ...(options || {}),
     cwd: options?.cwd ?? getBindingDefaultCwd(binding),
-    env: { ...baseEnv, ...(options?.env || {}) },
-  });
+    env: {
+      ...baseEnv,
+      ...(options?.env || {}),
+    },
+  };
+
+  const syntheticOutput = getSyntheticExecSyncOutput(
+    controller,
+    command,
+    syncOptions,
+  );
   if (syntheticOutput !== null) {
-    return normalizeExecSyncResult(syntheticOutput, options?.encoding);
+    return normalizeExecSyncResult(syntheticOutput, syncOptions.encoding);
   }
 
   throw new Error(
@@ -5793,6 +5842,18 @@ function forkWithBinding(
     ? modulePath
     : `${cwd}/${modulePath}`.replace(/\/+/g, "/");
 
+  const summarizeIpcMessage = (message: unknown): string => {
+    if (!message || typeof message !== "object") return typeof message;
+    const maybeRecord = message as { type?: unknown; id?: unknown };
+    const type =
+      typeof maybeRecord.type === "string" ? maybeRecord.type : "unknown";
+    const id =
+      typeof maybeRecord.id === "string" || typeof maybeRecord.id === "number"
+        ? ` id=${maybeRecord.id}`
+        : "";
+    return `${type}${id}`;
+  };
+
   const child = new ChildProcess();
   child.connected = true;
   child.spawnargs = ["node", ...execArgv, resolvedPath, ...args];
@@ -5847,6 +5908,38 @@ function forkWithBinding(
     }
   };
 
+  const parentToChildQueue: unknown[] = [];
+  let flushingParentToChild = false;
+  const flushParentToChildQueue = () => {
+    if (flushingParentToChild) return;
+    flushingParentToChild = true;
+
+    const attemptFlush = () => {
+      if (!child.connected) {
+        parentToChildQueue.length = 0;
+        flushingParentToChild = false;
+        return;
+      }
+
+      if (childProc.listenerCount("message") === 0) {
+        setTimeout(attemptFlush, 0);
+        return;
+      }
+
+      while (parentToChildQueue.length > 0) {
+        const message = parentToChildQueue.shift();
+        almostnodeDebugLog(
+          "child_process",
+          `[almostnode DEBUG] fork deliver parent->child ${summarizeIpcMessage(message)}`,
+        );
+        childProc.emit("message", message);
+      }
+      flushingParentToChild = false;
+    };
+
+    setTimeout(attemptFlush, 0);
+  };
+
   // Parent sends → child process receives
   child.send = (
     message: unknown,
@@ -5854,9 +5947,12 @@ function forkWithBinding(
   ): boolean => {
     if (!child.connected) return false;
     const cloned = cloneIpcMessage(message);
-    setTimeout(() => {
-      childProc.emit("message", cloned);
-    }, 0);
+    almostnodeDebugLog(
+      "child_process",
+      `[almostnode DEBUG] fork parent->child ${summarizeIpcMessage(cloned)}`,
+    );
+    parentToChildQueue.push(cloned);
+    flushParentToChildQueue();
     return true;
   };
 
@@ -5873,6 +5969,10 @@ function forkWithBinding(
   ): boolean => {
     if (!child.connected) return false;
     const cloned = cloneIpcMessage(message);
+    almostnodeDebugLog(
+      "child_process",
+      `[almostnode DEBUG] fork child->parent ${summarizeIpcMessage(cloned)}`,
+    );
     ipcQueue = ipcQueue.then(async () => {
       const listeners = child.listeners("message");
       for (const listener of listeners) {
@@ -5895,8 +5995,22 @@ function forkWithBinding(
 
   // Track this fork in the active children count
   execution.activeForkedChildren++;
+  almostnodeDebugLog(
+    "child_process",
+    `[almostnode DEBUG] fork start path=${resolvedPath} active=${execution.activeForkedChildren}`,
+  );
 
+  let childExitNotified = false;
+  let childRuntimeCacheCleared = false;
+  const clearChildRuntimeCache = () => {
+    if (childRuntimeCacheCleared) return;
+    childRuntimeCacheCleared = true;
+    childRuntime.clearCache();
+  };
   const notifyChildExit = () => {
+    if (childExitNotified) return;
+    childExitNotified = true;
+    clearChildRuntimeCache();
     execution.activeForkedChildren = Math.max(
       0,
       execution.activeForkedChildren - 1,
@@ -5938,8 +6052,27 @@ function forkWithBinding(
 
   // Run the module asynchronously
   setTimeout(() => {
+    almostnodeDebugLog(
+      "child_process",
+      `[almostnode DEBUG] fork runFile ${resolvedPath}`,
+    );
     childRuntime
       .runFile(resolvedPath)
+      .then(() => {
+        almostnodeDebugLog(
+          "child_process",
+          `[almostnode DEBUG] fork runFile resolved ${resolvedPath}`,
+        );
+        if (!childExitNotified && childProc.listenerCount("message") === 0) {
+          child.exitCode = 0;
+          child.connected = false;
+          childProc.connected = false;
+          childProc.emit("exit", 0);
+          child.emit("exit", 0, null);
+          child.emit("close", 0, null);
+          notifyChildExit();
+        }
+      })
       .catch((error) => {
         // process.exit throws in sync mode — that's normal
         if (
@@ -5954,9 +6087,7 @@ function forkWithBinding(
         child.emit("error", error);
         child.emit("exit", 1, null);
         child.emit("close", 1, null);
-      })
-      .finally(() => {
-        childRuntime.clearCache();
+        notifyChildExit();
       });
   }, 0);
 

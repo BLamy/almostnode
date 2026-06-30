@@ -86,9 +86,22 @@ export {
   resetServerBridge,
 } from "./server-bridge";
 export type {
+  IVirtualServer,
   InitServiceWorkerOptions,
+  RequestMiddleware,
   ServerRegistrationMetadata,
+  VirtualServer,
 } from "./server-bridge";
+export {
+  createFetchVirtualServer,
+  registerFetchVirtualServer,
+} from "./fetch-virtual-server";
+export type {
+  FetchHandler,
+  FetchVirtualServerOptions,
+  RegisteredFetchVirtualServer,
+  RegisterFetchVirtualServerOptions,
+} from "./fetch-virtual-server";
 // Dev servers
 export { DevServer } from "./dev-server";
 export type { DevServerOptions, ResponseData, HMRUpdate } from "./dev-server";

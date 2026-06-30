@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
-import React from "react";
+import React, { act } from "react";
 import { createWorkspace } from "../../almostnode-sdk/src/index";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+  .IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("almostnode-react", () => {
   it("renders editor content from the workspace", async () => {
@@ -13,12 +16,17 @@ describe("almostnode-react", () => {
     const container = document.createElement("div");
     document.body.append(container);
 
-    createRoot(container).render(
-      <AlmostnodeProvider workspace={workspace}>
-        <EditorPane />
-      </AlmostnodeProvider>,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AlmostnodeProvider workspace={workspace}>
+          <EditorPane />
+        </AlmostnodeProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement | null;
     expect(textarea?.value).toContain("almostnode sdk");
@@ -52,15 +60,19 @@ describe("almostnode-react", () => {
     container.style.height = "320px";
     document.body.append(container);
 
-    createRoot(container).render(
-      <React.StrictMode>
-        <AlmostnodeProvider workspace={workspace}>
-          <AgentPanel adapterId="delayed-agent" />
-        </AlmostnodeProvider>
-      </React.StrictMode>,
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <React.StrictMode>
+          <AlmostnodeProvider workspace={workspace}>
+            <AgentPanel adapterId="delayed-agent" />
+          </AlmostnodeProvider>
+        </React.StrictMode>,
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
 
     expect(container.textContent).toContain("mounted-2");
     workspace.destroy();

@@ -1,0 +1,50 @@
+{
+  "name": "@agent-wasm/vscode",
+  "version": "0.1.0",
+  "description": "VS Code-shaped shell and React integration APIs for agent-wasm workspaces.",
+  "private": false,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --tsconfig tsconfig.build.json --format esm,cjs --dts --clean --external @agent-wasm/sdk --external @agent-wasm/sdk/plugins --external react --external react-dom",
+    "test": "vitest run",
+    "type-check": "tsc --project tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@agent-wasm/sdk": "workspace:*",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "typescript": "^5.9.3",
+    "vitest": "4.0.18",
+    "tsup": "^8.5.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BLamy/agent-wasm.git"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

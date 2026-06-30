@@ -108,7 +108,7 @@ declare module '@napi-rs/wasm-runtime' {
   }
 }
 
-declare module '@tailscale/connect' {
+declare module '@agent-wasm/tailscale-connect' {
   export interface TailscaleConnectFetchRequest {
     url: string;
     method?: string;

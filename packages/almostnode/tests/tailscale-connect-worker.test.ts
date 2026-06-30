@@ -4,11 +4,11 @@ const { createIPNMock } = vi.hoisted(() => ({
   createIPNMock: vi.fn(),
 }));
 
-vi.mock('@tailscale/connect', () => ({
+vi.mock('@agent-wasm/tailscale-connect', () => ({
   createIPN: createIPNMock,
 }));
 
-vi.mock('@tailscale/connect/main.wasm?url', () => ({
+vi.mock('@agent-wasm/tailscale-connect/main.wasm?url', () => ({
   default: 'mock-tailscale.wasm',
 }));
 

@@ -1,0 +1,289 @@
+/* Windsurf-style file explorer: compact rows, rich colored icons, indent
+ * guides, subtle hover/active. Inherits the host theme tokens when embedded
+ * (web-ide defines --panel-alt/--text/--accent/etc.) and falls back to a dark
+ * palette when used standalone. */
+.aw-file-tree {
+  --aw-ft-bg: var(--almostnode-surface-alt-bg, var(--panel-alt, #111b27));
+  --aw-ft-fg: var(--text, #e6edf7);
+  --aw-ft-muted: var(--muted, #8ca0bb);
+  --aw-ft-hover: var(--almostnode-list-hover-bg, rgba(255, 255, 255, 0.06));
+  --aw-ft-active: var(--almostnode-list-active-bg, rgba(56, 139, 253, 0.22));
+  --aw-ft-active-fg: var(--almostnode-list-active-fg, var(--text, #e6edf7));
+  --aw-ft-border: var(--panel-border, rgba(255, 255, 255, 0.08));
+  --aw-ft-accent: var(--accent, #ff7a59);
+  --aw-ft-row-h: 22px;
+  --aw-ft-indent: 12px;
+
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--aw-ft-bg);
+  color: var(--aw-ft-fg);
+  font-size: 13px;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  user-select: none;
+}
+
+/* Header / toolbar -------------------------------------------------------- */
+.aw-ft-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--aw-ft-border);
+}
+
+.aw-ft-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--aw-ft-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aw-ft-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.aw-ft-toolbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--aw-ft-muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.aw-ft-toolbtn:hover {
+  background: var(--aw-ft-hover);
+  color: var(--aw-ft-fg);
+}
+
+.aw-ft-toolbtn:focus-visible {
+  outline: 2px solid var(--aw-ft-accent);
+  outline-offset: -2px;
+}
+
+/* Body + tree ------------------------------------------------------------- */
+.aw-ft-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0 12px;
+}
+
+.aw-ft-tree {
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+
+.aw-ft-tree[data-drop-target] {
+  outline: 1px solid var(--aw-ft-accent);
+  outline-offset: -1px;
+  border-radius: 6px;
+}
+
+/* Rows -------------------------------------------------------------------- */
+.aw-ft-item {
+  outline: none;
+}
+
+.aw-ft-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--aw-ft-row-h);
+  padding-inline: 4px 8px;
+  line-height: var(--aw-ft-row-h);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.aw-ft-item[data-hovered] > .react-aria-TreeItemContent .aw-ft-row,
+.aw-ft-row:hover {
+  background: var(--aw-ft-hover);
+}
+
+.aw-ft-item[data-selected] > .react-aria-TreeItemContent .aw-ft-row {
+  background: var(--aw-ft-active);
+  color: var(--aw-ft-active-fg);
+}
+
+.aw-ft-item[data-focus-visible] > .react-aria-TreeItemContent .aw-ft-row {
+  outline: 2px solid var(--aw-ft-accent);
+  outline-offset: -2px;
+}
+
+/* Drop target: highlight the folder being dropped onto. */
+.aw-ft-item[data-drop-target] > .react-aria-TreeItemContent .aw-ft-row {
+  background: color-mix(in srgb, var(--aw-ft-accent) 22%, transparent);
+  box-shadow: inset 0 0 0 1px var(--aw-ft-accent);
+}
+
+/* Indent guides ----------------------------------------------------------- */
+.aw-ft-indent {
+  display: inline-block;
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: var(--aw-ft-indent);
+  margin-right: -2px;
+  border-left: 1px solid var(--aw-ft-border);
+}
+
+/* Chevron ----------------------------------------------------------------- */
+.aw-ft-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--aw-ft-muted);
+  cursor: pointer;
+}
+
+.aw-ft-chevron--leaf {
+  cursor: default;
+}
+
+.aw-ft-chevron__icon {
+  transition: transform 0.12s ease;
+}
+
+.aw-ft-chevron__icon.is-open {
+  transform: rotate(90deg);
+}
+
+/* Icon + label ------------------------------------------------------------ */
+.aw-ft-icon {
+  flex: 0 0 auto;
+}
+
+/* Visually hidden drag handle (keyboard / screen-reader drag initiation). */
+.aw-ft-drag {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.aw-ft-drag:focus-visible {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  clip: auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  outline: 2px solid var(--aw-ft-accent);
+}
+
+.aw-ft-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aw-ft-empty,
+.aw-ft-create-hint {
+  color: var(--aw-ft-muted);
+  font-size: 12px;
+}
+
+.aw-ft-empty {
+  padding: 8px 12px;
+}
+
+.aw-ft-create-hint {
+  margin-left: 4px;
+  opacity: 0.7;
+}
+
+/* Inline rename / create input ------------------------------------------- */
+.aw-ft-row--create {
+  margin: 1px 4px;
+}
+
+.aw-ft-input {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--aw-ft-accent);
+  border-radius: 3px;
+  background: var(--panel-bg, #0d141d);
+  color: var(--aw-ft-fg);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+/* Context menu ------------------------------------------------------------ */
+.aw-ft-contextmenu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--aw-ft-border);
+  border-radius: 8px;
+  background: var(--panel-bg, #0d141d);
+  color: var(--aw-ft-fg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  outline: none;
+}
+
+.aw-ft-contextmenu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.aw-ft-contextmenu__item:hover,
+.aw-ft-contextmenu__item:focus-visible {
+  background: var(--aw-ft-hover);
+  outline: none;
+}
+
+.aw-ft-contextmenu__item.is-danger {
+  color: #f87171;
+}
+
+.aw-ft-contextmenu__icon {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}

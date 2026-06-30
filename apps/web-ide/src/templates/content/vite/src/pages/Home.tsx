@@ -1,227 +1,235 @@
-import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { createStripeCheckoutSession, type CartItem } from '@/lib/stripeCheckout';
+import { PRODUCTS, formatCurrency, type Product } from '@/lib/products';
 
-const PILLARS = [
-  {
-    title: 'Tailwind ready',
-    detail: 'Utility classes are live immediately through the preview. No bootstrap command is required to start styling.',
-  },
-  {
-    title: 'shadcn aliases',
-    detail: 'The workspace already has components.json, @/ imports, CSS variables, and a local Button primitive wired up.',
-  },
-  {
-    title: 'Terminal first',
-    detail: 'Keep the preview open while you add packages or components from the same project root in the terminal panel.',
-  },
-];
+type CartState = Record<string, number>;
 
-const NOTES = [
-  {
-    title: 'shadcn dropdown-menu',
-    body: 'A real @radix-ui/react-dropdown-menu component is already installed. Check src/components/ui/dropdown-menu.tsx for the source.',
-  },
-  {
-    title: 'Tailwind config',
-    body: 'Edit tailwind.config.ts to extend colors, spacing, and radii. The Vite preview injects that config automatically.',
-  },
-  {
-    title: 'Theme toggle',
-    body: 'This starter uses the standard .dark class so shadcn-style color variables and utility classes stay aligned.',
-  },
-];
+function cartEntries(cart: CartState): CartItem[] {
+  return PRODUCTS
+    .map((product) => ({
+      product,
+      quantity: cart[product.id] || 0,
+    }))
+    .filter((item) => item.quantity > 0);
+}
+
+function cartCount(cart: CartState): number {
+  return Object.values(cart).reduce((total, quantity) => total + quantity, 0);
+}
+
+function cartTotal(items: CartItem[]): number {
+  return items.reduce(
+    (total, item) => total + item.product.priceCents * item.quantity,
+    0,
+  );
+}
+
+function StoreProductCard({
+  product,
+  quantity,
+  onAdd,
+  onRemove,
+}: {
+  product: Product;
+  quantity: number;
+  onAdd: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <article className="grid min-h-[23rem] grid-rows-[9rem_1fr] overflow-hidden rounded-lg border border-border bg-card shadow-[0_20px_70px_-50px_rgba(15,23,42,0.8)]">
+      <div className="relative overflow-hidden bg-secondary">
+        <div className={`absolute left-5 top-5 h-16 w-16 rounded-md ${product.accent}`} />
+        <div className="absolute bottom-5 left-5 right-5 rounded-md border border-white/35 bg-white/55 p-3 text-sm font-semibold text-slate-900 shadow-sm backdrop-blur">
+          {product.name}
+        </div>
+      </div>
+      <div className="flex flex-col p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">{product.name}</h2>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">{product.description}</p>
+          </div>
+          <p className="shrink-0 text-base font-semibold">{formatCurrency(product.priceCents)}</p>
+        </div>
+
+        <ul className="mt-4 grid gap-2 text-xs text-muted-foreground">
+          {product.specs.map((spec) => (
+            <li key={spec} className="flex items-center gap-2">
+              <span className={`h-2 w-2 rounded-full ${product.accent}`} />
+              {spec}
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-auto flex items-center gap-2 pt-5">
+          <Button className="flex-1" onClick={onAdd}>
+            Add {product.name} to cart
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            aria-label={`Remove ${product.name} from cart`}
+            onClick={onRemove}
+            disabled={quantity === 0}
+          >
+            -
+          </Button>
+          <span className="min-w-8 rounded-md border border-border bg-background px-2 py-2 text-center text-sm font-semibold">
+            {quantity}
+          </span>
+        </div>
+      </div>
+    </article>
+  );
+}
 
 function Home() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
-  const navigate = useNavigate();
+  const [cart, setCart] = useState<CartState>({});
+  const [checkoutState, setCheckoutState] = useState<'idle' | 'loading'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const items = useMemo(() => cartEntries(cart), [cart]);
+  const total = cartTotal(items);
+  const count = cartCount(cart);
 
-  useEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle('dark', theme === 'dark');
-    root.style.colorScheme = theme;
-  }, [theme]);
+  function addProduct(product: Product): void {
+    setError(null);
+    setCart((current) => ({
+      ...current,
+      [product.id]: (current[product.id] || 0) + 1,
+    }));
+  }
+
+  function removeProduct(product: Product): void {
+    setError(null);
+    setCart((current) => {
+      const nextQuantity = Math.max((current[product.id] || 0) - 1, 0);
+      const next = { ...current };
+      if (nextQuantity === 0) {
+        delete next[product.id];
+      } else {
+        next[product.id] = nextQuantity;
+      }
+      return next;
+    });
+  }
+
+  async function checkout(): Promise<void> {
+    if (items.length === 0 || checkoutState === 'loading') return;
+
+    setCheckoutState('loading');
+    setError(null);
+    try {
+      const session = await createStripeCheckoutSession(items);
+      window.location.assign(session.url);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Checkout failed.');
+      setCheckoutState('idle');
+    }
+  }
 
   return (
-    <main className="min-h-screen bg-transparent text-foreground">
-      <nav className="mx-auto flex w-full max-w-6xl items-center gap-4 px-4 py-3 sm:px-6 lg:px-8">
-        <Link to="/" className="text-sm font-semibold text-foreground hover:text-foreground/80 transition-colors">Home</Link>
-        <Link to="/about" className="text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors">About</Link>
-        <Link to="/todos" className="text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors">Todos</Link>
-        <div className="ml-auto">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
-                Menu
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuLabel>Navigation</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuGroup>
-                <DropdownMenuItem onSelect={() => navigate('/')}>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                  Home
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => navigate('/about')}>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-                  About
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => navigate('/todos')}>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
-                  Todos
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>Appearance</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => setTheme('light')}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-                Light mode
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setTheme('dark')}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-                Dark mode
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </nav>
-      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
-        <section className="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_22rem]">
-          <div className="relative overflow-hidden rounded-[2rem] border border-border/60 bg-background/82 p-6 shadow-[0_40px_120px_-40px_rgba(15,23,42,0.65)] backdrop-blur-xl sm:p-8">
-            <div className="absolute inset-x-0 top-0 h-40 bg-[radial-gradient(circle_at_top,rgba(249,115,22,0.22),transparent_62%)]" />
-            <div className="relative flex flex-col gap-6">
-              <div className="space-y-4">
-                <span className="inline-flex w-fit items-center rounded-full border border-border/60 bg-secondary/70 px-3 py-1 font-mono text-[0.72rem] uppercase tracking-[0.28em] text-muted-foreground">
-                  Tailwind + shadcn starter
-                </span>
-                <div className="space-y-4">
-                  <h1 className="max-w-4xl text-4xl font-semibold tracking-tight sm:text-5xl lg:text-6xl">
-                    Style the Web IDE app immediately instead of bootstrapping Tailwind by hand.
+    <main className="min-h-screen bg-background text-foreground">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+        <nav className="flex items-center gap-4 py-2">
+          <Link to="/" className="text-sm font-semibold text-foreground hover:text-foreground/80">Store</Link>
+          <Link to="/todos" className="text-sm font-semibold text-muted-foreground hover:text-foreground">Todos</Link>
+          <Link to="/about" className="text-sm font-semibold text-muted-foreground hover:text-foreground">About</Link>
+          <div className="ml-auto rounded-md border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground">
+            {count} {count === 1 ? 'item' : 'items'}
+          </div>
+        </nav>
+
+        <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
+          <div className="space-y-5">
+            <div className="rounded-lg border border-border bg-card p-5 shadow-[0_28px_90px_-56px_rgba(15,23,42,0.72)] sm:p-6">
+              <p className="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">
+                Vibecoder test store
+              </p>
+              <div className="mt-3 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <h1 className="max-w-3xl text-4xl font-semibold tracking-tight sm:text-5xl">
+                    Buy a product through an emulated Stripe Checkout flow.
                   </h1>
-                  <p className="max-w-3xl text-base leading-7 text-muted-foreground sm:text-lg">
-                    The preview is already configured for Tailwind utility classes, CSS variables, and shadcn-style aliases.
-                    Use this screen as a real starter instead of a plain CSS placeholder.
+                  <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">
+                    Product prices match the seeded Stripe emulator IDs in this workspace, so an agent can add an item, open Checkout, pay, and verify the success screen without touching live Stripe.
                   </p>
                 </div>
+                <div className="rounded-lg border border-border bg-secondary px-4 py-3 text-sm text-muted-foreground">
+                  Stripe target <span className="font-mono text-foreground">/__virtual__/4009</span>
+                </div>
               </div>
+            </div>
 
-              <div className="flex flex-wrap gap-3">
-                <Button onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}>
-                  {theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    window.location.hash = '#starter-notes';
-                  }}
-                >
-                  Open starter notes
-                </Button>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-3">
-                {PILLARS.map((pillar) => (
-                  <article
-                    key={pillar.title}
-                    className="rounded-3xl border border-border/60 bg-card/75 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]"
-                  >
-                    <p className="text-sm font-semibold tracking-tight">{pillar.title}</p>
-                    <p className="mt-2 text-sm leading-6 text-muted-foreground">{pillar.detail}</p>
-                  </article>
-                ))}
-              </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              {PRODUCTS.map((product) => (
+                <StoreProductCard
+                  key={product.id}
+                  product={product}
+                  quantity={cart[product.id] || 0}
+                  onAdd={() => addProduct(product)}
+                  onRemove={() => removeProduct(product)}
+                />
+              ))}
             </div>
           </div>
 
-          <aside className="rounded-[2rem] border border-border/60 bg-card/82 p-5 shadow-[0_28px_90px_-45px_rgba(15,23,42,0.7)] backdrop-blur-xl">
-            <div className="space-y-5">
+          <aside className="h-fit rounded-lg border border-border bg-card p-5 shadow-[0_28px_90px_-54px_rgba(15,23,42,0.72)] lg:sticky lg:top-5">
+            <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">Start here</p>
-                <code className="mt-3 block rounded-2xl border border-border/70 bg-secondary/70 px-4 py-3 font-mono text-sm text-foreground">
-                  npm run dev
-                </code>
+                <p className="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">Cart</p>
+                <h2 className="mt-1 text-2xl font-semibold tracking-tight">Checkout summary</h2>
               </div>
+              <div className="rounded-md bg-secondary px-3 py-2 text-sm font-semibold">
+                {count}
+              </div>
+            </div>
 
-              <div className="rounded-3xl border border-border/60 bg-background/70 p-4">
-                <p className="text-sm font-semibold tracking-tight">Included components</p>
-                <p className="mt-2 font-mono text-xs leading-6 text-muted-foreground">
-                  button, dropdown-menu
+            <div className="mt-5 min-h-32 space-y-3">
+              {items.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border bg-background p-4 text-sm leading-6 text-muted-foreground">
+                  Cart is empty. Add any product to enable the Stripe checkout flow.
                 </p>
-              </div>
+              ) : (
+                items.map((item) => (
+                  <div key={item.product.id} className="flex items-start justify-between gap-3 rounded-md border border-border bg-background p-3">
+                    <div>
+                      <p className="text-sm font-semibold">{item.product.name}</p>
+                      <p className="mt-1 font-mono text-xs text-muted-foreground">{item.product.priceId}</p>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {item.quantity} x {formatCurrency(item.product.priceCents)}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
 
-              <div className="space-y-3 text-sm leading-6 text-muted-foreground">
-                <p>The app already includes components.json, tailwind.config.ts, and a working @/ import map.</p>
-                <p>Edit <span className="font-mono text-foreground">src/App.tsx</span> or drop new files into <span className="font-mono text-foreground">src/components</span>.</p>
+            <div className="mt-5 border-t border-border pt-5">
+              <div className="flex items-center justify-between text-sm text-muted-foreground">
+                <span>Subtotal</span>
+                <span className="text-lg font-semibold text-foreground">{formatCurrency(total)}</span>
               </div>
-
-              <div className="rounded-3xl border border-border/60 bg-secondary/55 p-4">
-                <p className="text-sm font-semibold tracking-tight">Aliases</p>
-                <ul className="mt-3 space-y-2 font-mono text-xs text-muted-foreground">
-                  <li>@/components</li>
-                  <li>@/components/ui</li>
-                  <li>@/lib/utils</li>
-                </ul>
-              </div>
+              <Button
+                className="mt-4 w-full"
+                size="lg"
+                onClick={checkout}
+                disabled={items.length === 0 || checkoutState === 'loading'}
+              >
+                {checkoutState === 'loading' ? 'Creating Stripe session...' : 'Checkout with Stripe'}
+              </Button>
+              {error ? (
+                <p role="alert" className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm leading-6 text-destructive">
+                  {error}
+                </p>
+              ) : (
+                <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                  Test checkout uses the Stripe emulator. Use the hosted checkout page to complete payment.
+                </p>
+              )}
             </div>
           </aside>
-        </section>
-
-        <section id="starter-notes" className="grid gap-4 md:grid-cols-3">
-          {NOTES.map((note) => (
-            <article
-              key={note.title}
-              className="rounded-[1.75rem] border border-border/60 bg-card/75 p-5 shadow-[0_22px_70px_-42px_rgba(15,23,42,0.65)] backdrop-blur-xl"
-            >
-              <p className="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">Starter note</p>
-              <h2 className="mt-3 text-xl font-semibold tracking-tight">{note.title}</h2>
-              <p className="mt-3 text-sm leading-6 text-muted-foreground">{note.body}</p>
-            </article>
-          ))}
-        </section>
-
-        <section className="rounded-[2rem] border border-border/60 bg-background/80 p-5 shadow-[0_28px_90px_-48px_rgba(15,23,42,0.72)] backdrop-blur-xl">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <div className="space-y-2">
-              <p className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">Preview stack</p>
-              <h2 className="text-2xl font-semibold tracking-tight">A Vite-flavored workspace with Tailwind semantics built in.</h2>
-            </div>
-            <div className="rounded-2xl border border-border/60 bg-secondary/60 px-4 py-3 text-sm text-muted-foreground">
-              Edit <span className="font-mono text-foreground">tailwind.config.ts</span> to extend the design tokens.
-            </div>
-          </div>
-
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <div className="rounded-3xl border border-border/60 bg-card/70 p-4">
-              <p className="text-sm font-semibold tracking-tight">What changed from the old seed</p>
-              <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
-                <li>Tailwind utility classes work without a manual init step.</li>
-                <li>shadcn aliases and CSS variables are already in place.</li>
-                <li>The starter now looks like a real app instead of a plain CSS scaffold.</li>
-              </ul>
-            </div>
-
-            <div className="rounded-3xl border border-border/60 bg-card/70 p-4">
-              <p className="text-sm font-semibold tracking-tight">Useful files</p>
-              <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
-                <li><span className="font-mono text-foreground">src/App.tsx</span> for the landing surface.</li>
-                <li><span className="font-mono text-foreground">src/components/ui/button.tsx</span> for the Button primitive.</li>
-                <li><span className="font-mono text-foreground">src/components/ui/dropdown-menu.tsx</span> for the DropdownMenu component.</li>
-                <li><span className="font-mono text-foreground">src/lib/utils.ts</span> for the shared cn helper.</li>
-              </ul>
-            </div>
-          </div>
         </section>
       </div>
     </main>

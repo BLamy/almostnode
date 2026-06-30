@@ -1,27 +1,40 @@
 {
   "name": "@agent-wasm/react",
   "version": "0.1.0",
+  "description": "React workbench, chat, and UI components for agent-wasm workspaces.",
   "private": false,
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    },
+    "./workbench": {
+      "types": "./dist/workbench.d.ts",
+      "import": "./dist/workbench.js",
+      "require": "./dist/workbench.cjs",
+      "default": "./dist/workbench.js"
     },
     "./chat": {
-      "types": "./src/chat/index.ts",
-      "default": "./src/chat/index.ts"
+      "types": "./dist/chat/index.d.ts",
+      "import": "./dist/chat/index.js",
+      "require": "./dist/chat/index.cjs",
+      "default": "./dist/chat/index.js"
     },
     "./ui": {
-      "types": "./src/ui/index.ts",
-      "default": "./src/ui/index.ts"
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js",
+      "require": "./dist/ui/index.cjs",
+      "default": "./dist/ui/index.js"
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/chat/index.ts src/ui/index.ts --tsconfig tsconfig.build.json --format esm,cjs --dts --clean --external @agent-wasm/core --external @agent-wasm/sdk --external @agent-wasm/chat-core --external react --external react-dom --external tailwindcss --external tailwindcss/utilities",
+    "build": "tsup src/index.ts src/workbench.ts src/chat/index.ts src/ui/index.ts --tsconfig tsconfig.build.json --format esm,cjs --dts --clean --external @agent-wasm/core --external @agent-wasm/sdk --external @agent-wasm/chat-core --external react --external react-dom --external react-aria-components --external tailwindcss --external tailwindcss/utilities",
     "test": "vitest run",
     "type-check": "tsc --project tsconfig.json --noEmit",
     "prepublishOnly": "npm run build"
@@ -37,10 +50,12 @@
     "@radix-ui/react-separator": "^1.1.8",
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@shadcn/react": "^0.1.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "react": "^19.2.4",
+    "react-aria-components": "^1.13.0",
     "react-dom": "^19.2.4",
     "tailwind-merge": "^3.5.0"
   },
@@ -57,36 +72,14 @@
     "type": "git",
     "url": "git+https://github.com/BLamy/agent-wasm.git"
   },
-  "sideEffects": false,
+  "sideEffects": [
+    "**/*.css"
+  ],
   "files": [
     "dist",
-    "src",
     "README.md"
   ],
   "publishConfig": {
-    "access": "public",
-    "main": "./dist/index.cjs",
-    "module": "./dist/index.js",
-    "types": "./dist/index.d.ts",
-    "exports": {
-      ".": {
-        "types": "./dist/index.d.ts",
-        "import": "./dist/index.js",
-        "require": "./dist/index.cjs",
-        "default": "./dist/index.js"
-      },
-      "./chat": {
-        "types": "./dist/chat/index.d.ts",
-        "import": "./dist/chat/index.js",
-        "require": "./dist/chat/index.cjs",
-        "default": "./dist/chat/index.js"
-      },
-      "./ui": {
-        "types": "./dist/ui/index.d.ts",
-        "import": "./dist/ui/index.js",
-        "require": "./dist/ui/index.cjs",
-        "default": "./dist/ui/index.js"
-      }
-    }
+    "access": "public"
   }
 }

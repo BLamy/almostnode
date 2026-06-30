@@ -147,7 +147,7 @@ function installFakeIndexedDB(options: {
       open(_name?: string, requestedVersion?: number) {
         const request = createRequest();
         queueMicrotask(() => {
-          const nextVersion = requestedVersion ?? 1;
+          const nextVersion = requestedVersion ?? (version || 1);
           if (nextVersion < version) {
             request.error = new Error('VersionError');
             request.onerror?.();
@@ -275,5 +275,42 @@ describe('ProjectDB app-building stores', () => {
     await db.putAppBuildingConfig(config);
 
     expect(await db.getAppBuildingConfig('project-legacy')).toEqual(config);
+  });
+
+  it('opens existing newer compatible databases without downgrading', async () => {
+    installFakeIndexedDB({
+      initialVersion: 6,
+      initialStores: [
+        { name: 'projects', keyPath: 'id' },
+        { name: 'project-files', keyPath: 'projectId' },
+        { name: 'project-agent-state', keyPath: 'projectId' },
+        {
+          name: 'resumable-threads',
+          keyPath: 'id',
+          indexes: [{ name: 'projectId', keyPath: 'projectId' }],
+        },
+        { name: 'app-building-config', keyPath: 'projectId' },
+        {
+          name: 'app-building-jobs',
+          keyPath: 'id',
+          indexes: [{ name: 'projectId', keyPath: 'projectId' }],
+        },
+      ],
+    });
+
+    const db = new ProjectDB();
+    const config: AppBuildingConfig = {
+      projectId: 'project-newer',
+      flyAppName: 'shared-fly-app',
+      imageRef: null,
+      infisicalEnvironment: 'prod',
+      hasInfisicalCredentials: true,
+      hasFlyApiToken: true,
+      updatedAt: 300,
+    };
+
+    await db.putAppBuildingConfig(config);
+
+    expect(await db.getAppBuildingConfig('project-newer')).toEqual(config);
   });
 });

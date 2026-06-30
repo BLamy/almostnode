@@ -24,12 +24,41 @@ await workspace.snapshots.save();
 - **`AgentAdapter` / `AgentSession`** — mount CLI agents into a workspace.
 - **`WorkspaceTemplate` / `DEFAULT_WORKSPACE_TEMPLATE`** — seedable starter files.
 - **`createOpenCodeAgentAdapter`** — an adapter for the OpenCode agent.
+- **`@agent-wasm/sdk/plugins`** — load and merge Claude Code, Codex, and
+  agent-wasm plugin manifests into one harness-agnostic contribution graph.
 
 ## `@agent-wasm/sdk/auth`
 
 The credential manifest shared across agent-wasm: `defaultCredentialSlots`,
 `defaultAuthProviders`, `agentWasmCredentialPaths`, and `createAuthManifest()` —
 the single source of truth for where each provider's credentials live in the VFS.
+
+## `@agent-wasm/sdk/plugins`
+
+The plugin registry is the shared manifest layer for all harnesses. It accepts
+canonical `plugin.json` files, `.claude-plugin/plugin.json`,
+`.codex-plugin/plugin.json`, `.mcp.json`, `.lsp.json`, `settings.json`, and
+folder conventions such as `skills/`, `commands/`, `agents/`, `hooks/`,
+`monitors/`, and `bin/`.
+
+```ts
+import { loadPlugins } from "@agent-wasm/sdk/plugins";
+
+const registry = await loadPlugins([
+  { kind: "workspace", root: "/project/.claude-plugin", workspace },
+  { kind: "workspace", root: "/project/.codex-plugin", workspace },
+  { kind: "workspace", root: "/project/plugins/design-tools", workspace },
+]);
+
+for (const panel of registry.listPanels()) {
+  console.log(panel.id, panel.location);
+}
+```
+
+Canonical contributions are `skills`, `commands`, `agents`, `hooks`,
+`mcpServers`, `lspServers`, `monitors`, `bin`, `settings`, `auth`,
+`vscode.panels`, and `vscode.customEditors`. Multiple manifests merge by
+contribution id. Duplicate ids use last-writer-wins and emit diagnostics.
 
 ## License
 
