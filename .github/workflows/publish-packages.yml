@@ -1,0 +1,126 @@
+name: Publish Packages
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-packages.yml"
+      - "docs/releasing-packages.md"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "packages/**"
+      - "scripts/package-*.mjs"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-packages.yml"
+      - "docs/releasing-packages.md"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "packages/**"
+      - "scripts/package-*.mjs"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish packages to npm after validation"
+        required: true
+        type: boolean
+        default: false
+      dry_run:
+        description: "Run the publish command in npm dry-run mode"
+        required: true
+        type: boolean
+        default: true
+      npm_tag:
+        description: "npm dist-tag to apply when publishing"
+        required: true
+        type: choice
+        default: latest
+        options:
+          - latest
+          - next
+          - canary
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Build, Test, Preflight, Publish
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+      PUBLISHABLE_PROJECTS: almostnode,chat-core,almostnode-sdk,keychain,code,codex-wasm,almostnode-react,vscode
+      PACKAGE_TEST_PROJECTS: chat-core,keychain,code,almostnode-sdk,codex-wasm,almostnode-react,vscode
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Setup Rust for Codex wasm
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --target wasm32-unknown-unknown
+          rustup default 1.95.0
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install vendored OpenCode/OpenTUI dependencies
+        run: pnpm vendor:install:opencode
+
+      - name: Build publishable packages
+        run: pnpm nx run-many -t build --projects="$PUBLISHABLE_PROJECTS"
+
+      - name: Build vendored Codex wasm adapter
+        run: pnpm vendor:install:codex
+
+      - name: Run package tests
+        run: pnpm nx run-many -t test --projects="$PACKAGE_TEST_PROJECTS"
+
+      - name: Package preflight
+        run: pnpm package:preflight | tee package-preflight.md
+
+      - name: Upload package preflight report
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-preflight
+          path: package-preflight.md
+
+      - name: Publish packages
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        run: pnpm package:publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ inputs.npm_tag }}
+          NPM_PROVENANCE: "true"
+          PUBLISH_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}

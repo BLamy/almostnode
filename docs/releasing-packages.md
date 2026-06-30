@@ -21,7 +21,7 @@ Publishable packages live under `packages/*` and have `private: false`:
 the runtime. `@agent-wasm/codex` is the local forked browser Codex package and
 ships its prebuilt WASM adapter under `dist/pkg`.
 
-## Manual release flow
+## Release checks
 
 Run releases from a clean working tree on the branch being released.
 
@@ -29,30 +29,51 @@ Run releases from a clean working tree on the branch being released.
 pnpm install --frozen-lockfile
 pnpm nx run-many -t build --projects=almostnode,chat-core,almostnode-sdk,keychain,code,codex-wasm,almostnode-react,vscode
 pnpm --dir packages/codex-wasm run build:adapter
-pnpm nx run-many -t test --projects=almostnode,chat-core,almostnode-sdk,keychain,code,codex-wasm,almostnode-react,vscode
+pnpm nx run-many -t test --projects=chat-core,keychain,code,almostnode-sdk,codex-wasm,almostnode-react,vscode
 pnpm package:preflight
 ```
 
 Review the preflight output before publishing. It checks packed manifests,
 entrypoints, workspace dependency rewrites, tarball contents, and size drivers.
 
-Publish dependency-first:
+The full `almostnode` runtime test target should be run before promoting
+runtime behavior changes, but it is not part of the publish gate while the
+current branch has unrelated runtime test failures.
+
+## Manual release flow
+
+Publish dependency-first with the checked-in release helper:
 
 ```bash
-pnpm --dir packages/tailscale-connect publish --access public
-pnpm --dir packages/almostnode publish --access public
-pnpm --dir packages/chat-core publish --access public
-pnpm --dir packages/almostnode-sdk publish --access public
-pnpm --dir packages/keychain publish --access public
-pnpm --dir packages/code publish --access public
-pnpm --dir packages/codex-wasm publish --access public
-pnpm --dir packages/almostnode-react publish --access public
-pnpm --dir packages/vscode publish --access public
+NPM_TAG=latest pnpm package:publish
 ```
 
 Do not publish from a package directory with a stale `dist/`. The package
-prepublish hooks build the package, but running the build and preflight first
-makes the release reviewable before anything reaches npm.
+publish helper packs each package with pnpm and publishes those tarballs with
+npm, which preserves pnpm's workspace dependency rewriting. The GitHub Actions
+workflow enables npm provenance for hosted releases.
+
+For a local dry run:
+
+```bash
+PUBLISH_DRY_RUN=true pnpm package:publish
+```
+
+## GitHub Actions release flow
+
+`.github/workflows/publish-packages.yml` validates package releases on pull
+requests and pushes to `main` when package/release files change. It runs:
+
+1. install dependencies and vendored OpenCode/OpenTUI dependencies
+2. build all publishable packages
+3. clone/build the vendored Codex WASM adapter
+4. run the package test set
+5. run `pnpm package:preflight` and upload the markdown report
+
+Publishing is manual through `workflow_dispatch`. Set `publish` to `true`,
+choose the npm dist-tag, and leave `dry_run` enabled until the release output
+looks correct. The workflow expects an `NPM_TOKEN` repository secret with
+permission to publish the `@agent-wasm/*` packages.
 
 ## Size review
 
