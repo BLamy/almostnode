@@ -92,7 +92,7 @@ test.describe('Vitest Demo', () => {
     await page.click('.file-tab[data-file="utils.test.js"]');
     await page.waitForTimeout(300);
     const testContent = await editor.inputValue();
-    expect(testContent).toContain("require('vitest')");
+    expect(testContent).toContain("from 'vitest'");
     expect(testContent).toContain('describe');
 
     // Switch to package.json

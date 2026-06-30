@@ -231,8 +231,15 @@ const HMR_CLIENT_SCRIPT = `
   // This preview's own virtual port: with several sandboxes live, updates
   // from another sandbox's dev server must be ignored even if a stale HMR
   // target still points at this window.
-  var __hmrPortMatch = location.pathname.match(/\\/__virtual__\\/(\\d+)\\//);
-  var __hmrOwnPort = __hmrPortMatch ? Number(__hmrPortMatch[1]) : null;
+  var __hmrBaseMatch = location.pathname.match(/^(.*\\/__virtual__\\/(\\d+))(?:\\/|$)/);
+  var __hmrVirtualBase = __hmrBaseMatch ? __hmrBaseMatch[1] : '';
+  var __hmrOwnPort = __hmrBaseMatch ? Number(__hmrBaseMatch[2]) : null;
+
+  function __hmrModuleUrl(modulePath, timestamp) {
+    var normalizedPath = modulePath.startsWith('/') ? modulePath : '/' + modulePath;
+    var pathWithBase = __hmrVirtualBase ? __hmrVirtualBase + normalizedPath : normalizedPath;
+    return pathWithBase + '?t=' + timestamp;
+  }
 
   // Listen for HMR updates via postMessage (works with sandboxed iframes)
   window.addEventListener('message', async (event) => {
@@ -264,7 +271,7 @@ const HMR_CLIENT_SCRIPT = `
           const id = style.getAttribute('data-vite-dev-id');
           if (id && id.includes(path.replace(/^\\//, ''))) {
             // Re-import the CSS module to get updated styles
-            import(path + '?t=' + timestamp).catch(() => {});
+            import(__hmrModuleUrl(path, timestamp)).catch(() => {});
           }
         });
       } else if (path.match(/\\.(jsx?|tsx?)$/)) {
@@ -299,7 +306,7 @@ const HMR_CLIENT_SCRIPT = `
             try {
               // Re-import all pending modules
               for (const [modulePath, ts] of pendingUpdates) {
-                const moduleUrl = '.' + modulePath + '?t=' + ts;
+                const moduleUrl = __hmrModuleUrl(modulePath, ts);
                 await import(moduleUrl);
               }
 
@@ -759,24 +766,41 @@ export class ViteDevServer extends DevServer {
    * Start file watching for HMR
    */
   startWatching(): void {
-    // Watch /src directory for changes
-    const srcPath = this.root === '/' ? '/src' : `${this.root}/src`;
-
+    // Watch the project root so imported assets outside /src (for example
+    // markdown loaded with ?raw) can trigger the same reload path as app code.
     try {
-      const watcher = this.vfs.watch(srcPath, { recursive: true }, (eventType, filename) => {
+      const watcher = this.vfs.watch(this.root, { recursive: true }, (eventType, filename) => {
         if (!filename) return;
-        const fullPath = filename.startsWith('/') ? filename : `${srcPath}/${filename}`;
+        const fullPath = filename.startsWith('/')
+          ? filename
+          : this.root === '/'
+            ? `/${filename}`
+            : `${this.root}/${filename}`;
+        const relativePath = this.root !== '/' && fullPath.startsWith(this.root + '/')
+          ? fullPath.slice(this.root.length + 1)
+          : fullPath.replace(/^\//, '');
+        const isNodeModulesChange = relativePath === 'node_modules' || relativePath.startsWith('node_modules/');
+
+        if (relativePath === 'package.json' || isNodeModulesChange) {
+          this.scheduleInstalledPackagesCacheClear();
+        }
+        if (isNodeModulesChange) {
+          return;
+        }
+
         if (eventType === 'change') {
           this.handleFileChange(fullPath);
         } else if (eventType === 'rename' && this.vfs.existsSync(fullPath)) {
           // 'rename' with existing file = creation (e.g. atomic write via rename, new file)
+          if (this.isDirectory(fullPath)) return;
           this.handleFileChange(fullPath);
         }
 
         // Regenerate route tree when files under src/routes/ change
         if (this.options.tanstackRouter) {
+          const srcPath = this.root === '/' ? '/src' : `${this.root}/src`;
           const routesPrefix = srcPath + '/routes';
-          const checkPath = filename.startsWith('/') ? filename : `${srcPath}/${filename}`;
+          const checkPath = fullPath;
           if (checkPath.startsWith(routesPrefix) && /\.(tsx?|jsx?)$/.test(checkPath)) {
             this.scheduleRouteTreeRegen();
           }
@@ -787,32 +811,7 @@ export class ViteDevServer extends DevServer {
         watcher.close();
       };
     } catch (error) {
-      almostnodeDebugWarn('vite', '[ViteDevServer] Could not watch /src directory:', error);
-    }
-
-    // Also watch for CSS files in root
-    try {
-      const rootWatcher = this.vfs.watch(this.root, { recursive: false }, (eventType, filename) => {
-        if (!filename) return;
-        const watchedPath = this.root === '/' ? `/${filename}` : `${this.root}/${filename}`;
-        const isWatchedRootFile = filename.endsWith('.css')
-          || /^tailwind\.config\.(ts|js|mjs)$/.test(filename)
-          || filename === 'components.json';
-        if (isWatchedRootFile && (eventType === 'change' || (eventType === 'rename' && this.vfs.existsSync(watchedPath)))) {
-          this.handleFileChange(watchedPath);
-        }
-        if (filename === 'package.json' || filename === 'node_modules') {
-          this.scheduleInstalledPackagesCacheClear();
-        }
-      });
-
-      const originalCleanup = this.watcherCleanup;
-      this.watcherCleanup = () => {
-        originalCleanup?.();
-        rootWatcher.close();
-      };
-    } catch {
-      // Ignore if root watching fails
+      almostnodeDebugWarn('vite', '[ViteDevServer] Could not watch project root:', error);
     }
 
     try {
@@ -1282,6 +1281,7 @@ export default css;
     try {
       let content = this.vfs.readFileSync(filePath, 'utf8');
       const tailwindInjection = await this.getTailwindInjection(content);
+      content = this.rewriteHtmlModuleScriptSources(content);
 
       // Inject a React import map if the HTML doesn't already have one.
       // This lets seed HTML omit the esm.sh boilerplate — the platform provides it.
@@ -1369,6 +1369,22 @@ export default css;
     } catch (error) {
       return this.serverError(error);
     }
+  }
+
+  private rewriteHtmlModuleScriptSources(html: string): string {
+    const virtualBase = `${this.options.deploymentBasePath || ''}/__virtual__/${this.port}`;
+    return html.replace(
+      /<script\b[^>]*\bsrc=(["'])(\/(?!\/)[^"']*)\1[^>]*>/gi,
+      (tag, quote: string, path: string) => {
+        if (!/\btype\s*=\s*["']module["']/i.test(tag)) {
+          return tag;
+        }
+        if (path === virtualBase || path.startsWith(`${virtualBase}/`)) {
+          return tag;
+        }
+        return tag.replace(`${quote}${path}${quote}`, `${quote}${virtualBase}${path}${quote}`);
+      },
+    );
   }
 
   private async loadTailwindConfigIfNeeded(): Promise<string> {

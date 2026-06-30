@@ -245,10 +245,10 @@ OpenCode in browser mode uses vendored OpenCode browser code:
 - browser DB snapshot/restore for agent state
 - OpenTUI wasm asset emitted by the Vite build
 
-Codex uses the local wasm packages:
+Codex uses the local WASM package:
 
-- `codex-cli-wasm` for the CLI shell command
-- `codex-app-server-wasm` for the app-server session
+- `@agent-wasm/codex` / `packages/codex-wasm` for the CLI shell command and
+  app-server session
 - workers in `src/features/codex-cli.worker.ts` and
   `src/features/codex-app-server.worker.ts`
 - browser login handling in `src/features/codex-auth.ts`
@@ -290,10 +290,8 @@ both dev and production builds.
 | Browser URL | Source | Loader | Purpose |
 | --- | --- | --- | --- |
 | `${base}opentui/opentui.wasm` | First existing file from `vendor/opentui/packages/core/src/zig/lib/wasm32-freestanding/libopentui.wasm` or `opentui.wasm` | `opentuiWasmAsset()` middleware and Rollup asset emission; URL injected as `__OPENTUI_WASM_URL__` | OpenTUI core runtime used by browser OpenCode TUI surfaces. |
-| `${base}codex-cli-wasm/codex_cli_wasm.js` | `packages/codex-cli-wasm/dist/pkg/codex_cli_wasm.js` | `codexCliWasmAssets()`; URL injected as `__CODEX_CLI_WASM_MODULE_URL__` | wasm-bindgen JS loader for the Codex CLI browser worker. |
-| `${base}codex-cli-wasm/codex_cli_wasm_bg.wasm` | `packages/codex-cli-wasm/dist/pkg/codex_cli_wasm_bg.wasm` | Fetched by the `codex_cli_wasm.js` loader | Rust Codex CLI adapter that runs in the browser worker and bridges shell/app-server effects back to almostnode. |
-| `${base}codex-app-server-wasm/codex_app_server_wasm.js` | `packages/codex-app-server-wasm/dist/pkg/codex_app_server_wasm.js` | `codexAppServerWasmAssets()`; URL injected as `__CODEX_APP_SERVER_WASM_MODULE_URL__` | wasm-bindgen JS loader for the Codex app-server browser worker. |
-| `${base}codex-app-server-wasm/codex_app_server_wasm_bg.wasm` | `packages/codex-app-server-wasm/dist/pkg/codex_app_server_wasm_bg.wasm` | Fetched by the `codex_app_server_wasm.js` loader | Rust Codex app-server adapter for browser-hosted thread/session state. |
+| `${base}codex-wasm/codex_wasm.js` | `packages/codex-wasm/dist/pkg/codex_wasm.js` | `codexWasmAssets()`; URL injected as `__CODEX_WASM_MODULE_URL__` | wasm-bindgen JS loader for the Codex CLI and app-server browser workers. |
+| `${base}codex-wasm/codex_wasm_bg.wasm` | `packages/codex-wasm/dist/pkg/codex_wasm_bg.wasm` | Fetched by the `codex_wasm.js` loader | Rust Codex adapter that runs in browser workers and bridges shell/app-server effects back to almostnode. |
 
 ### Bundled or lazy runtime assets
 
@@ -303,7 +301,7 @@ pipeline when those runtime paths are bundled.
 | Asset | Source | Loaded by | Purpose |
 | --- | --- | --- | --- |
 | `playground.wasm32-wasi.wasm` | `packages/almostnode/src/oxc/vendor/playground.wasm32-wasi.wasm` | `packages/almostnode/src/oxc/browser-binding.ts` through `?url` | OXC parser/linter/formatter runtime used by the Monaco OXC worker and shell command paths. |
-| `main.wasm` | `packages/tailscale-connect/main.wasm`, exposed as `@tailscale/connect/main.wasm?url` | `packages/almostnode/src/network/tailscale-connect-worker.ts` | Tailscale Connect Go WASM runtime for browser network sessions. |
+| `main.wasm` | `packages/tailscale-connect/main.wasm`, exposed as `@agent-wasm/tailscale-connect/main.wasm?url` | `packages/almostnode/src/network/tailscale-connect-worker.ts` | Tailscale Connect Go WASM runtime for browser network sessions. |
 | `brotli_wasm_bg.wasm` | `apps/web-ide/node_modules/brotli-wasm/pkg.web/brotli_wasm_bg.wasm` | `packages/almostnode/src/shims/zlib.ts` via lazy `import("brotli-wasm")` | Brotli compression/decompression for the browser `zlib` shim. |
 | `esbuild.wasm` | CDN URL from `packages/almostnode/src/config/cdn.ts` (`https://unpkg.com/esbuild-wasm@.../esbuild.wasm`) | `packages/almostnode/src/transform.ts`, framework dev servers, and `packages/almostnode/src/shims/esbuild.ts` | Browser TypeScript/JSX transform and npm module bundling support. |
 

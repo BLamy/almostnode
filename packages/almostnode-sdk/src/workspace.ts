@@ -122,6 +122,16 @@ export interface WorkspaceController {
   readFile: (path: string) => string;
   writeFile: (path: string, content: string) => void;
   listFiles: (root?: string) => string[];
+  /** Create a new empty (or seeded) file. Throws if the path already exists. */
+  createFile: (path: string, content?: string) => void;
+  /** Create a new directory (recursively). Throws if the path already exists. */
+  createDirectory: (path: string) => void;
+  /** Rename/move a file or directory subtree. Throws if the target exists. */
+  rename: (oldPath: string, newPath: string) => void;
+  /** Delete a file, or a directory and all of its contents. */
+  remove: (path: string) => void;
+  /** Move a file or directory into another directory, keeping its base name. */
+  move: (sourcePath: string, destinationDir: string) => void;
   reseed: (template?: WorkspaceTemplate) => Promise<void>;
   destroy: () => void;
 }
@@ -470,12 +480,7 @@ class WorkspaceControllerImpl implements WorkspaceController {
     });
 
     const onVfsChange = () => {
-      if (this.persistTimer) {
-        clearTimeout(this.persistTimer);
-      }
-      this.persistTimer = setTimeout(() => {
-        void this.snapshots.save();
-      }, 300);
+      this.scheduleSave();
       this.emit();
     };
     this.vfs.on("change", onVfsChange);
@@ -513,8 +518,115 @@ class WorkspaceControllerImpl implements WorkspaceController {
     this.emit();
   }
 
+  createFile(path: string, content = ""): void {
+    if (this.vfs.existsSync(path)) {
+      throw new Error(`File already exists: ${path}`);
+    }
+    // writeFileSync creates parent directories and fires a "change" event,
+    // which triggers the controller's emit + debounced persist.
+    this.vfs.writeFileSync(path, content);
+    this.currentFile = path;
+    this.emit();
+  }
+
+  createDirectory(path: string): void {
+    if (this.vfs.existsSync(path)) {
+      throw new Error(`Path already exists: ${path}`);
+    }
+    // mkdirSync does not fire a VFS event, so persist + emit explicitly.
+    this.vfs.mkdirSync(path, { recursive: true });
+    this.scheduleSave();
+    this.emit();
+  }
+
+  rename(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) {
+      return;
+    }
+    if (!this.vfs.existsSync(oldPath)) {
+      throw new Error(`No such path: ${oldPath}`);
+    }
+    if (this.vfs.existsSync(newPath)) {
+      throw new Error(`Target already exists: ${newPath}`);
+    }
+    // renameSync handles directory subtrees but does not fire a VFS event.
+    this.vfs.renameSync(oldPath, newPath);
+    this.remapCurrentFile(oldPath, newPath);
+    this.scheduleSave();
+    this.emit();
+  }
+
+  remove(path: string): void {
+    if (!this.vfs.existsSync(path)) {
+      return;
+    }
+    if (this.vfs.statSync(path).isDirectory()) {
+      this.removeDirectoryRecursive(path);
+    } else {
+      // unlinkSync fires a "delete" event (emit + persist), but we also emit
+      // below after fixing currentFile.
+      this.vfs.unlinkSync(path);
+    }
+    this.clearCurrentFileUnder(path);
+    this.scheduleSave();
+    this.emit();
+  }
+
+  move(sourcePath: string, destinationDir: string): void {
+    const name = sourcePath.slice(sourcePath.lastIndexOf("/") + 1);
+    const target = `${destinationDir}/${name}`;
+    if (target === sourcePath) {
+      return;
+    }
+    if (
+      destinationDir === sourcePath
+      || destinationDir.startsWith(`${sourcePath}/`)
+    ) {
+      throw new Error("Cannot move a folder into itself");
+    }
+    this.rename(sourcePath, target);
+  }
+
   listFiles(root = PROJECT_ROOT): string[] {
     return collectFiles(this.vfs, root);
+  }
+
+  private scheduleSave(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+    }
+    this.persistTimer = setTimeout(() => {
+      void this.snapshots.save();
+    }, 300);
+  }
+
+  private removeDirectoryRecursive(dir: string): void {
+    for (const entry of this.vfs.readdirSync(dir) as string[]) {
+      const child = `${dir}/${entry}`;
+      if (this.vfs.statSync(child).isDirectory()) {
+        this.removeDirectoryRecursive(child);
+      } else {
+        this.vfs.unlinkSync(child);
+      }
+    }
+    this.vfs.rmdirSync(dir);
+  }
+
+  private remapCurrentFile(oldPath: string, newPath: string): void {
+    if (this.currentFile === oldPath) {
+      this.currentFile = newPath;
+    } else if (this.currentFile?.startsWith(`${oldPath}/`)) {
+      this.currentFile = `${newPath}${this.currentFile.slice(oldPath.length)}`;
+    }
+  }
+
+  private clearCurrentFileUnder(path: string): void {
+    if (
+      this.currentFile === path
+      || this.currentFile?.startsWith(`${path}/`)
+    ) {
+      this.currentFile = collectFiles(this.vfs)[0] ?? null;
+    }
   }
 
   async reseed(template = this.template): Promise<void> {

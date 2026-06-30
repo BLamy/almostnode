@@ -1,35 +1,43 @@
 {
   "name": "@agent-wasm/codex",
   "version": "0.1.0",
+  "description": "Browser-hosted Codex sessions and WASM worker bridge for agent-wasm.",
   "private": false,
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./cli-browser-worker": {
-      "types": "./src/cli-browser-worker.ts",
-      "default": "./src/cli-browser-worker.ts"
+      "types": "./dist/cli-browser-worker.d.ts",
+      "import": "./dist/cli-browser-worker.js",
+      "default": "./dist/cli-browser-worker.js"
     },
     "./app-server-browser-worker": {
-      "types": "./src/app-server-browser-worker.ts",
-      "default": "./src/app-server-browser-worker.ts"
+      "types": "./dist/app-server-browser-worker.d.ts",
+      "import": "./dist/app-server-browser-worker.js",
+      "default": "./dist/app-server-browser-worker.js"
     }
   },
   "scripts": {
-    "build": "tsc --project tsconfig.json --noEmit",
+    "build": "npm run build:js",
+    "build:js": "tsup src/index.ts src/cli-browser-worker.ts src/app-server-browser-worker.ts --tsconfig tsconfig.build.json --format esm --dts --clean --external @bokuweb/zstd-wasm && node scripts/patch-dist-worker-urls.mjs",
     "build:adapter": "node scripts/build-adapter.mjs",
+    "build:publish": "npm run build:js && npm run build:adapter",
     "smoke:adapter": "node tests/browser-wasm-smoke.mjs && node tests/app-server-browser-wasm-smoke.mjs",
     "test": "vitest run",
     "type-check": "tsc --project tsconfig.json --noEmit",
-    "check:codex-wasm": "node scripts/check-codex-wasm.mjs"
+    "check:codex-wasm": "node scripts/check-codex-wasm.mjs",
+    "prepublishOnly": "npm run test && npm run build:publish"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
+    "tsup": "^8.5.0",
     "typescript": "^5.9.3",
     "vitest": "4.0.18"
   },
@@ -38,5 +46,15 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BLamy/agent-wasm.git"
+  },
+  "sideEffects": false
 }

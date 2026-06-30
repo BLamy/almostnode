@@ -455,6 +455,33 @@ h1 {
       expect(hmrIndex).toBeLessThan(headCloseIndex);
     });
 
+    it('should keep module script entrypoints inside the virtual server prefix', async () => {
+      vfs.writeFileSync(
+        '/index.html',
+        `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test App</title>
+  <script src="/legacy.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+  <script type="module" src="https://cdn.example/app.js"></script>
+</body>
+</html>`
+      );
+
+      const response = await server.handleRequest('GET', '/', {});
+      const body = response.body.toString();
+
+      expect(body).toContain('src="/__virtual__/3000/src/main.jsx"');
+      expect(body).toContain('src="/legacy.js"');
+      expect(body).toContain('src="https://cdn.example/app.js"');
+      expect(body).not.toContain('src="/src/main.jsx"');
+    });
+
     it('should inject module scripts after import map (Firefox compat)', async () => {
       // Replace index.html with one that has an import map
       vfs.writeFileSync(
@@ -856,6 +883,23 @@ export default App;`
       expect(listener).toHaveBeenCalled();
       const update = listener.mock.calls[0][0];
       expect(update.type).toBe('update');
+    });
+
+    it('should emit full reloads for imported non-src assets', async () => {
+      const listener = vi.fn();
+      server.on('hmr-update', listener);
+
+      server.start();
+
+      vfs.mkdirSync('/docs', { recursive: true });
+      vfs.writeFileSync('/docs/brief.md', '# Updated brief');
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(listener).toHaveBeenCalled();
+      const update = listener.mock.calls[0][0];
+      expect(update.type).toBe('full-reload');
+      expect(update.path).toBe('/docs/brief.md');
     });
   });
 

@@ -182,11 +182,37 @@ class BufferPolyfill extends Uint8Array {
     return new BufferPolyfill(super.subarray(start, end));
   }
 
-  write(value: string, offset = 0, length?: number, encoding?: BufferEncoding): number {
-    const bytes = BufferPolyfill.from(value, encoding).subarray(
-      0,
-      length === undefined ? undefined : Math.max(0, length),
-    );
+  write(value: string, encoding?: BufferEncoding): number;
+  write(value: string, offset?: number, encoding?: BufferEncoding): number;
+  write(value: string, offset?: number, length?: number, encoding?: BufferEncoding): number;
+  write(
+    value: string,
+    offsetOrEncoding: number | BufferEncoding = 0,
+    lengthOrEncoding?: number | BufferEncoding,
+    encoding?: BufferEncoding,
+  ): number {
+    let offset = 0;
+    let length: number | undefined;
+    let resolvedEncoding = encoding;
+
+    if (typeof offsetOrEncoding === "string") {
+      resolvedEncoding = offsetOrEncoding;
+    } else {
+      offset = Math.trunc(offsetOrEncoding);
+      if (typeof lengthOrEncoding === "string") {
+        resolvedEncoding = lengthOrEncoding;
+      } else {
+        length = lengthOrEncoding;
+      }
+    }
+
+    if (!Number.isFinite(offset) || offset < 0 || offset > this.length) {
+      throw new RangeError("Offset is out of range");
+    }
+
+    const available = this.length - offset;
+    const requested = length === undefined ? available : Math.max(0, Math.trunc(length));
+    const bytes = BufferPolyfill.from(value, resolvedEncoding).subarray(0, Math.min(available, requested));
     this.set(bytes, offset);
     return bytes.length;
   }

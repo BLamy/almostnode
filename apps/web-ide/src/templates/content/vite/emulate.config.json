@@ -1,0 +1,49 @@
+{
+  "stripe": {
+    "port": 4009,
+    "customers": [
+      {
+        "id": "cus_vibecoder_test",
+        "email": "test@example.com",
+        "name": "Vibecoder Test Customer"
+      }
+    ],
+    "products": [
+      {
+        "id": "prod_vibecoder_desk_pad",
+        "name": "Graphite Desk Pad",
+        "description": "A low-profile mat with a smooth tracking surface and a stitched edge."
+      },
+      {
+        "id": "prod_vibecoder_task_lamp",
+        "name": "Focus Task Lamp",
+        "description": "A dimmable aluminum lamp for late-night checkout flow debugging."
+      },
+      {
+        "id": "prod_vibecoder_notebook_kit",
+        "name": "Prototype Notebook Kit",
+        "description": "Three dot-grid notebooks and a fine-tip pen for sketching product ideas."
+      }
+    ],
+    "prices": [
+      {
+        "id": "price_vibecoder_desk_pad",
+        "product_name": "Graphite Desk Pad",
+        "currency": "usd",
+        "unit_amount": 4800
+      },
+      {
+        "id": "price_vibecoder_task_lamp",
+        "product_name": "Focus Task Lamp",
+        "currency": "usd",
+        "unit_amount": 8900
+      },
+      {
+        "id": "price_vibecoder_notebook_kit",
+        "product_name": "Prototype Notebook Kit",
+        "currency": "usd",
+        "unit_amount": 3200
+      }
+    ]
+  }
+}

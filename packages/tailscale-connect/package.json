@@ -1,9 +1,27 @@
 {
   "author": "Tailscale Inc.",
-  "description": "Tailscale Connect SDK",
+  "description": "agent-wasm fork of the Tailscale Connect browser SDK.",
+  "files": [
+    "main.wasm",
+    "pkg.css",
+    "pkg.css.map",
+    "pkg.d.ts",
+    "pkg.js",
+    "README.md"
+  ],
   "license": "BSD-3-Clause",
   "main": "./pkg.js",
-  "name": "@tailscale/connect",
+  "name": "@agent-wasm/tailscale-connect",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BLamy/agent-wasm.git"
+  },
+  "sideEffects": [
+    "*.css"
+  ],
   "type": "module",
   "types": "./pkg.d.ts",
   "version": "1.39.98-t02582083d"

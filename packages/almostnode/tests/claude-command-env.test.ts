@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { createContainer } from '../src';
 
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
 describe('Claude command environment', () => {
   it('preserves HOME and USER when launching the Claude package via npx', async () => {
     const originalHome = process.env.HOME;
@@ -315,6 +324,67 @@ describe('Claude command environment', () => {
       npxExec: '1',
       stdinTty: true,
     });
+    expect(result.stderr).toBe('');
+  });
+
+  it('keeps Pi-style npx package TUIs alive for slash-command input', async () => {
+    const container = createContainer({ cwd: '/project' });
+    const packageDir = '/project/node_modules/@earendil-works/pi-coding-agent';
+
+    container.vfs.mkdirSync(`${packageDir}/dist`, { recursive: true });
+    container.vfs.writeFileSync(
+      `${packageDir}/package.json`,
+      JSON.stringify({
+        name: '@earendil-works/pi-coding-agent',
+        version: '0.0.0-test',
+        type: 'module',
+        bin: {
+          pi: './dist/cli.js',
+        },
+      }),
+    );
+    container.vfs.writeFileSync(
+      `${packageDir}/dist/cli.js`,
+      [
+        "import process from 'node:process';",
+        '',
+        "console.log('Pi ready');",
+        'process.stdin.setRawMode(true);',
+        'const onData = (chunk) => {',
+        '  const text = String(chunk);',
+        "  console.log('PI_INPUT:' + text.replace(/[\\r\\n]+/g, ''));",
+        "  if (text.includes('/login')) {",
+        "    process.stdin.off('data', onData);",
+        '    process.stdin.setRawMode(false);',
+        '  }',
+        '};',
+        "process.stdin.on('data', onData);",
+      ].join('\n'),
+    );
+
+    const output: string[] = [];
+    const session = container.createTerminalSession({ cwd: '/project' });
+    const runPromise = session.run('npx @earendil-works/pi-coding-agent', {
+      interactive: true,
+      onStdout: (chunk) => output.push(chunk),
+    });
+
+    await waitFor(() => output.join('').includes('Pi ready'));
+
+    const settledBeforeInput = await Promise.race([
+      runPromise.then(() => 'settled'),
+      new Promise<'running'>((resolve) => setTimeout(() => resolve('running'), 500)),
+    ]);
+
+    expect(settledBeforeInput).toBe('running');
+    expect(session.getState().running).toBe(true);
+
+    session.sendInput('/login\r');
+    const result = await runPromise;
+    const combined = output.join('');
+
+    expect(result.exitCode, JSON.stringify(result, null, 2)).toBe(0);
+    expect(combined).toContain('PI_INPUT:/login');
     expect(result.stderr).toBe('');
   });
 

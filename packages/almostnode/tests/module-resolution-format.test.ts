@@ -9,6 +9,16 @@ const fakeVfs = {
 } as any;
 
 describe('ModuleResolver.detectFormat', () => {
+  it('routes Rollup subpath imports to the Rollup builtin shim', () => {
+    const resolver = new ModuleResolver(new VirtualFS(), {
+      builtinModules: { rollup: {} },
+    });
+
+    expect(resolver.resolve('rollup/parseAst', '/project/src').format).toBe('builtin');
+    expect(resolver.resolve('rollup/parseAst', '/project/src').builtinId).toBe('rollup');
+    expect(resolver.resolve('@rollup/rollup-linux-x64-gnu', '/project/src').builtinId).toBe('rollup');
+  });
+
   it('does not treat import.meta inside string literals as ESM syntax', () => {
     const resolver = new ModuleResolver(fakeVfs);
     const code = `

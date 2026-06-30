@@ -11,5 +11,6 @@ export {
   useWorkspaceSnapshot,
 } from "./provider";
 
+export { FileTree, type FileTreeProps } from "./file-tree";
 export * from "./chat";
 export * from "./ui";

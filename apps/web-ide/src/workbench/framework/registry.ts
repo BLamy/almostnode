@@ -32,41 +32,102 @@ type ConditionalRegistration = {
   dispose: IDisposable | null;
 };
 
+const runtimeEntrypoints: WorkbenchEntrypoint[] = [];
+
 export interface RegisteredWorkbenchEntrypoints {
   createEditorInput(id: string): SimpleEditorInput;
   viewIds: Record<string, string>;
   setActivation(id: string, active: boolean): void;
+  registerPanel(entrypoint: WorkbenchViewEntrypoint): IDisposable;
+  registerCustomEditor(entrypoint: WorkbenchEditorEntrypoint): IDisposable;
   dispose(): void;
+}
+
+export interface RegisterWorkbenchEntrypointsOptions {
+  entrypoints?: WorkbenchEntrypoint[];
 }
 
 export function getWorkbenchEntrypoint(
   id: string,
 ): WorkbenchEntrypoint | undefined {
-  return discoveredEntrypoints.find((entrypoint) => entrypoint.id === id);
+  return getAllWorkbenchEntrypoints().find((entrypoint) => entrypoint.id === id);
+}
+
+export function registerPanel(entrypoint: WorkbenchViewEntrypoint): IDisposable {
+  runtimeEntrypoints.push(entrypoint);
+  return {
+    dispose: () => {
+      const index = runtimeEntrypoints.indexOf(entrypoint);
+      if (index >= 0) {
+        runtimeEntrypoints.splice(index, 1);
+      }
+    },
+  };
+}
+
+export function registerCustomEditor(entrypoint: WorkbenchEditorEntrypoint): IDisposable {
+  runtimeEntrypoints.push(entrypoint);
+  return {
+    dispose: () => {
+      const index = runtimeEntrypoints.indexOf(entrypoint);
+      if (index >= 0) {
+        runtimeEntrypoints.splice(index, 1);
+      }
+    },
+  };
 }
 
 export function registerWorkbenchEntrypoints(
   context: WorkbenchMountContext,
+  options: RegisterWorkbenchEntrypointsOptions = {},
 ): RegisteredWorkbenchEntrypoints {
-  validateWorkbenchEntrypoints(discoveredEntrypoints);
+  const entrypoints = getAllWorkbenchEntrypoints(options.entrypoints);
+  validateWorkbenchEntrypoints(entrypoints);
 
   const disposables = new DisposableStore();
   const conditionalRegistrations = new Map<string, ConditionalRegistration>();
   const editorInputFactories: Record<string, () => SimpleEditorInput> = {};
   const viewIds: Record<string, string> = {};
 
-  for (const entrypoint of discoveredEntrypoints) {
+  const registerEntrypoint = (
+    entrypoint: WorkbenchEntrypoint,
+    targetDisposables: DisposableStore = disposables,
+  ): IDisposable => {
     if (entrypoint.kind === "editor") {
-      const createInput = registerWorkbenchEditor(entrypoint, context, disposables);
+      const editorRegistrationDisposables = targetDisposables === disposables
+        ? disposables
+        : new DisposableStore();
+      const createInput = registerWorkbenchEditor(entrypoint, context, editorRegistrationDisposables);
       editorInputFactories[entrypoint.id] = createInput;
-      continue;
+      if (targetDisposables !== disposables) {
+        const dynamicDisposable = {
+          dispose: () => {
+            delete editorInputFactories[entrypoint.id];
+            editorRegistrationDisposables.dispose();
+          },
+        };
+        targetDisposables.add(dynamicDisposable);
+        return dynamicDisposable;
+      }
+      return {
+        dispose: () => {
+          delete editorInputFactories[entrypoint.id];
+        },
+      };
     }
 
     viewIds[entrypoint.id] = entrypoint.id;
     const activation = entrypoint.activation ?? "eager";
     if (activation === "eager") {
-      disposables.add(registerWorkbenchView(entrypoint, context));
-      continue;
+      const viewDisposable = registerWorkbenchView(entrypoint, context);
+      const disposable = {
+        dispose: () => {
+          delete viewIds[entrypoint.id];
+          viewDisposable.dispose();
+        },
+      };
+      targetDisposables.add(disposable);
+      return disposable;
     }
 
     const initial = activation.initial === true;
@@ -74,6 +135,20 @@ export function registerWorkbenchEntrypoints(
       entrypoint,
       dispose: initial ? registerWorkbenchView(entrypoint, context) : null,
     });
+    const disposable = {
+      dispose: () => {
+        const record = conditionalRegistrations.get(entrypoint.id);
+        record?.dispose?.dispose();
+        conditionalRegistrations.delete(entrypoint.id);
+        delete viewIds[entrypoint.id];
+      },
+    };
+    targetDisposables.add(disposable);
+    return disposable;
+  };
+
+  for (const entrypoint of entrypoints) {
+    registerEntrypoint(entrypoint);
   }
 
   return {
@@ -101,6 +176,26 @@ export function registerWorkbenchEntrypoints(
       record.dispose?.dispose();
       record.dispose = null;
     },
+    registerPanel(entrypoint: WorkbenchViewEntrypoint): IDisposable {
+      validateWorkbenchEntrypoints([entrypoint]);
+      const dynamicDisposables = new DisposableStore();
+      registerEntrypoint(entrypoint, dynamicDisposables);
+      return {
+        dispose: () => {
+          dynamicDisposables.dispose();
+        },
+      };
+    },
+    registerCustomEditor(entrypoint: WorkbenchEditorEntrypoint): IDisposable {
+      validateWorkbenchEntrypoints([entrypoint]);
+      const dynamicDisposables = new DisposableStore();
+      registerEntrypoint(entrypoint, dynamicDisposables);
+      return {
+        dispose: () => {
+          dynamicDisposables.dispose();
+        },
+      };
+    },
     dispose: () => {
       for (const record of conditionalRegistrations.values()) {
         record.dispose?.dispose();
@@ -108,6 +203,16 @@ export function registerWorkbenchEntrypoints(
       disposables.dispose();
     },
   };
+}
+
+function getAllWorkbenchEntrypoints(
+  extraEntrypoints: WorkbenchEntrypoint[] = [],
+): WorkbenchEntrypoint[] {
+  return [
+    ...discoveredEntrypoints,
+    ...runtimeEntrypoints,
+    ...extraEntrypoints,
+  ];
 }
 
 function registerWorkbenchView(

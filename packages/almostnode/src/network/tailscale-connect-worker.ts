@@ -1,8 +1,8 @@
 import type {
   TailscaleConnectIPN,
   TailscaleConnectStateStorage,
-} from '@tailscale/connect';
-import tailscaleWasmUrl from '@tailscale/connect/main.wasm?url';
+} from '@agent-wasm/tailscale-connect';
+import tailscaleWasmUrl from '@agent-wasm/tailscale-connect/main.wasm?url';
 import { almostnodeDebugError, almostnodeDebugLog, almostnodeDebugWarn } from '../utils/debug';
 import { NETWORK_DIAGNOSTIC_FAILURE_BUCKETS } from './types';
 import type {
@@ -127,7 +127,7 @@ let ipnStartPromise: Promise<void> | null = null;
 let ipnGeneration = 0;
 let ipnResetCount = 0;
 let lastRuntimeResetReason: string | null = null;
-let tailscaleConnectModulePromise: Promise<typeof import('@tailscale/connect')> | null = null;
+let tailscaleConnectModulePromise: Promise<typeof import('@agent-wasm/tailscale-connect')> | null = null;
 let state: TailscaleConnectState = 'NoState';
 let netMap: TailscaleConnectNetMap | null = null;
 let loginUrl: string | null = null;
@@ -823,7 +823,7 @@ function isRealNodeProcess(value: unknown): boolean {
     && typeof processLike.versions?.node === 'string';
 }
 
-async function loadTailscaleConnectModule(): Promise<typeof import('@tailscale/connect')> {
+async function loadTailscaleConnectModule(): Promise<typeof import('@agent-wasm/tailscale-connect')> {
   if (!tailscaleConnectModulePromise) {
     tailscaleConnectModulePromise = (async () => {
       // The Tailscale bundle treats any navigator-bearing environment as a
@@ -840,7 +840,7 @@ async function loadTailscaleConnectModule(): Promise<typeof import('@tailscale/c
       const restoreFs = overrideGlobalProperty('fs', undefined);
       const restorePath = overrideGlobalProperty('path', undefined);
       try {
-        return await import('@tailscale/connect');
+        return await import('@agent-wasm/tailscale-connect');
       } finally {
         restoreNavigator();
         restoreProcess();
@@ -1841,7 +1841,7 @@ function toTailscaleWorkerErrorPayload(
 
 function getMinimalRuntimeFetchError(): string {
   return (
-    'The bundled @tailscale/connect runtime only supports simple GET requests ' +
+    'The bundled @agent-wasm/tailscale-connect runtime only supports simple GET requests ' +
     'without custom headers, bodies, or redirect overrides.'
   );
 }

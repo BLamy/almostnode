@@ -15,4 +15,19 @@ describe("web-ide node buffer shim", () => {
     expect(buffer.copy(copy, 0, 0, 4)).toBe(4);
     expect(copy.toString("utf8")).toBe("DIRC");
   });
+
+  it("supports Buffer.write overloads with encoding as the second argument", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const buffer = Buffer.alloc(20);
+
+    expect(buffer.write(sha, "hex")).toBe(20);
+    expect(buffer.toString("hex")).toBe(sha);
+  });
+
+  it("caps Buffer.write to the available target length", () => {
+    const buffer = Buffer.alloc(4);
+
+    expect(buffer.write("abcdef", 2, "utf8")).toBe(2);
+    expect(buffer.toString("utf8")).toBe("\0\0ab");
+  });
 });

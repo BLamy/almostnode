@@ -1,6 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import "./workbench.css";
 import type {
   AgentBrowserEnv,
   WorkspaceController,
@@ -11,8 +12,10 @@ import React, {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
+import { FileTree } from "./file-tree";
 
 const WorkspaceContext = createContext<WorkspaceController | null>(null);
 
@@ -48,6 +51,11 @@ export function EditorPane(): React.ReactElement {
   const snapshot = useWorkspaceSnapshot();
   const currentFile = snapshot.currentFile;
   const currentValue = currentFile ? workspace.readFile(currentFile) : "";
+  const highlightedSource = useMemo(
+    () => highlightSource(currentFile ?? "", currentValue),
+    [currentFile, currentValue],
+  );
+  const [scroll, setScroll] = useState({ left: 0, top: 0 });
 
   return (
     <section style={paneStyle}>
@@ -55,32 +63,37 @@ export function EditorPane(): React.ReactElement {
         <strong>Editor</strong>
         <span style={captionStyle}>{currentFile || "No file selected"}</span>
       </header>
-      <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", minHeight: 0, flex: 1 }}>
-        <div style={sidebarStyle}>
-          {snapshot.files.map((filePath) => (
-            <button
-              key={filePath}
-              onClick={() => workspace.setCurrentFile(filePath)}
+      <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", minHeight: 0, flex: 1 }}>
+        <div style={{ minHeight: 0, borderRight: "1px solid rgba(148,163,184,.3)" }}>
+          <FileTree />
+        </div>
+        <div className="aw-source-editor" data-agent-wasm-editor="source">
+          <pre aria-hidden="true" className="aw-source-editor__highlight">
+            <code
               style={{
-                ...fileButtonStyle,
-                background: filePath === currentFile ? "#dbeafe" : "transparent",
-                color: filePath === currentFile ? "#0f172a" : "#1e293b",
+                transform: `translate(${-scroll.left}px, ${-scroll.top}px)`,
               }}
             >
-              {filePath.replace("/project/", "")}
-            </button>
-          ))}
+              {highlightedSource}
+            </code>
+          </pre>
+          <textarea
+            aria-label={currentFile ? `Edit ${currentFile}` : "Edit file"}
+            className="aw-source-editor__textarea"
+            value={currentValue}
+            onChange={(event) => {
+              if (currentFile) {
+                workspace.writeFile(currentFile, event.target.value);
+              }
+            }}
+            onScroll={(event) => {
+              const target = event.currentTarget;
+              setScroll({ left: target.scrollLeft, top: target.scrollTop });
+            }}
+            wrap="off"
+            spellCheck={false}
+          />
         </div>
-        <textarea
-          value={currentValue}
-          onChange={(event) => {
-            if (currentFile) {
-              workspace.writeFile(currentFile, event.target.value);
-            }
-          }}
-          spellCheck={false}
-          style={editorStyle}
-        />
       </div>
     </section>
   );
@@ -91,6 +104,11 @@ export function PreviewPane(
 ): React.ReactElement {
   const workspace = useWorkspace();
   const snapshot = useWorkspaceSnapshot();
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const previewPort = useMemo(
+    () => getVirtualPreviewPort(snapshot.preview.url),
+    [snapshot.preview.url],
+  );
 
   useEffect(() => {
     if (!props.autoStart || snapshot.preview.status !== "idle") {
@@ -98,6 +116,28 @@ export function PreviewPane(
     }
     void workspace.preview.start();
   }, [props.autoStart, snapshot.preview.status, workspace]);
+
+  useEffect(() => {
+    if (!previewPort) {
+      return;
+    }
+    const iframe = iframeRef.current;
+    if (!iframe) {
+      return;
+    }
+
+    const bindHmrTarget = () => {
+      workspace.container.setHMRTargetForPort(previewPort, iframe.contentWindow);
+    };
+
+    bindHmrTarget();
+    iframe.addEventListener("load", bindHmrTarget);
+
+    return () => {
+      iframe.removeEventListener("load", bindHmrTarget);
+      workspace.container.setHMRTargetForPort(previewPort, null);
+    };
+  }, [previewPort, snapshot.preview.url, workspace]);
 
   return (
     <section style={paneStyle}>
@@ -112,6 +152,7 @@ export function PreviewPane(
       <div style={{ flex: 1, minHeight: 0, background: "#0f172a" }}>
         {snapshot.preview.url ? (
           <iframe
+            ref={iframeRef}
             src={snapshot.preview.url}
             title="Workspace preview"
             style={{ width: "100%", height: "100%", border: "none" }}
@@ -129,9 +170,40 @@ export function PreviewPane(
   );
 }
 
-export function TerminalPane(): React.ReactElement {
+function getVirtualPreviewPort(url: string | null): number | null {
+  if (!url) {
+    return null;
+  }
+  try {
+    const baseUrl = typeof window === "undefined" ? "http://localhost/" : window.location.href;
+    const pathname = new URL(url, baseUrl).pathname;
+    const match = pathname.match(/\/__virtual__\/(\d+)(?:\/|$)/);
+    if (!match) {
+      return null;
+    }
+    const port = Number(match[1]);
+    return Number.isFinite(port) ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface TerminalPaneProps {
+  cwd?: string;
+  env?: Record<string, string>;
+  initialCommand?: string;
+  initialCommandDelayMs?: number;
+}
+
+export function TerminalPane(
+  props: TerminalPaneProps = {},
+): React.ReactElement {
   const workspace = useWorkspace();
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const cwd = props.cwd ?? "/project";
+  const env = props.env;
+  const initialCommand = props.initialCommand?.trim() ?? "";
+  const initialCommandDelayMs = props.initialCommandDelayMs ?? 0;
 
   useEffect(() => {
     if (!hostRef.current) {
@@ -151,9 +223,11 @@ export function TerminalPane(): React.ReactElement {
     terminal.loadAddon(fitAddon);
     terminal.open(hostRef.current);
 
-    const session = workspace.terminals.createSession({ cwd: "/project" });
+    const session = workspace.terminals.createSession({ cwd, env });
     let buffer = "";
     let running = false;
+    let disposed = false;
+    let initialCommandTimer: number | null = null;
 
     const renderPrompt = () => {
       const cwd = session.session.getState().cwd.replace("/project", "~");
@@ -169,11 +243,51 @@ export function TerminalPane(): React.ReactElement {
       session.session.resize(terminal.cols, terminal.rows);
     };
 
+    const runCommand = async (command: string) => {
+      running = true;
+      try {
+        await session.session.run(command, {
+          interactive: true,
+          onStdout: printChunk,
+          onStderr: printChunk,
+        });
+      } catch (caught) {
+        if (!disposed) {
+          const message = caught instanceof Error ? caught.message : String(caught);
+          printChunk(`\n${message}\n`);
+        }
+      } finally {
+        running = false;
+        if (!disposed) {
+          renderPrompt();
+        }
+      }
+    };
+
     const resizeObserver = new ResizeObserver(onResize);
     resizeObserver.observe(hostRef.current);
     onResize();
     terminal.write("almostnode terminal");
     renderPrompt();
+
+    if (initialCommand) {
+      const startInitialCommand = () => {
+        if (disposed || running) {
+          return;
+        }
+        terminal.write(initialCommand);
+        terminal.write("\r\n");
+        void runCommand(initialCommand);
+      };
+      if (initialCommandDelayMs > 0) {
+        initialCommandTimer = window.setTimeout(
+          startInitialCommand,
+          initialCommandDelayMs,
+        );
+      } else {
+        startInitialCommand();
+      }
+    }
 
     const disposable = terminal.onData(async (data) => {
       if (running) {
@@ -192,17 +306,7 @@ export function TerminalPane(): React.ReactElement {
           renderPrompt();
           return;
         }
-        running = true;
-        try {
-          await session.session.run(command, {
-            interactive: true,
-            onStdout: printChunk,
-            onStderr: printChunk,
-          });
-        } finally {
-          running = false;
-          renderPrompt();
-        }
+        await runCommand(command);
         return;
       }
       if (data === "\u007f") {
@@ -219,12 +323,16 @@ export function TerminalPane(): React.ReactElement {
     });
 
     return () => {
+      disposed = true;
+      if (initialCommandTimer !== null) {
+        window.clearTimeout(initialCommandTimer);
+      }
       disposable.dispose();
       resizeObserver.disconnect();
       session.dispose();
       terminal.dispose();
     };
-  }, [workspace]);
+  }, [cwd, env, initialCommand, initialCommandDelayMs, workspace]);
 
   return (
     <section style={paneStyle}>
@@ -265,7 +373,7 @@ export function AgentPanel(
     void workspace.agents.mount(adapterId, {
       element: mountRoot,
       browserEnv: props.browserEnv,
-      storage: window.localStorage,
+      storage: getBrowserStorage(),
     }).then((mounted) => {
       if (disposed) {
         mounted.dispose();
@@ -294,6 +402,17 @@ export function AgentPanel(
   );
 }
 
+function getBrowserStorage(): Storage | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 const paneStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -320,38 +439,6 @@ const captionStyle: React.CSSProperties = {
   color: "#475569",
 };
 
-const sidebarStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: "4px",
-  padding: "10px",
-  borderRight: "1px solid rgba(148,163,184,.3)",
-  overflow: "auto",
-};
-
-const fileButtonStyle: React.CSSProperties = {
-  border: "none",
-  borderRadius: "10px",
-  padding: "8px 10px",
-  textAlign: "left",
-  cursor: "pointer",
-  fontSize: "13px",
-};
-
-const editorStyle: React.CSSProperties = {
-  border: "none",
-  outline: "none",
-  resize: "none",
-  padding: "16px",
-  minHeight: 0,
-  width: "100%",
-  height: "100%",
-  fontFamily: "ui-monospace, SFMono-Regular, monospace",
-  fontSize: "13px",
-  lineHeight: 1.5,
-  background: "#ffffff",
-};
-
 const emptyStateStyle: React.CSSProperties = {
   display: "grid",
   placeItems: "center",
@@ -366,3 +453,206 @@ const preStyle: React.CSSProperties = {
   whiteSpace: "pre-wrap",
   textAlign: "left",
 };
+
+const KEYWORDS = new Set([
+  "async",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "default",
+  "do",
+  "else",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "from",
+  "function",
+  "if",
+  "import",
+  "in",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "return",
+  "switch",
+  "throw",
+  "true",
+  "try",
+  "type",
+  "undefined",
+  "var",
+  "while",
+]);
+
+function highlightSource(path: string, source: string): React.ReactNode[] {
+  const language = languageFromPath(path);
+  const lines = source.split("\n");
+  const nodes: React.ReactNode[] = [];
+  lines.forEach((line, lineIndex) => {
+    nodes.push(...highlightLine(line, language, `${lineIndex}`));
+    if (lineIndex < lines.length - 1) {
+      nodes.push("\n");
+    }
+  });
+  return nodes.length ? nodes : [" "];
+}
+
+function languageFromPath(path: string): "css" | "html" | "json" | "md" | "ts" {
+  if (path.endsWith(".css")) return "css";
+  if (path.endsWith(".html")) return "html";
+  if (path.endsWith(".json")) return "json";
+  if (path.endsWith(".md") || path.endsWith(".mdx")) return "md";
+  return "ts";
+}
+
+function highlightLine(
+  line: string,
+  language: "css" | "html" | "json" | "md" | "ts",
+  keyPrefix: string,
+): React.ReactNode[] {
+  if (language === "html") {
+    return highlightWithPattern(
+      line,
+      keyPrefix,
+      /(<\/?[\w-]+|<\/|\/?>|[\w-]+(?==)|"[^"]*"|'[^']*')/g,
+    );
+  }
+  if (language === "css") {
+    return highlightWithPattern(
+      line,
+      keyPrefix,
+      /(\/\*.*?\*\/|[.#]?[\w-]+(?=\s*\{)|[\w-]+(?=\s*:)|#[0-9a-fA-F]{3,8}|-?\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%)?|"[^"]*"|'[^']*')/g,
+    );
+  }
+  if (language === "md") {
+    return highlightWithPattern(
+      line,
+      keyPrefix,
+      /(^#{1,6}\s.*|^\s*[-*+]\s+|^>\s.*|`[^`]*`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g,
+    );
+  }
+  return highlightJavaScriptLike(line, language, keyPrefix);
+}
+
+function highlightWithPattern(
+  line: string,
+  keyPrefix: string,
+  pattern: RegExp,
+): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(line))) {
+    if (match.index > cursor) {
+      nodes.push(line.slice(cursor, match.index));
+    }
+    const value = match[0];
+    nodes.push(
+      <span className={classForPatternToken(value)} key={`${keyPrefix}-${match.index}`}>
+        {value}
+      </span>,
+    );
+    cursor = match.index + value.length;
+  }
+  if (cursor < line.length) {
+    nodes.push(line.slice(cursor));
+  }
+  return nodes.length ? nodes : [line || " "];
+}
+
+function classForPatternToken(value: string): string {
+  if (/^#{1,6}\s/.test(value) || /^\s*[-*+]\s+/.test(value) || /^>\s/.test(value)) {
+    return "aw-token-keyword";
+  }
+  if (value.startsWith("`")) return "aw-token-string";
+  if (value.startsWith("**")) return "aw-token-property";
+  if (value.startsWith("[") && value.includes("](")) return "aw-token-function";
+  if (value.startsWith("\"") || value.startsWith("'")) return "aw-token-string";
+  if (value.startsWith("#") || /^\d/.test(value)) return "aw-token-number";
+  if (value.startsWith("<") || value === ">" || value === "/>") return "aw-token-keyword";
+  if (value.startsWith(".") || value.startsWith("#")) return "aw-token-function";
+  return "aw-token-property";
+}
+
+function highlightJavaScriptLike(
+  line: string,
+  language: "json" | "ts",
+  keyPrefix: string,
+): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  let tokenIndex = 0;
+
+  const pushToken = (className: string, value: string) => {
+    nodes.push(
+      <span className={className} key={`${keyPrefix}-${tokenIndex++}`}>
+        {value}
+      </span>,
+    );
+  };
+
+  while (cursor < line.length) {
+    const rest = line.slice(cursor);
+    if (rest.startsWith("//")) {
+      pushToken("aw-token-comment", rest);
+      break;
+    }
+    const quote = line[cursor];
+    if (quote === "\"" || quote === "'" || quote === "`") {
+      let end = cursor + 1;
+      while (end < line.length) {
+        if (line[end] === "\\") {
+          end += 2;
+          continue;
+        }
+        if (line[end] === quote) {
+          end += 1;
+          break;
+        }
+        end += 1;
+      }
+      const value = line.slice(cursor, end);
+      const className =
+        language === "json" && /^\s*:/.test(line.slice(end))
+          ? "aw-token-property"
+          : "aw-token-string";
+      pushToken(className, value);
+      cursor = end;
+      continue;
+    }
+
+    const numberMatch = /^-?\d+(?:\.\d+)?/.exec(rest);
+    if (numberMatch) {
+      pushToken("aw-token-number", numberMatch[0]);
+      cursor += numberMatch[0].length;
+      continue;
+    }
+
+    const wordMatch = /^[A-Za-z_$][\w$]*/.exec(rest);
+    if (wordMatch) {
+      const value = wordMatch[0];
+      const after = line.slice(cursor + value.length);
+      if (KEYWORDS.has(value)) {
+        pushToken("aw-token-keyword", value);
+      } else if (/^\s*\(/.test(after)) {
+        pushToken("aw-token-function", value);
+      } else {
+        nodes.push(value);
+      }
+      cursor += value.length;
+      continue;
+    }
+
+    nodes.push(line[cursor]);
+    cursor += 1;
+  }
+
+  return nodes.length ? nodes : [line || " "];
+}

@@ -70,8 +70,10 @@ export interface InitServiceWorkerOptions {
    */
   swUrl?: string;
   /**
-   * Reload the page the first time the service worker controls it so static
-   * hosts can attach COOP/COEP headers to the navigation response.
+   * Reload the page the first time the service worker takes control.
+   * This is useful for static hosts that need the service worker to inject
+   * navigation-level isolation headers, but command-time module imports must
+   * opt out so the running process is not destroyed.
    * @default true
    */
   reloadOnFirstControl?: boolean;
@@ -334,12 +336,10 @@ export class ServerBridge extends EventEmitter {
     // If this is the first time the SW controls this page, reload so the SW can
     // inject COOP/COEP headers on the navigation response (needed for static hosts
     // like GitHub Pages that can't set custom headers)
-    if (!sessionStorage.getItem('__almostnode_sw_init')) {
+    if ((options?.reloadOnFirstControl ?? true) && !sessionStorage.getItem('__almostnode_sw_init')) {
       sessionStorage.setItem('__almostnode_sw_init', '1');
-      if (options?.reloadOnFirstControl ?? true) {
-        window.location.reload();
-        return;
-      }
+      window.location.reload();
+      return;
     }
 
     // Re-establish communication when the SW loses its port (idle termination)

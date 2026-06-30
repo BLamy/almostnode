@@ -38,6 +38,14 @@ export function format(fmt: string, ...args: unknown[]): string {
   });
 }
 
+export function formatWithOptions(
+  _inspectOptions: { depth?: number; colors?: boolean } | undefined,
+  fmt: unknown,
+  ...args: unknown[]
+): string {
+  return format(fmt as string, ...args);
+}
+
 export function inspect(obj: unknown, options?: { depth?: number; colors?: boolean }): string {
   const seen = new WeakSet();
   const depth = options?.depth ?? 2;
@@ -524,6 +532,7 @@ export const TextDecoder = globalThis.TextDecoder;
 
 export default {
   format,
+  formatWithOptions,
   inspect,
   inherits,
   deprecate,

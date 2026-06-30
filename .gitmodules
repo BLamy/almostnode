@@ -25,3 +25,6 @@
 	path = vendor/headscale
 	url = git@github.com:BLamy/headscale.git
 	branch = almostnode-browser-ts2021
+[submodule "vendor/emulate"]
+	path = vendor/emulate
+	url = git@github.com:BLamy/emulate.git

@@ -1,28 +1,35 @@
 {
   "name": "@agent-wasm/keychain",
   "version": "0.1.0",
+  "description": "Browser credential vault, OAuth orchestration, and session persistence for agent-wasm.",
   "private": false,
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
     },
     "./oauth": {
-      "types": "./src/oauth-services/index.ts",
-      "default": "./src/oauth-services/index.ts"
+      "types": "./dist/oauth-services/index.d.ts",
+      "import": "./dist/oauth-services/index.js",
+      "require": "./dist/oauth-services/index.cjs",
+      "default": "./dist/oauth-services/index.js"
     },
     "./oauth/*": {
-      "types": "./src/oauth-services/*.ts",
-      "default": "./src/oauth-services/*.ts"
+      "types": "./dist/oauth-services/*.d.ts",
+      "import": "./dist/oauth-services/*.js",
+      "require": "./dist/oauth-services/*.cjs",
+      "default": "./dist/oauth-services/*.js"
     }
   },
   "scripts": {
     "build": "tsup src/index.ts src/oauth-services/index.ts src/oauth-services/*.ts --tsconfig tsconfig.build.json --format esm,cjs --dts --clean --external @agent-wasm/core",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "type-check": "tsc --project tsconfig.json --noEmit",
     "prepublishOnly": "npm run build"
   },
@@ -43,33 +50,9 @@
   "sideEffects": false,
   "files": [
     "dist",
-    "src",
     "README.md"
   ],
   "publishConfig": {
-    "access": "public",
-    "main": "./dist/index.cjs",
-    "module": "./dist/index.js",
-    "types": "./dist/index.d.ts",
-    "exports": {
-      ".": {
-        "types": "./dist/index.d.ts",
-        "import": "./dist/index.js",
-        "require": "./dist/index.cjs",
-        "default": "./dist/index.js"
-      },
-      "./oauth": {
-        "types": "./dist/oauth-services/index.d.ts",
-        "import": "./dist/oauth-services/index.js",
-        "require": "./dist/oauth-services/index.cjs",
-        "default": "./dist/oauth-services/index.js"
-      },
-      "./oauth/*": {
-        "types": "./dist/oauth-services/*.d.ts",
-        "import": "./dist/oauth-services/*.js",
-        "require": "./dist/oauth-services/*.cjs",
-        "default": "./dist/oauth-services/*.js"
-      }
-    }
+    "access": "public"
   }
 }

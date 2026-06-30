@@ -20,22 +20,20 @@ const saveBtn = document.getElementById('saveBtn') as HTMLButtonElement;
 
 // File contents
 const files: Record<string, string> = {
-  'utils.js': `function capitalize(str) {
+  'utils.js': `export function capitalize(str) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
-function sum(a, b) {
+export function sum(a, b) {
   return a + b;
 }
 
-function contains(str, word) {
+export function contains(str, word) {
   return str.includes(word);
 }
-
-module.exports = { capitalize, sum, contains };
 `,
-  'utils.test.js': `const { describe, it, expect } = require('vitest');
-const { capitalize, sum, contains } = require('./utils');
+  'utils.test.js': `import { describe, it, expect } from 'vitest';
+import { capitalize, sum, contains } from './utils.js';
 
 describe('capitalize', () => {
   it('capitalizes the first letter', () => {
@@ -124,6 +122,7 @@ const term = new Terminal({
 const fitAddon = new FitAddon();
 term.loadAddon(fitAddon);
 term.open(terminalEl);
+terminalEl.addEventListener('pointerdown', () => term.focus());
 
 // Fit terminal after a frame to ensure container has dimensions
 requestAnimationFrame(() => fitAddon.fit());

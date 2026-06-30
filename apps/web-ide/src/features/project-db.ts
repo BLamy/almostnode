@@ -229,6 +229,15 @@ const STORE_PROJECT_FILES_BACKUP_V4 = 'project-files-backup-v4';
 
 export const REPO_DEFAULT_BRANCH = 'main';
 
+const REQUIRED_STORES = [
+  STORE_PROJECTS,
+  STORE_PROJECT_FILES,
+  STORE_PROJECT_AGENT_STATE,
+  STORE_RESUMABLE_THREADS,
+  STORE_APP_BUILDING_CONFIG,
+  STORE_APP_BUILDING_JOBS,
+] as const;
+
 function isMissingStoreError(error: unknown): boolean {
   if (
     typeof DOMException !== 'undefined'
@@ -248,9 +257,34 @@ function isMissingStoreError(error: unknown): boolean {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function openDB(): Promise<IDBDatabase> {
+function isVersionDowngradeError(error: unknown): boolean {
+  if (
+    typeof DOMException !== 'undefined'
+    && error instanceof DOMException
+    && error.name === 'VersionError'
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('less than the existing version')
+    || message.includes('VersionError')
+  );
+}
+
+function ensureRequiredStores(db: IDBDatabase): void {
+  const missing = REQUIRED_STORES.filter((store) => !db.objectStoreNames.contains(store));
+  if (missing.length > 0) {
+    throw new Error(`Missing store: ${missing.join(', ')}`);
+  }
+}
+
+function openDBAtVersion(version?: number): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = version === undefined
+      ? indexedDB.open(DB_NAME)
+      : indexedDB.open(DB_NAME, version);
 
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -324,7 +358,15 @@ function openDB(): Promise<IDBDatabase> {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      try {
+        ensureRequiredStores(request.result);
+        resolve(request.result);
+      } catch (error) {
+        request.result.close();
+        reject(error);
+      }
+    };
     request.onerror = () => reject(request.error);
   });
 }
@@ -352,6 +394,17 @@ function backupProjectFilesStore(tx: IDBTransaction): void {
       backup.put(record);
     }
   };
+}
+
+async function openDB(): Promise<IDBDatabase> {
+  try {
+    return await openDBAtVersion(DB_VERSION);
+  } catch (error) {
+    if (!isVersionDowngradeError(error)) {
+      throw error;
+    }
+    return openDBAtVersion();
+  }
 }
 
 function txGet<T>(db: IDBDatabase, store: string, key: IDBValidKey): Promise<T | undefined> {

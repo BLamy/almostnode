@@ -87,12 +87,13 @@ export class ModuleResolver {
       ? specifier.slice(5)
       : specifier;
 
-    if (this.isBuiltin(normalizedSpecifier)) {
+    const builtinId = this.getBuiltinId(normalizedSpecifier);
+    if (builtinId) {
       return {
-        id: `builtin:${normalizedSpecifier}`,
-        resolvedPath: normalizedSpecifier,
+        id: `builtin:${builtinId}`,
+        resolvedPath: builtinId,
         format: 'builtin',
-        builtinId: normalizedSpecifier,
+        builtinId,
       };
     }
 
@@ -169,8 +170,20 @@ export class ModuleResolver {
     return 'cjs';
   }
 
-  private isBuiltin(specifier: string): boolean {
-    return specifier in this.builtinModules || DEFAULT_BUILTINS.has(specifier);
+  private getBuiltinId(specifier: string): string | null {
+    if (
+      specifier === 'rollup'
+      || specifier.startsWith('rollup/')
+      || specifier.startsWith('@rollup/')
+    ) {
+      return 'rollup';
+    }
+
+    if (specifier in this.builtinModules || DEFAULT_BUILTINS.has(specifier)) {
+      return specifier;
+    }
+
+    return null;
   }
 
   private resolvePackageImport(specifier: string, fromDir: string): string | null {

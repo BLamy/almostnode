@@ -1,4 +1,4 @@
-import type { TailscaleConnectStateStorage } from '@tailscale/connect';
+import type { TailscaleConnectStateStorage } from '@agent-wasm/tailscale-connect';
 
 export const TAILSCALE_SESSION_STORAGE_KEY = '__almostnodeTailscaleState';
 

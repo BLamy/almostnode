@@ -1,0 +1,76 @@
+.aw-source-editor {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.aw-source-editor__highlight,
+.aw-source-editor__textarea {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.aw-source-editor__highlight {
+  pointer-events: none;
+  overflow: hidden;
+  color: #111827;
+}
+
+.aw-source-editor__highlight code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  transform-origin: top left;
+}
+
+.aw-source-editor__textarea {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  outline: none;
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: #0f172a;
+}
+
+.aw-source-editor__textarea::selection {
+  background: rgb(59 130 246 / 0.26);
+  color: transparent;
+}
+
+.aw-token-keyword {
+  color: #2563eb;
+}
+
+.aw-token-string {
+  color: #15803d;
+}
+
+.aw-token-number {
+  color: #b45309;
+}
+
+.aw-token-comment {
+  color: #64748b;
+  font-style: italic;
+}
+
+.aw-token-function {
+  color: #7c3aed;
+}
+
+.aw-token-property {
+  color: #dc2626;
+}

@@ -1,32 +1,27 @@
-> **Note (2026-06):** the `codex-cli-wasm` and `codex-app-server-wasm` packages have been
-> consolidated into **`@agent-wasm/codex`** (`packages/codex-wasm`). Package/path names
-> below refer to the historical layout; the browser worker entrypoints are now
-> `@agent-wasm/codex/cli-browser-worker` and `@agent-wasm/codex/app-server-browser-worker`.
-
 # Codex CLI In Browser
 
 This follows the same shape as the OpenCode/OpenTUI browser integration:
 
 1. Vendor the upstream source and build the browser artifact with
    `pnpm vendor:install:codex`.
-2. Build the browser-compatible CLI package under `packages/codex-cli-wasm`.
+2. Build the browser-compatible Codex package under `packages/codex-wasm`.
 3. Load that package in a module Worker.
 4. Route filesystem and command access back through almostnode instead of native
    OS APIs.
 
-`packages/codex-cli-wasm` is intentionally split into explicit build and check
+`packages/codex-wasm` is intentionally split into explicit build and check
 targets:
 
 - `pnpm vendor:install:codex` clones or updates `vendor/codex` and then runs the
   Codex CLI WASM adapter build.
-- `pnpm nx build-adapter codex-cli-wasm` builds the current wasm-bindgen CLI
+- `pnpm nx build-adapter codex-wasm` builds the current wasm-bindgen CLI
   module and emits browser-importable JS/WASM under
-  `packages/codex-cli-wasm/dist/pkg`. This is generated build output and can be
+  `packages/codex-wasm/dist/pkg`. This is generated build output and can be
   recreated locally with the target.
-- `pnpm nx smoke-adapter codex-cli-wasm` imports the generated package, loads
+- `pnpm nx smoke-adapter codex-wasm` imports the generated package, loads
   the WASM, and verifies `codex --help`, `codex login status`, the wasm
   ratatui frame renderer, and native-only subcommand reporting.
-- `pnpm nx check-codex-cli-wasm codex-cli-wasm` checks upstream
+- `pnpm nx check-codex-wasm codex-wasm` checks upstream
   `codex-rs/tui` and `codex-rs/cli` for `wasm32-unknown-unknown`
   compatibility.
 
@@ -53,8 +48,8 @@ route through the WASM worker.
 
 The Web IDE Vite config serves and emits the generated files at:
 
-- `/codex-cli-wasm/codex_cli_wasm.js`
-- `/codex-cli-wasm/codex_cli_wasm_bg.wasm`
+- `/codex-wasm/codex_wasm.js`
+- `/codex-wasm/codex_wasm_bg.wasm`
 
 `createWebIdeCodexCliBrowserSession` and
 `createWebIdeCodexCliShellCommand` use that module URL by default.
@@ -144,7 +139,7 @@ They now check successfully for the browser target:
 
 ```bash
 pnpm vendor:install:codex
-pnpm nx check-codex-cli-wasm codex-cli-wasm
+pnpm nx check-codex-wasm codex-wasm
 ```
 
 The native `codex-tui` session/runtime paths still pull OS-only surfaces through
@@ -172,10 +167,10 @@ Remaining browser CLI work:
 Current focused checks:
 
 ```bash
-pnpm nx check-codex-cli-wasm codex-cli-wasm
-pnpm nx smoke-adapter codex-cli-wasm
-pnpm nx type-check codex-cli-wasm --skip-nx-cache
-pnpm nx test codex-cli-wasm --skip-nx-cache
+pnpm nx check-codex-wasm codex-wasm
+pnpm nx smoke-adapter codex-wasm
+pnpm nx type-check codex-wasm --skip-nx-cache
+pnpm nx test codex-wasm --skip-nx-cache
 pnpm --dir apps/web-ide exec vitest run tests/webide-command-routing.test.ts tests/codex-cli-shell-command.test.ts tests/webide-vite-config.test.ts
 CODEX_CLI_WASM_BASE_URL=http://127.0.0.1:5177 pnpm --dir apps/web-ide exec node tests/codex-cli-wasm-browser-smoke.mjs
 pnpm --dir apps/web-ide run build

@@ -1,4 +1,4 @@
-export type DocsGroup = "Start" | "Tutorials" | "React" | "API" | "Reference";
+export type DocsGroup = "Start" | "Tutorials" | "React" | "Editors" | "API" | "Reference";
 
 export type CodeLanguage = "ts" | "sh";
 
@@ -7,6 +7,75 @@ export interface CodeExample {
   readonly title: string;
   readonly language: CodeLanguage;
   readonly code: string;
+  readonly demo?: CodeDemo;
+}
+
+export type CodeDemo =
+  | {
+      readonly kind: "runtime-output";
+      readonly title: string;
+      readonly description: string;
+    }
+  | {
+      readonly kind: "react-workbench";
+      readonly title: string;
+      readonly description: string;
+    }
+  | {
+      readonly kind: "agent-editor";
+      readonly agentId: "project-agent";
+      readonly agentLabel: string;
+      readonly title: string;
+      readonly description: string;
+    }
+  | {
+      readonly kind: "codex-cli-editor";
+      readonly title: string;
+      readonly description: string;
+    }
+  | {
+      readonly kind: "opencode-tui-editor";
+      readonly title: string;
+      readonly description: string;
+    }
+  | {
+      readonly kind: "terminal-agent-editor";
+      readonly agentId: "claude" | "pi";
+      readonly title: string;
+      readonly description: string;
+    };
+
+function runtimeOutputDemo(title: string, description: string): CodeDemo {
+  return { kind: "runtime-output", title, description };
+}
+
+function reactWorkbenchDemo(title: string, description: string): CodeDemo {
+  return { kind: "react-workbench", title, description };
+}
+
+function agentEditorDemo(
+  agentId: "project-agent",
+  agentLabel: string,
+  title: string,
+  description: string,
+): CodeDemo {
+  return { kind: "agent-editor", agentId, agentLabel, title, description };
+}
+
+function codexCliEditorDemo(title: string, description: string): CodeDemo {
+  return { kind: "codex-cli-editor", title, description };
+}
+
+function opencodeTuiEditorDemo(title: string, description: string): CodeDemo {
+  return { kind: "opencode-tui-editor", title, description };
+}
+
+function terminalAgentEditorDemo(
+  agentId: "claude" | "pi",
+  title: string,
+  description: string,
+): CodeDemo {
+  return { kind: "terminal-agent-editor", agentId, title, description };
 }
 
 export interface ApiItem {
@@ -66,8 +135,148 @@ export interface DocsPage {
 
 export const installCode = `npm install @agent-wasm/core @agent-wasm/sdk
 
-# Optional UI package once the React extraction lands
+# Add React UI when you want ready-made panes
 npm install @agent-wasm/react`;
+
+export const compositionInstallCode = `npm install @agent-wasm/core @agent-wasm/sdk
+npm install @agent-wasm/react @agent-wasm/vscode @agent-wasm/chat-core
+npm install @agent-wasm/code @agent-wasm/codex @agent-wasm/keychain`;
+
+export const runtimePlaygroundCode = `import { createContainer } from "@agent-wasm/core";
+
+const container = createContainer();
+
+container.vfs.writeFileSync("/index.js", "console.log('hello')");
+await container.run("node /index.js");`;
+
+export const composeWorkspaceCode = `import { createWorkspace } from "@agent-wasm/sdk";
+
+const workspace = await createWorkspace({
+  autoStartPreview: true,
+  installMode: "lazy",
+  snapshotKey: "my-product:workspace",
+});
+
+await workspace.ready;
+workspace.writeFile(
+  "/project/src/main.js",
+  "document.body.textContent = 'agent-wasm';",
+);
+
+await workspace.preview.start("npm run dev");
+previewFrame.src = workspace.getSnapshot().preview.url ?? "about:blank";`;
+
+export const composeAgentChatCode = `import { ChatScreen } from "@agent-wasm/react/chat";
+import type { AgentHarness } from "@agent-wasm/chat-core";
+
+export function AgentChat({ host }: { host: AgentHost }) {
+  return (
+    <ChatScreen
+      startAgentSession={(harness: AgentHarness) =>
+        host.startAgentSession(harness)
+      }
+      createAdapter={(session) => host.createConversationAdapter(session)}
+    />
+  );
+}`;
+
+export const composeCredentialCode = `import {
+  CODEX_AUTH_PATH,
+  CredentialMirror,
+  Keychain,
+  OPENCODE_AUTH_PATH,
+  TAILSCALE_SESSION_KEYCHAIN_PATH,
+} from "@agent-wasm/keychain";
+
+const keychain = new Keychain({
+  vfs: workspace.vfs,
+  isAgentLaunchCommand: (cmd) => /\\b(claude|codex|opencode)\\b/.test(cmd),
+});
+
+keychain.registerSlot("agents", [OPENCODE_AUTH_PATH, CODEX_AUTH_PATH]);
+
+const mirror = new CredentialMirror({
+  vfs: workspace.vfs,
+  paths: [OPENCODE_AUTH_PATH, CODEX_AUTH_PATH, TAILSCALE_SESSION_KEYCHAIN_PATH],
+});
+
+mirror.hydrateFromStorage();
+mirror.startWatching();`;
+
+export const composePluginRegistryCode = `import { loadPlugins } from "@agent-wasm/sdk/plugins";
+
+const plugins = await loadPlugins([
+  { kind: "workspace", root: "/project/.claude-plugin", workspace },
+  { kind: "workspace", root: "/project/.codex-plugin", workspace },
+  { kind: "workspace", root: "/project/plugins/design-tools", workspace },
+]);
+
+for (const panel of plugins.listPanels()) {
+  console.log(panel.id, panel.location);
+}
+
+for (const editor of plugins.listCustomEditors()) {
+  console.log(editor.id, editor.filePatterns);
+}`;
+
+export const composeVSCodeShellCode = `import { createWorkspace } from "@agent-wasm/sdk";
+import { loadPlugins } from "@agent-wasm/sdk/plugins";
+import {
+  VSCode,
+  defineVSCodeCustomEditor,
+  defineVSCodePanel,
+} from "@agent-wasm/vscode";
+
+const workspace = createWorkspace({ autoStartPreview: true });
+await workspace.ready;
+
+const plugins = await loadPlugins([
+  { kind: "workspace", root: "/project/.claude-plugin", workspace },
+  { kind: "workspace", root: "/project/.codex-plugin", workspace },
+]);
+
+export function IdeShell() {
+  return (
+    <VSCode
+      workspace={workspace}
+      plugins={plugins}
+      panels={[
+        defineVSCodePanel({
+          id: "outline",
+          title: "Outline",
+          location: "sidebar",
+          render({ container }) {
+            container.textContent = "Plugin outline";
+          },
+        }),
+      ]}
+      customEditors={[
+        defineVSCodeCustomEditor({
+          id: "schema-editor",
+          displayName: "Schema Editor",
+          filePatterns: ["**/*.schema.json"],
+          render({ container, resource, workspace }) {
+            container.textContent = workspace.readFile(resource);
+          },
+        }),
+      ]}
+    />
+  );
+}`;
+
+export const vscodePlaywrightTargetCode = `const opened = shell.openResource("/project/schema.graph.json");
+
+if (opened.kind === "customEditor") {
+  const target = shell.getPlaywrightTarget({
+    editorId: opened.customEditor.id,
+    resource: opened.resource,
+  });
+
+  await page
+    .locator(target!.selector)
+    .getByRole("button", { name: "Add field" })
+    .click();
+}`;
 
 export const quickStartCode = `import { createWorkspace } from "@agent-wasm/sdk";
 
@@ -97,27 +306,30 @@ await terminal.session.run("npm run dev", {
 
 terminal.dispose();`;
 
-export const openCodeHarnessCode = `import {
-  createOpenCodeAgentAdapter,
-  createWorkspace,
-} from "@agent-wasm/sdk";
+export const openCodeHarnessCode = `import { createWorkspace } from "@agent-wasm/sdk";
+import { mountOpenCodeBrowserSession } from "./opencode-browser-session";
 
 const workspace = await createWorkspace({
   snapshotKey: "demo:opencode-workspace",
   autoStartPreview: true,
+  initialFiles: {
+    "/project/docs/brief.md": "# Demo brief\\n\\nAsk OpenCode to edit this document after login.\\n",
+  },
 });
 
-workspace.agents.register(
-  createOpenCodeAgentAdapter({
-    loadModule: () => import("./opencode-browser-agent"),
-    loadFsModule: () => import("./opencode-browser-fs"),
-  }),
-);
+await workspace.ready;
+workspace.setCurrentFile("/project/docs/brief.md");
 
-await workspace.agents.mount("opencode", {
+const session = await mountOpenCodeBrowserSession({
+  container: workspace.container,
   element: document.querySelector("#agent")!,
-  storage: window.localStorage,
-});`;
+  cwd: "/project",
+  env: {},
+  opencodeDirectory: "/docs/opencode-editor",
+  themeMode: "dark",
+});
+
+window.addEventListener("beforeunload", () => session.dispose());`;
 
 export const customAgentCode = `workspace.agents.register({
   id: "review-bot",
@@ -176,7 +388,7 @@ export const reactInstallCode = `npm install @agent-wasm/core @agent-wasm/sdk @a
 
 export const reactProviderCode = `import { useEffect, useState } from "react";
 import { createWorkspace, type WorkspaceController } from "@agent-wasm/sdk";
-import { AlmostnodeProvider, EditorPane, PreviewPane } from "@agent-wasm/react";
+import { AlmostnodeProvider, EditorPane, PreviewPane } from "@agent-wasm/react/workbench";
 
 export function Workbench() {
   const [workspace, setWorkspace] = useState<WorkspaceController | null>(null);
@@ -204,7 +416,7 @@ export function Workbench() {
   );
 }`;
 
-export const reactHooksCode = `import { useWorkspace, useWorkspaceSnapshot } from "@agent-wasm/react";
+export const reactHooksCode = `import { useWorkspace, useWorkspaceSnapshot } from "@agent-wasm/react/workbench";
 
 // Read reactive workspace state — re-renders on every snapshot change.
 export function PreviewStatus() {
@@ -219,14 +431,244 @@ export function PreviewStatus() {
   );
 }`;
 
-export const reactAgentCode = `import { AlmostnodeProvider, AgentPanel, TerminalPane } from "@agent-wasm/react";
+export const reactAgentCode = `import { AlmostnodeProvider, AgentPanel, TerminalPane } from "@agent-wasm/react/workbench";
 
-// Drop a fully wired agent chat + terminal beside your app preview.
 export function AgentWorkbench({ workspace }) {
+  workspace.agents.register({
+    id: "project-agent",
+    label: "Project agent",
+    async mount({ element }) {
+      element.textContent = "Mount your provider UI here.";
+      return { dispose: () => element.replaceChildren() };
+    },
+  });
+
   return (
     <AlmostnodeProvider workspace={workspace}>
-      <AgentPanel adapterId="opencode" />
+      <AgentPanel adapterId="project-agent" />
       <TerminalPane />
+    </AlmostnodeProvider>
+  );
+}`;
+
+export const workbenchEditorCode = `import { createWorkspace, type WorkspaceController } from "@agent-wasm/sdk";
+import { AlmostnodeProvider, EditorPane, PreviewPane } from "@agent-wasm/react/workbench";
+
+const workspace = await createWorkspace({
+  autoStartPreview: true,
+  installMode: "lazy",
+});
+
+await workspace.ready;
+
+export function WorkbenchEditor() {
+  return (
+    <AlmostnodeProvider workspace={workspace}>
+      <EditorPane />
+      <PreviewPane autoStart />
+    </AlmostnodeProvider>
+  );
+}`;
+
+export const opencodeEditorCode = `import { useEffect, useRef } from "react";
+import { createWorkspace } from "@agent-wasm/sdk";
+import {
+  AlmostnodeProvider,
+  EditorPane,
+  PreviewPane,
+} from "@agent-wasm/react/workbench";
+import { mountOpenCodeBrowserSession } from "./opencode-browser-session";
+
+const workspace = await createWorkspace({
+  autoStartPreview: true,
+  installMode: "lazy",
+  snapshotKey: "opencode-editor",
+  initialFiles: {
+    "/project/docs/brief.md": "# Demo brief\\n\\nAsk OpenCode to edit this document after login.\\n",
+  },
+});
+
+await workspace.ready;
+workspace.setCurrentFile("/project/docs/brief.md");
+
+function OpenCodePane() {
+  const hostRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hostRef.current) return;
+    let session: { dispose(): void } | null = null;
+    mountOpenCodeBrowserSession({
+      container: workspace.container,
+      element: hostRef.current,
+      cwd: "/project",
+      env: {},
+      opencodeDirectory: "/docs/opencode-editor",
+      themeMode: "dark",
+    }).then((mounted) => {
+      session = mounted;
+    });
+    return () => session?.dispose();
+  }, []);
+
+  return <section ref={hostRef} />;
+}
+
+export function OpenCodeEditor() {
+  return (
+    <AlmostnodeProvider workspace={workspace}>
+      <OpenCodePane />
+      <EditorPane />
+      <PreviewPane autoStart />
+    </AlmostnodeProvider>
+  );
+}`;
+
+export const codexEditorCode = `import { createWorkspace } from "@agent-wasm/sdk";
+import {
+  AlmostnodeProvider,
+  EditorPane,
+  PreviewPane,
+  TerminalPane,
+} from "@agent-wasm/react/workbench";
+import { createWebIdeCodexCliShellCommand } from "./codex-cli-browser-session";
+import { runCodexBrowserLogin } from "./codex-auth";
+
+const workspace = await createWorkspace({
+  autoStartPreview: true,
+  installMode: "lazy",
+  snapshotKey: "codex-editor",
+  initialFiles: {
+    "/project/docs/brief.md": "# Demo brief\\n\\nAsk Codex to edit this document after login.\\n",
+  },
+});
+
+workspace.container.registerShellCommand(
+  createWebIdeCodexCliShellCommand({
+    container: workspace.container,
+    cwd: "/project",
+    requestBrowserLogin: ({ login, context }) =>
+      runCodexBrowserLogin({
+        method: login.type,
+        vfs: workspace.vfs,
+        signal: context.signal,
+        writeStdout: context.writeStdout,
+      }),
+  }),
+);
+
+await workspace.ready;
+workspace.setCurrentFile("/project/docs/brief.md");
+
+export function CodexEditor() {
+  return (
+    <AlmostnodeProvider workspace={workspace}>
+      <TerminalPane cwd="/project" initialCommand="codex --help" />
+      <EditorPane />
+      <PreviewPane autoStart />
+    </AlmostnodeProvider>
+  );
+}`;
+
+export const claudeEditorCode = `import { createWorkspace } from "@agent-wasm/sdk";
+import {
+  AlmostnodeProvider,
+  EditorPane,
+  PreviewPane,
+  TerminalPane,
+} from "@agent-wasm/react/workbench";
+
+const claudePluginFiles = {
+  "/project/.claude-plugin/plugin.json": JSON.stringify(
+    {
+      name: "almostnode-lsp",
+      version: "0.1.0",
+      description: "Workspace-local oxlint and tsgo LSP wiring for Claude Code.",
+      lspServers: "./.lsp.json",
+    },
+    null,
+    2,
+  ),
+  "/project/.claude-plugin/.lsp.json": JSON.stringify(
+    {
+      oxlint: {
+        command: "almostnode-lsp-bridge",
+        args: ["oxlint"],
+        transport: "stdio",
+      },
+      tsgo: {
+        command: "almostnode-lsp-bridge",
+        args: ["tsgo"],
+        transport: "stdio",
+      },
+    },
+    null,
+    2,
+  ),
+};
+
+const workspace = await createWorkspace({
+  autoStartPreview: true,
+  installMode: "lazy",
+  snapshotKey: "claude-code-editor",
+  initialFiles: {
+    ...claudePluginFiles,
+    "/project/docs/brief.md": "# Demo brief\\n\\nAsk Claude Code to edit this document after login.\\n",
+  },
+});
+
+await workspace.ready;
+workspace.setCurrentFile("/project/docs/brief.md");
+
+const claudeCommand = [
+  "/usr/local/bin/claude-wrapper",
+  "--plugin-dir /project/.claude-plugin",
+  "--permission-mode bypassPermissions",
+].join(" ");
+
+export function ClaudeCodeEditor() {
+  return (
+    <AlmostnodeProvider workspace={workspace}>
+      <TerminalPane
+        cwd="/project"
+        initialCommand={claudeCommand + " --help"}
+      />
+      <EditorPane />
+      <PreviewPane autoStart />
+    </AlmostnodeProvider>
+  );
+}`;
+
+export const piEditorCode = `import { PI_AGENT_DIR } from "@agent-wasm/keychain";
+import { createWorkspace } from "@agent-wasm/sdk";
+import {
+  AlmostnodeProvider,
+  EditorPane,
+  PreviewPane,
+  TerminalPane,
+} from "@agent-wasm/react/workbench";
+
+const workspace = await createWorkspace({
+  autoStartPreview: true,
+  installMode: "lazy",
+  snapshotKey: "pi-editor",
+  initialFiles: {
+    "/project/docs/brief.md": "# Demo brief\\n\\nAsk Pi to edit this document after login.\\n",
+  },
+});
+
+await workspace.ready;
+workspace.setCurrentFile("/project/docs/brief.md");
+
+export function PiEditor() {
+  return (
+    <AlmostnodeProvider workspace={workspace}>
+      <TerminalPane
+        cwd="/project"
+        env={{ PI_CODING_AGENT_DIR: PI_AGENT_DIR }}
+        initialCommand="npx @earendil-works/pi-coding-agent --version"
+      />
+      <EditorPane />
+      <PreviewPane autoStart />
     </AlmostnodeProvider>
   );
 }`;
@@ -266,34 +708,102 @@ export const reactComponentCards: readonly CardItem[] = [
 
 export const packageCards: readonly CardItem[] = [
   {
-    title: "agent-wasm",
+    title: "@agent-wasm/core",
     kicker: "runtime",
-    body: "Browser Node runtime, virtual filesystem, package install, command shims, framework dev servers, and service worker bridge.",
+    body: "Browser Node runtime, virtual filesystem, package install, command shims, framework dev servers, service worker bridge, and network primitives.",
   },
   {
     title: "@agent-wasm/sdk",
     kicker: "harness",
-    body: "Workspace lifecycle, terminal sessions, preview orchestration, snapshots, agent adapters, and auth manifest entrypoints.",
+    body: "Workspace lifecycle over core: templates, terminal sessions, preview orchestration, snapshots, agent adapters, auth metadata, and @agent-wasm/sdk/plugins.",
   },
   {
     title: "@agent-wasm/react",
-    kicker: "optional UI",
-    body: "React components and hooks for embedding terminal, preview, chat, and keychain controls without adopting Web IDE.",
+    kicker: "react ui",
+    body: "React subpaths for provider/panes, chat shell, and Radix UI primitives: @agent-wasm/react/workbench, /chat, and /ui.",
   },
   {
-    title: "codex-wasm",
-    kicker: "agent runtime",
-    body: "Codex browser CLI and host bridge pieces used by browser agent sessions.",
+    title: "@agent-wasm/vscode",
+    kicker: "vscode shell",
+    body: "VS Code-shaped shell primitives for panels, custom editors, command routing, VFS file access, and Playwright target metadata.",
+  },
+  {
+    title: "@agent-wasm/chat-core",
+    kicker: "chat domain",
+    body: "Framework-free conversation types, tool-call encoders, session registry, and adapter contracts shared by UI and agent packages.",
+  },
+  {
+    title: "@agent-wasm/code",
+    kicker: "claude code",
+    body: "Claude Code transcript parsing, conversation adapter, and IDE bridge helpers over the shared chat-core contract.",
+  },
+  {
+    title: "@agent-wasm/codex",
+    kicker: "codex wasm",
+    body: "Codex WASM browser sessions, CLI worker entrypoints, and host bridge contracts for browser-hosted Codex.",
+  },
+  {
+    title: "@agent-wasm/keychain",
+    kicker: "credentials",
+    body: "Headless vault, OAuth orchestration, credential mirroring, provider slots, and Tailscale session persistence.",
+  },
+  {
+    title: "@agent-wasm/tailscale-connect",
+    kicker: "private network",
+    body: "WASM Tailscale client consumed by the core network adapter for tailnet access from browser workspaces.",
+  },
+  {
+    title: "@replayio/app-building",
+    kicker: "worker control",
+    body: "Local and Fly worker orchestration for generated app building. Web IDE adds the product control plane around it.",
   },
   {
     title: "apps/web-ide",
     kicker: "reference app",
-    body: "The full IDE product. It should prove public APIs rather than hide reusable runtime behavior inside app code.",
+    body: "The full IDE product. It composes the packages above and keeps host-specific routing, Monaco, launch, and dashboard code app-local.",
   },
   {
     title: "apps/sdk-showcase",
     kicker: "smoke app",
     body: "Small consumer app for proving package boundaries, examples, and public install flows.",
+  },
+];
+
+export const compositionCards: readonly CardItem[] = [
+  {
+    title: "Runtime playground",
+    kicker: "@agent-wasm/core",
+    body: "Use core directly for tutorials, code runners, command-shim tests, and package-manager or dev-server experiments.",
+  },
+  {
+    title: "Workspace app",
+    kicker: "@agent-wasm/core + @agent-wasm/sdk",
+    body: "Add the SDK when the product has project files, templates, terminal sessions, snapshots, and preview state.",
+  },
+  {
+    title: "React workbench",
+    kicker: "@agent-wasm/react/workbench",
+    body: "Use the React workbench subpath for provider/hooks/panes when a host wants workspace UI without the full Web IDE shell.",
+  },
+  {
+    title: "Plugin IDE shell",
+    kicker: "@agent-wasm/sdk/plugins + @agent-wasm/vscode",
+    body: "Load one merged plugin graph, then let plugins contribute commands, panels, custom editors, MCP/LSP config, skills, bins, and settings.",
+  },
+  {
+    title: "Agent chat",
+    kicker: "@agent-wasm/chat-core",
+    body: "Use chat-core plus @agent-wasm/react/chat so Claude, Codex, OpenCode, and custom agents can render through one conversation contract.",
+  },
+  {
+    title: "Credentialed private workspace",
+    kicker: "@agent-wasm/keychain + @agent-wasm/tailscale-connect",
+    body: "Add keychain and network support when the workspace needs provider credentials, OAuth tokens, Tailscale state, or private APIs.",
+  },
+  {
+    title: "Full IDE",
+    kicker: "apps/web-ide",
+    body: "Compose every layer, then keep product-specific navigation, Monaco wiring, launch dialogs, and app-builder dashboards in the host app.",
   },
 ];
 
@@ -360,8 +870,9 @@ export const docsPages: readonly DocsPage[] = [
         type: "paragraphs",
         items: [
           "The Web IDE is the complete reference product, but it should not be the only way to use the platform. Reusable behavior belongs in packages; apps prove those package APIs.",
-          "The public library shape starts with agent-wasm and @agent-wasm/sdk. Consumers create a workspace, seed files, run commands, mount agents, expose a preview, and persist state.",
-          "OpenCode is a first-class harness in this model. Its browser TUI, shared opencode server, VFS sync, and host-level history need explicit docs and package entrypoints.",
+          "The public library shape starts with @agent-wasm/core and @agent-wasm/sdk. Consumers create a workspace, seed files, run commands, mount agents, expose a preview, persist state, and load shared plugin manifests.",
+          "@agent-wasm/sdk/plugins normalizes Claude Code, Codex, and agent-wasm plugin roots into one contribution graph. @agent-wasm/vscode consumes that graph to register panels, custom editors, commands, and Playwright-addressable custom editor roots.",
+          "Agent packages compose through @agent-wasm/chat-core. Provider-specific packages translate Claude Code, Codex, OpenCode, or custom sessions into the same conversation contract while React stays host-agnostic.",
         ],
       },
       {
@@ -369,18 +880,23 @@ export const docsPages: readonly DocsPage[] = [
         items: [
           {
             title: "Runtime",
-            kicker: "agent-wasm",
+            kicker: "@agent-wasm/core",
             body: "Virtual filesystem, package manager, service worker bridge, command shims, and browser-compatible Node APIs.",
           },
           {
             title: "Harness",
             kicker: "@agent-wasm/sdk",
-            body: "Workspace lifecycle, terminal sessions, previews, snapshots, auth metadata, and agent adapter registration.",
+            body: "Workspace lifecycle, terminal sessions, previews, snapshots, auth metadata, plugin registry, and agent adapter registration.",
           },
           {
-            title: "Examples",
-            kicker: "apps",
-            body: "Web IDE as the full reference app; SDK Showcase as the smallest install and embed smoke test.",
+            title: "UI and agents",
+            kicker: "@agent-wasm/react + chat-core",
+            body: "Reusable panes, chat surfaces, and agent conversation contracts that hosts can compose without importing Web IDE internals.",
+          },
+          {
+            title: "Plugin IDE shell",
+            kicker: "@agent-wasm/vscode",
+            body: "Runtime panels, file-pattern custom editors, command routing, VFS write-through, and Playwright target metadata.",
           },
         ],
       },
@@ -391,6 +907,98 @@ export const docsPages: readonly DocsPage[] = [
           title: "Install",
           language: "sh",
           code: installCode,
+        },
+      },
+    ],
+  },
+  {
+    path: "/tutorials/compose-apps",
+    group: "Tutorials",
+    navTitle: "Compose Apps",
+    eyebrow: "Tutorial",
+    title: "Compose apps from package layers.",
+    summary:
+      "Pick the smallest package layer that owns the behavior you need, then add workspace, React, agent, keychain, and network pieces as the product grows.",
+    status: "current",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "The Web IDE is a consumer of the package stack, not the only way to use it. Start with the runtime, add the SDK for workspace lifecycle, add React for UI, and add agent/keychain/network packages only when the host needs those capabilities.",
+          "Use @agent-wasm/sdk/plugins when the host needs Claude Code, Codex, or agent-wasm plugin manifests. Load them once, merge by contribution id, then pass the PluginRegistry to whichever harness owns the UI.",
+          "Use @agent-wasm/vscode when that UI is VS Code-shaped: plugin panels map to sidebar, panel, or auxiliary bar regions; custom editors route by file pattern and write back to the same workspace VFS as agent edits.",
+          "Host apps still own their product shell: routing, navigation, Monaco service boot, launch buttons, account onboarding, app-builder dashboards, analytics, and deployment-specific configuration.",
+        ],
+      },
+      {
+        type: "cards",
+        items: compositionCards,
+      },
+      {
+        type: "code",
+        example: {
+          id: "composition-install",
+          title: "Install package layers",
+          language: "sh",
+          code: compositionInstallCode,
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "runtime-playground",
+          title: "Runtime playground",
+          language: "ts",
+          code: runtimePlaygroundCode,
+          demo: runtimeOutputDemo(
+            "Runtime output",
+            "Runs the same file through @agent-wasm/core and streams the command result.",
+          ),
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "workspace-composition",
+          title: "Workspace with preview",
+          language: "ts",
+          code: composeWorkspaceCode,
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "agent-chat-composition",
+          title: "Agent chat",
+          language: "ts",
+          code: composeAgentChatCode,
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "credential-composition",
+          title: "Credentials",
+          language: "ts",
+          code: composeCredentialCode,
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "plugin-registry-composition",
+          title: "Load plugin contributions",
+          language: "ts",
+          code: composePluginRegistryCode,
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "vscode-shell-composition",
+          title: "Plugin-powered VSCode shell",
+          language: "ts",
+          code: composeVSCodeShellCode,
         },
       },
     ],
@@ -410,7 +1018,7 @@ export const docsPages: readonly DocsPage[] = [
         items: [
           {
             title: "Install the runtime packages",
-            body: "Use agent-wasm for the browser runtime and @agent-wasm/sdk for the workspace/harness API.",
+            body: "Use @agent-wasm/core for the browser runtime and @agent-wasm/sdk for the workspace/harness API.",
           },
           {
             title: "Create a workspace",
@@ -438,6 +1046,10 @@ export const docsPages: readonly DocsPage[] = [
           title: "Workspace quickstart",
           language: "ts",
           code: quickStartCode,
+          demo: reactWorkbenchDemo(
+            "Quickstart preview",
+            "Boots the SDK workspace, renders the editor, and starts the preview from the same VFS.",
+          ),
         },
       },
     ],
@@ -456,7 +1068,7 @@ export const docsPages: readonly DocsPage[] = [
         type: "paragraphs",
         items: [
           "OpenCode is not just a terminal command in this repo. The Web IDE already wires a browser TUI, an in-browser OpenCode server, command routing, VFS synchronization, and chat/session discovery.",
-          "The package extraction should expose that as an adapter instead of requiring consumers to import Web IDE internals.",
+          "The live demo below mounts that real browser TUI beside a markdown editor and preview. After credentials are available, OpenCode can edit docs/brief.md through the same workspace VFS the human editor uses.",
         ],
       },
       {
@@ -467,12 +1079,12 @@ export const docsPages: readonly DocsPage[] = [
             body: "Use createWorkspace so OpenCode runs against the same VFS, package manager, preview server, and snapshot store as the rest of the app.",
           },
           {
-            title: "Register the adapter",
-            body: "The OpenCode adapter owns the browser agent module, browser filesystem module, credential lookup, and mount lifecycle.",
+            title: "Mount the TUI session",
+            body: "Call mountOpenCodeBrowserSession with the workspace container, target element, cwd, env, and an OpenCode history namespace.",
           },
           {
-            title: "Mount into a real element",
-            body: "Consumers provide the DOM node and storage. The adapter renders OpenCode and keeps workspace files synchronized.",
+            title: "Share the VFS",
+            body: "The OpenCode workspace bridge maps browser OpenCode file operations back to the workspace VFS, so agent writes and editor writes converge.",
           },
           {
             title: "Persist intentionally",
@@ -487,6 +1099,10 @@ export const docsPages: readonly DocsPage[] = [
           title: "OpenCode harness",
           language: "ts",
           code: openCodeHarnessCode,
+          demo: opencodeTuiEditorDemo(
+            "OpenCode harness",
+            "Mounts the real browser OpenCode TUI against docs/brief.md, with the editor and preview reading from the same VFS.",
+          ),
         },
       },
     ],
@@ -581,6 +1197,10 @@ export const docsPages: readonly DocsPage[] = [
           title: "Preview frame",
           language: "ts",
           code: previewCode,
+          demo: reactWorkbenchDemo(
+            "Running preview",
+            "Starts the default Vite preview and renders the live iframe beside the VFS-backed editor.",
+          ),
         },
       },
     ],
@@ -880,6 +1500,152 @@ export const docsPages: readonly DocsPage[] = [
     ],
   },
   {
+    path: "/api/plugins",
+    group: "API",
+    navTitle: "Plugins",
+    eyebrow: "API",
+    title: "Plugin registry API",
+    summary:
+      "The plugin registry normalizes Claude Code, Codex, and agent-wasm plugin manifests into one merged contribution graph.",
+    status: "current",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "Use @agent-wasm/sdk/plugins when multiple harnesses should consume the same plugin root. The loader accepts manifest-only sources, workspace-backed directories, local folder readers, and package-style sources.",
+          "Canonical contributions are skills, commands, agents, hooks, mcpServers, lspServers, monitors, bin, settings, auth, vscode.panels, and vscode.customEditors. Duplicate contribution ids are last-writer-wins and reported through diagnostics.",
+        ],
+      },
+      {
+        type: "api",
+        items: [
+          {
+            name: "loadPlugins",
+            signature: "loadPlugins(sources: PluginSource[]): Promise<PluginRegistry>",
+            description:
+              "Discovers plugin.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json, sidecars, and folder conventions, then returns a registry.",
+            status: "current",
+          },
+          {
+            name: "mergePluginManifests",
+            signature: "mergePluginManifests(manifests): PluginMergeResult",
+            description:
+              "Normalizes manifests and merges contributions by id with diagnostics for duplicate ids and settings.",
+            status: "current",
+          },
+          {
+            name: "PluginRegistry",
+            signature: "new PluginRegistry(manifests?)",
+            description:
+              "Holds the merged manifest plus source manifests and exposes listPanels, listCustomEditors, listContributions, and getContribution helpers.",
+            status: "current",
+          },
+          {
+            name: "AgentWasmPluginManifest",
+            signature: "{ skills; commands; agents; hooks; mcpServers; lspServers; vscode: { panels; customEditors } }",
+            description:
+              "Canonical manifest shape. Existing Claude and Codex fields are accepted and normalized into this contribution graph.",
+            status: "current",
+          },
+          {
+            name: "Plugin diagnostics",
+            signature: "{ level; code; message; pluginId?; contributionId? }",
+            description:
+              "Non-fatal warnings and errors emitted during discovery, parse, and merge. Hosts can show these in settings or plugin management UI.",
+            status: "current",
+          },
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "plugin-registry-api",
+          title: "Load plugins",
+          language: "ts",
+          code: composePluginRegistryCode,
+        },
+      },
+    ],
+  },
+  {
+    path: "/api/vscode",
+    group: "API",
+    navTitle: "VSCode Shell",
+    eyebrow: "API",
+    title: "VSCode wrapper API",
+    summary:
+      "@agent-wasm/vscode provides a reusable VS Code-shaped shell for panels, custom editors, commands, VFS file access, and Playwright-targetable editor UI.",
+    status: "current",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "Use <VSCode> in React harnesses and createVSCodeShell in non-React harnesses. Both consume the same PluginRegistry and runtime panel/custom editor definitions.",
+          "The shell owns command registration, file-pattern custom editor routing, and a VFS-backed file provider. Text and custom editor edits call workspace.writeFile(), so previews and watchers see the same changes as agent writes.",
+          "Every mounted custom editor root gets stable plugin id, editor id, resource, and test id metadata. Harnesses can hand agents the selector returned by getPlaywrightTarget() for raw Playwright interaction.",
+        ],
+      },
+      {
+        type: "api",
+        items: [
+          {
+            name: "VSCode",
+            signature: "<VSCode workspace={workspace} plugins={registry} panels customEditors />",
+            description:
+              "React wrapper that renders registered panels and the matching custom editor or VFS-backed text fallback for the current file.",
+            status: "current",
+          },
+          {
+            name: "createVSCodeShell",
+            signature: "createVSCodeShell(options): VSCodeShell",
+            description:
+              "Creates the non-React shell with plugin registry, command registry, file provider, panel/custom editor registration, and openResource routing.",
+            status: "current",
+          },
+          {
+            name: "defineVSCodePanel",
+            signature: "defineVSCodePanel({ id; title; location; render })",
+            description:
+              "Defines a runtime panel. Locations map to sidebar, panel, or auxiliarybar.",
+            status: "current",
+          },
+          {
+            name: "defineVSCodeCustomEditor",
+            signature: "defineVSCodeCustomEditor({ id; filePatterns; render })",
+            description:
+              "Defines a file-pattern custom editor that can render UI and write back through the workspace VFS.",
+            status: "current",
+          },
+          {
+            name: "shell.getPlaywrightTarget",
+            signature: "getPlaywrightTarget(editorId | { editorId?, resource? })",
+            description:
+              "Returns a stable selector and metadata for a mounted custom editor root so an agent can interact with the real UI through Playwright.",
+            status: "current",
+          },
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "vscode-shell-api",
+          title: "VSCode shell",
+          language: "ts",
+          code: composeVSCodeShellCode,
+        },
+      },
+      {
+        type: "code",
+        example: {
+          id: "vscode-playwright-target",
+          title: "Playwright target",
+          language: "ts",
+          code: vscodePlaywrightTargetCode,
+        },
+      },
+    ],
+  },
+  {
     path: "/api/runtime",
     group: "API",
     navTitle: "Runtime",
@@ -966,6 +1732,10 @@ export const docsPages: readonly DocsPage[] = [
           title: "Workbench.tsx",
           language: "ts",
           code: reactProviderCode,
+          demo: reactWorkbenchDemo(
+            "Live workbench",
+            "Boots a real SDK workspace and renders the reusable React panes from @agent-wasm/react/workbench.",
+          ),
         },
       },
     ],
@@ -1012,6 +1782,174 @@ export const docsPages: readonly DocsPage[] = [
           title: "Agent + terminal panes",
           language: "ts",
           code: reactAgentCode,
+          demo: agentEditorDemo(
+            "project-agent",
+            "Project agent",
+            "Custom agent panel",
+            "Mounts a local agent adapter beside the highlighted editor and running preview.",
+          ),
+        },
+      },
+    ],
+  },
+  {
+    path: "/editors/workbench",
+    group: "Editors",
+    navTitle: "Workbench Editor",
+    eyebrow: "Editor",
+    title: "Build a VFS-backed workbench editor.",
+    summary:
+      "Compose EditorPane and PreviewPane when the app needs a syntax-highlighted editor that writes back to the workspace VFS and lets the preview server hot reload.",
+    status: "current",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "EditorPane reads the selected file from the WorkspaceController and writes every edit with workspace.writeFile(). Because the SDK VFS emits normal change events, Vite and other preview servers see the same updates that agent writes produce.",
+          "Use this page as the smallest reusable editor shell: no Web IDE routing, no provider auth, just workspace files, syntax highlighting, and preview.",
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "workbench-editor-demo",
+          title: "WorkbenchEditor.tsx",
+          language: "ts",
+          code: workbenchEditorCode,
+          demo: reactWorkbenchDemo(
+            "VFS editor",
+            "Edits save through workspace.writeFile(), and the running preview observes the same VFS change events.",
+          ),
+        },
+      },
+    ],
+  },
+  {
+    path: "/editors/opencode",
+    group: "Editors",
+    navTitle: "OpenCode Editor",
+    eyebrow: "Editor",
+    title: "Compose an OpenCode editor.",
+    summary:
+      "Mount the OpenCode browser TUI beside the reusable editor and preview panes so agent writes and human edits share one workspace VFS.",
+    status: "extracting",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "The production OpenCode path mounts the browser TUI and in-browser OpenCode server with mountOpenCodeBrowserSession. The live demo below uses that path directly instead of a docs-only mock.",
+          "OpenCode, the human editor, and the preview all see docs/brief.md through WorkspaceController, so provider-authenticated turns and manual edits converge on the same VFS and reload path.",
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "opencode-editor-demo",
+          title: "OpenCodeEditor.tsx",
+          language: "ts",
+          code: opencodeEditorCode,
+          demo: opencodeTuiEditorDemo(
+            "OpenCode TUI editor",
+            "Mounts the real browser OpenCode TUI against the workspace VFS. Login enables agent turns that can edit docs/brief.md.",
+          ),
+        },
+      },
+    ],
+  },
+  {
+    path: "/editors/codex",
+    group: "Editors",
+    navTitle: "Codex Editor",
+    eyebrow: "Editor",
+    title: "Compose a Codex editor.",
+    summary:
+      "Use the Codex WASM package as an agent runtime while keeping editor, preview, and VFS ownership in the shared workspace.",
+    status: "extracting",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "@agent-wasm/codex owns the browser Codex worker/session pieces. The consuming app still decides how to register the shell command, how login is handled, and how to pair the CLI with editor and preview panes.",
+          "The live demo registers the same browser Codex CLI path used by the Web IDE. It starts with codex --help so the page does not force a login; run codex login, then codex, and ask it to edit docs/brief.md.",
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "codex-editor-demo",
+          title: "CodexEditor.tsx",
+          language: "ts",
+          code: codexEditorCode,
+          demo: codexCliEditorDemo(
+            "Codex CLI editor",
+            "Runs the real browser Codex CLI against the workspace VFS. Login enables agent turns that can edit docs/brief.md.",
+          ),
+        },
+      },
+    ],
+  },
+  {
+    path: "/editors/claude-code",
+    group: "Editors",
+    navTitle: "Claude Code Editor",
+    eyebrow: "Editor",
+    title: "Compose a Claude Code editor.",
+    summary:
+      "Keep Claude-specific transcript and IDE bridge behavior in @agent-wasm/code while sharing the same editor, preview, and workspace controller.",
+    status: "extracting",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "@agent-wasm/code owns Claude transcript parsing and bridge helpers. The host still composes those pieces with a real terminal, EditorPane, and PreviewPane so Claude Code writes and human edits land in the same workspace.",
+          "The live demo starts the same browser claude-wrapper path used by the Web IDE with --help so the page does not force a login. After credentials are restored, run the wrapper command without --help and ask Claude Code to edit docs/brief.md.",
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "claude-editor-demo",
+          title: "ClaudeCodeEditor.tsx",
+          language: "ts",
+          code: claudeEditorCode,
+          demo: terminalAgentEditorDemo(
+            "claude",
+            "Claude Code CLI editor",
+            "Runs the real browser Claude wrapper against the workspace VFS. Login enables agent turns that can edit docs/brief.md.",
+          ),
+        },
+      },
+    ],
+  },
+  {
+    path: "/editors/pi",
+    group: "Editors",
+    navTitle: "Pi Editor",
+    eyebrow: "Editor",
+    title: "Compose a Pi editor.",
+    summary:
+      "Run Pi coding agent beside the reusable editor and preview panes so agent writes and human edits share one workspace VFS.",
+    status: "extracting",
+    blocks: [
+      {
+        type: "paragraphs",
+        items: [
+          "The Web IDE launches Pi as a terminal-backed agent harness with npx @earendil-works/pi-coding-agent and PI_CODING_AGENT_DIR pointed at /home/user/.pi/agent.",
+          "The live demo starts the real package command with --version so the docs page can boot without forcing auth. After Pi auth and config are in the keychain, run npx @earendil-works/pi-coding-agent in the same terminal and ask it to edit docs/brief.md.",
+        ],
+      },
+      {
+        type: "code",
+        example: {
+          id: "pi-editor-demo",
+          title: "PiEditor.tsx",
+          language: "ts",
+          code: piEditorCode,
+          demo: terminalAgentEditorDemo(
+            "pi",
+            "Pi CLI editor",
+            "Runs the real Pi coding agent command against the workspace VFS. Login enables agent turns that can edit docs/brief.md.",
+          ),
         },
       },
     ],
@@ -1086,11 +2024,21 @@ export const legacyHashRedirects: Record<string, string> = {
   architecture: "/overview",
   runtime: "/api/runtime",
   harness: "/api/agents",
-  opencode: "/tutorials/opencode",
+  opencode: "/editors/opencode",
+  codex: "/editors/codex",
+  claude: "/editors/claude-code",
+  "claude-code": "/editors/claude-code",
+  pi: "/editors/pi",
+  "pi-editor": "/editors/pi",
+  workbench: "/editors/workbench",
+  editor: "/editors/workbench",
+  editors: "/editors/workbench",
   auth: "/api/auth",
   "web-ide": "/reference/packages",
   publishing: "/reference/publishing",
   packages: "/reference/packages",
+  compose: "/tutorials/compose-apps",
+  composition: "/tutorials/compose-apps",
   examples: "/tutorials/quickstart",
   features: "/reference/features",
 };

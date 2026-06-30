@@ -1,14 +1,9 @@
-> **Note (2026-06):** the `codex-cli-wasm` and `codex-app-server-wasm` packages have been
-> consolidated into **`@agent-wasm/codex`** (`packages/codex-wasm`). Package/path names
-> below refer to the historical layout; the browser worker entrypoints are now
-> `@agent-wasm/codex/cli-browser-worker` and `@agent-wasm/codex/app-server-browser-worker`.
-
 # Codex App-Server In Browser
 
 almostnode should run Codex app-server as browser code, not as a local OS process
 or a tunneled localhost server. The integration is split into two parts:
 
-1. `packages/codex-app-server-wasm` owns the browser bridge:
+1. `packages/codex-wasm` owns the browser bridge:
    - JSON-RPC peer for Codex app-server messages.
    - `MessagePort` transport for Worker/WASM communication.
    - host bridge for filesystem and command execution through almostnode VFS and
@@ -16,10 +11,10 @@ or a tunneled localhost server. The integration is split into two parts:
 2. `apps/web-ide/src/features/codex-browser-session.ts` creates the Web IDE
    Worker/session wrapper and passes almostnode host services into the bridge.
 
-The Rust crate under `packages/codex-app-server-wasm/rust` is an adapter
+The Rust crate under `packages/codex-wasm/rust` is an adapter
 scaffold. It now links the forked `codex-app-server` wasm surface behind the
 `real-codex` feature and builds a browser-importable wasm-pack package under
-`packages/codex-app-server-wasm/dist/pkg`. The adapter can run a browser
+`packages/codex-wasm/dist/pkg`. The adapter can run a browser
 `MessagePort` JSON-RPC loop, deserialize generated Codex app-server protocol
 requests, return protocol-shaped startup/read responses, and route the first
 in-memory thread lifecycle, filesystem, buffered or streamed command execution,
@@ -38,7 +33,7 @@ Current status:
 
 ```bash
 pnpm vendor:install:codex
-pnpm nx check-codex-wasm codex-app-server-wasm
+pnpm nx check-codex-wasm codex-wasm
 ```
 
 The forked `codex-app-server` library now checks for
@@ -47,15 +42,15 @@ keeps native app-server binaries, socket/listener transports, WebSocket
 servers, native image decoding, and other OS-only dependencies behind
 `not(target_arch = "wasm32")`.
 
-The adapter build follows the same generated-artifact shape as
-`packages/codex-cli-wasm`:
+The adapter build follows the same generated-artifact shape as the CLI browser
+surface in `packages/codex-wasm`:
 
 ```bash
-pnpm nx build-adapter codex-app-server-wasm
-pnpm nx smoke-adapter codex-app-server-wasm
+pnpm nx build-adapter codex-wasm
+pnpm nx smoke-adapter codex-wasm
 ```
 
-The smoke test imports `codex_app_server_wasm.js`, loads the generated `.wasm`,
+The smoke test imports `codex_wasm.js`, loads the generated `.wasm`,
 starts the adapter on a `MessageChannel`, and verifies:
 
 - `initialize` returns browser app-server metadata.

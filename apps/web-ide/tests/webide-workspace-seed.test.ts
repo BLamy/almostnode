@@ -51,6 +51,7 @@ describe("webide workspace seed", () => {
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.opencode/opencode.jsonc`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_ROOT}/.opencode/plugins/task-git.js`)).toBe(true);
     expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/todo-crud.spec.ts`)).toBe(true);
+    expect(container.vfs.existsSync(`${WORKSPACE_TEST_E2E_ROOT}/stripe-emulator-checkout.spec.ts`)).toBe(true);
     expect(container.vfs.existsSync(WORKSPACE_TEST_METADATA_PATH)).toBe(true);
 
     const pkg = JSON.parse(
@@ -124,6 +125,10 @@ describe("webide workspace seed", () => {
       `${WORKSPACE_ROOT}/src/pages/Home.tsx`,
       "utf8",
     );
+    const checkoutTestSource = container.vfs.readFileSync(
+      `${WORKSPACE_TEST_E2E_ROOT}/stripe-emulator-checkout.spec.ts`,
+      "utf8",
+    );
     const readme = container.vfs.readFileSync(
       `${WORKSPACE_ROOT}/README.md`,
       "utf8",
@@ -144,6 +149,14 @@ describe("webide workspace seed", () => {
       `${WORKSPACE_ROOT}/src/env.d.ts`,
       "utf8",
     );
+    const testMetadata = JSON.parse(
+      container.vfs.readFileSync(WORKSPACE_TEST_METADATA_PATH, "utf8"),
+    ) as {
+      tests?: Array<{
+        name?: string;
+        specPath?: string;
+      }>;
+    };
     const tsconfig = JSON.parse(
       container.vfs.readFileSync(`${WORKSPACE_ROOT}/tsconfig.json`, "utf8"),
     ) as {
@@ -201,9 +214,14 @@ describe("webide workspace seed", () => {
     expect(claudeGitHook).toContain('git commit -m "Complete task"');
     expect(claudeGitHook).toContain('git push -u origin "$BRANCH"');
     expect(appSource).toContain("react-router-dom");
-    expect(homeSource).toContain("Tailwind + shadcn starter");
+    expect(appSource).toContain('/success');
+    expect(homeSource).toContain("Checkout with Stripe");
+    expect(homeSource).toContain("createStripeCheckoutSession");
     expect(homeSource).toContain("import { Button } from '@/components/ui/button';");
-    expect(readme).toContain("npx shadcn@latest add dropdown-menu");
+    expect(checkoutTestSource).toContain("stripe-emulator-checkout");
+    expect(checkoutTestSource).toContain("Pay $89.00");
+    expect(readme).toContain("Stripe emulator");
+    expect(testMetadata.tests?.map((test) => test.name)).toContain("stripe-emulator-checkout");
     expect(agentsGuide).toContain("OpenCode uses `AGENTS.md` and `.opencode/agent/`");
     expect(agentsGuide).toContain(".agents/agent-system-prompt.md");
     expect(claudeGuide).toContain("Claude Code uses `CLAUDE.md` and `.claude/`");

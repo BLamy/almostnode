@@ -2271,6 +2271,7 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
 
   const gitEnv = resolveGitEnv(ctx.env, vfs);
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
+  const headers = resolveGitAuthHeaders(gitEnv);
   await git.clone({
     fs: createGitFs(vfs),
     http: proxiedHttp,
@@ -2279,6 +2280,7 @@ async function handleClone(args: string[], ctx: CommandContext, vfs: VirtualFS):
     depth,
     singleBranch,
     ref,
+    headers,
     onAuth: () => resolveGitAuth(gitEnv),
   });
   await syncIndexToHead(vfs, dir);
@@ -2391,6 +2393,7 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
   const remoteLooksLikeUrl = remoteValidation.remoteLooksLikeUrl;
 
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
+  const headers = resolveGitAuthHeaders(gitEnv);
   await git.fetch({
     fs: gitFs,
     http: proxiedHttp,
@@ -2401,6 +2404,7 @@ async function handleFetch(args: string[], ctx: CommandContext, vfs: VirtualFS):
     singleBranch,
     depth,
     prune,
+    headers,
     onAuth: () => resolveGitAuth(gitEnv),
   });
 
@@ -2450,6 +2454,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
     }
 
     const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
+    const headers = resolveGitAuthHeaders(gitEnv);
     await git.fetch({
       fs: gitFs,
       http: proxiedHttp,
@@ -2457,6 +2462,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
       remote,
       ref: remoteRef,
       singleBranch: true,
+      headers,
       onAuth: () => resolveGitAuth(gitEnv),
     });
 
@@ -2464,6 +2470,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
   }
 
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
+  const headers = resolveGitAuthHeaders(gitEnv);
   await git.pull({
     fs: gitFs,
     http: proxiedHttp,
@@ -2473,6 +2480,7 @@ async function handlePull(args: string[], ctx: CommandContext, vfs: VirtualFS): 
     remoteRef,
     fastForward: true,
     fastForwardOnly,
+    headers,
     onAuth: () => resolveGitAuth(gitEnv),
     author: {
       name: gitEnv.authorName,
@@ -2541,6 +2549,7 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
   }
 
   const proxiedHttp = createProxiedHttp(gitEnv.corsProxy);
+  const headers = resolveGitAuthHeaders(gitEnv);
   await git.push({
     fs: gitFs,
     http: proxiedHttp,
@@ -2549,6 +2558,7 @@ async function handlePush(args: string[], ctx: CommandContext, vfs: VirtualFS): 
     ref,
     remoteRef,
     force,
+    headers,
     onAuth: () => resolveGitAuth(gitEnv),
   });
   if (setUpstream) {
@@ -2601,7 +2611,7 @@ function resolveGitEnv(
 function resolveGitAuth(gitEnv: GitEnv): GitAuthResult {
   if (gitEnv.token) {
     return {
-      username: gitEnv.username || 'token',
+      username: gitEnv.username || 'x-access-token',
       password: gitEnv.token,
     };
   }
@@ -2614,6 +2624,40 @@ function resolveGitAuth(gitEnv: GitEnv): GitAuthResult {
   }
 
   return {};
+}
+
+function encodeBase64Utf8(value: string): string {
+  const bytes = textEncoder.encode(value);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  if (typeof btoa === 'function') {
+    return btoa(binary);
+  }
+
+  const bufferCtor = (globalThis as {
+    Buffer?: {
+      from(input: Uint8Array): { toString(encoding: string): string };
+    };
+  }).Buffer;
+  if (bufferCtor) {
+    return bufferCtor.from(bytes).toString('base64');
+  }
+
+  throw new Error('Base64 encoding is not available');
+}
+
+function resolveGitAuthHeaders(gitEnv: GitEnv): Record<string, string> | undefined {
+  const auth = resolveGitAuth(gitEnv);
+  if (!auth.username && !auth.password) {
+    return undefined;
+  }
+
+  return {
+    Authorization: `Basic ${encodeBase64Utf8(`${auth.username || ''}:${auth.password || ''}`)}`,
+  };
 }
 
 function resolvePath(cwd: string, maybePath: string): string {

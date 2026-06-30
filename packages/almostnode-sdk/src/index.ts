@@ -18,3 +18,4 @@ export {
   createWorkspace,
 } from "./workspace";
 export * from "./auth";
+export * from "./plugins";

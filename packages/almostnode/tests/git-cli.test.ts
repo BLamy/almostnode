@@ -93,6 +93,10 @@ function createGitFs(vfs: VirtualFS) {
   } as const;
 }
 
+function basicAuth(username: string, password: string): string {
+  return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+}
+
 describe('git CLI command', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -1151,7 +1155,10 @@ describe('git CLI command', () => {
     let fetchArgs = fetchSpy.mock.calls[0][0] as any;
     expect(fetchArgs.singleBranch).toBe(true);
     expect(fetchArgs.depth).toBe(1);
-    expect(fetchArgs.onAuth()).toEqual({ username: 'token', password: 'initial-token' });
+    expect(fetchArgs.onAuth()).toEqual({ username: 'x-access-token', password: 'initial-token' });
+    expect(fetchArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'initial-token'),
+    });
 
     container.setGitAuth({ token: 'updated-token' });
     expect(container.getGitAuth().token).toBe('updated-token');
@@ -1160,13 +1167,19 @@ describe('git CLI command', () => {
     expect(result.exitCode).toBe(0);
 
     const pullArgs = pullSpy.mock.calls[0][0] as any;
-    expect(pullArgs.onAuth()).toEqual({ username: 'token', password: 'updated-token' });
+    expect(pullArgs.onAuth()).toEqual({ username: 'x-access-token', password: 'updated-token' });
+    expect(pullArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'updated-token'),
+    });
 
     result = await container.run('git push origin main', { cwd: '/repo' });
     expect(result.exitCode).toBe(0);
 
     const pushArgs = pushSpy.mock.calls[0][0] as any;
-    expect(pushArgs.onAuth()).toEqual({ username: 'token', password: 'updated-token' });
+    expect(pushArgs.onAuth()).toEqual({ username: 'x-access-token', password: 'updated-token' });
+    expect(pushArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'updated-token'),
+    });
 
     result = await container.run('git push --force origin main', { cwd: '/repo' });
     expect(result.exitCode).toBe(0);
@@ -1181,6 +1194,7 @@ describe('git CLI command', () => {
 
     fetchArgs = fetchSpy.mock.calls[1][0] as any;
     expect(fetchArgs.onAuth()).toEqual({});
+    expect(fetchArgs.headers).toBeUndefined();
   });
 
   it('tolerates shadcn template clone optimization flags', async () => {
@@ -1225,14 +1239,20 @@ describe('git CLI command', () => {
     result = await container.run('git fetch origin main', { cwd: '/repo' });
     expect(result.exitCode).toBe(0);
     let fetchArgs = fetchSpy.mock.calls[0][0] as any;
-    expect(fetchArgs.onAuth()).toEqual({ username: 'token', password: 'container-token' });
+    expect(fetchArgs.onAuth()).toEqual({ username: 'x-access-token', password: 'container-token' });
+    expect(fetchArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'container-token'),
+    });
 
     container.setGitAuth({ token: 'live-token', corsProxy: 'https://live-proxy/?url=' });
 
     result = await container.run('git fetch origin main', { cwd: '/repo' });
     expect(result.exitCode).toBe(0);
     fetchArgs = fetchSpy.mock.calls[1][0] as any;
-    expect(fetchArgs.onAuth()).toEqual({ username: 'token', password: 'live-token' });
+    expect(fetchArgs.onAuth()).toEqual({ username: 'x-access-token', password: 'live-token' });
+    expect(fetchArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'live-token'),
+    });
 
     result = await container.run('git fetch origin main', {
       cwd: '/repo',
@@ -1243,6 +1263,31 @@ describe('git CLI command', () => {
     });
     expect(result.exitCode).toBe(0);
     fetchArgs = fetchSpy.mock.calls[2][0] as any;
-    expect(fetchArgs.onAuth()).toEqual({ username: 'token', password: 'run-token' });
+    expect(fetchArgs.onAuth()).toEqual({ username: 'x-access-token', password: 'run-token' });
+    expect(fetchArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'run-token'),
+    });
+  });
+
+  it('sends token auth headers on the first clone request', async () => {
+    const container = createContainer({
+      git: {
+        token: 'clone-token',
+      },
+    });
+    const cloneSpy = vi.spyOn(git, 'clone').mockResolvedValue({} as never);
+
+    const result = await container.run('git clone https://github.com/octocat/private-repo.git /repo');
+
+    expect(result.exitCode).toBe(0);
+    const cloneArgs = cloneSpy.mock.calls[0][0] as any;
+    expect(cloneArgs.url).toBe('https://github.com/octocat/private-repo.git');
+    expect(cloneArgs.headers).toEqual({
+      Authorization: basicAuth('x-access-token', 'clone-token'),
+    });
+    expect(cloneArgs.onAuth()).toEqual({
+      username: 'x-access-token',
+      password: 'clone-token',
+    });
   });
 });
