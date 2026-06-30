@@ -20,6 +20,7 @@
     "build:mobile-ide": "pnpm nx build mobile-ide",
     "build:types": "pnpm nx build-types almostnode",
     "package:preflight": "node scripts/package-preflight.mjs",
+    "package:publish": "node scripts/package-publish.mjs",
     "test": "pnpm nx run-many -t test",
     "test:run": "pnpm nx run-many -t test",
     "test:e2e": "pnpm nx run-many -t e2e",
