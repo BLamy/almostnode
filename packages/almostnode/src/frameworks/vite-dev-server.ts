@@ -139,6 +139,13 @@ export interface ViteDevServerOptions extends DevServerOptions {
 
   /** Deployment base path prefix (e.g., '/almostnode' for GitHub Pages subpath). NOT the same as Vite's `base`. */
   deploymentBasePath?: string;
+
+  /**
+   * Raw HTML injected at the very start of `<head>`, before import maps and
+   * module scripts. Use for a bootstrap that must run before any app code —
+   * e.g. installing an Electron preload / contextBridge bridge in the renderer.
+   */
+  injectHead?: string;
 }
 
 /**
@@ -1282,6 +1289,18 @@ export default css;
       let content = this.vfs.readFileSync(filePath, 'utf8');
       const tailwindInjection = await this.getTailwindInjection(content);
       content = this.rewriteHtmlModuleScriptSources(content);
+
+      // Inject a caller-provided head bootstrap first, so it runs before any
+      // import map / module script (e.g. the Electron preload bridge).
+      if (this.options.injectHead) {
+        if (content.includes('<head>')) {
+          content = content.replace('<head>', `<head>\n${this.options.injectHead}`);
+        } else if (content.includes('<html')) {
+          content = content.replace(/<html[^>]*>/, `$&${this.options.injectHead}`);
+        } else {
+          content = this.options.injectHead + content;
+        }
+      }
 
       // Inject a React import map if the HTML doesn't already have one.
       // This lets seed HTML omit the esm.sh boilerplate — the platform provides it.

@@ -1,0 +1,9 @@
+/dist/
+/dist-site/
+/node_modules/
+/.nitro/
+/.tanstack/
+src/routeTree.gen.ts
+*.tsbuildinfo
+.turbo/
+/storybook-static/

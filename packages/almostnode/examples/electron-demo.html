@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Electron Demo — almostnode</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        margin: 0;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      header {
+        padding: 16px 24px;
+        border-bottom: 1px solid #1e293b;
+      }
+      header h1 {
+        font-size: 18px;
+        margin: 0;
+      }
+      header p {
+        margin: 4px 0 0;
+        color: #94a3b8;
+        font-size: 13px;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 1fr 360px;
+        gap: 16px;
+        padding: 16px 24px;
+        align-items: start;
+      }
+      #windows {
+        min-height: 460px;
+      }
+      #log {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 12px;
+        height: 440px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+      .status {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        background: #1e293b;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Electron in the browser — almostnode</h1>
+      <p>
+        A modern (contextIsolation + preload) Electron app running from source.
+        Status: <span id="status" class="status" data-state="booting">booting…</span>
+      </p>
+    </header>
+    <main>
+      <div id="windows"></div>
+      <div id="log"></div>
+    </main>
+    <script type="module" src="/examples/electron-demo-entry.ts"></script>
+  </body>
+</html>

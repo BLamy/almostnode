@@ -1,5 +1,7 @@
 import {
   createContainer,
+  type NetworkIntegration,
+  type NetworkOptions,
   type RunResult,
   type ShellCommandDefinition,
   type TerminalSession,
@@ -88,6 +90,10 @@ export interface WorkspaceCreateOptions {
   autoStartPreview?: boolean;
   browserEnv?: AgentBrowserEnv;
   installMode?: "auto" | "eager" | "lazy";
+  /** Network (Tailscale) configuration forwarded to the container. */
+  network?: NetworkOptions;
+  /** Session-persistence + auth-URL hooks for the Tailscale adapter. */
+  networkIntegration?: NetworkIntegration;
 }
 
 export interface WorkspaceController {
@@ -401,6 +407,8 @@ class WorkspaceControllerImpl implements WorkspaceController {
     this.container = createContainer({
       installMode: options.installMode as NonNullable<Parameters<typeof createContainer>[0]>["installMode"],
       shellCommands: options.shellCommands,
+      network: options.network,
+      networkIntegration: options.networkIntegration,
     });
     this.vfs = this.container.vfs;
     this.currentFile = this.template.defaultFile;

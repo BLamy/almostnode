@@ -28,3 +28,6 @@
 [submodule "vendor/emulate"]
 	path = vendor/emulate
 	url = git@github.com:BLamy/emulate.git
+[submodule "vendor/webamp"]
+	path = vendor/webamp
+	url = https://github.com/BLamy/webamp

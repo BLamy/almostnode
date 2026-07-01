@@ -92,6 +92,32 @@ export type {
   ServerRegistrationMetadata,
   VirtualServer,
 } from "./server-bridge";
+// Electron main-process host seam — the embedder registers a host that backs
+// `BrowserWindow` (see shims/electron.ts). almost-os wires the WindowManager.
+export {
+  setElectronHost,
+  getElectronHost,
+  hasElectronHost,
+  ELECTRON_IPC_TAG,
+  ELECTRON_IPC_KIND,
+  isElectronIpcEnvelope,
+} from "./frameworks/electron-host";
+export type {
+  ElectronHost,
+  ElectronWindowHandle,
+  ElectronWindowOptions,
+  ElectronWindowBounds,
+  ElectronWindowEvent,
+  ElectronIpcEnvelope,
+  ElectronIpcError,
+  ElectronIpcKind,
+} from "./frameworks/electron-host";
+export { buildElectronPreloadBootstrap } from "./frameworks/electron-preload";
+export { launchElectronApp } from "./frameworks/electron-app";
+export type {
+  ElectronLaunchContext,
+  ElectronAppInstance,
+} from "./frameworks/electron-app";
 export {
   createFetchVirtualServer,
   registerFetchVirtualServer,

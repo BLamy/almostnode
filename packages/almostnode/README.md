@@ -27,6 +27,10 @@ await container.run("node index.js");
   shims (`fs`, `path`, `http`, `net`, `stream`, `crypto`, `child_process`, …).
 - **`PackageManager`** — installs real npm packages, served via `/_npm/`.
 - **`ViteDevServer` / `NextDevServer`** — React + HMR, Next Pages + App Router.
+- **`electron` shim + `setElectronHost` / `launchElectronApp`** — emulate the Electron
+  main process (`app`, `BrowserWindow`, `ipcMain`) and run modern (contextIsolation +
+  preload) Electron apps from source; each `BrowserWindow` renders as a host-supplied
+  iframe with postMessage IPC. See `examples/electron-demo.*`.
 - **`createContainer` / `ContainerInstance`** — orchestration: vfs, workspace,
   git, terminal sessions.
 - **`ServerBridge`** — service-worker network interception for in-VFS servers.

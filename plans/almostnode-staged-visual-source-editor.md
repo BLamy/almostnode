@@ -18,6 +18,29 @@ References:
 - [Impeccable live-browser.js](https://raw.githubusercontent.com/pbakaus/impeccable/main/skill/scripts/live-browser.js)
 - [Impeccable live-server.mjs](https://raw.githubusercontent.com/pbakaus/impeccable/main/skill/scripts/live-server.mjs)
 
+## Relationship To The Isomorphic Agents Plan
+
+Keep this plan separate from `plans/isomorphic-agents.md`. This plan owns the
+developer-facing staged visual editing workflow inside Web IDE previews. The
+isomorphic agents plan owns durable branch state, append-only file events, agent
+logs, database branching, merge/rebase signals, and cloud handoff.
+
+The shared seam is `VfsFileSystemProvider.writeFile()`:
+
+- The visual editor stages operations in the host and mutates the preview DOM
+  only after host acknowledgement.
+- Apply groups staged ops by source file, validates anchors and source hashes,
+  computes all outputs, and writes through the existing VFS provider.
+- If a durable branch is attached, the isomorphic-agents VFS bridge records
+  those writes as branch-scoped file events and may log visual-edit summaries.
+- Unapplied staged edits are UI-local state; they are discarded, applied, or
+  invalidated by navigation and are not durable branch history.
+- The visual editor must not create branches, merge branches, clone PGlite, or
+  depend directly on Durable Streams in v1.
+
+That keeps visual editing as one source-edit producer while durable source
+control remains a separate persistence and branch-continuity layer.
+
 ## Key Changes
 
 - Add a dev-only JSX metadata pass before esbuild in
@@ -127,6 +150,9 @@ internal until the operation model stabilizes.
 - E2E test a seeded Vite app in web-ide: enable Edit, stage multiple visual
   changes, apply, assert Monaco/VFS source changes and iframe HMR reflects
   committed source.
+- Cross-plan integration test with `isomorphic-agents`: attach a durable branch,
+  Apply a visual edit, and verify the VFS write is mirrored into durable file
+  events without visual-editor code calling Durable Streams directly.
 - Run:
 
 ```bash
