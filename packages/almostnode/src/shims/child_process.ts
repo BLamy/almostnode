@@ -2822,6 +2822,95 @@ module.exports = (async () => {
     }
   });
 
+  // `electron .` / `electron <dir>` / `electron <main.js>` — launch a modern
+  // (contextIsolation + preload) Electron app from source in dev mode. The main
+  // process runs in a fresh Runtime; windows render through the host registered
+  // by the embedder (almost-os). Long-running: stays up until aborted.
+  const electronCommand = defineCommand("electron", async (args, ctx) => {
+    const env = envToRecord(ctx.env);
+    const execution =
+      getExecutionContextFromEnv(controller, env) ??
+      createExecutionContext(controller);
+    const ownsExecution = !getExecutionContextFromEnv(controller, env);
+
+    const target = args.find((a) => !a.startsWith("-")) ?? ".";
+    const resolvedTarget = target.startsWith("/")
+      ? target
+      : `${ctx.cwd}/${target}`.replace(/\/+/g, "/");
+    let appDir = resolvedTarget;
+    try {
+      if (
+        controller.vfs.existsSync(resolvedTarget) &&
+        !controller.vfs.statSync(resolvedTarget).isDirectory()
+      ) {
+        appDir = resolvedTarget.replace(/\/[^/]*$/, "") || "/";
+      }
+    } catch {
+      // fall back to treating the target as a directory
+    }
+
+    const pkgPath = `${appDir}/package.json`.replace(/\/+/g, "/");
+    if (!controller.vfs.existsSync(pkgPath)) {
+      if (ownsExecution) destroyExecutionContext(controller, execution.id);
+      return {
+        stdout: "",
+        stderr: `electron: no package.json found in ${appDir}\n`,
+        exitCode: 1,
+      };
+    }
+
+    let stdout = "";
+    const appendStdout = (data: string) => {
+      stdout += data;
+      execution.onStdout?.(data);
+    };
+    const appendStderr = (data: string) => {
+      execution.onStderr?.(data);
+    };
+    execution.outputStreamed = true;
+
+    const runtime = new Runtime(controller.vfs, {
+      cwd: appDir,
+      env,
+      childProcessController: controller,
+      ownerId: devServerOwnerId(controller),
+      onConsole: (method, consoleArgs) => {
+        const msg = consoleArgs.map((arg) => String(arg)).join(" ") + "\n";
+        if (method === "error") appendStderr(msg);
+        else appendStdout(msg);
+      },
+      onStdout: appendStdout,
+      onStderr: appendStderr,
+    });
+    execution.activeProcess = runtime.getProcess();
+
+    try {
+      const { launchElectronApp } = await import("../frameworks/electron-app");
+      const app = await launchElectronApp(appDir, {
+        vfs: controller.vfs,
+        runtime,
+        onLog: appendStdout,
+      });
+      emitStreamData(
+        execution,
+        `electron: app running — renderer at ${app.rendererUrl}\n`,
+        "stdout",
+      );
+
+      if (execution?.signal) {
+        await waitForAbort(execution.signal);
+        app.close();
+        if (ownsExecution) destroyExecutionContext(controller, execution.id);
+        return { stdout, stderr: "", exitCode: 130 };
+      }
+      return { stdout, stderr: "", exitCode: 0 };
+    } catch (error) {
+      if (ownsExecution) destroyExecutionContext(controller, execution.id);
+      const message = error instanceof Error ? error.message : String(error);
+      return { stdout, stderr: `electron: ${message}\n`, exitCode: 1 };
+    }
+  });
+
   const vitestCommand = defineCommand("vitest", async (args, ctx) => {
     return execInstalledPackageBin(
       controller,
@@ -3535,6 +3624,16 @@ module.exports = (async () => {
     return runAwsCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
+  const soundcloudCommand = defineCommand("soundcloud", async (args, ctx) => {
+    const { runSoundCloudCommand } = await import("./soundcloud-command");
+    return runSoundCloudCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
+  const scCommand = defineCommand("sc", async (args, ctx) => {
+    const { runSoundCloudCommand } = await import("./soundcloud-command");
+    return runSoundCloudCommand(args, ctx, controller.vfs, controller.keychain);
+  });
+
   const replayioCommand = defineCommand("replayio", async (args, ctx) => {
     const { runReplayioCommand } = await import("./replayio-command");
     return runReplayioCommand(args, ctx, controller.vfs, controller.keychain);
@@ -3917,6 +4016,9 @@ module.exports = (async () => {
     createRegisteredShellCommand(viteCommand.name, viteCommand, {
       interceptShellParsing: true,
     }),
+    createRegisteredShellCommand(electronCommand.name, electronCommand, {
+      interceptShellParsing: true,
+    }),
     createRegisteredShellCommand(vitestCommand.name, vitestCommand, {
       interceptShellParsing: true,
     }),
@@ -3966,6 +4068,12 @@ module.exports = (async () => {
       interceptShellParsing: true,
     }),
     createRegisteredShellCommand(awsCommand.name, awsCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(soundcloudCommand.name, soundcloudCommand, {
+      interceptShellParsing: true,
+    }),
+    createRegisteredShellCommand(scCommand.name, scCommand, {
       interceptShellParsing: true,
     }),
     infisicalCommand,

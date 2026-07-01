@@ -19,11 +19,33 @@
 - Chat/session state split across `packages/chat-core`, `packages/almostnode-react`, and Web IDE session management.
 - Git shims remain useful for interoperability, but they should not be the source of truth for this agent-native model.
 
+## Relationship To The Visual Source Editor Plan
+
+Keep this plan separate from `plans/almostnode-staged-visual-source-editor.md`.
+The visual source editor is an internal Web IDE editing surface; this plan owns
+durable branch state, file event persistence, agent logs, database lineage, and
+cloud handoff.
+
+The alignment contract is the existing file write path:
+
+- Visual editor Apply writes source through `VfsFileSystemProvider.writeFile()`.
+- `DurableVirtualFsBridge` observes or wraps the same VFS write path when a
+  durable branch is attached.
+- Durable streams record the resulting file operations, hashes, branch offsets,
+  and optional visual-edit summaries after Apply succeeds.
+- Preview-only DOM mutations and uncommitted staged visual edits remain
+  ephemeral; they are not branch history until they become VFS writes.
+- The visual editor must not call Durable Streams directly or own branch/merge
+  semantics in v1.
+
+This lets the editor become one producer of normal source edits while
+`isomorphic-agents` remains the source of truth for durable continuity.
+
 ## Goals
 
 - Persist all workspace files in durable append-only streams.
 - Persist all agent chat/log/tool events in durable streams.
-- Let branches behave like agent-native source-control branches: every action is durable, replayable, and branch-scoped.
+- Let branches behave like agent-native source-control branches: every committed workspace/file/log action is durable, replayable, and branch-scoped.
 - Clone/branch the PGlite database whenever a filesystem branch is created.
 - Allow browser agents to continue locally, hand off to cloud on demand, or resume in cloud after reconnect/credential approval.
 - Signal other branches after merges so agents can rebase or reconcile themselves.
@@ -167,6 +189,9 @@ The first runner should be generic server/worker code. Cloudflare/Fly-specific d
 - Unit test branch creation materializes parent files at the captured offset.
 - Unit test PGlite branch clone using `dumpDataDir()` and `loadDataDir`, verifying source and child diverge independently.
 - Integration test with local `@durable-streams/server`: two sessions edit the same branch, reload, reconnect from saved offsets, and converge.
+- Cross-plan integration test: with the staged visual source editor enabled,
+  Apply a visual edit and verify it produces normal VFS writes plus durable file
+  events without the editor depending on Durable Streams APIs.
 - Web IDE smoke with `playwright-cli`: create sandbox branch, edit files, run agent chat, reload, switch branch, merge, and observe rebase signal.
 - Run `pnpm nx test almostnode`, `pnpm nx test web-ide`, `pnpm nx type-check almostnode`, and targeted Web IDE e2e once UI surfaces are wired.
 

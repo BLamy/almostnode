@@ -34,6 +34,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - OpenCode stays vendored (`vendor/opencode`), consumed via the existing bun shims.
 
 ### Added
+- **Run Electron apps from source (`@agent-wasm/core` 0.4.0).** A new `electron`
+  module shim emulates the Electron **main process** in the runtime — `app`,
+  `BrowserWindow`, `webContents`, `ipcMain`, plus partial `Menu`/`dialog`/`shell`/
+  `nativeImage`/`clipboard`/`screen` (and visible no-op stubs for the rest). A
+  `BrowserWindow` renders as an iframe supplied by an embedder-registered host
+  (`setElectronHost`); IPC (`ipcRenderer.invoke`/`ipcMain.handle` + `send`/`on`)
+  travels over postMessage, and a preload/`contextBridge` bootstrap is injected into
+  the renderer before app code runs. `electron .` launches an app in dev mode: the
+  renderer is served by `ViteDevServer` (new generic `injectHead` option) and
+  `loadURL(devServerUrl)` is wired up automatically. **almost-os** registers a host so
+  each `BrowserWindow` becomes a real desktop window, and ships an **App Store** app
+  (dock icon) that lazily installs open-source Electron apps into the VFS and launches
+  each in its own isolated runtime — Pomodoro (main→renderer ticks), Markdownify
+  (fs over ipcMain.handle), and System Info (app/shell APIs), reconstructed from real
+  GitHub projects. See `examples/electron-demo.*`.
+  Scope (MVP): modern secure apps (`contextIsolation` + preload); no `nodeIntegration`
+  renderers, no `loadFile`/packaged/`asar` apps, and `contextBridge` exposes on the
+  page's own world rather than a separate isolated world.
 - **Docs are now a page in the web-ide demo** (`/docs` route) rendering the shared
   docs content; the standalone `apps/docs` app stays as a thin host over the same
   module.

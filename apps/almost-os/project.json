@@ -1,0 +1,65 @@
+{
+  "name": "almost-os",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/almost-os/src",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
+      "options": {
+        "command": "node --max-old-space-size=8192 ./node_modules/vite/bin/vite.js build",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "preview": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite preview",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "type-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "e2e": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "playwright test",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "storybook": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "storybook dev -p 6006 --no-open",
+        "cwd": "apps/almost-os"
+      }
+    },
+    "build-storybook": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node --max-old-space-size=8192 ./node_modules/storybook/bin/index.cjs build",
+        "cwd": "apps/almost-os"
+      }
+    }
+  }
+}

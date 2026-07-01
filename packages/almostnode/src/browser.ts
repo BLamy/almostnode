@@ -57,3 +57,23 @@ export {
   serializeTailscaleStateSnapshot,
   TAILSCALE_SESSION_STORAGE_KEY,
 } from "./network";
+// Electron main-process host seam — the embedder (e.g. almost-os) registers a
+// host that backs `BrowserWindow`; see shims/electron.ts.
+export {
+  setElectronHost,
+  getElectronHost,
+  hasElectronHost,
+  ELECTRON_IPC_TAG,
+  ELECTRON_IPC_KIND,
+  isElectronIpcEnvelope,
+} from "./frameworks/electron-host";
+export type {
+  ElectronHost,
+  ElectronWindowHandle,
+  ElectronWindowOptions,
+  ElectronWindowBounds,
+  ElectronWindowEvent,
+  ElectronIpcEnvelope,
+  ElectronIpcError,
+  ElectronIpcKind,
+} from "./frameworks/electron-host";

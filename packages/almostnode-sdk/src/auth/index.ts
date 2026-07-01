@@ -71,6 +71,7 @@ export const agentWasmCredentialPaths = {
   piSettings: "/home/user/.pi/agent/settings.json",
   piModels: "/home/user/.pi/agent/models.json",
   githubHosts: "/home/user/.config/gh/hosts.yml",
+  soundcloudConfig: "/home/user/.config/sc/config.json",
   awsConfig: "/home/user/.config/almostnode/aws/config.json",
   awsAuth: "/home/user/.config/almostnode/aws/auth.json",
   infisicalConfig: "/home/user/.infisical/infisical-config.json",
@@ -156,6 +157,13 @@ export const defaultCredentialSlots = [
     label: "GitHub",
     category: "source-control",
     paths: [agentWasmCredentialPaths.githubHosts],
+    mirrorByDefault: true,
+  }),
+  defineCredentialSlot({
+    id: "soundcloud",
+    label: "SoundCloud",
+    category: "oauth",
+    paths: [agentWasmCredentialPaths.soundcloudConfig],
     mirrorByDefault: true,
   }),
   defineCredentialSlot({
@@ -292,6 +300,16 @@ export const defaultAuthProviders = [
         sourcePath: agentWasmCredentialPaths.githubHosts,
       },
     ],
+  }),
+  defineAuthProvider({
+    id: "soundcloud",
+    label: "SoundCloud",
+    kind: "browser-oauth",
+    slotId: "soundcloud",
+    commands: {
+      login: "sc login",
+      logout: "sc logout",
+    },
   }),
   defineAuthProvider({
     id: "aws",

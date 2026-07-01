@@ -174,6 +174,12 @@ import {
   type KeychainSlotStatus,
   type RegisteredWorkbenchSurfaces,
 } from "./workbench-surfaces";
+import {
+  getVimWasmUnsupportedReason,
+  runVimTerminalSession,
+  type VimVariant,
+} from "./vim-terminal-session";
+import { createFfmpegShellCommands } from "../features/ffmpeg-shell-command";
 import type {
   KeychainSlotPicker,
   KeychainVaultEnvVar,
@@ -1201,6 +1207,11 @@ export class WebIDEHost {
   private databaseSidebarRegistered = false;
   private readonly testsSurface = new TestsSidebarSurface();
   private workbenchThemeKind: WorkbenchThemeKind = "dark";
+  /**
+   * vim.wasm is single-instance per page, so at most one `vim`/`vi` overlay may
+   * be open across all terminals at a time.
+   */
+  private vimSessionActive = false;
   private externalPreviewWindow: Window | null = null;
   private removeHostConsoleBridge: (() => void) | null = null;
   private removeDesktopOAuthLoopbackBridge: (() => void) | null = null;
@@ -8198,6 +8209,107 @@ export class WebIDEHost {
         }
       },
     });
+
+    // `vim` (full build) and `vi` (lightweight "small" build) mount a real
+    // vim.wasm canvas over the terminal and edit files on this container's VFS.
+    const registerVimCommand = (name: string, variant: VimVariant) => {
+      container.registerShellCommand({
+        name,
+        execute: async (args, context) => {
+          const fileArg = args.find((arg) => !arg.startsWith("-"));
+          if (!fileArg) {
+            return {
+              stdout: "",
+              stderr: `usage: ${name} <file>\n`,
+              exitCode: 1,
+            };
+          }
+          return this.launchVimSession({
+            vfs: container.vfs,
+            rawPath: fileArg,
+            variant,
+            cwd: context.cwd,
+            signal: context.signal,
+          });
+        },
+      });
+    };
+    registerVimCommand("vim", "vim");
+    registerVimCommand("vi", "vi");
+
+    // `ffmpeg` / `ffprobe` (ffmpeg.wasm) transcode files on this container's VFS.
+    for (const command of createFfmpegShellCommands()) {
+      container.registerShellCommand(command);
+    }
+  }
+
+  /**
+   * Backs the `vim`/`vi` shell commands: resolves the target path, then mounts
+   * a vim.wasm canvas over the active terminal tab and blocks until Vim exits.
+   * Runs on the main thread alongside the container + canvas, so it can read/
+   * write the container VFS directly — `:w` lands in the same filesystem the
+   * editor and explorer watch.
+   */
+  private async launchVimSession(options: {
+    vfs: ContainerInstance["vfs"];
+    rawPath: string;
+    variant: VimVariant;
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const unsupported = getVimWasmUnsupportedReason();
+    if (unsupported) {
+      return { stdout: "", stderr: `${options.variant}: ${unsupported}\n`, exitCode: 1 };
+    }
+    if (this.vimSessionActive) {
+      return {
+        stdout: "",
+        stderr: `${options.variant}: another editor session is already open.\n`,
+        exitCode: 1,
+      };
+    }
+
+    let absPath: string;
+    try {
+      absPath = resolveWebIdeOpenPath(options.rawPath, options.cwd, WORKSPACE_ROOT);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { stdout: "", stderr: `${options.variant}: ${message}\n`, exitCode: 1 };
+    }
+
+    const tab = this.requireActiveTerminalTab();
+    const body = this.terminalSurface.getTabBody(tab.id);
+    if (!body) {
+      return {
+        stdout: "",
+        stderr: `${options.variant}: no active terminal to render into.\n`,
+        exitCode: 1,
+      };
+    }
+
+    this.vimSessionActive = true;
+    try {
+      const { status } = await runVimTerminalSession({
+        host: body,
+        vfs: options.vfs,
+        absPath,
+        variant: options.variant,
+        signal: options.signal,
+        fontFamily: "IBM Plex Mono, monospace",
+        fontSize: 12,
+      });
+      return { stdout: "", stderr: "", exitCode: status };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "aborted") {
+        return { stdout: "", stderr: "", exitCode: 130 };
+      }
+      return { stdout: "", stderr: `${options.variant}: ${message}\n`, exitCode: 1 };
+    } finally {
+      this.vimSessionActive = false;
+      // The overlay stole focus; hand it back to xterm so the prompt is live.
+      tab.terminal.focus();
+    }
   }
 
   private async runWebIdeOpenCommand(

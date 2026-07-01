@@ -1683,6 +1683,15 @@ export class TerminalPanelSurface {
   }
 
   /**
+   * The live body element hosting a tab's xterm, or `undefined` if unknown.
+   * Callers overlay UI (e.g. a vim.wasm canvas) on top of the terminal by
+   * mounting into this element.
+   */
+  getTabBody(id: string): HTMLElement | undefined {
+    return this.tabBodies.get(id);
+  }
+
+  /**
    * Removes the tab's chrome without disposing the xterm/session and returns
    * the live body element so the caller can reattach it later via
    * `attachTab`. xterm keeps buffering output while the body is offscreen.

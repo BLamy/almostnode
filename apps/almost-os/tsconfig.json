@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "allowJs": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "types": ["vite/client", "node"],
+    "baseUrl": ".",
+    "paths": {
+      "@agent-wasm/core": ["../../packages/almostnode/dist/index.d.ts"],
+      "@agent-wasm/core/internal": ["../../packages/almostnode/dist/internal.d.ts"],
+      "@agent-wasm/sdk": ["../../packages/almostnode-sdk/dist/index.d.ts"],
+      "@agent-wasm/sdk/auth": ["../../packages/almostnode-sdk/dist/auth/index.d.ts"],
+      "@agent-wasm/keychain": ["../../packages/keychain/dist/index.d.ts"],
+      "@agent-wasm/codex": ["../../packages/codex-wasm/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*", "tests/**/*", "vite.config.ts"],
+  "exclude": ["node_modules", "dist", "dist-site"]
+}

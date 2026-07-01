@@ -11,6 +11,7 @@ import type { PackageJson } from './types/package-json';
 import { simpleHash } from './utils/hash';
 import { uint8ToBase64, uint8ToHex } from './utils/binary-encoding';
 import { createFsShim, FsShim } from './shims/fs';
+import { createElectronShim } from './shims/electron';
 import * as pathShim from './shims/path';
 import { createProcess, Process } from './shims/process';
 import * as httpShim from './shims/http';
@@ -1744,6 +1745,7 @@ function createRuntimeGlobalObject(
 export class Runtime {
   private vfs: VirtualFS;
   private fsShim: FsShim;
+  private electronShim: Record<string, unknown>;
   private process: Process;
   private runtimeGlobalObject: Record<string, unknown>;
   private runtimeId: string;
@@ -1815,6 +1817,17 @@ export class Runtime {
         this.process.stderr.write(stdioDecoder.decode(data));
       },
     });
+    // Per-runtime electron main-process shim. Windows are created lazily via
+    // the globally-registered host (see frameworks/electron-host), so the host
+    // may be registered after the runtime is constructed.
+    this.electronShim = createElectronShim({
+      vfs,
+      process: this.process as unknown as {
+        cwd(): string;
+        env: Record<string, string | undefined>;
+        platform?: string;
+      },
+    });
     this.builtinModules = {
       ...builtinModules,
       fs: this.fsShim,
@@ -1844,6 +1857,11 @@ export class Runtime {
       chokidar: chokidarShim.createChokidarModule(vfs),
       readdirp: readdirpShim.createReaddirpModule(vfs),
       esbuild: esbuildShim.createEsbuildModule(vfs),
+      // Per-runtime electron shim: app/ipcMain/window state must be shared
+      // across every module in this runtime, so `require('electron')` returns
+      // one identical object (unlike child_process, whose state lives in a
+      // controller).
+      electron: this.electronShim,
       // Per-runtime http/https: servers constructed here carry this
       // container's owner id from birth (EADDRINUSE checks, server-ready
       // routing, and dispose cleanup all attribute by it).
