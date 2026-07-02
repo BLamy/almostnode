@@ -347,6 +347,66 @@ export function isIPv6(input: string): boolean {
   return isIP(input) === 6;
 }
 
+function ipv4ToInt(address: string): number {
+  const parts = address.split(".").map((part) => Number(part));
+  return (
+    ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0
+  );
+}
+
+type BlockListRule =
+  | { kind: "address"; type: "ipv4" | "ipv6"; address: string }
+  | { kind: "range"; type: "ipv4" | "ipv6"; start: string; end: string }
+  | { kind: "subnet"; type: "ipv4" | "ipv6"; network: string; prefix: number };
+
+/**
+ * Minimal shim of Node's net.BlockList — supports the common IPv4
+ * address/range/subnet cases; IPv6 rules only match by exact address.
+ */
+export class BlockList {
+  private rulesList: BlockListRule[] = [];
+
+  addAddress(address: string, type: "ipv4" | "ipv6" = "ipv4"): void {
+    this.rulesList.push({ kind: "address", type, address });
+  }
+
+  addRange(start: string, end: string, type: "ipv4" | "ipv6" = "ipv4"): void {
+    this.rulesList.push({ kind: "range", type, start, end });
+  }
+
+  addSubnet(network: string, prefix: number, type: "ipv4" | "ipv6" = "ipv4"): void {
+    this.rulesList.push({ kind: "subnet", type, network, prefix });
+  }
+
+  check(address: string, type: "ipv4" | "ipv6" = "ipv4"): boolean {
+    for (const rule of this.rulesList) {
+      if (rule.type !== type) continue;
+      if (rule.kind === "address" && rule.address === address) return true;
+      if (type !== "ipv4") continue;
+      if (rule.kind === "range") {
+        const value = ipv4ToInt(address);
+        if (value >= ipv4ToInt(rule.start) && value <= ipv4ToInt(rule.end)) {
+          return true;
+        }
+      } else if (rule.kind === "subnet") {
+        const mask = rule.prefix === 0 ? 0 : (0xffffffff << (32 - rule.prefix)) >>> 0;
+        if ((ipv4ToInt(address) & mask) === (ipv4ToInt(rule.network) & mask)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  get rules(): string[] {
+    return this.rulesList.map((rule) => {
+      if (rule.kind === "address") return `Address: ${rule.type} ${rule.address}`;
+      if (rule.kind === "range") return `Range: ${rule.type} ${rule.start}-${rule.end}`;
+      return `Subnet: ${rule.type} ${rule.network}/${rule.prefix}`;
+    });
+  }
+}
+
 export default {
   Socket,
   Server,
@@ -356,4 +416,5 @@ export default {
   isIP,
   isIPv4,
   isIPv6,
+  BlockList,
 };

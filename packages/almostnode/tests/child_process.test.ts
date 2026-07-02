@@ -778,6 +778,90 @@ exec('echo "first" && echo "second"', (error, stdout, stderr) => {
     });
   });
 
+  describe('node command flags', () => {
+    it('should evaluate code with node -e', async () => {
+      const code = `
+const { exec } = require('child_process');
+exec('node -e "console.log(1+1)"', (error, stdout, stderr) => {
+  if (error) {
+    console.log('EVAL_ERROR:' + error.message + stderr);
+    return;
+  }
+  console.log('EVAL_OUT:' + stdout.trim());
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('EVAL_OUT:') || o.includes('EVAL_ERROR:')));
+
+      expect(consoleOutput.some(o => o.includes('EVAL_OUT:2'))).toBe(true);
+    });
+
+    it('should print the result with node -p', async () => {
+      const code = `
+const { exec } = require('child_process');
+exec('node -p "1+1"', (error, stdout, stderr) => {
+  if (error) {
+    console.log('PRINT_ERROR:' + error.message + stderr);
+    return;
+  }
+  console.log('PRINT_OUT:' + stdout.trim());
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('PRINT_OUT:') || o.includes('PRINT_ERROR:')));
+
+      expect(consoleOutput.some(o => o.includes('PRINT_OUT:2'))).toBe(true);
+    });
+
+    it('should report the runtime version with node --version', async () => {
+      const code = `
+const { exec } = require('child_process');
+exec('node --version', (error, stdout) => {
+  console.log('VERSION_OUT:' + (error ? error.message : stdout.trim()));
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('VERSION_OUT:')));
+
+      expect(consoleOutput.some(o => o.includes('VERSION_OUT:v20.0.0'))).toBe(true);
+    });
+
+    it('should expose trailing args as process.argv in eval mode', async () => {
+      const code = `
+const { exec } = require('child_process');
+exec('node -e "console.log(process.argv.slice(1).join(\\',\\'))" foo bar', (error, stdout, stderr) => {
+  if (error) {
+    console.log('ARGV_ERROR:' + error.message + stderr);
+    return;
+  }
+  console.log('ARGV_OUT:' + stdout.trim());
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('ARGV_OUT:') || o.includes('ARGV_ERROR:')));
+
+      expect(consoleOutput.some(o => o.includes('ARGV_OUT:foo,bar'))).toBe(true);
+    });
+
+    it('should reject unknown flags with a bad option error', async () => {
+      const code = `
+const { exec } = require('child_process');
+exec('node --bogus script.js', (error, stdout, stderr) => {
+  console.log('BAD_OPTION:' + stderr.trim());
+});
+      `;
+
+      await runtime.execute(code, '/test.js');
+      await waitFor(() => consoleOutput.some(o => o.includes('BAD_OPTION:')));
+
+      expect(consoleOutput.some(o => o.includes('bad option: --bogus'))).toBe(true);
+    });
+  });
+
   describe('npm command', () => {
     it('should execute a script from package.json with npm run', async () => {
       vfs.writeFileSync('/package.json', JSON.stringify({
