@@ -141,8 +141,16 @@ const DEFAULT_SHELL_ENV: Record<string, string> = {
 };
 
 const DEFAULT_CLAUDE_WRAPPER_PATH = "/usr/local/bin/claude-wrapper";
+// Anthropic switched the `claude` CLI's bin entry from a JS file (cli.js) to a
+// platform-native compiled binary (bin/claude.exe, a Bun `--compile` output —
+// Mach-O/ELF/PE machine code) starting at 2.1.113. That can't run in this
+// WASM sandbox no matter what shims exist — there's no JS source to execute,
+// and the package's own --ignore-scripts fallback (cli-wrapper.cjs) just
+// spawns that same native binary. 2.1.112 is the newest version that still
+// ships bin: { claude: "cli.js" }. Bump past this only once a JS/WASM-runnable
+// distribution exists again.
 export const DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE =
-  "@anthropic-ai/claude-code@2.1.52";
+  "@anthropic-ai/claude-code@2.1.112";
 
 interface ActiveProcessStdin {
   emit: (event: string, ...args: unknown[]) => void;
@@ -1566,22 +1574,70 @@ export function initChildProcess(
       createExecutionContext(controller);
     const ownsExecution = !getExecutionContextFromEnv(controller, env);
 
-    const scriptPath = args[0];
-    if (!scriptPath) {
+    let evalCode: string | null = null;
+    let printEvalResult = false;
+    let argIndex = 0;
+    while (argIndex < args.length) {
+      const arg = args[argIndex];
+      if (arg === "--") {
+        argIndex++;
+        break;
+      }
+      if (!arg.startsWith("-") || arg === "-") break;
+      if (arg === "-e" || arg === "--eval" || arg === "-p" || arg === "--print") {
+        const code = args[argIndex + 1];
+        if (code === undefined) {
+          if (ownsExecution) destroyExecutionContext(controller, execution.id);
+          return {
+            stdout: "",
+            stderr: `node: ${arg} requires an argument\n`,
+            exitCode: 9,
+          };
+        }
+        evalCode = code;
+        printEvalResult = arg === "-p" || arg === "--print";
+        argIndex += 2;
+      } else if (arg.startsWith("--eval=")) {
+        evalCode = arg.slice("--eval=".length);
+        argIndex++;
+      } else if (arg.startsWith("--print=")) {
+        evalCode = arg.slice("--print=".length);
+        printEvalResult = true;
+        argIndex++;
+      } else if (arg === "-v" || arg === "--version") {
+        if (ownsExecution) destroyExecutionContext(controller, execution.id);
+        return { stdout: "v20.0.0\n", stderr: "", exitCode: 0 };
+      } else {
+        if (ownsExecution) destroyExecutionContext(controller, execution.id);
+        return {
+          stdout: "",
+          stderr: `node: bad option: ${arg}\n`,
+          exitCode: 9,
+        };
+      }
+    }
+    const scriptArgs = args.slice(argIndex);
+
+    const scriptPath = scriptArgs[0];
+    if (evalCode === null && !scriptPath) {
       if (ownsExecution) destroyExecutionContext(controller, execution.id);
       return {
         stdout: "",
-        stderr: "Usage: node <script.js> [args...]\n",
+        stderr: 'Usage: node [-e code | -p code] <script.js> [args...]\n',
         exitCode: 1,
       };
     }
 
-    const resolvedPath = scriptPath.startsWith("/")
-      ? scriptPath
-      : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, "/");
+    // Eval code resolves relative requires against cwd, like real `node -e`.
+    const resolvedPath =
+      evalCode !== null
+        ? `${ctx.cwd}/__almostnode_eval__.js`.replace(/\/+/g, "/")
+        : scriptPath.startsWith("/")
+          ? scriptPath
+          : `${ctx.cwd}/${scriptPath}`.replace(/\/+/g, "/");
     const isNodeModulesCli = resolvedPath.includes("/node_modules/");
     const isOneShotNodeModulesCli =
-      isNodeModulesCli && isLikelyOneShotCliInvocation(args.slice(1));
+      isNodeModulesCli && isLikelyOneShotCliInvocation(scriptArgs.slice(1));
     const isNpxExec = env.ALMOSTNODE_NPX_EXEC === "1";
     const isLongIdleNodeModulesCli =
       isNodeModulesCli &&
@@ -1589,7 +1645,7 @@ export function initChildProcess(
       (env.ALMOSTNODE_LONG_NODE_IDLE === "1" ||
         env.ALMOSTNODE_LONG_NODE_IDLE === "true");
 
-    if (!controller.vfs.existsSync(resolvedPath)) {
+    if (evalCode === null && !controller.vfs.existsSync(resolvedPath)) {
       if (ownsExecution) destroyExecutionContext(controller, execution.id);
       return {
         stdout: "",
@@ -1677,7 +1733,10 @@ export function initChildProcess(
       }
       throw new Error(`Process exited with code ${finalCode}`);
     }) as (code?: number) => never;
-    proc.argv = ["node", resolvedPath, ...args.slice(1)];
+    proc.argv =
+      evalCode !== null
+        ? ["node", ...scriptArgs]
+        : ["node", resolvedPath, ...scriptArgs.slice(1)];
 
     const shouldEnableTty =
       !!execution.signal || !!execution.onStdout || !!execution.onStderr;
@@ -1796,7 +1855,17 @@ module.exports = (async () => {
     const runInitialFile = async (): Promise<"runFile" | "exit" | "abort"> => {
       const runFilePromise = (async () => {
         await preloadYogaLayout();
-        await runtime.runFile(resolvedPath);
+        if (evalCode !== null) {
+          // eval() preserves the completion value for -p, which plain module
+          // execution would discard (e.g. `node -p "1+1"` prints 2).
+          const source = printEvalResult
+            ? `const __evalResult = eval(${JSON.stringify(evalCode)});\n` +
+              `console.log(typeof __evalResult === "string" ? __evalResult : require("util").inspect(__evalResult));`
+            : evalCode;
+          await runtime.execute(source, resolvedPath);
+        } else {
+          await runtime.runFile(resolvedPath);
+        }
       })();
 
       const raceEntries: Array<Promise<"runFile" | "exit" | "abort">> = [
@@ -2035,7 +2104,7 @@ module.exports = (async () => {
     if (!subcommand || subcommand === "help" || subcommand === "--help") {
       return {
         stdout:
-          "Usage: npm <command>\n\nCommands:\n  run <script>   Run a script from package.json\n  start          Run the start script\n  test           Run the test script\n  install [pkg]  Install packages\n  ls             List installed packages\n",
+          "Usage: npm <command>\n\nCommands:\n  run <script>       Run a script from package.json\n  start              Run the start script\n  test               Run the test script\n  install [pkg]      Install packages\n  create <name>      Scaffold via a create-<name> package\n  init [name]        Alias of create; bare init writes package.json\n  ls                 List installed packages\n",
         stderr: "",
         exitCode: 0,
       };
@@ -2058,6 +2127,23 @@ module.exports = (async () => {
       case "ls":
       case "list":
         return handleNpmList(controller, ctx);
+      case "create":
+      case "init":
+      case "innit": {
+        // `npm create <initializer>` === `npm init <initializer>`: install and
+        // run the `create-<initializer>` package (like `npx create-...`). Args
+        // after the initializer — dropping a leading `--` separator — are
+        // forwarded to the scaffolder.
+        const rest = args.slice(1);
+        const idx = rest.findIndex((a) => !a.startsWith("-"));
+        if (idx === -1) {
+          return handleNpmInitBare(controller, ctx);
+        }
+        const createPkg = initializerToCreatePackage(rest[idx]);
+        let forwarded = rest.slice(idx + 1);
+        if (forwarded[0] === "--") forwarded = forwarded.slice(1);
+        return runPackageExecCommand("npx", [createPkg, ...forwarded], ctx);
+      }
       default:
         return {
           stdout: "",
@@ -2897,13 +2983,25 @@ module.exports = (async () => {
         "stdout",
       );
 
-      if (execution?.signal) {
-        await waitForAbort(execution.signal);
-        app.close();
-        if (ownsExecution) destroyExecutionContext(controller, execution.id);
-        return { stdout, stderr: "", exitCode: 130 };
+      // Foreground like real `electron .`: keep the command (and thus the app's
+      // runtime + its timers) alive until the app quits itself (menu Quit /
+      // app.quit() / all windows closed) or the terminal aborts. Returning early
+      // would stop pumping the runtime before the shim's deferred `ready` fires,
+      // so `app.whenReady()` never resolves and no window ever opens.
+      const quitPromise = app.whenQuit.then((code) => ({ kind: "quit" as const, code }));
+      const outcome = execution?.signal
+        ? await Promise.race([
+            waitForAbort(execution.signal).then(() => ({ kind: "abort" as const })),
+            quitPromise,
+          ])
+        : await quitPromise;
+      app.close();
+      if (ownsExecution) destroyExecutionContext(controller, execution.id);
+      if (outcome.kind === "quit") {
+        emitStreamData(execution, `electron: app quit (code ${outcome.code})\n`, "stdout");
+        return { stdout, stderr: "", exitCode: outcome.code };
       }
-      return { stdout, stderr: "", exitCode: 0 };
+      return { stdout, stderr: "", exitCode: 130 };
     } catch (error) {
       if (ownsExecution) destroyExecutionContext(controller, execution.id);
       const message = error instanceof Error ? error.message : String(error);
@@ -3624,12 +3722,12 @@ module.exports = (async () => {
     return runAwsCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const soundcloudCommand = defineCommand("soundcloud", async (args, ctx) => {
+  const napsterCommand = defineCommand("napster", async (args, ctx) => {
     const { runSoundCloudCommand } = await import("./soundcloud-command");
     return runSoundCloudCommand(args, ctx, controller.vfs, controller.keychain);
   });
 
-  const scCommand = defineCommand("sc", async (args, ctx) => {
+  const soundcloudCommand = defineCommand("soundcloud", async (args, ctx) => {
     const { runSoundCloudCommand } = await import("./soundcloud-command");
     return runSoundCloudCommand(args, ctx, controller.vfs, controller.keychain);
   });
@@ -4070,10 +4168,10 @@ module.exports = (async () => {
     createRegisteredShellCommand(awsCommand.name, awsCommand, {
       interceptShellParsing: true,
     }),
-    createRegisteredShellCommand(soundcloudCommand.name, soundcloudCommand, {
+    createRegisteredShellCommand(napsterCommand.name, napsterCommand, {
       interceptShellParsing: true,
     }),
-    createRegisteredShellCommand(scCommand.name, scCommand, {
+    createRegisteredShellCommand(soundcloudCommand.name, soundcloudCommand, {
       interceptShellParsing: true,
     }),
     infisicalCommand,
@@ -4571,6 +4669,62 @@ function listScripts(
 /**
  * Handle `npm install [pkg]` — bridge to PackageManager
  */
+/**
+ * Map an `npm create` / `npm init` initializer to the package npm would run, per
+ * npm's own rules: `foo` → `create-foo`, `@scope` → `@scope/create`,
+ * `@scope/foo` → `@scope/create-foo`. A trailing `@version`/`@tag` is preserved.
+ */
+export function initializerToCreatePackage(initializer: string): string {
+  let spec = initializer;
+  let version = "";
+  // A '@' after index 0 marks a version/tag (index 0 is a scope's leading '@').
+  const atIdx = spec.lastIndexOf("@");
+  if (atIdx > 0) {
+    version = spec.slice(atIdx);
+    spec = spec.slice(0, atIdx);
+  }
+
+  let pkg: string;
+  if (spec.startsWith("@")) {
+    const slash = spec.indexOf("/");
+    if (slash === -1) {
+      pkg = `${spec}/create`;
+    } else {
+      pkg = `${spec.slice(0, slash)}/create-${spec.slice(slash + 1)}`;
+    }
+  } else {
+    pkg = `create-${spec}`;
+  }
+  return pkg + version;
+}
+
+/**
+ * Bare `npm init` / `npm init -y` — scaffold a minimal package.json in cwd
+ * rather than dropping into npm's interactive questionnaire (no TTY here).
+ */
+async function handleNpmInitBare(
+  controller: ChildProcessController,
+  ctx: CommandContext,
+): Promise<JustBashExecResult> {
+  const pkgPath = `${ctx.cwd}/package.json`.replace(/\/+/g, "/");
+  if (controller.vfs.existsSync(pkgPath)) {
+    return { stdout: `package.json already exists at ${pkgPath}\n`, stderr: "", exitCode: 0 };
+  }
+  const name = (ctx.cwd.split("/").filter(Boolean).pop() || "app").toLowerCase();
+  const pkg = {
+    name,
+    version: "1.0.0",
+    description: "",
+    main: "index.js",
+    scripts: { test: 'echo "Error: no test specified" && exit 1' },
+    keywords: [] as string[],
+    author: "",
+    license: "ISC",
+  };
+  controller.vfs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+  return { stdout: `Wrote to ${pkgPath}\n`, stderr: "", exitCode: 0 };
+}
+
 async function handleNpmInstall(
   controller: ChildProcessController,
   args: string[],

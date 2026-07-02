@@ -8,6 +8,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Bumped the default browser-sandboxed Claude Code package** (`DEFAULT_BROWSER_CLAUDE_CODE_PACKAGE`,
+  `@agent-wasm/core`) from `@anthropic-ai/claude-code@2.1.52` to `@anthropic-ai/claude-code@2.1.112`.
+  Newer releases (2.1.113+, including the previous latest 2.1.198) ship `bin/claude.exe` as a
+  platform-native compiled binary (a Bun `--compile` Mach-O/ELF/PE executable) instead of a JS
+  `cli.js` entrypoint — that can't execute in this WASM sandbox regardless of shimming, since
+  there's no JS source to run and the package's own `--ignore-scripts` fallback still just spawns
+  the native binary. 2.1.112 is the newest version confirmed to still ship a JS entrypoint; the
+  `shadcn-claude-code.spec.ts` e2e suite verifies `npx @anthropic-ai/claude-code --version` boots.
+  Override via `ALMOSTNODE_CLAUDE_CODE_PACKAGE` if you need a different pin.
+
+### Added
+- **`npm create` / `npm init <initializer>` in the bash shim (`@agent-wasm/core`).**
+  `npm create @quick-start/electron -- --template react-ts` (and `npm init vite`, etc.)
+  now resolve the initializer to its `create-*` package by npm's own rules
+  (`foo`→`create-foo`, `@scope/foo`→`@scope/create-foo`, `@scope`→`@scope/create`,
+  version/tag preserved) and run it through the existing `npx` machinery; args after
+  `--` are forwarded to the scaffolder. Bare `npm init`/`npm init -y` writes a minimal
+  `package.json` instead of erroring. Previously both returned `Unknown command`.
+- **Run electron-vite apps from source (`@agent-wasm/core`).** `electron <dir>` can
+  now launch a stock electron-vite / vite-plugin-electron project cloned straight
+  from GitHub, via four lowest-layer additions (no library-specific shims):
+  - **Source main-entry resolution** — when `pkg.main` points at an unbuilt output
+    (`out/main/index.js`, `dist-electron/main/index.js`), the runtime falls back to
+    the conventional source entry (`src/main/index.ts`, `electron/main/index.ts`, …)
+    and runs it directly (`resolveMainEntry`).
+  - **vite/webpack asset imports** in the ESM module graph — `import x from './a.png?asset'`
+    / `?url` / `?inline` yields the file path, `?raw` yields the file text, and a bare
+    import of an asset-extension file (`.png/.svg/.woff/.mp3/…`) is treated as an asset.
+    Resolved at `ModuleResolver` so every consumer sees a real module.
+  - **TypeScript/TSX/JSX transpilation** of first-party ESM source in the module graph
+    loader (esbuild), so an app's own `src/main/index.ts` runs without a prior build.
+    Fixes the key blocker: module-format detection acorn-parses source to classify
+    ESM/CJS, but acorn can't parse TS type syntax — so a *typed* `.ts` main was
+    misclassified as CJS and run as raw eval (never transpiled). `detectFormat` now
+    falls back to a TS-tolerant ESM check on parse failure, routing typed `.ts`/`.tsx`
+    to the transpiling ESM loader (`.mts`→ESM, `.cts`→CJS by extension). esbuild is
+    pre-warmed on the main thread before a TS main runs. A stock electron-vite
+    TypeScript app (TS main + preload + renderer) now launches and renders.
+  - `electron <dir>` stays **foreground** until the app quits/aborts even without an
+    external abort signal, so a bare-terminal `electron .` keeps its runtime alive
+    long enough for the deferred `ready` to fire and the window to open.
+  - **Preload bundling** — a preload that imports npm helpers (e.g.
+    `@electron-toolkit/preload`) is bundled with its dependencies inlined, keeping
+    `electron` external so it binds to the renderer bridge; falls back to the
+    single-file transform when there's nothing to bundle.
+  - **Shim fidelity for the `@electron-toolkit` surface** — `app` now emits the
+    standard `browser-window-created` event when a `BrowserWindow` is created (so
+    `optimizer.watchWindowShortcuts` and similar per-window hooks run), and the
+    renderer bridge gained `webFrame.insertCSS`/`insertText` and a `webUtils`
+    namespace (`getPathForFile` best-effort → the file name, since browsers can't
+    expose a real path).
+
+### Changed
 - **Monorepo split into publishable `@agent-wasm/*` packages.** The runtime and the
   reusable IDE layers are now scoped packages, re-consumed by the `web-ide` demo:
   - `almostnode` → **`@agent-wasm/core`** (the browser Node runtime; `./internal`,
