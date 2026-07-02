@@ -3,10 +3,11 @@ import { CATALOG, type AppStoreEntry } from "./catalog";
 import {
   installApp,
   isInstalled,
-  isRunning,
   launchApp,
+  reinstallApp,
   stopApp,
   uninstallApp,
+  useRunning,
 } from "./appstore-store";
 import { getWorkspace } from "../../runtime/runtime";
 import "./appstore.css";
@@ -15,7 +16,7 @@ type Phase = "idle" | "installing";
 
 export function AppStoreApp() {
   const [installed, setInstalled] = useState<Set<string>>(new Set());
-  const [running, setRunning] = useState<Set<string>>(new Set());
+  const running = useRunning();
   const [phase, setPhase] = useState<Record<string, Phase>>({});
 
   const refreshInstalled = useCallback(() => {
@@ -44,28 +45,24 @@ export function AppStoreApp() {
     }
   };
 
-  const open = (entry: AppStoreEntry) => {
-    launchApp(entry.id);
-    setRunning((r) => new Set(r).add(entry.id));
-  };
+  // launch/stop/uninstall update the manager's reactive running set directly.
+  const open = (entry: AppStoreEntry) => launchApp(entry.id);
 
-  const quit = (entry: AppStoreEntry) => {
-    stopApp(entry.id);
-    setRunning((r) => {
-      const next = new Set(r);
-      next.delete(entry.id);
-      return next;
-    });
-  };
+  const quit = (entry: AppStoreEntry) => stopApp(entry.id);
 
   const remove = (entry: AppStoreEntry) => {
     uninstallApp(entry.id);
-    setRunning((r) => {
-      const next = new Set(r);
-      next.delete(entry.id);
-      return next;
-    });
     refreshInstalled();
+  };
+
+  const reinstall = async (entry: AppStoreEntry) => {
+    setPhase((p) => ({ ...p, [entry.id]: "installing" }));
+    try {
+      await reinstallApp(entry);
+      refreshInstalled();
+    } finally {
+      setPhase((p) => ({ ...p, [entry.id]: "idle" }));
+    }
   };
 
   return (
@@ -80,7 +77,7 @@ export function AppStoreApp() {
       <div className="appstore__grid">
         {CATALOG.map((entry) => {
           const isInst = installed.has(entry.id);
-          const isRun = running.has(entry.id) || isRunning(entry.id);
+          const isRun = running.has(entry.id);
           const busy = phase[entry.id] === "installing";
           return (
             <div className="appstore__card" key={entry.id}>
@@ -117,6 +114,14 @@ export function AppStoreApp() {
                     </button>
                   ) : (
                     <>
+                      <button
+                        className="appstore__btn appstore__btn--ghost"
+                        onClick={() => void reinstall(entry)}
+                        disabled={busy}
+                        title="Wipe settings + AI edits and restore a pristine copy"
+                      >
+                        {busy ? "Reinstalling…" : "Reinstall"}
+                      </button>
                       <button
                         className="appstore__btn appstore__btn--ghost"
                         onClick={() => remove(entry)}

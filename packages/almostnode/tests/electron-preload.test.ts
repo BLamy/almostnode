@@ -57,6 +57,23 @@ describe('electron preload bridge', () => {
     expect(ready?.[ELECTRON_IPC_TAG]).toBe(true);
   });
 
+  it('exposes the standard renderer namespaces (webFrame.insertCSS, webUtils)', () => {
+    const PRELOAD_TK = `
+      const electron = require('electron');
+      electron.contextBridge.exposeInMainWorld('electron', electron);
+    `;
+    const { fakeWindow } = runBootstrap(PRELOAD_TK);
+    const renderer = fakeWindow.electron as {
+      webFrame: { insertCSS: unknown };
+      webUtils: { getPathForFile: (f: unknown) => string };
+    };
+    expect(typeof renderer.webFrame.insertCSS).toBe('function');
+    expect(typeof renderer.webUtils.getPathForFile).toBe('function');
+    // Best-effort: browsers can't give a real path, so we return the name.
+    expect(renderer.webUtils.getPathForFile({ name: 'a.txt' })).toBe('a.txt');
+    expect(renderer.webUtils.getPathForFile(undefined)).toBe('');
+  });
+
   it('ipcRenderer.invoke posts an invoke and resolves on reply', async () => {
     const { fakeWindow, mainInbox, deliver } = runBootstrap(PRELOAD);
     const api = fakeWindow.api as { ping: (msg: string) => Promise<string> };

@@ -1,73 +1,54 @@
 /**
- * App Store install/launch logic against the shared almost-os workspace.
- *
- * Install lazily imports an app's source and writes it into the VFS under
- * /Applications/<id> (persisted with the workspace snapshot). Launch runs
- * `electron <dir>` in a dedicated terminal session so each app gets its own
- * isolated runtime (separate app/ipcMain/window state).
+ * App Store install/launch surface — a thin adapter over the shared
+ * electron-app-manager. Catalog entries (AppStoreEntry) are mapped to the
+ * manager's ManagedElectronApp shape; all install/launch/stop/uninstall and the
+ * reactive running set live in the manager so the dock and App Store agree on
+ * app state.
  */
-import type { TerminalSessionHandle } from '@agent-wasm/sdk';
-import { getWorkspace } from '../../runtime/runtime';
-import type { AppStoreEntry } from './catalog';
+import {
+  APPS_ROOT,
+  appDir,
+  ensureInstalled,
+  isInstalled,
+  isRunning,
+  launch,
+  reinstall,
+  stop,
+  uninstall,
+  useRunning,
+  type ManagedElectronApp,
+} from "../electron/electron-app-manager";
+import type { AppStoreEntry } from "./catalog";
 
-export const APPS_ROOT = '/Applications';
+export { APPS_ROOT, appDir, isInstalled, isRunning, useRunning };
 
-export function appDir(id: string): string {
-  return `${APPS_ROOT}/${id}`;
-}
-
-export function isInstalled(id: string): boolean {
-  return getWorkspace().vfs.existsSync(`${appDir(id)}/package.json`);
+function toManaged(entry: AppStoreEntry): ManagedElectronApp {
+  return {
+    id: entry.id,
+    name: entry.name,
+    version: entry.version,
+    loadFiles: () => entry.load().then((m) => m.files),
+  };
 }
 
 export async function installApp(entry: AppStoreEntry): Promise<void> {
-  const vfs = getWorkspace().vfs;
-  const mod = await entry.load();
-  const dir = appDir(entry.id);
-  for (const [rel, content] of Object.entries(mod.files)) {
-    const full = `${dir}/${rel}`;
-    const parent = full.slice(0, full.lastIndexOf('/'));
-    if (parent && !vfs.existsSync(parent)) {
-      vfs.mkdirSync(parent, { recursive: true });
-    }
-    vfs.writeFileSync(full, content);
-  }
+  await ensureInstalled(toManaged(entry));
 }
 
-export function uninstallApp(id: string): void {
-  stopApp(id);
-  const dir = appDir(id);
-  if (getWorkspace().vfs.existsSync(dir)) {
-    getWorkspace().remove(dir);
-  }
-}
-
-// Live app instances, keyed by app id — prevents double-launch and lets us stop.
-const running = new Map<string, TerminalSessionHandle>();
-
-export function isRunning(id: string): boolean {
-  return running.has(id);
+/** Wipe the app's settings + AI edits and restore its pristine seed files. */
+export async function reinstallApp(entry: AppStoreEntry): Promise<void> {
+  await reinstall(toManaged(entry));
 }
 
 export function launchApp(id: string): void {
-  if (running.has(id)) return;
-  const workspace = getWorkspace();
-  const handle = workspace.terminals.createSession();
-  running.set(id, handle);
-  // Fire-and-forget: the session keeps the Electron main process alive until
-  // we dispose it (or the command errors, in which case we free the slot).
-  void handle.session
-    .run(`electron ${appDir(id)}`)
-    .catch(() => {})
-    .finally(() => {
-      if (running.get(id) === handle) running.delete(id);
-    });
+  // Installed before this is called (the UI only enables Open once installed).
+  launch({ id, name: id, loadFiles: async () => ({}) });
 }
 
 export function stopApp(id: string): void {
-  const handle = running.get(id);
-  if (handle) {
-    handle.dispose();
-    running.delete(id);
-  }
+  stop(id);
+}
+
+export function uninstallApp(id: string): void {
+  uninstall(id);
 }

@@ -71,6 +71,16 @@ export function buildElectronPreloadBootstrap(
         try { fn.apply(null, [ipcEvent].concat(data.args || [])); }
         catch (e) { console.error(e); }
       });
+    } else if (data.kind === KIND.menuRole) {
+      // Edit-role menu commands (Edit > Cut/Copy/Paste/...) applied best-effort.
+      var roleCommands = {
+        undo: 'undo', redo: 'redo', cut: 'cut', copy: 'copy', paste: 'paste',
+        pasteAndMatchStyle: 'paste', 'delete': 'delete', selectAll: 'selectAll',
+      };
+      var command = data.args && roleCommands[data.args[0]];
+      if (command) {
+        try { document.execCommand(command); } catch (e) { /* unsupported */ }
+      }
     }
   });
 
@@ -139,9 +149,31 @@ export function buildElectronPreloadBootstrap(
     setZoomFactor: function () {}, getZoomFactor: function () { return 1; },
     setZoomLevel: function () {}, getZoomLevel: function () { return 0; },
     executeJavaScript: function () { return Promise.resolve(); },
+    insertCSS: function (css) {
+      try {
+        var style = document.createElement('style');
+        style.textContent = String(css);
+        document.head.appendChild(style);
+      } catch (e) { /* no document yet */ }
+      return '';
+    },
+    insertText: function () { return Promise.resolve(); },
   };
 
-  var electronRenderer = { ipcRenderer: ipcRenderer, contextBridge: contextBridge, webFrame: webFrame };
+  // Browsers can't expose a File's absolute filesystem path (removed from the
+  // web platform), so this is best-effort — the name is the closest analog.
+  var webUtils = {
+    getPathForFile: function (file) {
+      return file && typeof file.name === 'string' ? file.name : '';
+    },
+  };
+
+  var electronRenderer = {
+    ipcRenderer: ipcRenderer,
+    contextBridge: contextBridge,
+    webFrame: webFrame,
+    webUtils: webUtils,
+  };
   window.__almostElectronRenderer = electronRenderer;
 
   function preloadRequire(id) {

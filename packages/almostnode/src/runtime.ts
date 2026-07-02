@@ -2708,6 +2708,14 @@ export class Runtime {
     return this.process;
   }
 
+  /**
+   * A named builtin module instance owned by this runtime (e.g. 'electron' —
+   * used by the app orchestrator to observe the shim's app lifecycle).
+   */
+  getBuiltin(name: string): unknown {
+    return this.builtinModules[name];
+  }
+
   getNetwork(): NetworkController {
     return this.networkController;
   }

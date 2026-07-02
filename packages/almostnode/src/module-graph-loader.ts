@@ -271,6 +271,12 @@ export class ModuleGraphLoader {
           case 'cjs':
             result = this.buildCjsModuleSource(descriptor);
             break;
+          case 'raw':
+            result = this.buildRawModuleSource(descriptor);
+            break;
+          case 'asset':
+            result = this.buildAssetModuleSource(descriptor);
+            break;
           case 'esm':
           default:
             try {
@@ -302,6 +308,12 @@ export class ModuleGraphLoader {
       code = code.slice(code.indexOf('\n') + 1);
     }
 
+    // Local TS/TSX/JSX source (e.g. an app's own `src/main/index.ts`) is run
+    // directly through the runtime — strip types / compile JSX to JS before the
+    // acorn-based specifier rewrite, which only parses plain JS. npm packages
+    // are pre-transformed at install; this covers first-party source only.
+    code = await this.maybeTranspileTypeScript(code, descriptor.resolvedPath);
+
     const rewritten = await this.rewriteEsmSpecifiers(code, descriptor.resolvedPath);
     const runtimePreamble = this.createRuntimePreamble(
       rewritten.topLevelBindings,
@@ -323,6 +335,52 @@ export class ModuleGraphLoader {
       '});',
       rewritten.code,
     ].join('\n');
+  }
+
+  private async maybeTranspileTypeScript(code: string, filePath: string): Promise<string> {
+    const ext = pathShim.extname(filePath).toLowerCase();
+    const loader =
+      ext === '.ts' || ext === '.mts' || ext === '.cts'
+        ? 'ts'
+        : ext === '.tsx'
+          ? 'tsx'
+          : ext === '.jsx'
+            ? 'jsx'
+            : null;
+    if (!loader) return code;
+
+    try {
+      // Reuse the app's shared `window.__esbuild` singleton (same instance the
+      // ViteDevServer / install-time transforms use) rather than the esbuild
+      // shim's own initializer, whose CDN fallback hangs under COEP when this is
+      // the first esbuild caller (e.g. a TS main transpiled before any renderer
+      // request has initialized esbuild).
+      const w = globalThis as unknown as {
+        __esbuild?: { transform: (c: string, o: unknown) => Promise<{ code: string }> };
+      };
+      if (!w.__esbuild) {
+        const { initTransformer } = await import('./transform');
+        await initTransformer();
+      }
+      const esbuild = w.__esbuild;
+      if (!esbuild) return code;
+      const result = await esbuild.transform(code, {
+        loader,
+        format: 'esm',
+        target: 'es2020',
+        ...(loader === 'tsx' || loader === 'jsx' ? { jsx: 'automatic' as const } : {}),
+      });
+      return result.code;
+    } catch (error) {
+      // esbuild is browser-only; in environments without it, leave the source as
+      // is — the acorn rewrite surfaces a clear parse error if types remain.
+      almostnodeDebugLog(
+        'modules',
+        `[almostnode DEBUG] TypeScript transpile skipped for ${filePath}`,
+        error,
+      );
+      return code;
+    }
   }
 
   private createRuntimePreamble(topLevelBindings?: Set<string>, fromPath = '/'): string {
@@ -395,6 +453,19 @@ export class ModuleGraphLoader {
       'export default __mod;',
       '',
     ].join('\n');
+  }
+
+  private buildRawModuleSource(descriptor: ResolvedModuleDescriptor): string {
+    // `import text from './f?raw'` — default export is the file's text.
+    const text = this.vfs.readFileSync(descriptor.resolvedPath, 'utf8');
+    return `export default ${JSON.stringify(text)};\n`;
+  }
+
+  private buildAssetModuleSource(descriptor: ResolvedModuleDescriptor): string {
+    // `import url from './f?asset'` — in the runtime (main/preload) the useful
+    // value is the file's VFS path (usable with fs / nativeImage). Renderer
+    // asset URLs are handled by the dev server, not this loader.
+    return `export default ${JSON.stringify(descriptor.resolvedPath)};\n`;
   }
 
   private buildCjsModuleSource(descriptor: ResolvedModuleDescriptor): string {
@@ -603,6 +674,11 @@ export class ModuleGraphLoader {
       return simpleHash(`builtin:${descriptor.builtinId || descriptor.resolvedPath}`);
     }
 
+    // Asset modules emit only the path — don't read the (possibly binary) file.
+    if (descriptor.format === 'asset') {
+      return simpleHash(`asset:${descriptor.resolvedPath}`);
+    }
+
     const source = this.vfs.readFileSync(descriptor.resolvedPath, 'utf8');
     return simpleHash(`${descriptor.format}:${descriptor.resolvedPath}:${source}`);
   }
@@ -611,6 +687,12 @@ export class ModuleGraphLoader {
     if (descriptor.format === 'builtin') {
       return simpleHash(
         `${MODULE_SOURCE_HASH_VERSION}:builtin:${descriptor.builtinId || descriptor.resolvedPath}`,
+      );
+    }
+
+    if (descriptor.format === 'asset') {
+      return simpleHash(
+        `${MODULE_SOURCE_HASH_VERSION}:asset:${descriptor.resolvedPath}`,
       );
     }
 
@@ -628,6 +710,16 @@ export class ModuleGraphLoader {
         resolvedPath: builtinId,
         format: 'builtin',
         builtinId,
+      };
+    }
+
+    // Asset/raw ids are `<path>?asset` / `<path>?raw` (see resolveAssetRequest).
+    const assetMatch = /\?(asset|raw)$/.exec(id);
+    if (assetMatch) {
+      return {
+        id,
+        resolvedPath: id.slice(0, id.length - assetMatch[0].length),
+        format: assetMatch[1] as ModuleFormat,
       };
     }
 
