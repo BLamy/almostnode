@@ -1,27 +1,19 @@
 import { VimWasm, checkBrowserCompatibility } from "vim-wasm";
 
 /**
- * Runs a real Vim (vim.wasm) session as an overlay on top of a terminal tab.
+ * Runs a real Vim (vim.wasm) session as an overlay on top of a terminal.
  *
  * vim.wasm is a *canvas GUI*, not a terminal program: it renders Vim to its own
  * `<canvas>` driven by a Web Worker + `SharedArrayBuffer`/`Atomics`, and does
  * NOT emit ANSI into xterm. So the `vim`/`vi` shell commands don't stream Vim
  * through stdout — they call {@link runVimTerminalSession}, which mounts the
  * canvas over the terminal, blocks until the user quits, and syncs saves back
- * to almostnode's VirtualFS (the source of truth the rest of the IDE reads).
+ * to almostnode's VirtualFS (the source of truth the rest of the app reads).
  *
- * Cross-origin isolation (required for `SharedArrayBuffer`) is already set up in
- * this repo — Vite dev headers + the service worker inject COOP/COEP on every
- * response — so no extra header work is needed here.
+ * Cross-origin isolation (required for `SharedArrayBuffer`) must be set up by
+ * the host app — both web-ide and almost-os do this via Vite dev headers + the
+ * almostnode service worker injecting COOP/COEP.
  */
-
-// Injected by the `__VIM_WASM_BASE__` define (see vite.config.ts). Points at the
-// directory where `vimWasmAssets()` serves the runtime; `vim.js` is the normal
-// build, `small/vim.js` the reduced build.
-declare const __VIM_WASM_BASE__: string;
-
-const VIM_WASM_BASE =
-  typeof __VIM_WASM_BASE__ === "string" ? __VIM_WASM_BASE__ : "/vim-wasm/";
 
 /** `vim` → full "normal" build; `vi` → lightweight "small" build. */
 export type VimVariant = "vim" | "vi";
@@ -38,13 +30,20 @@ export interface VimVfs {
 }
 
 export interface VimTerminalSessionOptions {
-  /** Element to overlay the Vim canvas onto (the active terminal tab body). */
+  /** Element to overlay the Vim canvas onto (the terminal's content area). */
   host: HTMLElement;
   /** almostnode VirtualFS — the file is read from and written back to here. */
   vfs: VimVfs;
   /** Absolute path of the file to edit (created on `:w` if it doesn't exist). */
   absPath: string;
   variant: VimVariant;
+  /**
+   * Base URL where the vim.wasm runtime is served (e.g. `/vim-wasm/`). The
+   * worker script is `${vimWasmBaseUrl}vim.js` (normal) or
+   * `${vimWasmBaseUrl}small/vim.js` (small); the worker fetches the sibling
+   * `.wasm`/`.data`.
+   */
+  vimWasmBaseUrl: string;
   /** Aborting force-quits Vim (`:qall!`) and tears the overlay down. */
   signal?: AbortSignal;
   fontFamily?: string;
@@ -188,7 +187,7 @@ export function runVimTerminalSession(
 
     let vim: VimWasm;
     try {
-      const workerScriptPath = `${VIM_WASM_BASE}${variant === "vi" ? "small/" : ""}vim.js`;
+      const workerScriptPath = `${options.vimWasmBaseUrl}${variant === "vi" ? "small/" : ""}vim.js`;
       vim = new VimWasm({ canvas, input, workerScriptPath });
     } catch (error) {
       fail(error instanceof Error ? error : new Error(String(error)));
@@ -203,7 +202,7 @@ export function runVimTerminalSession(
     // `:export` is the one public read-back path — it fires onFileExport with the
     // buffer bytes. The BufWritePost autocmd (installed in onVimInit) runs
     // `:export` after every `:w`, so saves land in almostnode's VirtualFS, which
-    // the explorer/Monaco already watch for `change` events.
+    // the explorer/editor already watch for `change` events.
     vim.onFileExport = (fullpath, contents) => {
       try {
         for (const dir of ancestorDirs(fullpath)) {

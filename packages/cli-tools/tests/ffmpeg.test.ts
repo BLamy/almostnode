@@ -4,9 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // A fake @ffmpeg/ffmpeg whose MEMFS is a Map. `exec` emits a log line and
 // "produces" its output (last positional arg) so we can assert the round-trip.
 const hoisted = vi.hoisted(() => {
-  const state = {
-    instances: [] as MockFFmpeg[],
-  };
+  const state = { instances: [] as MockFFmpeg[] };
   class MockFFmpeg {
     loaded = false;
     loadConfig: unknown = null;
@@ -62,7 +60,7 @@ const hoisted = vi.hoisted(() => {
 
 vi.mock("@ffmpeg/ffmpeg", () => ({ FFmpeg: hoisted.MockFFmpeg }));
 
-import { createFfmpegShellCommands } from "../src/features/ffmpeg-shell-command";
+import { createFfmpegShellCommands } from "../src/index";
 
 interface FakeVfs {
   files: Map<string, Uint8Array>;
@@ -124,8 +122,13 @@ function makeCtx(vfs: FakeVfs, cwd = "/project") {
   };
 }
 
+const OPTS = {
+  coreURL: "/ffmpeg-core/ffmpeg-core.js",
+  wasmURL: "/ffmpeg-core/ffmpeg-core.wasm",
+};
+
 function getCommand(name: "ffmpeg" | "ffprobe") {
-  const cmd = createFfmpegShellCommands().find((c) => c.name === name);
+  const cmd = createFfmpegShellCommands(OPTS).find((c) => c.name === name);
   if (!cmd) throw new Error(`command ${name} not registered`);
   return cmd;
 }
@@ -142,10 +145,17 @@ beforeEach(() => {
 
 describe("ffmpeg shell command", () => {
   it("registers ffmpeg and ffprobe", () => {
-    expect(createFfmpegShellCommands().map((c) => c.name).sort()).toEqual([
+    expect(createFfmpegShellCommands(OPTS).map((c) => c.name).sort()).toEqual([
       "ffmpeg",
       "ffprobe",
     ]);
+  });
+
+  it("passes the served core/wasm URLs to FFmpeg.load()", async () => {
+    const vfs = createFakeVfs({ "/project/in.mp4": "RAW" });
+    const { ctx } = makeCtx(vfs);
+    await getCommand("ffmpeg").execute(["-i", "in.mp4", "out.webm"], ctx);
+    expect(hoisted.state.instances.at(-1)!.loadConfig).toEqual(OPTS);
   });
 
   it("stages the input from the VFS, runs, and writes the output back", async () => {
@@ -159,27 +169,19 @@ describe("ffmpeg shell command", () => {
 
     expect(result.exitCode).toBe(0);
     const ffmpeg = hoisted.state.instances.at(-1)!;
-
-    // Input bytes were copied into MEMFS.
     expect(ffmpeg.writes[0]?.data).toEqual(new TextEncoder().encode("RAWVIDEO"));
 
-    // exec ran with `-y` prepended and file args mapped to MEMFS basenames.
-    const execArgs = ffmpeg.execCalls[0]!;
+    const execArgs = ffmpeg.execCalls.at(-1)!;
     expect(execArgs[0]).toBe("-y");
     expect(execArgs).toContain("-i");
     expect(execArgs).toContain("input.mp4");
     expect(execArgs[execArgs.length - 1]).toBe("output.webm");
 
-    // Output was copied back into the VFS at the cwd-resolved path.
     expect(vfs.files.has("/project/output.webm")).toBe(true);
     expect(new TextDecoder().decode(vfs.files.get("/project/output.webm")!)).toBe(
       "TRANSCODED",
     );
-
-    // ffmpeg's log was streamed to stderr.
     expect(stderr.join("")).toContain("frame=1");
-
-    // MEMFS was cleaned up afterwards.
     expect(ffmpeg.fs.size).toBe(0);
   });
 
@@ -192,9 +194,7 @@ describe("ffmpeg shell command", () => {
       ["-i", "in.wav", "../out.mp3"],
       ctx,
     );
-
     expect(result.exitCode).toBe(0);
-    // `../out.mp3` from /project/sub resolves to /project/out.mp3.
     expect(vfs.files.has("/project/out.mp3")).toBe(true);
   });
 
@@ -209,12 +209,8 @@ describe("ffmpeg shell command", () => {
 
     expect(result.exitCode).toBe(0);
     const ffmpeg = hoisted.state.instances.at(-1)!;
-
-    // The virtual `-i` value is NOT a VFS file → never staged, passed verbatim.
     expect(ffmpeg.writes).toHaveLength(0);
-    expect(ffmpeg.execCalls[0]).toContain("testsrc=duration=1:size=64x64:rate=1");
-
-    // The output still round-trips back to the VFS.
+    expect(ffmpeg.execCalls.at(-1)).toContain("testsrc=duration=1:size=64x64:rate=1");
     expect(vfs.files.has("/project/out.mp4")).toBe(true);
   });
 
@@ -222,11 +218,7 @@ describe("ffmpeg shell command", () => {
     const vfs = createFakeVfs({ "/project/clip.mp4": "RAWVIDEO" });
     const { ctx, stderr } = makeCtx(vfs);
 
-    const result = await getCommand("ffprobe").execute(
-      ["-i", "clip.mp4"],
-      ctx,
-    );
-
+    const result = await getCommand("ffprobe").execute(["-i", "clip.mp4"], ctx);
     expect(result.exitCode).toBe(0);
     expect(stderr.join("")).toContain("Duration");
   });

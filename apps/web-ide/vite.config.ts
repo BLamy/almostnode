@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { transformAsync } from "@babel/core";
 import ts from "@babel/preset-typescript";
 import react from "@vitejs/plugin-react";
@@ -13,10 +13,9 @@ import { nodePolyfills } from "vite-plugin-node-polyfills";
 import wasm from "vite-plugin-wasm";
 import tailwindcss from "@tailwindcss/vite";
 import { resolvePreferredPnpmPackagePath } from "../../scripts/resolve-pnpm-package-path.mjs";
+import { ffmpegCoreAssets, vimWasmAssets } from "@agent-wasm/cli-tools/vite";
 import { corsProxyPlugin } from "./src/plugins/vite-plugin-cors-proxy";
-import { ffmpegCoreAssets } from "./src/plugins/vite-plugin-ffmpeg-core";
 import { tailscaleAuthKeyPlugin } from "./src/plugins/vite-plugin-tailscale-auth-key";
-import { vimWasmAssets } from "./src/plugins/vite-plugin-vim-wasm";
 import { workbenchEntrypointsPlugin } from "./src/plugins/vite-plugin-workbench-entrypoints";
 import { workspaceTemplatesPlugin } from "./src/plugins/vite-plugin-workspace-templates";
 
@@ -174,6 +173,9 @@ const codexWasmModulePath = `${appBase}codex-wasm/${codexWasmModuleFileName}`;
 // .wasm/.data). `${vimWasmBase}vim.js` = normal build, `${vimWasmBase}small/vim.js`
 // = small build. Consumed via the __VIM_WASM_BASE__ define.
 const vimWasmBase = `${appBase}vim-wasm/`;
+const vimWasmPackageRoot = dirname(
+  createRequire(import.meta.url).resolve("vim-wasm/package.json"),
+);
 // `@ffmpeg/core` (GPL) ESM glue + wasm, served by `ffmpegCoreAssets()` and
 // handed to FFmpeg.load() via the __FFMPEG_* defines. Single-thread build — no
 // SharedArrayBuffer required (though the app is cross-origin isolated anyway).
@@ -669,7 +671,7 @@ export default defineConfig(async ({ mode }) => {
       workspaceTemplatesPlugin({ templatesDir: resolve(__dirname, "src/templates/content") }),
       opentuiWasmAsset(),
       codexWasmAssets(),
-      vimWasmAssets(),
+      vimWasmAssets({ packageRoot: vimWasmPackageRoot }),
       ffmpegCoreAssets({
         coreJsPath: resolve(ffmpegCoreEsmRoot, "ffmpeg-core.js"),
         coreWasmPath: resolve(ffmpegCoreEsmRoot, "ffmpeg-core.wasm"),

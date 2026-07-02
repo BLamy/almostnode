@@ -14,8 +14,7 @@ interface VimInstance {
   } | null;
 }
 
-// Shared state the mocked `vim-wasm` module and the tests both reach. The mock
-// class lives inside `vi.hoisted` so it exists when the hoisted `vi.mock`
+// The mock class lives inside vi.hoisted so it exists when the hoisted vi.mock
 // factory runs.
 const hoisted = vi.hoisted(() => {
   const instances: VimInstance[] = [];
@@ -26,7 +25,6 @@ const hoisted = vi.hoisted(() => {
     onError?: (err: Error) => void;
     readonly opts: { workerScriptPath: string };
     startOpts: VimInstance["startOpts"] = null;
-
     constructor(opts: { workerScriptPath: string }) {
       this.opts = opts;
       instances.push(this);
@@ -59,9 +57,10 @@ vi.mock("vim-wasm", () => ({
 }));
 
 import {
+  createVimShellCommands,
   getVimWasmUnsupportedReason,
   runVimTerminalSession,
-} from "../src/workbench/vim-terminal-session";
+} from "../src/index";
 
 interface FakeVfs {
   files: Map<string, string>;
@@ -74,7 +73,7 @@ interface FakeVfs {
 
 function createFakeVfs(initial: Record<string, string> = {}): FakeVfs {
   const files = new Map(Object.entries(initial));
-  const dirs = new Set<string>(["/"]);
+  const dirs = new Set<string>(["/", "/project"]);
   return {
     files,
     dirs,
@@ -92,6 +91,8 @@ function createFakeVfs(initial: Record<string, string> = {}): FakeVfs {
   };
 }
 
+const BASE = "/vim-wasm/";
+
 beforeEach(() => {
   hoisted.instances.length = 0;
   hoisted.checkBrowserCompatibility.mockReturnValue(undefined);
@@ -105,7 +106,7 @@ beforeEach(() => {
 });
 
 describe("runVimTerminalSession", () => {
-  it("preloads the target file from the vfs and opens the full build for `vim`", async () => {
+  it("preloads the file from the vfs and opens the full build for `vim`", async () => {
     const vfs = createFakeVfs({ "/work/hello.txt": "hi there" });
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -115,15 +116,14 @@ describe("runVimTerminalSession", () => {
       vfs,
       absPath: "/work/hello.txt",
       variant: "vim",
+      vimWasmBaseUrl: BASE,
     });
 
     const vim = hoisted.instances[0]!;
     expect(vim.startOpts?.files).toEqual({ "/work/hello.txt": "hi there" });
     expect(vim.startOpts?.cmdArgs).toEqual(["/work/hello.txt"]);
     expect(vim.startOpts?.dirs).toContain("/work");
-    expect(vim.opts.workerScriptPath).toMatch(/\/vim-wasm\/vim\.js$/);
-    // `vim` (not `vi`) must NOT use the small build.
-    expect(vim.opts.workerScriptPath).not.toMatch(/small/);
+    expect(vim.opts.workerScriptPath).toBe("/vim-wasm/vim.js");
 
     vim.onVimExit?.(0);
     await expect(promise).resolves.toEqual({ status: 0 });
@@ -140,21 +140,20 @@ describe("runVimTerminalSession", () => {
       vfs,
       absPath: "/work/new.txt",
       variant: "vi",
+      vimWasmBaseUrl: BASE,
       onSaved,
     });
 
     const vim = hoisted.instances[0]!;
-    expect(vim.opts.workerScriptPath).toMatch(/\/vim-wasm\/small\/vim\.js$/);
-    // New file → empty preload.
+    expect(vim.opts.workerScriptPath).toBe("/vim-wasm/small/vim.js");
     expect(vim.startOpts?.files).toEqual({ "/work/new.txt": "" });
 
-    // Simulate `:w` → BufWritePost export firing onFileExport.
     vim.onVimInit?.();
     const bytes = new TextEncoder().encode("saved from vim!\n");
     vim.onFileExport?.("/work/new.txt", bytes.buffer);
 
     expect(vfs.files.get("/work/new.txt")).toBe("saved from vim!\n");
-    expect(vfs.dirs.has("/work")).toBe(true); // ancestor dir auto-created
+    expect(vfs.dirs.has("/work")).toBe(true);
     expect(onSaved).toHaveBeenCalledWith("/work/new.txt");
 
     vim.onVimExit?.(0);
@@ -162,17 +161,15 @@ describe("runVimTerminalSession", () => {
   });
 
   it("rejects with `aborted` when the signal is already aborted", async () => {
-    const vfs = createFakeVfs();
-    const host = document.createElement("div");
     const controller = new AbortController();
     controller.abort();
-
     await expect(
       runVimTerminalSession({
-        host,
-        vfs,
+        host: document.createElement("div"),
+        vfs: createFakeVfs(),
         absPath: "/work/x.txt",
         variant: "vim",
+        vimWasmBaseUrl: BASE,
         signal: controller.signal,
       }),
     ).rejects.toThrow("aborted");
@@ -180,11 +177,90 @@ describe("runVimTerminalSession", () => {
   });
 });
 
+describe("createVimShellCommands", () => {
+  function makeCtx(cwd = "/project") {
+    return { cwd, env: {}, stdin: "", vfs: createFakeVfs() } as unknown as Parameters<
+      ReturnType<typeof createVimShellCommands>[number]["execute"]
+    >[1];
+  }
+
+  it("registers vim and vi", () => {
+    const cmds = createVimShellCommands({
+      vfs: createFakeVfs(),
+      vimWasmBaseUrl: BASE,
+      resolveHost: () => document.createElement("div"),
+    });
+    expect(cmds.map((c) => c.name)).toEqual(["vim", "vi"]);
+  });
+
+  it("prints usage when no file arg is given", async () => {
+    const [vim] = createVimShellCommands({
+      vfs: createFakeVfs(),
+      vimWasmBaseUrl: BASE,
+      resolveHost: () => document.createElement("div"),
+    });
+    const result = await vim!.execute([], makeCtx());
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("usage");
+  });
+
+  it("errors when no terminal host is available", async () => {
+    const [vim] = createVimShellCommands({
+      vfs: createFakeVfs(),
+      vimWasmBaseUrl: BASE,
+      resolveHost: () => null,
+    });
+    const result = await vim!.execute(["a.txt"], makeCtx());
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("no active terminal");
+    expect(hoisted.instances).toHaveLength(0);
+  });
+
+  it("launches Vim on the resolved host and returns its exit status", async () => {
+    const host = document.createElement("div");
+    const onSessionEnd = vi.fn();
+    const [vim] = createVimShellCommands({
+      vfs: createFakeVfs(),
+      vimWasmBaseUrl: BASE,
+      resolveHost: () => host,
+      onSessionEnd,
+    });
+
+    const pending = vim!.execute(["notes.txt"], makeCtx("/project"));
+    const inst = hoisted.instances[0]!;
+    // Path resolved against cwd and preloaded.
+    expect(inst.startOpts?.cmdArgs).toEqual(["/project/notes.txt"]);
+
+    inst.onVimExit?.(0);
+    const result = await pending;
+    expect(result.exitCode).toBe(0);
+    expect(onSessionEnd).toHaveBeenCalled();
+  });
+
+  it("refuses a second concurrent session (vim is single-instance)", async () => {
+    const host = document.createElement("div");
+    const [vim] = createVimShellCommands({
+      vfs: createFakeVfs(),
+      vimWasmBaseUrl: BASE,
+      resolveHost: () => host,
+    });
+
+    const first = vim!.execute(["a.txt"], makeCtx());
+    const inst = hoisted.instances[0]!;
+
+    const second = await vim!.execute(["b.txt"], makeCtx());
+    expect(second.exitCode).toBe(1);
+    expect(second.stderr).toContain("already open");
+
+    inst.onVimExit?.(0);
+    await first;
+  });
+});
+
 describe("getVimWasmUnsupportedReason", () => {
   it("returns undefined when the browser is compatible", () => {
     expect(getVimWasmUnsupportedReason()).toBeUndefined();
   });
-
   it("surfaces the vim-wasm compatibility reason", () => {
     hoisted.checkBrowserCompatibility.mockReturnValueOnce("needs Chromium");
     expect(getVimWasmUnsupportedReason()).toBe("needs Chromium");
