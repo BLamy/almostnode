@@ -1,0 +1,21 @@
+name = "napster"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "cc8e2f38f1862286b90e834d8f267d1a"
+
+# KV caches the SoundCloud client_credentials app token.
+[[kv_namespaces]]
+binding = "KV"
+id = "d852d4172c454024ae661620c37a6b62"
+
+[vars]
+# Auth0 tenant that gates the almost-os desktop (public identifiers, not secrets).
+# /sc/* verifies that this exact ID token is valid — no separate login/token
+# exchange of our own.
+AUTH0_DOMAIN = "webreplay.us.auth0.com"
+AUTH0_AUDIENCE = "J0U5KKcVSO451nCeBO0XaOfgrQrtXpu2"
+
+# Secrets (DO NOT put here) — set with `wrangler secret put <NAME>`:
+#   SC_CLIENT_ID        your SoundCloud app client_id
+#   SC_CLIENT_SECRET    your SoundCloud app client_secret

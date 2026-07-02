@@ -28,6 +28,15 @@ function commit(next: WinampSkinState): void {
   for (const listener of listeners) listener();
 }
 
+function toBlobPart(bytes: ArrayBuffer | Uint8Array): BlobPart {
+  if (bytes instanceof Uint8Array) {
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return copy.buffer;
+  }
+  return bytes;
+}
+
 export const winampStore = {
   subscribe(listener: () => void) {
     listeners.add(listener);
@@ -41,7 +50,7 @@ export const winampStore = {
   },
   /** Apply a .wsz from raw bytes (Finder reads the real file → Blob → object URL). */
   setSkinFromBytes(bytes: ArrayBuffer | Uint8Array, name?: string) {
-    const blob = new Blob([bytes], { type: "application/octet-stream" });
+    const blob = new Blob([toBlobPart(bytes)], { type: "application/octet-stream" });
     commit({ skinUrl: URL.createObjectURL(blob), skinName: name ?? state.skinName });
   },
 };
