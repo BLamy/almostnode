@@ -98,6 +98,7 @@ export {
   setElectronHost,
   getElectronHost,
   hasElectronHost,
+  allocateElectronAppInstanceId,
   ELECTRON_IPC_TAG,
   ELECTRON_IPC_KIND,
   isElectronIpcEnvelope,
@@ -111,6 +112,15 @@ export type {
   ElectronIpcEnvelope,
   ElectronIpcError,
   ElectronIpcKind,
+  ElectronApplicationMenu,
+  ElectronContextMenu,
+  ElectronTray,
+  ElectronScreenInfo,
+  ElectronDialogRequest,
+  ElectronDialogResult,
+  ElectronFileFilter,
+  SerializedMenuItem,
+  SerializedMenuItemType,
 } from "./frameworks/electron-host";
 export { buildElectronPreloadBootstrap } from "./frameworks/electron-preload";
 export { launchElectronApp } from "./frameworks/electron-app";

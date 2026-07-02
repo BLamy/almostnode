@@ -33,8 +33,67 @@ export interface ElectronWindowOptions {
   show?: boolean;
   resizable?: boolean;
   backgroundColor?: string;
+  /** `frame: false` renders without OS chrome (no titlebar/traffic lights). */
+  frame?: boolean;
+  /** Transparent window background. */
+  transparent?: boolean;
   /** Preload script path (absolute VFS path), used by the renderer injector. */
   preload?: string;
+  /** Identity of the app instance that owns this window (menu/dock association). */
+  appInstanceId?: number;
+  appId?: string;
+  appName?: string;
+}
+
+/** Host display metrics backing the shim's `screen` module. */
+export interface ElectronScreenInfo {
+  width: number;
+  height: number;
+  workArea: { x: number; y: number; width: number; height: number };
+}
+
+// ---------------------------------------------------------------------------
+// Dialogs — the shim's `dialog` module forwards to the host, which renders a
+// real (VFS-backed) picker or message box and resolves with the outcome.
+// ---------------------------------------------------------------------------
+
+export interface ElectronFileFilter {
+  name: string;
+  extensions: string[];
+}
+
+export interface ElectronDialogRequest {
+  kind: 'open' | 'save' | 'message';
+  /** Dialog window title (open/save) or message-box title. */
+  title?: string;
+  /** open/save: initial directory or suggested file path. */
+  defaultPath?: string;
+  buttonLabel?: string;
+  filters?: ElectronFileFilter[];
+  /** open: Electron properties ('openFile' | 'openDirectory' | 'multiSelections' | ...). */
+  properties?: string[];
+  /** message: body text + secondary detail. */
+  message?: string;
+  detail?: string;
+  /** message: button labels (default ['OK']). */
+  buttons?: string[];
+  /** message: 'none' | 'info' | 'error' | 'question' | 'warning'. */
+  type?: string;
+  defaultId?: number;
+  cancelId?: number;
+  checkboxLabel?: string;
+  checkboxChecked?: boolean;
+}
+
+export interface ElectronDialogResult {
+  canceled: boolean;
+  /** open */
+  filePaths?: string[];
+  /** save */
+  filePath?: string;
+  /** message: index of the clicked button */
+  response?: number;
+  checkboxChecked?: boolean;
 }
 
 export type ElectronWindowEvent =
@@ -75,9 +134,88 @@ export interface ElectronWindowHandle {
   on(event: ElectronWindowEvent, listener: (...args: unknown[]) => void): void;
 }
 
+// ---------------------------------------------------------------------------
+// Application menus — serialized template published by the shim's
+// `Menu.setApplicationMenu`. Main processes run in the same JS context as the
+// host, so menu click dispatch is a plain function call (`onCommand`), not a
+// postMessage round-trip.
+// ---------------------------------------------------------------------------
+
+export type SerializedMenuItemType =
+  | 'normal'
+  | 'separator'
+  | 'submenu'
+  | 'checkbox'
+  | 'radio';
+
+export interface SerializedMenuItem {
+  commandId: string;
+  type: SerializedMenuItemType;
+  label: string;
+  enabled: boolean;
+  visible: boolean;
+  checked?: boolean;
+  accelerator?: string;
+  role?: string;
+  submenu?: SerializedMenuItem[];
+}
+
+export interface ElectronApplicationMenu {
+  appInstanceId: number;
+  appId: string;
+  appName: string;
+  items: SerializedMenuItem[];
+  /** Same-context callback into the shim; dispatches the item's behavior. */
+  onCommand: (commandId: string) => void;
+}
+
+/** A context menu popped up via `Menu.popup(...)`, rendered at a screen point. */
+export interface ElectronContextMenu {
+  items: SerializedMenuItem[];
+  onCommand: (commandId: string) => void;
+}
+
+/** A `Tray` instance, surfaced as a menu-bar extra. */
+export interface ElectronTray {
+  trayId: number;
+  title: string;
+  tooltip: string;
+  /** Icon as a data URL, or null. */
+  icon: string | null;
+  /** Context menu (from setContextMenu), shown on click; null if none. */
+  menu: ElectronContextMenu | null;
+  /** Fired when the extra is clicked. */
+  onClick: () => void;
+}
+
+let appInstanceCounter = 0;
+
+/** One id per shim instance (i.e. per running Electron app). */
+export function allocateElectronAppInstanceId(): number {
+  return ++appInstanceCounter;
+}
+
 /** The embedder-provided window factory. */
 export interface ElectronHost {
   createWindow(options: ElectronWindowOptions): ElectronWindowHandle;
+  /**
+   * Render (or clear, with null) the application menu for an app instance.
+   * Optional: headless hosts and tests may omit it.
+   */
+  setApplicationMenu?(
+    appInstanceId: number,
+    menu: ElectronApplicationMenu | null,
+  ): void;
+  /** Real display metrics for the shim's `screen` module (null = not ready). */
+  getScreenInfo?(): ElectronScreenInfo | null;
+  /** Show a file picker / message box. Optional: absent → dialogs cancel. */
+  showDialog?(request: ElectronDialogRequest): Promise<ElectronDialogResult>;
+  /** Pop up a context menu at a point (Menu.popup). Optional: absent → no-op. */
+  showContextMenu?(menu: ElectronContextMenu, position: { x: number; y: number }): void;
+  /** Dismiss the active context menu (Menu.closePopup). */
+  closeContextMenu?(): void;
+  /** Create/update (tray) or remove (null) a menu-bar-extra tray icon. */
+  setTray?(trayId: number, tray: ElectronTray | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +238,8 @@ export const ELECTRON_IPC_KIND = {
   event: 'event',
   /** renderer -> main: preload bridge is installed and listening */
   rendererReady: 'renderer-ready',
+  /** main -> renderer: apply an edit-role menu command (best-effort execCommand) */
+  menuRole: 'menu-role',
 } as const;
 
 export type ElectronIpcKind =

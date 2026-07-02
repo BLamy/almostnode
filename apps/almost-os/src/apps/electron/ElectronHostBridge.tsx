@@ -22,6 +22,12 @@ export function ElectronHostBridge() {
       openWindow: (payload) => wmRef.current.openWindow(payload),
       setWindowUrl: (id, url) => wmRef.current.setWindowUrl(id, url),
       setWindowTitle: (id, title) => wmRef.current.setWindowTitle(id, title),
+      setWindowBounds: (id, bounds) => wmRef.current.setBounds(id, bounds),
+      focus: (id) => wmRef.current.focus(id),
+      minimize: (id) => wmRef.current.minimize(id),
+      // Electron's show() raises + focuses; WM focus() also un-minimizes.
+      unminimize: (id) => wmRef.current.focus(id),
+      setMaximized: (id, maximized) => wmRef.current.setMaximized(id, maximized),
       close: (id) => wmRef.current.close(id),
       getViewport: () => wmRef.current.viewport,
     };

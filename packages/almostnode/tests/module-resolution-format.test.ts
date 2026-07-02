@@ -88,4 +88,35 @@ describe('ModuleResolver.detectFormat', () => {
 
     expect(resolver.detectFormat('/node_modules/@anthropic-ai/claude-code/cli.js')).toBe('esm');
   });
+
+  // acorn can't parse TS type syntax, so a typed `.ts` file throws during
+  // detection. It must still route to ESM (where it gets transpiled) rather than
+  // fall back to CJS raw-eval — otherwise an electron-vite TS main never runs.
+  it('detects a typed .ts file with imports as ESM (acorn cannot parse it)', () => {
+    const resolver = new ModuleResolver(fakeVfs);
+    const code = [
+      "import { app, BrowserWindow } from 'electron'",
+      'const make = (): void => { const w: BrowserWindow = new BrowserWindow({}) }',
+      'app.whenReady().then(make)',
+    ].join('\n');
+    expect(resolver.detectFormat('/project/src/main/index.ts', code)).toBe('esm');
+  });
+
+  it('detects a typed .tsx file with imports as ESM', () => {
+    const resolver = new ModuleResolver(fakeVfs);
+    const code = "import React from 'react'\nexport const A = (): JSX.Element => <div/>";
+    expect(resolver.detectFormat('/project/App.tsx', code)).toBe('esm');
+  });
+
+  it('detects a require-based typed .ts file (no import/export) as CJS', () => {
+    const resolver = new ModuleResolver(fakeVfs);
+    const code = "const x: number = require('electron').app\nmodule.exports = x";
+    expect(resolver.detectFormat('/project/legacy.ts', code)).toBe('cjs');
+  });
+
+  it('treats .mts as ESM and .cts as CJS by extension', () => {
+    const resolver = new ModuleResolver(fakeVfs);
+    expect(resolver.detectFormat('/project/main.mts', 'const x: number = 1')).toBe('esm');
+    expect(resolver.detectFormat('/project/main.cts', 'const x: number = 1')).toBe('cjs');
+  });
 });

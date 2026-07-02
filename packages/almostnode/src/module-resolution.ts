@@ -5,7 +5,7 @@ import type { VirtualFS } from './virtual-fs';
 import type { PackageJson } from './types/package-json';
 import * as pathShim from './shims/path';
 
-export type ModuleFormat = 'esm' | 'cjs' | 'json' | 'builtin';
+export type ModuleFormat = 'esm' | 'cjs' | 'json' | 'builtin' | 'asset' | 'raw';
 
 export interface ResolvedModuleDescriptor {
   id: string;
@@ -61,6 +61,15 @@ const FILE_EXTENSIONS = [
   '.node',
 ] as const;
 
+// File extensions vite/webpack treat as static assets: a bare import yields the
+// asset's URL/path rather than executable code. Deliberately excludes `.wasm`
+// (imported as an instantiable module elsewhere) and code/data extensions.
+const ASSET_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif', '.ico', '.bmp',
+  '.woff', '.woff2', '.ttf', '.eot', '.otf',
+  '.mp3', '.wav', '.ogg', '.flac', '.m4a', '.mp4', '.webm', '.mov', '.avi',
+]);
+
 export class ModuleResolver {
   private vfs: VirtualFS;
   private builtinModules: Record<string, unknown>;
@@ -106,6 +115,17 @@ export class ModuleResolver {
       return cached;
     }
 
+    // vite/webpack-style asset imports — `./x.png?asset`, `./y.svg?url`,
+    // `./z.glsl?raw`, or a bare import of an asset-extension file. `?raw` yields
+    // the file text; `?url`/`?asset`/`?inline` (and bare asset files) yield the
+    // file path. Handled here so every consumer (runtime ESM loader, dev
+    // servers) resolves them to a real module instead of a missing file.
+    const assetDescriptor = this.resolveAssetRequest(normalizedSpecifier, fromDir);
+    if (assetDescriptor) {
+      this.caches.resolutionCache.set(cacheKey, assetDescriptor);
+      return assetDescriptor;
+    }
+
     let resolvedPath: string | null = null;
     if (normalizedSpecifier.startsWith('#')) {
       resolvedPath = this.resolvePackageImport(normalizedSpecifier, fromDir);
@@ -136,10 +156,11 @@ export class ModuleResolver {
   detectFormat(filePath: string, sourceOverride?: string): ModuleFormat {
     if (filePath.startsWith('builtin:')) return 'builtin';
     if (filePath.endsWith('.json')) return 'json';
-    if (filePath.endsWith('.mjs')) return 'esm';
-    if (filePath.endsWith('.cjs')) return 'cjs';
+    if (filePath.endsWith('.mjs') || filePath.endsWith('.mts')) return 'esm';
+    if (filePath.endsWith('.cjs') || filePath.endsWith('.cts')) return 'cjs';
 
     const packageType = this.getPackageTypeForFile(filePath);
+    const isTs = /\.(ts|tsx)$/.test(filePath);
 
     const code = stripShebang(sourceOverride ?? this.safeReadFile(filePath));
     if (!code) {
@@ -158,7 +179,17 @@ export class ModuleResolver {
         return 'cjs';
       }
     } catch {
-      // Code fails to parse as ESM — treat as CJS regardless of package type
+      // acorn can't parse TypeScript type syntax, so a typed `.ts`/`.tsx` file
+      // throws here. Fall back to a syntax-marker check so ESM TypeScript still
+      // routes to the ESM loader (which transpiles it) instead of being run as
+      // raw CJS. Non-TS parse failures stay CJS as before.
+      if (isTs) {
+        return hasEsmSyntaxRegex(code)
+          ? 'esm'
+          : packageType === 'module'
+            ? 'esm'
+            : 'cjs';
+      }
       return 'cjs';
     }
 
@@ -219,6 +250,57 @@ export class ModuleResolver {
       ? specifier
       : pathShim.resolve(fromDir, specifier);
     return this.tryResolveFile(target);
+  }
+
+  /**
+   * Resolve a vite/webpack asset import to a synthetic asset/raw module, or null
+   * if the specifier isn't an asset request. The id encodes the kind
+   * (`<path>?raw` / `<path>?asset`) so it round-trips through the module graph's
+   * URL-based transport.
+   */
+  private resolveAssetRequest(
+    specifier: string,
+    fromDir: string,
+  ): ResolvedModuleDescriptor | null {
+    const queryIndex = specifier.indexOf('?');
+    const bare = queryIndex === -1 ? specifier : specifier.slice(0, queryIndex);
+    const query = queryIndex === -1 ? '' : specifier.slice(queryIndex + 1);
+
+    let assetFormat: 'asset' | 'raw' | null = null;
+    if (query) {
+      const flags = new Set(query.split('&').map((part) => part.split('=')[0]));
+      if (flags.has('raw')) {
+        assetFormat = 'raw';
+      } else if (flags.has('url') || flags.has('asset') || flags.has('inline')) {
+        assetFormat = 'asset';
+      } else {
+        return null; // unrelated query (e.g. ?worker) — leave to normal resolution
+      }
+    } else if (ASSET_EXTENSIONS.has(pathShim.extname(bare).toLowerCase())) {
+      assetFormat = 'asset';
+    } else {
+      return null;
+    }
+
+    let resolvedPath: string | null;
+    if (bare.startsWith('#')) {
+      resolvedPath = this.resolvePackageImport(bare, fromDir);
+    } else if (
+      bare.startsWith('./') ||
+      bare.startsWith('../') ||
+      bare.startsWith('/')
+    ) {
+      resolvedPath = this.resolveFileSpecifier(bare, fromDir);
+    } else {
+      resolvedPath = this.resolveNodeModulesSpecifier(bare, fromDir);
+    }
+    if (!resolvedPath) return null;
+
+    return {
+      id: `${resolvedPath}?${assetFormat}`,
+      resolvedPath,
+      format: assetFormat,
+    };
   }
 
   private resolveNodeModulesSpecifier(specifier: string, fromDir: string): string | null {
@@ -391,6 +473,20 @@ function stripShebang(source: string): string {
 
   const newlineIndex = source.indexOf('\n');
   return newlineIndex === -1 ? '' : source.slice(newlineIndex + 1);
+}
+
+/**
+ * Cheap, TypeScript-tolerant ESM-syntax check for when acorn can't parse a file
+ * (type annotations). Line-anchored to avoid matching `import(...)` expressions,
+ * the word inside strings/comments, or `.import`/`.export` member access.
+ */
+function hasEsmSyntaxRegex(code: string): boolean {
+  return (
+    /^\s*import\s+[^(]/m.test(code) ||
+    /^\s*import\s*['"]/m.test(code) ||
+    /^\s*export\s/m.test(code) ||
+    /^\s*export\{/m.test(code)
+  );
 }
 
 function hasEsmSyntax(ast: AstNode): boolean {

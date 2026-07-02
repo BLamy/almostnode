@@ -14,6 +14,15 @@ import type {
   ElectronWindowHandle,
   ElectronWindowOptions,
 } from "@agent-wasm/core";
+import { setElectronAppMenu } from "../../desktop/menu-store";
+import {
+  DOCK_RESERVE,
+  MENUBAR_HEIGHT,
+  type FrameWindow,
+} from "../../windows/window-store";
+import { closeContextMenu, showContextMenu } from "./context-menu-store";
+import { requestDialog } from "./dialog-store";
+import { setTray } from "./tray-store";
 
 /** How the React WindowManager exposes itself to this imperative host. */
 export interface ElectronWindowController {
@@ -21,10 +30,20 @@ export interface ElectronWindowController {
     id: string;
     title: string;
     size: { width: number; height: number };
-    frame: { electronWindowId: number; url: string };
+    frame: FrameWindow;
+    frameless?: boolean;
+    transparent?: boolean;
+    resizable?: boolean;
+    minSize?: { width: number; height: number };
+    position?: { x: number; y: number };
   }): void;
   setWindowUrl(id: string, url: string): void;
   setWindowTitle(id: string, title: string): void;
+  setWindowBounds(id: string, bounds: Partial<ElectronWindowBounds>): void;
+  focus(id: string): void;
+  minimize(id: string): void;
+  unminimize(id: string): void;
+  setMaximized(id: string, maximized: boolean): void;
   close(id: string): void;
   getViewport(): { width: number; height: number };
 }
@@ -37,6 +56,7 @@ interface WindowRecord {
   bounds: ElectronWindowBounds;
   destroyed: boolean;
   closedFired: boolean;
+  focused: boolean;
   deliverToRenderer: ((message: unknown) => void) | null;
   pending: unknown[];
   fromRenderer: Array<(message: unknown) => void>;
@@ -82,6 +102,7 @@ function createWindow(options: ElectronWindowOptions): ElectronWindowHandle {
     },
     destroyed: false,
     closedFired: false,
+    focused: false,
     deliverToRenderer: null,
     pending: [],
     fromRenderer: [],
@@ -89,12 +110,29 @@ function createWindow(options: ElectronWindowOptions): ElectronWindowHandle {
   };
   records.set(electronId, rec);
 
+  const minSize =
+    options.minWidth || options.minHeight
+      ? { width: options.minWidth ?? 0, height: options.minHeight ?? 0 }
+      : undefined;
   withController((c) =>
     c.openWindow({
       id: domId,
       title: rec.title,
       size: { width: rec.bounds.width, height: rec.bounds.height },
-      frame: { electronWindowId: electronId, url: rec.url },
+      frame: {
+        electronWindowId: electronId,
+        url: rec.url,
+        appInstanceId: options.appInstanceId,
+        appId: options.appId,
+      },
+      frameless: options.frame === false,
+      transparent: options.transparent,
+      resizable: options.resizable,
+      minSize,
+      position:
+        options.x !== undefined && options.y !== undefined
+          ? { x: options.x, y: options.y }
+          : undefined,
     }),
   );
 
@@ -122,15 +160,28 @@ function createWindow(options: ElectronWindowOptions): ElectronWindowHandle {
     },
     setBounds: (bounds) => {
       Object.assign(rec.bounds, bounds);
+      withController((c) => c.setWindowBounds(domId, bounds));
     },
     getBounds: () => ({ ...rec.bounds }),
-    show: () => {},
-    hide: () => {},
-    focus: () => {},
+    show: () => {
+      withController((c) => c.unminimize(domId));
+    },
+    hide: () => {
+      withController((c) => c.minimize(domId));
+    },
+    focus: () => {
+      withController((c) => c.focus(domId));
+    },
     blur: () => {},
-    minimize: () => {},
-    maximize: () => {},
-    unmaximize: () => {},
+    minimize: () => {
+      withController((c) => c.minimize(domId));
+    },
+    maximize: () => {
+      withController((c) => c.setMaximized(domId, true));
+    },
+    unmaximize: () => {
+      withController((c) => c.setMaximized(domId, false));
+    },
     close: () => {
       if (rec.destroyed) return;
       // The WindowManager removes the window; ElectronWindow's unmount then
@@ -149,6 +200,25 @@ function createWindow(options: ElectronWindowOptions): ElectronWindowHandle {
 
 export const electronDesktopHost: ElectronHost = {
   createWindow,
+  setApplicationMenu: (appInstanceId, menu) => setElectronAppMenu(appInstanceId, menu),
+  showDialog: (request) => requestDialog(request),
+  showContextMenu: (menu, position) => showContextMenu(menu, position),
+  closeContextMenu: () => closeContextMenu(),
+  setTray: (trayId, tray) => setTray(trayId, tray),
+  getScreenInfo: () => {
+    if (!controller) return null;
+    const viewport = controller.getViewport();
+    return {
+      width: viewport.width,
+      height: viewport.height,
+      workArea: {
+        x: 0,
+        y: MENUBAR_HEIGHT,
+        width: viewport.width,
+        height: viewport.height - MENUBAR_HEIGHT - DOCK_RESERVE,
+      },
+    };
+  },
 };
 
 // -- React-facing glue (used by ElectronWindow) ---------------------------
@@ -184,4 +254,35 @@ export function notifyClosed(electronId: number): void {
   rec.destroyed = true;
   fireHostEvent(rec, "closed");
   records.delete(electronId);
+}
+
+/**
+ * WindowManager focus moved on/off this window: fire the shim's 'focus'/'blur'
+ * host events so `BrowserWindow.getFocusedWindow()` stays truthful (menu
+ * command dispatch depends on it).
+ */
+export function notifyFocusChanged(electronId: number, focused: boolean): void {
+  const rec = records.get(electronId);
+  if (!rec || rec.destroyed || rec.focused === focused) return;
+  rec.focused = focused;
+  fireHostEvent(rec, focused ? "focus" : "blur");
+}
+
+/**
+ * WindowManager geometry changed (drag, resize handles, maximize, setBounds):
+ * keep the shim's `getBounds()` truthful and fire 'move'/'resize' host events.
+ */
+export function notifyBoundsChanged(
+  electronId: number,
+  bounds: ElectronWindowBounds,
+): void {
+  const rec = records.get(electronId);
+  if (!rec || rec.destroyed) return;
+  const moved = bounds.x !== rec.bounds.x || bounds.y !== rec.bounds.y;
+  const resized =
+    bounds.width !== rec.bounds.width || bounds.height !== rec.bounds.height;
+  if (!moved && !resized) return;
+  rec.bounds = { ...bounds };
+  if (moved) fireHostEvent(rec, "move");
+  if (resized) fireHostEvent(rec, "resize");
 }

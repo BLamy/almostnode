@@ -11,6 +11,8 @@ export interface AppStoreEntry {
   repoUrl: string;
   emoji: string;
   accent: string;
+  /** Bundled version; a mismatch on disk triggers a reinstall of the seed files. */
+  version?: string;
   /** Lazily import the app's seed files (path -> content, relative to app dir). */
   load: () => Promise<{ files: Record<string, string> }>;
 }
@@ -48,5 +50,17 @@ export const CATALOG: AppStoreEntry[] = [
     emoji: 'ℹ️',
     accent: '#8b5cf6',
     load: () => import('./apps/sysinfo'),
+  },
+  {
+    id: 'vite-stopwatch',
+    name: 'Vite Stopwatch',
+    tagline: 'electron-vite · TypeScript',
+    description:
+      'An electron-vite-shaped app: "main" points at an unbuilt ./out entry (resolved back to the TS source), with TypeScript main, preload, and renderer transpiled on the fly and wired over a contextBridge preload.',
+    repoUrl: 'https://github.com/alex8088/electron-vite',
+    emoji: '⏱️',
+    accent: '#3b82f6',
+    version: '1.0.2',
+    load: () => import('./apps/vitestopwatch'),
   },
 ];
