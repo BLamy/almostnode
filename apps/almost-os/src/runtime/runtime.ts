@@ -106,6 +106,19 @@ export function getWorkspace(): WorkspaceController {
     workspace.container.network.subscribe((status) => {
       markEstablished(status.provider === "tailscale" && status.state === "running");
     });
+    // Register the almostnode service worker so it injects COOP/COEP headers
+    // on every response (the coi-serviceworker pattern) — Vite's own
+    // `server.headers` config doesn't reach the root document under
+    // TanStack Start's SPA middleware, so without this, `crossOriginIsolated`
+    // stays false and SharedArrayBuffer-dependent tools (vim.wasm) can't run.
+    // `initServiceWorker()` reloads the page once automatically the first time
+    // the worker takes control (`reloadOnFirstControl` defaults to `true`), so
+    // this is fire-and-forget rather than blocking `getWorkspace()`.
+    void workspace.container.serverBridge
+      .initServiceWorker()
+      .catch((error: unknown) => {
+        console.error("[almostos] service worker init failed", error);
+      });
   }
   return workspace;
 }

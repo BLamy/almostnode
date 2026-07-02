@@ -16,11 +16,15 @@
   },
   "dependencies": {
     "@agent-wasm/chat-core": "workspace:*",
+    "@agent-wasm/cli-tools": "workspace:*",
     "@agent-wasm/codex": "workspace:*",
     "@agent-wasm/core": "workspace:*",
     "@agent-wasm/keychain": "workspace:*",
     "@agent-wasm/react": "workspace:*",
     "@agent-wasm/sdk": "workspace:*",
+    "@anthropic-ai/sdk": "^0.109.1",
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
     "@tanstack/react-router": "^1.168.1",
     "@tanstack/react-start": "^1.167.2",
     "@xterm/addon-fit": "^0.11.0",
@@ -28,11 +32,16 @@
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "eruda": "^3.4.3",
+    "liquid-glass-web-react": "^0.1.1",
     "monaco-editor": "^0.52.2",
+    "quickjs-emscripten": "^0.32.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "sucrase": "^3.35.1",
     "tailwind-merge": "^3.5.0",
-    "webamp": "^2.3.1"
+    "vim-wasm": "^0.0.13",
+    "webamp": "^2.3.1",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.0",

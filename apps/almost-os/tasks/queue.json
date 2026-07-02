@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "updated": "2026-07-02",
+  "description": "Priority queue for the almost-os design pass + Electron-ification. Work top-down; deps must be done before a task starts. status: pending | in_progress | done | blocked.",
+  "queue": [
+    { "id": "dock-overlap",              "file": "task-dock-overlap.md",              "priority": 0, "status": "done", "deps": [], "area": "almost-os" },
+    { "id": "chrome-icon-squircle",      "file": "task-chrome-icon-squircle.md",      "priority": 0, "status": "done", "deps": [], "area": "almost-os" },
+    { "id": "winamp-css-clickthrough",   "file": "task-winamp-css-clickthrough.md",   "priority": 0, "status": "done", "deps": [], "area": "almost-os" },
+    { "id": "player-store-file-engine",  "file": "task-player-store-file-engine.md",  "priority": 1, "status": "done", "deps": [], "area": "almost-os" },
+    { "id": "webamp-custom-media",       "file": "task-webamp-custom-media.md",       "priority": 1, "status": "done", "deps": ["player-store-file-engine"], "area": "almost-os" },
+    { "id": "napster-play-button",       "file": "task-napster-play-button.md",       "priority": 1, "status": "done", "deps": [], "area": "almost-os" },
+    { "id": "electron-menu-seam",        "file": "task-electron-menu-seam.md",        "priority": 2, "status": "done", "deps": [], "area": "almostnode" },
+    { "id": "menubar-menus",             "file": "task-menubar-menus.md",             "priority": 2, "status": "done", "deps": ["electron-menu-seam"], "area": "almost-os" },
+    { "id": "native-app-menus",          "file": "task-native-app-menus.md",          "priority": 2, "status": "pending", "deps": ["menubar-menus"], "area": "almost-os" },
+    { "id": "electron-window-options",   "file": "task-electron-window-options.md",   "priority": 2, "status": "done", "deps": [], "area": "almostnode+almost-os" },
+    { "id": "electron-app-packaging",    "file": "task-electron-app-packaging.md",    "priority": 2, "status": "in_progress", "deps": [], "area": "almost-os", "note": "app-manager + reinstall done & tested; import.meta.glob('?raw') source-file reorg deferred" },
+    { "id": "native-surface-windows",    "file": "task-native-surface-windows.md",    "priority": 2, "status": "done", "deps": ["electron-window-options"], "area": "almost-os" },
+    { "id": "dock-electron-integration", "file": "task-dock-electron-integration.md", "priority": 2, "status": "done", "deps": ["menubar-menus", "electron-app-packaging"], "area": "almost-os", "note": "generic: running Electron apps show in dock via useRunning + frame.appId; first-party ELECTRON_APPS registry deferred to the convert-* tasks" },
+    { "id": "convert-napster",           "file": "task-convert-napster.md",           "priority": 3, "status": "pending", "deps": ["electron-menu-seam", "menubar-menus", "electron-window-options", "electron-app-packaging", "dock-electron-integration"], "area": "almost-os" },
+    { "id": "convert-tailscale",         "file": "task-convert-tailscale.md",         "priority": 3, "status": "pending", "deps": ["electron-menu-seam", "menubar-menus", "electron-window-options", "electron-app-packaging", "dock-electron-integration"], "area": "almostnode+almost-os" },
+    { "id": "convert-winamp",            "file": "task-convert-winamp.md",            "priority": 3, "status": "pending", "deps": ["webamp-custom-media", "electron-window-options", "native-surface-windows", "electron-app-packaging", "dock-electron-integration"], "area": "almost-os" },
+    { "id": "webamp-fork-upstream",      "file": "task-webamp-fork-upstream.md",      "priority": 4, "status": "pending", "deps": ["winamp-css-clickthrough"], "area": "vendor/webamp", "optional": true }
+  ]
+}
