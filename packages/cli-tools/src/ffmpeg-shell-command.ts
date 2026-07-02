@@ -17,24 +17,18 @@ import type {
  *   2. copies inputs from almostnode's VirtualFS into ffmpeg's MEMFS,
  *   3. runs `exec`/`ffprobe`, streaming ffmpeg's log to stderr,
  *   4. copies produced outputs back into the VirtualFS (where the explorer and
- *      Monaco pick them up via `change` events).
+ *      editor pick them up via `change` events).
  *
  * The 31 MB core is loaded once and the FFmpeg worker is reused across
  * invocations; ffmpeg runs single-threaded so no SharedArrayBuffer is required.
  */
 
-// Injected by defines in vite.config.ts (served by `ffmpegCoreAssets()`).
-declare const __FFMPEG_CORE_URL__: string;
-declare const __FFMPEG_WASM_URL__: string;
-
-const CORE_URL =
-  typeof __FFMPEG_CORE_URL__ === "string"
-    ? __FFMPEG_CORE_URL__
-    : "/ffmpeg-core/ffmpeg-core.js";
-const WASM_URL =
-  typeof __FFMPEG_WASM_URL__ === "string"
-    ? __FFMPEG_WASM_URL__
-    : "/ffmpeg-core/ffmpeg-core.wasm";
+export interface FfmpegShellCommandsOptions {
+  /** URL of `@ffmpeg/core`'s ESM `ffmpeg-core.js` (served by `ffmpegCoreAssets`). */
+  coreURL: string;
+  /** URL of the sibling `ffmpeg-core.wasm`. */
+  wasmURL: string;
+}
 
 // Paths that aren't real files — leave them untouched and don't read them back.
 const SINKS = new Set(["-", "/dev/null", "null", "nul", "pipe:"]);
@@ -45,7 +39,11 @@ let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<FFmpeg> | null = null;
 let running = false;
 
-async function getFfmpeg(onFirstLoad: () => void): Promise<FFmpeg> {
+async function getFfmpeg(
+  coreURL: string,
+  wasmURL: string,
+  onFirstLoad: () => void,
+): Promise<FFmpeg> {
   if (ffmpegInstance) {
     return ffmpegInstance;
   }
@@ -53,7 +51,7 @@ async function getFfmpeg(onFirstLoad: () => void): Promise<FFmpeg> {
     loadPromise = (async () => {
       onFirstLoad();
       const ffmpeg = new FFmpeg();
-      await ffmpeg.load({ coreURL: CORE_URL, wasmURL: WASM_URL });
+      await ffmpeg.load({ coreURL, wasmURL });
       ffmpegInstance = ffmpeg;
       return ffmpeg;
     })().catch((error) => {
@@ -184,6 +182,8 @@ async function runFfmpeg(
   kind: "ffmpeg" | "ffprobe",
   args: string[],
   ctx: ShellCommandContext,
+  coreURL: string,
+  wasmURL: string,
 ): Promise<ShellCommandResult> {
   if (running) {
     return {
@@ -196,7 +196,7 @@ async function runFfmpeg(
 
   let ffmpeg: FFmpeg;
   try {
-    ffmpeg = await getFfmpeg(() =>
+    ffmpeg = await getFfmpeg(coreURL, wasmURL, () =>
       ctx.writeStderr("Loading ffmpeg-core (first run, ~31 MB)…\n"),
     );
   } catch (error) {
@@ -275,17 +275,21 @@ async function runFfmpeg(
 
 /**
  * `ffmpeg` and `ffprobe` shell commands, ready to pass to
- * `container.registerShellCommand`.
+ * `container.registerShellCommand`. Pass the URLs where `ffmpegCoreAssets()`
+ * serves the core (from the app's `__FFMPEG_CORE_URL__`/`__FFMPEG_WASM_URL__`).
  */
-export function createFfmpegShellCommands(): ShellCommandDefinition[] {
+export function createFfmpegShellCommands(
+  options: FfmpegShellCommandsOptions,
+): ShellCommandDefinition[] {
+  const { coreURL, wasmURL } = options;
   return [
     {
       name: "ffmpeg",
-      execute: (args, ctx) => runFfmpeg("ffmpeg", args, ctx),
+      execute: (args, ctx) => runFfmpeg("ffmpeg", args, ctx, coreURL, wasmURL),
     },
     {
       name: "ffprobe",
-      execute: (args, ctx) => runFfmpeg("ffprobe", args, ctx),
+      execute: (args, ctx) => runFfmpeg("ffprobe", args, ctx, coreURL, wasmURL),
     },
   ];
 }

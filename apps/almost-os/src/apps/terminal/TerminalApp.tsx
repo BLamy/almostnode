@@ -7,6 +7,7 @@ import type { TerminalSession } from "@agent-wasm/core";
 import { useOsRuntime } from "../../runtime/OsRuntimeProvider";
 import { useSystem } from "../../os/system";
 import { terminalBus } from "./terminal-bus";
+import { terminalOverlayHost } from "./terminal-overlay-host";
 
 const THEME = {
   background: "#1d1f21",
@@ -99,6 +100,10 @@ export function TerminalApp() {
     const runCommand = async (command: string) => {
       running = true;
       runningAbort = new AbortController();
+      // Registers this terminal as the overlay target for `vim`/`vi` — the
+      // command runs inside `container`, which has no window context of its
+      // own, so it asks this registry for the terminal that launched it.
+      terminalOverlayHost.set(host);
       try {
         await session.run(command, {
           interactive: true,
@@ -211,6 +216,12 @@ export function TerminalApp() {
       runningAbort?.abort();
       session.dispose();
       term.dispose();
+      // Only clear the overlay registry if this terminal is still the active
+      // one — another terminal may have taken over since this one last ran a
+      // command, and its host shouldn't be clobbered by this unmount.
+      if (terminalOverlayHost.get() === host) {
+        terminalOverlayHost.set(null);
+      }
     };
   }, [ready, workspace]);
 

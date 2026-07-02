@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@agent-wasm/chat-core": "workspace:*",
+    "@agent-wasm/cli-tools": "workspace:*",
     "@agent-wasm/code": "workspace:*",
     "@agent-wasm/codex": "workspace:*",
     "@agent-wasm/core": "workspace:*",
