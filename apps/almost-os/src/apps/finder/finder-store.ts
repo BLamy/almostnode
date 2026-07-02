@@ -1,14 +1,9 @@
 import { useSyncExternalStore } from "react";
 
-// Lets desktop icons (and other surfaces) tell the Finder window what to open
-// when it mounts/focuses: a VFS path, or the real "Winamp Skins" folder (which
-// Finder browses through the File System Access API).
+// Lets desktop icons (and other surfaces) tell the Finder window which VFS path
+// to open when it mounts/focuses.
 
-export type FinderTarget =
-  | { kind: "vfs"; path: string }
-  // The directory handle is resolved inside the click gesture (the FSA picker
-  // needs transient activation) and handed to Finder, which only lists it.
-  | { kind: "winamp-skins"; handle: FileSystemDirectoryHandle | null };
+export type FinderTarget = { kind: "vfs"; path: string };
 
 let pending: FinderTarget | null = null;
 let seq = 0;

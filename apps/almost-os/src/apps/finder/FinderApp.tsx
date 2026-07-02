@@ -3,27 +3,204 @@ import { useOsRuntime } from "../../runtime/OsRuntimeProvider";
 import { useSystem } from "../../os/system";
 import { playVirtualMp3 } from "../../media/player-store";
 import { DOWNLOADS_DIR, isVirtualMp3Path, readVirtualMp3 } from "../../media/virtual-mp3";
-import { winampStore } from "../winamp/winamp-store";
-import { ensureSkinsDir, listWsz, readWszBytes, type RealFile } from "../../fs/real-folder";
+import { SOUNDCLOUD_LINKS_DIR, WEBAMP_SKINS_DIR } from "../../media/virtual-url-map";
 import { finderStore, useFinderRequest } from "./finder-store";
 
 interface Entry {
   name: string;
   path: string;
   isDir: boolean;
-  /** A real-folder .wsz skin (browsed off disk), vs a normal VFS entry. */
-  wsz?: RealFile;
+  size: number;
+  mtime: number;
 }
 
-const FAVORITES: Array<{ label: string; path: string }> = [
-  { label: "project", path: "/project" },
-  { label: "Desktop", path: "/home/user/Desktop" },
-  { label: "Napster Downloads", path: DOWNLOADS_DIR },
-  { label: "Computer", path: "/" },
+type IconName =
+  | "folder"
+  | "applications"
+  | "desktop"
+  | "documents"
+  | "downloads"
+  | "home"
+  | "computer"
+  | "airdrop"
+  | "trash"
+  | "shared"
+  | "cloud";
+
+interface SidebarItem {
+  label: string;
+  path: string;
+  icon: IconName;
+  cloud?: boolean;
+}
+interface SidebarSection {
+  title?: string;
+  items: SidebarItem[];
+}
+
+const SIDEBAR: SidebarSection[] = [
+  { items: [{ label: "Shared", path: "/", icon: "shared" }] },
+  {
+    title: "Favorites",
+    items: [
+      { label: "Applications", path: "/Applications", icon: "applications" },
+      { label: "Desktop", path: "/home/user/Desktop", icon: "desktop", cloud: true },
+      { label: "project", path: "/project", icon: "folder" },
+      { label: "Documents", path: "/home/user/Documents", icon: "documents", cloud: true },
+      { label: "Downloads", path: "/home/user/Downloads", icon: "downloads" },
+      { label: "Napster Downloads", path: DOWNLOADS_DIR, icon: "downloads" },
+      { label: "Winamp Skins", path: WEBAMP_SKINS_DIR, icon: "folder" },
+      { label: "SoundCloud Links", path: SOUNDCLOUD_LINKS_DIR, icon: "folder" },
+    ],
+  },
+  {
+    title: "Locations",
+    items: [
+      { label: "iCloud Drive", path: "/home/user", icon: "cloud" },
+      { label: "brettlamy", path: "/home/user", icon: "home" },
+      { label: "Computer", path: "/", icon: "computer" },
+      { label: "Trash", path: "/tmp", icon: "trash" },
+    ],
+  },
 ];
 
 function join(dir: string, name: string): string {
   return dir === "/" ? `/${name}` : `${dir}/${name}`;
+}
+
+function formatSize(size: number, isDir: boolean): string {
+  if (isDir) return "--";
+  if (size < 1000) return `${size} bytes`;
+  if (size < 1000 * 1000) return `${Math.round(size / 1000)} KB`;
+  if (size < 1000 * 1000 * 1000) return `${(size / (1000 * 1000)).toFixed(1)} MB`;
+  return `${(size / (1000 * 1000 * 1000)).toFixed(1)} GB`;
+}
+
+function formatDate(mtime: number): string {
+  if (!mtime) return "--";
+  const d = new Date(mtime);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (sameDay) return `Today at ${time}`;
+  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return `${date} at ${time}`;
+}
+
+const KIND_BY_EXT: Record<string, string> = {
+  css: "CSS",
+  json: "JSON document",
+  md: "Markdown Document",
+  ts: "TypeScript file",
+  tsx: "TypeScript file",
+  js: "JavaScript file",
+  jsx: "JavaScript file",
+  html: "HTML document",
+  txt: "Plain Text",
+  png: "PNG image",
+  jpg: "JPEG image",
+  jpeg: "JPEG image",
+  gif: "GIF image",
+  svg: "SVG document",
+  mp3: "MP3 audio",
+  wsz: "Winamp skin",
+};
+
+function kindOf(name: string, isDir: boolean): string {
+  if (isDir) return "Folder";
+  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  return KIND_BY_EXT[ext] ?? (ext ? `${ext.toUpperCase()} file` : "Plain Text");
+}
+
+function SidebarIcon({ name }: { name: IconName }) {
+  const p = {
+    width: 17,
+    height: 17,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.6,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (name) {
+    case "applications":
+      return (
+        <svg {...p}>
+          <path d="M12 3l9 16H3l9-16z" />
+        </svg>
+      );
+    case "desktop":
+      return (
+        <svg {...p}>
+          <rect x="3" y="5" width="18" height="11" rx="1.5" />
+          <path d="M8 20h8M12 16v4" />
+        </svg>
+      );
+    case "documents":
+      return (
+        <svg {...p}>
+          <path d="M7 3h7l4 4v14H7z" />
+          <path d="M14 3v4h4" />
+        </svg>
+      );
+    case "downloads":
+      return (
+        <svg {...p}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v8m0 0l-3-3m3 3l3-3" />
+        </svg>
+      );
+    case "home":
+      return (
+        <svg {...p}>
+          <path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1v-8z" />
+        </svg>
+      );
+    case "computer":
+      return (
+        <svg {...p}>
+          <rect x="4" y="5" width="16" height="14" rx="2" />
+          <path d="M9 21h6" />
+        </svg>
+      );
+    case "airdrop":
+      return (
+        <svg {...p}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M8 13a5 5 0 0 1 8 0M10 16a2.5 2.5 0 0 1 4 0" />
+        </svg>
+      );
+    case "trash":
+      return (
+        <svg {...p}>
+          <path d="M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13" />
+        </svg>
+      );
+    case "shared":
+      return (
+        <svg {...p}>
+          <rect x="3" y="6" width="18" height="13" rx="2" />
+          <circle cx="12" cy="12" r="2.5" />
+        </svg>
+      );
+    case "cloud":
+      return (
+        <svg {...p}>
+          <path d="M7 18a4 4 0 0 1 .5-8 5 5 0 0 1 9.5 1.5A3.5 3.5 0 0 1 16.5 18H7z" />
+        </svg>
+      );
+    default:
+      return (
+        <svg {...p}>
+          <path d="M4 7a1 1 0 0 1 1-1h4l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7z" />
+        </svg>
+      );
+  }
 }
 
 function FolderGlyph() {
@@ -54,29 +231,20 @@ export function FinderApp() {
   const [stack, setStack] = useState<string[]>(["/project"]);
   const [index, setIndex] = useState(0);
   const [tick, setTick] = useState(0);
-  const [view, setView] = useState<"icon" | "list">("icon");
+  const [view, setView] = useState<"icon" | "list">("list");
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState<null | "file" | "folder">(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  // Real-folder ("Winamp Skins") browsing state — non-null replaces the VFS view.
-  const [skins, setSkins] = useState<RealFile[] | null>(null);
-  const [skinsError, setSkinsError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const cwd = stack[index];
   const finderReq = useFinderRequest();
 
-  // React to open requests from desktop icons / other surfaces.
   useEffect(() => {
     const target = finderStore.consume();
     if (!target) return;
-    if (target.kind === "vfs") {
-      setSkins(null);
-      navigate(target.path);
-    } else if (target.kind === "winamp-skins") {
-      void showSkins(target.handle);
-    }
+    if (target.kind === "vfs") navigate(target.path);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finderReq]);
 
@@ -96,26 +264,7 @@ export function FinderApp() {
     if (creating || renaming) inputRef.current?.focus();
   }, [creating, renaming]);
 
-  async function showSkins(handle: FileSystemDirectoryHandle | null): Promise<void> {
-    const dir = handle ?? (await ensureSkinsDir().catch(() => null));
-    if (!dir) {
-      setSkins([]);
-      setSkinsError("Couldn't open a real folder (needs Chrome + permission).");
-      return;
-    }
-    try {
-      setSkinsError(null);
-      setSkins(await listWsz(dir));
-    } catch (e) {
-      setSkins([]);
-      setSkinsError(e instanceof Error ? e.message : "Failed to read folder.");
-    }
-  }
-
   const entries = useMemo<Entry[]>(() => {
-    if (skins) {
-      return skins.map((f) => ({ name: f.name, path: `skin:${f.name}`, isDir: false, wsz: f }));
-    }
     if (!ready) return [];
     void tick;
     try {
@@ -124,12 +273,17 @@ export function FinderApp() {
         .map((name) => {
           const path = join(cwd, name);
           let isDir = false;
+          let size = 0;
+          let mtime = 0;
           try {
-            isDir = workspace.vfs.statSync(path).isDirectory();
+            const stat = workspace.vfs.statSync(path);
+            isDir = stat.isDirectory();
+            size = stat.size ?? 0;
+            mtime = stat.mtime ? new Date(stat.mtime).getTime() : (stat.mtimeMs ?? 0);
           } catch {
             /* ignore */
           }
-          return { name, path, isDir };
+          return { name, path, isDir, size, mtime };
         })
         .sort((a, b) =>
           a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1,
@@ -137,10 +291,9 @@ export function FinderApp() {
     } catch {
       return [];
     }
-  }, [workspace, cwd, tick, ready, skins]);
+  }, [workspace, cwd, tick, ready]);
 
   const navigate = (path: string) => {
-    setSkins(null);
     const next = stack.slice(0, index + 1);
     next.push(path);
     setStack(next);
@@ -149,19 +302,10 @@ export function FinderApp() {
   };
 
   const open = (entry: Entry) => {
-    // Real-folder skin → apply to Webamp (open Winamp if needed).
-    if (entry.wsz) {
-      void readWszBytes(entry.wsz.handle).then((bytes) => {
-        winampStore.setSkinFromBytes(bytes, entry.wsz?.name);
-        system.openApp("winamp");
-      });
-      return;
-    }
     if (entry.isDir) {
       navigate(entry.path);
       return;
     }
-    // A Napster "virtual mp3" → play it in Winamp instead of the code editor.
     if (isVirtualMp3Path(entry.path)) {
       const payload = readVirtualMp3(entry.path);
       if (payload) {
@@ -180,7 +324,7 @@ export function FinderApp() {
         if (creating === "folder") workspace.createDirectory(join(cwd, name));
         else workspace.createFile(join(cwd, name), "");
       } catch {
-        /* name already exists */
+        /* exists */
       }
       setTick((t) => t + 1);
     }
@@ -194,7 +338,7 @@ export function FinderApp() {
       try {
         workspace.rename(renaming, join(cwd, name));
       } catch {
-        /* target exists */
+        /* exists */
       }
       setTick((t) => t + 1);
     }
@@ -219,46 +363,61 @@ export function FinderApp() {
     setDraft(selected.split("/").pop() ?? "");
   };
 
-  const pathLabel = skins ? "Winamp Skins — real folder" : cwd;
-  const editingDisabled = skins !== null;
+  const title = cwd === "/" ? "Computer" : cwd.split("/").filter(Boolean).pop() ?? "Finder";
+
+  const renameInput = (
+    <input
+      ref={inputRef}
+      className="finder__rename-input"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commitRename();
+        if (e.key === "Escape") {
+          setRenaming(null);
+          setDraft("");
+        }
+      }}
+      onBlur={commitRename}
+    />
+  );
 
   return (
     <div className="finder">
       <aside className="finder__sidebar">
-        <div className="finder__sidebar-title">Favorites</div>
-        {FAVORITES.map((fav) => (
-          <button
-            key={fav.path}
-            type="button"
-            className={`finder__fav${!skins && cwd === fav.path ? " is-active" : ""}`}
-            onClick={() => navigate(fav.path)}
-          >
-            <span className="finder__fav-dot" />
-            {fav.label}
-          </button>
+        {SIDEBAR.map((section, si) => (
+          <div key={section.title ?? `s${si}`} className="finder__side-section">
+            {section.title && <div className="finder__sidebar-title">{section.title}</div>}
+            {section.items.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                className={`finder__fav${cwd === item.path ? " is-active" : ""}`}
+                onClick={() => navigate(item.path)}
+              >
+                <span className="finder__fav-icon">
+                  <SidebarIcon name={item.icon} />
+                </span>
+                <span className="finder__fav-label">{item.label}</span>
+                {item.cloud && (
+                  <span className="finder__fav-cloud" aria-hidden="true">
+                    <SidebarIcon name="cloud" />
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         ))}
-        <button
-          type="button"
-          className={`finder__fav${skins ? " is-active" : ""}`}
-          onClick={() => void showSkins(null)}
-          title="Browse a real folder of .wsz Winamp skins"
-        >
-          <span className="finder__fav-dot" />
-          Winamp Skins
-        </button>
       </aside>
+
       <div className="finder__main">
         <div className="finder__toolbar">
-          <div className="finder__nav">
+          <div className="finder__nav finder__pill">
             <button
               type="button"
               className="finder__btn"
-              disabled={index === 0 && !skins}
+              disabled={index === 0}
               onClick={() => {
-                if (skins) {
-                  setSkins(null);
-                  return;
-                }
                 setIndex((i) => Math.max(0, i - 1));
                 setSelected(null);
               }}
@@ -269,7 +428,7 @@ export function FinderApp() {
             <button
               type="button"
               className="finder__btn"
-              disabled={index >= stack.length - 1 || !!skins}
+              disabled={index >= stack.length - 1}
               onClick={() => {
                 setIndex((i) => Math.min(stack.length - 1, i + 1));
                 setSelected(null);
@@ -279,127 +438,152 @@ export function FinderApp() {
               ›
             </button>
           </div>
-          <div className="finder__path">{pathLabel}</div>
+          <div className="finder__title">{title}</div>
           <div className="finder__tools">
-            <button
-              type="button"
-              className={`finder__btn${view === "icon" ? " is-active" : ""}`}
-              onClick={() => setView("icon")}
-              aria-label="Icon view"
-            >
-              ▦
+            <div className="finder__pill finder__segmented">
+              <button
+                type="button"
+                className={`finder__btn${view === "list" ? " is-active" : ""}`}
+                onClick={() => setView("list")}
+                aria-label="List view"
+              >
+                ☰
+              </button>
+              <button
+                type="button"
+                className={`finder__btn${view === "icon" ? " is-active" : ""}`}
+                onClick={() => setView("icon")}
+                aria-label="Icon view"
+              >
+                ▦
+              </button>
+            </div>
+            <button type="button" className="finder__pill finder__btn" onClick={() => setCreating("folder")} title="New Folder">
+              ＋
             </button>
-            <button
-              type="button"
-              className={`finder__btn${view === "list" ? " is-active" : ""}`}
-              onClick={() => setView("list")}
-              aria-label="List view"
-            >
-              ☰
+            <button type="button" className="finder__pill finder__btn" onClick={() => setCreating("file")} title="New File">
+              ▤
             </button>
-            <span className="finder__divider" />
-            <button type="button" className="finder__btn" onClick={() => setCreating("folder")} disabled={editingDisabled} title="New Folder">
-              ⊕▸
-            </button>
-            <button type="button" className="finder__btn" onClick={() => setCreating("file")} disabled={editingDisabled} title="New File">
-              ⊕
-            </button>
-            <button type="button" className="finder__btn" onClick={beginRename} disabled={!selected || editingDisabled} title="Rename">
+            <button type="button" className="finder__pill finder__btn" onClick={beginRename} disabled={!selected} title="Rename">
               ✎
             </button>
-            <button type="button" className="finder__btn" onClick={remove} disabled={!selected || editingDisabled} title="Delete">
+            <button type="button" className="finder__pill finder__btn" onClick={remove} disabled={!selected} title="Delete">
               🗑
+            </button>
+            <button type="button" className="finder__pill finder__btn" title="Search" aria-label="Search">
+              ⌕
             </button>
           </div>
         </div>
 
-        <div className={`finder__view finder__view--${view}`}>
-          {creating && !skins && (
-            <div className={view === "icon" ? "finder__item" : "finder__row"}>
-              <span className={view === "icon" ? "finder__icon" : "finder__row-icon"}>
-                {creating === "folder" ? <FolderGlyph /> : <FileGlyph />}
+        {view === "list" ? (
+          <div className="finder__list">
+            <div className="finder__list-head">
+              <span className="finder__col finder__col--name">
+                Name <span className="finder__sort" aria-hidden="true">⌃</span>
               </span>
-              <input
-                ref={inputRef}
-                className="finder__rename-input"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitCreate();
-                  if (e.key === "Escape") {
-                    setCreating(null);
-                    setDraft("");
-                  }
-                }}
-                onBlur={commitCreate}
-                placeholder={creating === "folder" ? "untitled folder" : "untitled"}
-              />
+              <span className="finder__col finder__col--date">Date Modified</span>
+              <span className="finder__col finder__col--size">Size</span>
+              <span className="finder__col finder__col--kind">Kind</span>
             </div>
-          )}
-
-          {entries.map((entry) => {
-            const isRenaming = renaming === entry.path;
-            const selectedClass = selected === entry.path ? " is-selected" : "";
-            const label = isRenaming ? (
-              <input
-                ref={inputRef}
-                className="finder__rename-input"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitRename();
-                  if (e.key === "Escape") {
-                    setRenaming(null);
-                    setDraft("");
-                  }
-                }}
-                onBlur={commitRename}
-              />
-            ) : (
-              <span className="finder__name">{entry.name}</span>
-            );
-
-            if (view === "icon") {
-              return (
-                <button
+            <div className="finder__list-body">
+              {creating && (
+                <div className="finder__lrow">
+                  <span className="finder__col finder__col--name">
+                    <span className="finder__lrow-icon">
+                      {creating === "folder" ? <FolderGlyph /> : <FileGlyph />}
+                    </span>
+                    <input
+                      ref={inputRef}
+                      className="finder__rename-input"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitCreate();
+                        if (e.key === "Escape") {
+                          setCreating(null);
+                          setDraft("");
+                        }
+                      }}
+                      onBlur={commitCreate}
+                      placeholder={creating === "folder" ? "untitled folder" : "untitled"}
+                    />
+                  </span>
+                </div>
+              )}
+              {entries.map((entry) => (
+                <div
                   key={entry.path}
-                  type="button"
-                  className={`finder__item${selectedClass}`}
+                  className={`finder__lrow${selected === entry.path ? " is-selected" : ""}`}
                   onClick={() => setSelected(entry.path)}
                   onDoubleClick={() => open(entry)}
                 >
-                  <span className="finder__icon">
-                    {entry.isDir ? <FolderGlyph /> : <FileGlyph />}
+                  <span className="finder__col finder__col--name">
+                    <span className="finder__disclose" aria-hidden="true">
+                      {entry.isDir ? "›" : ""}
+                    </span>
+                    <span className="finder__lrow-icon">
+                      {entry.isDir ? <FolderGlyph /> : <FileGlyph />}
+                    </span>
+                    {renaming === entry.path ? renameInput : (
+                      <span className="finder__name">{entry.name}</span>
+                    )}
                   </span>
-                  {label}
-                </button>
-              );
-            }
-            return (
+                  <span className="finder__col finder__col--date">{formatDate(entry.mtime)}</span>
+                  <span className="finder__col finder__col--size">{formatSize(entry.size, entry.isDir)}</span>
+                  <span className="finder__col finder__col--kind">{kindOf(entry.name, entry.isDir)}</span>
+                </div>
+              ))}
+              {entries.length === 0 && !creating && (
+                <div className="finder__empty">This folder is empty</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="finder__view finder__view--icon">
+            {creating && (
+              <div className="finder__item">
+                <span className="finder__icon">
+                  {creating === "folder" ? <FolderGlyph /> : <FileGlyph />}
+                </span>
+                <input
+                  ref={inputRef}
+                  className="finder__rename-input"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitCreate();
+                    if (e.key === "Escape") {
+                      setCreating(null);
+                      setDraft("");
+                    }
+                  }}
+                  onBlur={commitCreate}
+                  placeholder={creating === "folder" ? "untitled folder" : "untitled"}
+                />
+              </div>
+            )}
+            {entries.map((entry) => (
               <button
                 key={entry.path}
                 type="button"
-                className={`finder__row${selectedClass}`}
+                className={`finder__item${selected === entry.path ? " is-selected" : ""}`}
                 onClick={() => setSelected(entry.path)}
                 onDoubleClick={() => open(entry)}
               >
-                <span className="finder__row-icon">
+                <span className="finder__icon">
                   {entry.isDir ? <FolderGlyph /> : <FileGlyph />}
                 </span>
-                {label}
-                <span className="finder__row-kind">
-                  {entry.wsz ? "Winamp Skin" : entry.isDir ? "Folder" : "File"}
-                </span>
+                {renaming === entry.path ? renameInput : (
+                  <span className="finder__name">{entry.name}</span>
+                )}
               </button>
-            );
-          })}
-
-          {entries.length === 0 && !creating && (
-            <div className="finder__empty">
-              {skins ? skinsError ?? "No .wsz skins in this folder" : "This folder is empty"}
-            </div>
-          )}
-        </div>
+            ))}
+            {entries.length === 0 && !creating && (
+              <div className="finder__empty">This folder is empty</div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
