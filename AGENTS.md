@@ -133,3 +133,33 @@ Load an existing project skill when it matches the task instead of improvising a
 - `drizzle-kit`, `pg`, and `playwright-cli` are part of the intended toolchain here. Use them directly when the task calls for them.
 - If you are editing template or seeded-app database behavior, generate or apply migrations instead of manually faking schema state.
 - If you are validating UI behavior, inspect the real rendered state with `playwright-cli` instead of reasoning from code alone.
+
+## Ephemeral Testing (apps/almost-os)
+
+`apps/almost-os` boots behind an Auth0 login gate (`src/auth/AuthGate.tsx`); the
+whole desktop is unreachable until a session exists. When doing ephemeral local
+testing (dev server + browser automation), **emulate the Auth0 login with
+`blamy/emulate` — do not hand-seed a fake `localStorage` session.** Emulate
+stands up a real, stateful OIDC provider (the `okta` service) so the actual
+redirect/callback/token-validation flow runs end to end.
+
+```bash
+# Stand up the OIDC provider the app will authenticate against.
+npx emulate --service okta --port 4006   # vendored at vendor/emulate
+```
+
+Point the app at the emulator via its Vite env overrides (read from
+`src/auth/auth0.ts`), then start the dev server:
+
+- `VITE_AUTH0_DOMAIN=localhost:4006` — the emulator's issuer/authorize/token host
+- `VITE_AUTH0_CLIENT_ID=<seeded client id>` — a client registered in the emulator seed
+- `VITE_AUTH0_FLOW=pkce` — the emulator implements the authorization-code + PKCE flow
+
+This keeps the login path exercised like production instead of faking session
+state. Only fall back to seeding `almostos.auth0.session` in `localStorage` if the
+emulator is genuinely unavailable, and say so explicitly.
+
+- **Do not use the Replay browser / submit or record Replay sessions for
+  verification here.** Replay-Chromium is currently broken with openNode (a
+  separate, tracked issue). Validate with the normal dev server + Chrome
+  automation (or `playwright-cli`) instead.
