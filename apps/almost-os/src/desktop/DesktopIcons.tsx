@@ -2,11 +2,12 @@ import { useEffect } from "react";
 import { useOsRuntime } from "../runtime/OsRuntimeProvider";
 import { useSystem } from "../os/system";
 import { finderStore } from "../apps/finder/finder-store";
-import { ensureSkinsDir } from "../fs/real-folder";
 import { DOWNLOADS_DIR } from "../media/virtual-mp3";
+import { SOUNDCLOUD_LINKS_DIR, WEBAMP_SKINS_DIR } from "../media/virtual-url-map";
 
 // Desktop folder icons. Double-clicking opens them in Finder:
-//  • "Winamp Skins"     → a REAL host folder (File System Access API) of .wsz
+//  • "Winamp Skins"      → VFS link files backed by the webamp+skins:// map
+//  • "SoundCloud Links"  → VFS link files backed by the soundcloud:// map
 //  • "Napster Downloads" → the VFS folder Napster saves virtual mp3s into
 
 function FolderIcon() {
@@ -38,24 +39,33 @@ export function DesktopIcons() {
     }
   }, [ready, workspace]);
 
-  const openSkins = async () => {
-    // Resolve the directory handle inside this click gesture (the FSA picker
-    // needs transient activation), then hand it to Finder to list.
-    const handle = await ensureSkinsDir().catch(() => null);
-    finderStore.request({ kind: "winamp-skins", handle });
-    system.openApp("finder");
-  };
-
   const openDownloads = () => {
     finderStore.request({ kind: "vfs", path: DOWNLOADS_DIR });
     system.openApp("finder");
   };
 
+  const openVfsFolder = (path: string) => {
+    finderStore.request({ kind: "vfs", path });
+    system.openApp("finder");
+  };
+
   return (
     <div className="desktop-icons">
-      <button type="button" className="desktop-icon" onDoubleClick={() => void openSkins()}>
+      <button
+        type="button"
+        className="desktop-icon"
+        onDoubleClick={() => openVfsFolder(WEBAMP_SKINS_DIR)}
+      >
         <FolderIcon />
         <span className="desktop-icon__label">Winamp Skins</span>
+      </button>
+      <button
+        type="button"
+        className="desktop-icon"
+        onDoubleClick={() => openVfsFolder(SOUNDCLOUD_LINKS_DIR)}
+      >
+        <FolderIcon />
+        <span className="desktop-icon__label">SoundCloud Links</span>
       </button>
       <button type="button" className="desktop-icon" onDoubleClick={openDownloads}>
         <FolderIcon />

@@ -107,14 +107,27 @@ export function KeychainIcon() {
 }
 
 export function ChromeIcon() {
+  // Raster logo on a white tile; mirror IconFrame's geometry (rect inset 2/64,
+  // rx 14/60) so it reads as the same squircle as the SVG icons.
   return (
-    <img
-      src={`${import.meta.env.BASE_URL}chrome-icon.png`}
-      alt=""
-      width="100%"
-      height="100%"
-      style={{ display: "block", objectFit: "contain" }}
-    />
+    <div
+      style={{
+        width: "93.75%",
+        height: "93.75%",
+        margin: "3.125%",
+        borderRadius: "23%",
+        overflow: "hidden",
+        background: "#fff",
+      }}
+    >
+      <img
+        src={`${import.meta.env.BASE_URL}chrome-icon.png`}
+        alt=""
+        width="100%"
+        height="100%"
+        style={{ display: "block", objectFit: "cover" }}
+      />
+    </div>
   );
 }
 
@@ -236,6 +249,28 @@ export function ChatIcon() {
       <circle cx="26" cy="33" r="2.4" fill="#f2620f" />
       <circle cx="34" cy="33" r="2.4" fill="#f2620f" />
       <circle cx="42" cy="33" r="2.4" fill="#f2620f" />
+    </IconFrame>
+  );
+}
+
+export function ExecutorIcon() {
+  return (
+    <IconFrame id="executor-g" gradient={["#1c1f26", "#0a0b0e"]}>
+      <rect x="9" y="11" width="46" height="42" rx="7" fill="#05060a" stroke="#2b313d" />
+      <path
+        d="M16 22l6 5-6 5"
+        stroke="#8b5cf6"
+        strokeWidth="3.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <path d="M26 34h10" stroke="#8b5cf6" strokeWidth="3.2" strokeLinecap="round" />
+      <path
+        d="M43 20l-5 11h5l-3 11 9-14h-6l4-8z"
+        fill="#f0abfc"
+        stroke="none"
+      />
     </IconFrame>
   );
 }
