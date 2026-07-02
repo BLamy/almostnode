@@ -7,8 +7,11 @@ import {
   type ReactNode,
 } from "react";
 import { Keychain, type KeychainState } from "@agent-wasm/keychain";
+import { tokenFilePathForService } from "@agent-wasm/keychain/oauth";
 import { defaultCredentialSlots } from "@agent-wasm/sdk/auth";
+import { listExecutorSecretSlots } from "../apps/executor/executor-secrets";
 import { getWorkspace } from "../runtime/runtime";
+import { getOAuthRegistry } from "./oauth-runtime";
 
 interface KeychainValue {
   keychain: Keychain;
@@ -40,6 +43,16 @@ export function getKeychain(): Keychain {
     });
     for (const slot of defaultCredentialSlots) {
       singleton.registerSlot(slot.id, [...slot.paths]);
+    }
+    // Dynamic slots must be registered BEFORE init() so their files restore
+    // into the VFS on vault unlock: user-added OAuth services (executor.sh
+    // connections + any future keychain-managed service) and executor.sh
+    // API-key secrets.
+    for (const service of getOAuthRegistry().list()) {
+      singleton.registerSlot(service.id, [tokenFilePathForService(service.id)]);
+    }
+    for (const slot of listExecutorSecretSlots()) {
+      singleton.registerSlot(slot.name, slot.paths);
     }
     void singleton.init();
   }
