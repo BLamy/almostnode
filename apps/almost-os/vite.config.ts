@@ -1,14 +1,18 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import { ffmpegCoreAssets, vimWasmAssets } from "@agent-wasm/cli-tools/vite";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
 import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
+import { resolvePreferredPnpmPackagePath } from "../../scripts/resolve-pnpm-package-path.mjs";
+import { clientMetadataPlugin } from "./src/plugins/vite-plugin-client-metadata";
 import { corsProxyPlugin } from "./src/plugins/vite-plugin-cors-proxy";
 import { scOauthPlugin } from "./src/plugins/vite-plugin-sc-oauth";
 
@@ -16,6 +20,23 @@ const appDir = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = resolve(appDir, "..", "..");
 const corePkg = resolve(repoRoot, "packages/almostnode");
 const appBase = process.env.GITHUB_PAGES ? "/almostnode/" : "/";
+
+// vim.wasm runtime (worker + .wasm/.data), served by `vimWasmAssets()` at
+// `/vim-wasm/`. `vim` uses the normal build; `vi` the "small" build.
+const vimWasmBase = `${appBase}vim-wasm/`;
+const vimWasmPackageRoot = dirname(
+  createRequire(import.meta.url).resolve("vim-wasm/package.json"),
+);
+
+// `@ffmpeg/core` (GPL) ESM glue + wasm, served by `ffmpegCoreAssets()` at
+// `/ffmpeg-core/`. Single-thread build — no SharedArrayBuffer required (though
+// the app is cross-origin isolated anyway, for vim.wasm's sake).
+const ffmpegCoreEsmRoot = resolve(
+  resolvePreferredPnpmPackagePath(repoRoot, "@ffmpeg/core", "0.12."),
+  "dist/esm",
+);
+const ffmpegCoreUrl = `${appBase}ffmpeg-core/ffmpeg-core.js`;
+const ffmpegWasmUrl = `${appBase}ffmpeg-core/ffmpeg-core.wasm`;
 
 // Serve the prebuilt Codex (Rust→WASM) module + binary so the `codex` terminal
 // command can fetch them at runtime, in dev and in the built site.
@@ -65,8 +86,14 @@ export default defineConfig({
     wasm(),
     topLevelAwait(),
     codexWasmAssets(),
+    vimWasmAssets({ packageRoot: vimWasmPackageRoot }),
+    ffmpegCoreAssets({
+      coreJsPath: resolve(ffmpegCoreEsmRoot, "ffmpeg-core.js"),
+      coreWasmPath: resolve(ffmpegCoreEsmRoot, "ffmpeg-core.wasm"),
+    }),
     corsProxyPlugin(),
     scOauthPlugin(),
+    clientMetadataPlugin({ base: appBase }),
     // almostnode's host code needs Node globals/builtins; polyfill them for the
     // browser exactly like apps/web-ide does.
     nodePolyfills({
@@ -81,6 +108,9 @@ export default defineConfig({
     ),
     global: "globalThis",
     __CODEX_WASM_MODULE_URL__: JSON.stringify(`${appBase}codex-wasm/codex_wasm.js`),
+    __VIM_WASM_BASE__: JSON.stringify(vimWasmBase),
+    __FFMPEG_CORE_URL__: JSON.stringify(ffmpegCoreUrl),
+    __FFMPEG_WASM_URL__: JSON.stringify(ffmpegWasmUrl),
   },
   server: {
     port: 4000,
@@ -115,7 +145,20 @@ export default defineConfig({
     // esbuild pre-bundling breaks that and 404s, so let Vite process it as
     // source (Codex compresses app-server traffic with it). Same for the codex
     // workers' wasm-asset handling.
-    exclude: ["@bokuweb/zstd-wasm", "@agent-wasm/codex"],
+    // quickjs-emscripten (the executor code-mode sandbox) resolves its wasm
+    // via `new URL('./…wasm', import.meta.url)`; esbuild pre-bundling rewrites
+    // that path and the wasm 404s ("both async and sync fetching failed"),
+    // same failure mode as zstd-wasm. Let Vite process it as source.
+    exclude: [
+      "@bokuweb/zstd-wasm",
+      "@agent-wasm/codex",
+      "@ffmpeg/ffmpeg",
+      "vim-wasm",
+      "quickjs-emscripten",
+      "quickjs-emscripten-core",
+      "@jitl/quickjs-wasmfile-release-sync",
+      "@jitl/quickjs-wasmfile-release-asyncify",
+    ],
     esbuildOptions: { target: "esnext" },
   },
 });

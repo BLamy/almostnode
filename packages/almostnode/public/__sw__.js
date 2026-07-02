@@ -1,7 +1,9 @@
 /**
  * Service Worker for Mini WebContainers
  * Intercepts fetch requests and routes them to virtual servers
- * Version: 16 - multi-runtime /_npm/ routing: no-Referer fallback requires exactly one registered port
+ * Version: 17 - virtual-server responses also strip CSP (frame-ancestors),
+ * not just X-Frame-Options, so a fetch-backed virtual server can front an
+ * iframe-embedded cross-origin login flow (see media/soundcloud-login-server.ts)
  */
 
 const DEBUG = false;
@@ -459,6 +461,8 @@ async function handleModuleRequest(request, url) {
     headers.set('Cross-Origin-Opener-Policy', 'same-origin');
     headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
     headers.delete('X-Frame-Options');
+    headers.delete('Content-Security-Policy');
+    headers.delete('Content-Security-Policy-Report-Only');
 
     if (response.bodyBase64 && response.bodyBase64.length > 0) {
       const bytes = base64ToBytes(response.bodyBase64);
@@ -1208,6 +1212,8 @@ async function handleVirtualRequest(request, port, path) {
         respHeaders.set('Cross-Origin-Resource-Policy', 'cross-origin');
         // Remove any headers that might block iframe loading
         respHeaders.delete('X-Frame-Options');
+        respHeaders.delete('Content-Security-Policy');
+        respHeaders.delete('Content-Security-Policy-Report-Only');
 
         finalResponse = new Response(blob, {
           status: response.statusCode,
@@ -1270,6 +1276,8 @@ async function handleStreamingRequest(port, method, path, headers, body) {
   respHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
   respHeaders.set('Cross-Origin-Resource-Policy', 'cross-origin');
   respHeaders.delete('X-Frame-Options');
+  respHeaders.delete('Content-Security-Policy');
+  respHeaders.delete('Content-Security-Policy-Report-Only');
 
   return new Response(stream, {
     status: responseData?.statusCode || 200,
