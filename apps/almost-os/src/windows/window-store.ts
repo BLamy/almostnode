@@ -12,6 +12,10 @@ export interface FrameWindow {
   electronWindowId: number;
   /** URL the iframe is pointed at (updated by loadURL). */
   url: string;
+  /** Owning Electron app instance (menu association). */
+  appInstanceId?: number;
+  /** Owning app id (dock association, e.g. "napster"). */
+  appId?: string;
 }
 
 export interface WindowState extends Rect {
@@ -25,6 +29,16 @@ export interface WindowState extends Rect {
   restoreRect?: Rect;
   /** Present when this is an iframe-backed frame window (not a dock app). */
   frame?: FrameWindow;
+  /** Render with no OS chrome — the app draws its own header (e.g. Winamp). */
+  frameless?: boolean;
+  /** Fill the work area with a click-through container (Webamp-style). */
+  overlay?: boolean;
+  /** Transparent window body (no background). */
+  transparent?: boolean;
+  /** Resize handles disabled when false. */
+  resizable?: boolean;
+  /** Per-window minimum size (falls back to the app's minSize). */
+  minSize?: { width: number; height: number };
 }
 
 export interface WMState {
@@ -42,7 +56,15 @@ export const initialWMState: WMState = {
 };
 
 export type WMAction =
-  | { type: "open"; appId: AppId; title: string; size: { width: number; height: number }; viewport: { width: number; height: number } }
+  | {
+      type: "open";
+      appId: AppId;
+      title: string;
+      size: { width: number; height: number };
+      viewport: { width: number; height: number };
+      frameless?: boolean;
+      overlay?: boolean;
+    }
   | {
       type: "openWindow";
       id: string;
@@ -50,6 +72,12 @@ export type WMAction =
       size: { width: number; height: number };
       viewport: { width: number; height: number };
       frame: FrameWindow;
+      frameless?: boolean;
+      transparent?: boolean;
+      resizable?: boolean;
+      minSize?: { width: number; height: number };
+      /** Explicit top-left position (skips the cascade placement). */
+      position?: { x: number; y: number };
     }
   | { type: "setWindowUrl"; id: string; url: string }
   | { type: "setWindowTitle"; id: string; title: string }
@@ -57,8 +85,20 @@ export type WMAction =
   | { type: "focus"; id: string }
   | { type: "move"; id: string; x: number; y: number }
   | { type: "resize"; id: string; rect: Rect }
+  | {
+      type: "setBounds";
+      id: string;
+      bounds: Partial<Rect>;
+      viewport: { width: number; height: number };
+    }
   | { type: "minimize"; id: string }
-  | { type: "toggleMaximize"; id: string; viewport: { width: number; height: number } };
+  | { type: "toggleMaximize"; id: string; viewport: { width: number; height: number } }
+  | {
+      type: "setMaximized";
+      id: string;
+      maximized: boolean;
+      viewport: { width: number; height: number };
+    };
 
 function raise(state: WMState, id: string): WMState {
   const z = state.nextZ + 1;
@@ -77,11 +117,33 @@ function clampPosition(
   y: number,
 ): { x: number; y: number } {
   const maxX = Math.max(0, viewport.width - 120);
-  const maxY = Math.max(MENUBAR_HEIGHT, viewport.height - DOCK_RESERVE);
+  // Keep the whole window above the dock strip; a window taller than the
+  // work area pins to the menu bar instead.
+  const maxY = Math.max(MENUBAR_HEIGHT + 4, viewport.height - DOCK_RESERVE - rect.height);
   return {
     x: Math.min(Math.max(x, -(rect.width - 160)), maxX),
     y: Math.min(Math.max(y, MENUBAR_HEIGHT + 4), maxY),
   };
+}
+
+/** Initial rect for a new window: cascade from centre, fitted to the work area. */
+function placeNewWindow(
+  size: { width: number; height: number },
+  viewport: { width: number; height: number },
+  counter: number,
+): Rect {
+  const offset = (counter % 6) * 28;
+  const workHeight = Math.max(160, viewport.height - MENUBAR_HEIGHT - DOCK_RESERVE);
+  const workWidth = Math.max(320, viewport.width - 48);
+  // Fit the default within the work area so large defaults never overflow on
+  // smaller viewports (windows stay draggable/resizable from there).
+  const width = Math.min(size.width, workWidth);
+  const height = Math.min(size.height, workHeight);
+  const x = Math.round(Math.max(24, (viewport.width - width) / 2) + offset - 60);
+  const y = Math.round(
+    Math.max(MENUBAR_HEIGHT + 24, (viewport.height - height) / 2) + offset - 50,
+  );
+  return { ...clampPosition({ width, height }, viewport, x, y), width, height };
 }
 
 export function wmReducer(state: WMState, action: WMAction): WMState {
@@ -94,27 +156,17 @@ export function wmReducer(state: WMState, action: WMAction): WMState {
       const counter = state.counter + 1;
       const z = state.nextZ + 1;
       const id = `${action.appId}-${counter}`;
-      // Cascade new windows from a sensible centred-ish origin.
-      const offset = (counter % 6) * 28;
-      const x = Math.round(
-        Math.max(24, (action.viewport.width - action.size.width) / 2) + offset - 60,
-      );
-      const y = Math.round(
-        Math.max(MENUBAR_HEIGHT + 24, (action.viewport.height - action.size.height) / 2) +
-          offset -
-          50,
-      );
+      const rect = placeNewWindow(action.size, action.viewport, counter);
       const win: WindowState = {
         id,
         appId: action.appId,
         title: action.title,
-        x,
-        y,
-        width: action.size.width,
-        height: action.size.height,
+        ...rect,
         z,
         minimized: false,
         maximized: false,
+        frameless: action.frameless,
+        overlay: action.overlay,
       };
       return {
         ...state,
@@ -128,27 +180,26 @@ export function wmReducer(state: WMState, action: WMAction): WMState {
       // Frame windows are never deduped — a main process may open several.
       const counter = state.counter + 1;
       const z = state.nextZ + 1;
-      const offset = (counter % 6) * 28;
-      const x = Math.round(
-        Math.max(24, (action.viewport.width - action.size.width) / 2) + offset - 60,
-      );
-      const y = Math.round(
-        Math.max(MENUBAR_HEIGHT + 24, (action.viewport.height - action.size.height) / 2) +
-          offset -
-          50,
-      );
+      const rect = action.position
+        ? {
+            ...clampPosition(action.size, action.viewport, action.position.x, action.position.y),
+            width: action.size.width,
+            height: action.size.height,
+          }
+        : placeNewWindow(action.size, action.viewport, counter);
       const win: WindowState = {
         id: action.id,
         appId: "electron",
         title: action.title,
-        x,
-        y,
-        width: action.size.width,
-        height: action.size.height,
+        ...rect,
         z,
         minimized: false,
         maximized: false,
         frame: action.frame,
+        frameless: action.frameless,
+        transparent: action.transparent,
+        resizable: action.resizable,
+        minSize: action.minSize,
       };
       return {
         ...state,
@@ -198,6 +249,15 @@ export function wmReducer(state: WMState, action: WMAction): WMState {
           w.id === action.id ? { ...w, ...action.rect } : w,
         ),
       };
+    case "setBounds":
+      return {
+        ...state,
+        windows: state.windows.map((w) => {
+          if (w.id !== action.id) return w;
+          const next = { ...w, ...action.bounds };
+          return { ...next, ...clampPosition(next, action.viewport, next.x, next.y) };
+        }),
+      };
     case "minimize":
       return {
         ...state,
@@ -209,27 +269,43 @@ export function wmReducer(state: WMState, action: WMAction): WMState {
     case "toggleMaximize": {
       return {
         ...state,
-        windows: state.windows.map((w) => {
-          if (w.id !== action.id) return w;
-          if (w.maximized && w.restoreRect) {
-            const { restoreRect, ...rest } = w;
-            return { ...rest, ...restoreRect, maximized: false };
-          }
-          return {
-            ...w,
-            maximized: true,
-            restoreRect: { x: w.x, y: w.y, width: w.width, height: w.height },
-            x: 0,
-            y: MENUBAR_HEIGHT,
-            width: action.viewport.width,
-            height: action.viewport.height - MENUBAR_HEIGHT - DOCK_RESERVE + 28,
-          };
-        }),
+        windows: state.windows.map((w) =>
+          w.id === action.id ? applyMaximize(w, !w.maximized, action.viewport) : w,
+        ),
       };
     }
+    case "setMaximized":
+      return {
+        ...state,
+        windows: state.windows.map((w) =>
+          w.id === action.id ? applyMaximize(w, action.maximized, action.viewport) : w,
+        ),
+      };
     default:
       return state;
   }
+}
+
+function applyMaximize(
+  w: WindowState,
+  maximized: boolean,
+  viewport: { width: number; height: number },
+): WindowState {
+  if (maximized === w.maximized) return w;
+  if (!maximized) {
+    if (!w.restoreRect) return { ...w, maximized: false };
+    const { restoreRect, ...rest } = w;
+    return { ...rest, ...restoreRect, maximized: false };
+  }
+  return {
+    ...w,
+    maximized: true,
+    restoreRect: { x: w.x, y: w.y, width: w.width, height: w.height },
+    x: 0,
+    y: MENUBAR_HEIGHT,
+    width: viewport.width,
+    height: viewport.height - MENUBAR_HEIGHT - DOCK_RESERVE,
+  };
 }
 
 export { clampPosition };
