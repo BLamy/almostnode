@@ -6,6 +6,9 @@ import { Suspense, lazy, useEffect, useState } from "react";
 const Desktop = lazy(() =>
   import("../desktop/Desktop").then((m) => ({ default: m.Desktop })),
 );
+const AuthGate = lazy(() =>
+  import("../auth/AuthGate").then((m) => ({ default: m.AuthGate })),
+);
 
 export const Route = createFileRoute("/")({
   component: HomeRoute,
@@ -21,7 +24,9 @@ function HomeRoute() {
 
   return (
     <Suspense fallback={<div className="os-boot" />}>
-      <Desktop />
+      <AuthGate>
+        <Desktop />
+      </AuthGate>
     </Suspense>
   );
 }
