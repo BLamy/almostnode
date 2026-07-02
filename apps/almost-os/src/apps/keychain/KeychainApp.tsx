@@ -8,11 +8,19 @@ import { useKeychain } from "../../keychain/keychain-store";
 import { useOsRuntime } from "../../runtime/OsRuntimeProvider";
 import { useSystem } from "../../os/system";
 
+// Placeholder hint per credential category — agents want an auth.json/API key,
+// everything else a token.
+function placeholderFor(category: string): string {
+  if (category === "agent") return '{ "type": "oauth", "access": "…", "refresh": "…" }  — or an API key';
+  return "Paste an API key or token…";
+}
+
 export function KeychainApp() {
   const { keychain, state, refresh } = useKeychain();
   const { workspace } = useOsRuntime();
   const system = useSystem();
-  const [authDraft, setAuthDraft] = useState("");
+  const [openSlot, setOpenSlot] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
   const providerBySlot = useMemo(() => {
@@ -30,22 +38,42 @@ export function KeychainApp() {
           ? "Vault unlocked"
           : "No action needed";
 
-  const storeOpenCodeAuth = () => {
-    const value = authDraft.trim();
-    if (!value) return;
-    const path = agentWasmCredentialPaths.opencodeAuth;
+  // Write the pasted credential to the slot's first credential path — the same
+  // mechanism that already works for OpenCode — which flips
+  // keychain.hasSlotData(slot.id) to "Connected" and lets the vault seal it.
+  const saveCredential = (slotId: string, path: string) => {
+    const value = draft.trim();
+    if (!value || !path) return;
     const dir = path.slice(0, path.lastIndexOf("/"));
     try {
-      if (!workspace.vfs.existsSync(dir)) {
+      if (dir && !workspace.vfs.existsSync(dir)) {
         workspace.vfs.mkdirSync(dir, { recursive: true });
       }
       workspace.vfs.writeFileSync(path, value);
-      setNotice("Stored OpenCode auth into the workspace. Save the vault to encrypt it.");
-      setAuthDraft("");
+      setNotice(`Stored ${slotId} credential. Save the vault (above) to encrypt it.`);
+      setDraft("");
+      setOpenSlot(null);
       refresh();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  // Log out = remove the slot's credential files from the workspace.
+  const clearCredential = (slotId: string, paths: readonly string[]) => {
+    let removed = false;
+    for (const path of paths) {
+      try {
+        if (workspace.vfs.existsSync(path)) {
+          workspace.vfs.unlinkSync(path);
+          removed = true;
+        }
+      } catch {
+        /* best effort */
+      }
+    }
+    if (removed) setNotice(`Signed out of ${slotId}.`);
+    refresh();
   };
 
   return (
@@ -100,75 +128,93 @@ export function KeychainApp() {
 
       <section className="keychain__card">
         <div className="keychain__card-title">Credentials</div>
+        <p className="keychain__hint">
+          Click <strong>Log In</strong> and paste the credential (an <code>auth.json</code>, OAuth
+          token, or API key). It's written to the workspace and sealed into the passkey vault when
+          you save above.
+        </p>
         <div className="keychain__slots">
           {defaultCredentialSlots.map((slot) => {
             const connected = keychain.hasSlotData(slot.id);
             const provider = providerBySlot.get(slot.id);
             const loginCmd = provider?.commands?.login;
-            const logoutCmd = provider?.commands?.logout;
+            const credentialPath = slot.paths[0];
+            const canEnter = !slot.synthetic && !!credentialPath;
+            const isOpen = openSlot === slot.id;
             return (
-              <div
-                key={slot.id}
-                className={`keychain__slot${slot.id === "opencode" ? " is-highlight" : ""}`}
-              >
-                <span className="keychain__slot-name">{slot.label}</span>
-                <span className="keychain__slot-cat">{slot.category}</span>
-                <span className={`keychain__badge${connected ? " is-on" : ""}`}>
-                  {connected ? "Connected" : "Not connected"}
-                </span>
-                <span className="keychain__slot-actions">
-                  {loginCmd && (
-                    <button
-                      type="button"
-                      className="keychain__btn keychain__btn--small"
-                      onClick={() => system.runInTerminal(loginCmd)}
-                      title={loginCmd}
-                    >
-                      Log in
-                    </button>
-                  )}
-                  {logoutCmd && connected && (
-                    <button
-                      type="button"
-                      className="keychain__btn keychain__btn--small"
-                      onClick={() => system.runInTerminal(logoutCmd)}
-                      title={logoutCmd}
-                    >
-                      Log out
-                    </button>
-                  )}
-                </span>
+              <div key={slot.id} className="keychain__slot-wrap">
+                <div className="keychain__slot">
+                  <span className="keychain__slot-name">{slot.label}</span>
+                  <span className="keychain__slot-cat">{slot.category}</span>
+                  <span className={`keychain__badge${connected ? " is-on" : ""}`}>
+                    {connected ? "Connected" : "Not connected"}
+                  </span>
+                  <span className="keychain__slot-actions">
+                    {canEnter && (
+                      <button
+                        type="button"
+                        className="keychain__btn keychain__btn--small"
+                        onClick={() => {
+                          setDraft("");
+                          setOpenSlot(isOpen ? null : slot.id);
+                        }}
+                      >
+                        {isOpen ? "Cancel" : connected ? "Update" : "Log In"}
+                      </button>
+                    )}
+                    {connected && (
+                      <button
+                        type="button"
+                        className="keychain__btn keychain__btn--small"
+                        onClick={() => clearCredential(slot.id, slot.paths)}
+                      >
+                        Log Out
+                      </button>
+                    )}
+                  </span>
+                </div>
+                {isOpen && canEnter && (
+                  <div className="keychain__slot-entry">
+                    <textarea
+                      className="keychain__textarea"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      placeholder={placeholderFor(slot.category)}
+                      spellCheck={false}
+                      autoFocus
+                    />
+                    <div className="keychain__actions">
+                      <button
+                        type="button"
+                        className="keychain__btn keychain__btn--primary keychain__btn--small"
+                        disabled={!draft.trim()}
+                        onClick={() => saveCredential(slot.id, credentialPath)}
+                      >
+                        Save credential
+                      </button>
+                      {loginCmd && (
+                        <button
+                          type="button"
+                          className="keychain__btn keychain__btn--small"
+                          onClick={() => system.runInTerminal(loginCmd)}
+                          title={`Run ${loginCmd} in the Terminal`}
+                        >
+                          Log in via CLI
+                        </button>
+                      )}
+                      <span className="keychain__slot-path">→ {credentialPath}</span>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
-      </section>
-
-      <section className="keychain__card">
-        <div className="keychain__card-title">OpenCode auth</div>
-        <p className="keychain__hint">
-          Paste your OpenCode <code>auth.json</code> (or run <code>opencode login</code> in the
-          Terminal). It's written to <code>{agentWasmCredentialPaths.opencodeAuth}</code> and can be
-          sealed into the passkey vault.
-        </p>
-        <textarea
-          className="keychain__textarea"
-          value={authDraft}
-          onChange={(e) => setAuthDraft(e.target.value)}
-          placeholder='{ "type": "oauth", "access": "…", "refresh": "…" }'
-          spellCheck={false}
-        />
-        <div className="keychain__actions">
-          <button
-            type="button"
-            className="keychain__btn keychain__btn--primary"
-            disabled={!authDraft.trim()}
-            onClick={storeOpenCodeAuth}
-          >
-            Store OpenCode auth
-          </button>
-        </div>
         {notice && <p className="keychain__notice">{notice}</p>}
+        <p className="keychain__hint">
+          OpenCode is stored at <code>{agentWasmCredentialPaths.opencodeAuth}</code>; log in above to
+          enable the sidebar chat.
+        </p>
       </section>
     </div>
   );
