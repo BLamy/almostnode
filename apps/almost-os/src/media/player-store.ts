@@ -1,7 +1,9 @@
-// The single source of truth for playback in almost-os. Exactly one hidden
-// SoundCloud Widget iframe (mounted once by <PlayerHost/>) is the audio engine;
-// Winamp/Webamp renders + drives it, the `sc` CLI drives it over a VFS bridge,
-// and the OpenCode agent drives it through `sc`. Napster does NOT use this — it
+// The single source of truth for playback in almost-os. Two engines, one queue:
+// SoundCloud URLs play through the hidden SoundCloud Widget iframe (mounted once
+// by <PlayerHost/>); everything else (local/http media files, e.g. the seeded
+// llama demo mp3) plays through a module-owned HTMLAudioElement. Winamp/Webamp
+// renders + drives the store, the `napster` CLI drives it over a VFS bridge, and
+// the OpenCode agent drives it through `napster`. Napster does NOT use this — it
 // only downloads. All surfaces read the same queue via `useMediaPlayer()`.
 
 import { useSyncExternalStore } from "react";
@@ -19,6 +21,8 @@ export interface PlayerTrack {
   title: string;
   artist?: string;
   artwork?: string | null;
+  /** Track length in ms, when known up front (file tracks refine it on load). */
+  durationMs?: number;
 }
 
 export interface PlayerState {
@@ -35,9 +39,10 @@ export interface PlayerState {
 
 // Winamp comes preloaded with the classic demo track (queued, not auto-played).
 const SEED_TRACK: PlayerTrack = {
-  url: "https://soundcloud.com/avishay-bassa/winamp-it-really-whips-the",
-  title: "It Really Whips the Llama's Ass",
-  artist: "Winamp",
+  url: `${import.meta.env.BASE_URL}media/llama.mp3`,
+  title: "Llama Whippin' Intro",
+  artist: "DJ Mike Llama",
+  durationMs: 5322,
 };
 
 const BRIDGE_DIR = "/home/user/.winamp";
@@ -57,6 +62,7 @@ let state: PlayerState = {
 
 const listeners = new Set<() => void>();
 let widget: SCWidget | null = null;
+let audioEl: HTMLAudioElement | null = null;
 /** Bumped only on structural changes (queue/index/playing/now) → gate VFS writes. */
 let structuralVersion = 0;
 let lastWrittenVersion = -1;
@@ -72,10 +78,75 @@ function commit(next: Partial<PlayerState>, structural = false): void {
   for (const listener of listeners) listener();
 }
 
+// --- engine routing --------------------------------------------------------
+
+/** SoundCloud URLs go through the widget; everything else through <audio>. */
+export function isSoundCloudUrl(url: string): boolean {
+  try {
+    const host = new URL(url, "https://localhost").hostname;
+    return host === "soundcloud.com" || host.endsWith(".soundcloud.com") || host === "snd.sc";
+  } catch {
+    return false;
+  }
+}
+
+function currentEngine(): "widget" | "file" {
+  const track = state.queue[state.index];
+  return track && !isSoundCloudUrl(track.url) ? "file" : "widget";
+}
+
+/**
+ * Lazy singleton <audio> for non-SoundCloud tracks.
+ *
+ * Every event handler is gated on the engine owning the current track: when a
+ * track switch hands playback to the other engine, the losing engine's
+ * in-flight events (a pause fired by the switch itself, a straggling
+ * timeupdate) must not overwrite the new track's state.
+ */
+function getAudioEl(): HTMLAudioElement {
+  if (audioEl) return audioEl;
+  const el = new Audio();
+  el.preload = "auto";
+  el.volume = state.volume / 100;
+  el.addEventListener("timeupdate", () => {
+    if (currentEngine() !== "file") return;
+    commit({ posMs: Math.round(el.currentTime * 1000) });
+  });
+  el.addEventListener("durationchange", () => {
+    if (currentEngine() !== "file") return;
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      commit({ durMs: Math.round(el.duration * 1000) }, true);
+    }
+  });
+  el.addEventListener("play", () => {
+    if (currentEngine() === "file") commit({ playing: true }, true);
+  });
+  el.addEventListener("pause", () => {
+    if (currentEngine() === "file") commit({ playing: false }, true);
+  });
+  el.addEventListener("ended", () => {
+    if (currentEngine() === "file") next();
+  });
+  el.addEventListener("error", () => {
+    console.warn("[player] file engine error", el.error?.message ?? el.error);
+  });
+  audioEl = el;
+  return el;
+}
+
+function playAudioEl(): void {
+  void getAudioEl()
+    .play()
+    .catch((error) => console.warn("[player] audio play blocked", error));
+}
+
 // --- widget wiring ---------------------------------------------------------
 
 function refreshNow(): void {
   widget?.getCurrentSound((sound: SCSound) => {
+    // The widget answers for whatever IT has loaded — ignore it when the
+    // current track belongs to the file engine (e.g. the seeded llama mp3).
+    if (currentEngine() !== "widget") return;
     commit(
       {
         now: { title: sound?.title ?? "—", artist: sound?.user?.username ?? "" },
@@ -89,32 +160,98 @@ function refreshNow(): void {
 /** Called by <PlayerHost/> once the hidden iframe is in the DOM. Idempotent. */
 export function attachIframe(iframe: HTMLIFrameElement): void {
   if (widget) return;
+  // Seed the queue up front — independent of the SoundCloud widget handshake —
+  // so the "now playing" list shows the classic demo track immediately, even if
+  // the widget is slow to become ready (or never does, e.g. embeds blocked).
+  seedQueue();
   void loadSoundCloudWidgetApi()
     .then((SC) => {
       const w = SC.Widget(iframe);
       widget = w;
       const E = SC.Widget.Events;
-      w.bind(E.READY, () => {
+
+      let readied = false;
+      const onReady = () => {
+        if (readied) return;
+        readied = true;
         w.setVolume(state.volume);
         commit({ ready: true });
-        seedQueue();
+        // Point the widget at the current track if it's a SoundCloud one, so the
+        // very first press of play has audio loaded. A file track already has the
+        // <audio> engine — reloading it here would reset its playback.
+        const current = state.queue[state.index];
+        if (current && isSoundCloudUrl(current.url)) loadCurrent(false);
         installBridge();
+      };
+      // Gated on engine ownership — see getAudioEl for why.
+      w.bind(E.READY, onReady);
+      w.bind(E.PLAY, () => {
+        if (currentEngine() === "widget") commit({ playing: true }, true);
       });
-      w.bind(E.PLAY, () => commit({ playing: true }, true));
-      w.bind(E.PAUSE, () => commit({ playing: false }, true));
-      w.bind(E.FINISH, () => next());
-      w.bind(E.PLAY_PROGRESS, (e) =>
-        commit({ posMs: (e as { currentPosition?: number })?.currentPosition ?? 0 }),
-      );
+      w.bind(E.PAUSE, () => {
+        if (currentEngine() === "widget") commit({ playing: false }, true);
+      });
+      w.bind(E.FINISH, () => {
+        if (currentEngine() === "widget") next();
+      });
+      w.bind(E.PLAY_PROGRESS, (e) => {
+        if (currentEngine() !== "widget") return;
+        commit({ posMs: (e as { currentPosition?: number })?.currentPosition ?? 0 });
+      });
+
+      // The widget's READY event fires only once. Because the iframe often loads
+      // (and fires READY) before this API script finishes loading and binds the
+      // handler, that one-shot event is easily missed — leaving the widget fully
+      // functional but the app stuck thinking it never became ready. Guard the
+      // race by polling a cheap widget request (getCurrentSound only answers once
+      // the widget is live) and promoting to ready as soon as it responds.
+      const poll = window.setInterval(() => {
+        if (readied) {
+          window.clearInterval(poll);
+          return;
+        }
+        w.getCurrentSound((sound: SCSound) => {
+          if (sound && !readied) onReady();
+        });
+      }, 600);
+      window.setTimeout(() => window.clearInterval(poll), 30000);
     })
     .catch((error) => console.error("[player] SoundCloud widget failed", error));
+  // Watchdog: surface a silent handshake failure so "why won't it play?" is
+  // diagnosable instead of a mystery. The SoundCloud embed needs to reach READY
+  // for any audio to play; if it doesn't, log a clear hint.
+  window.setTimeout(() => {
+    if (!state.ready) {
+      console.warn(
+        "[player] SoundCloud widget has not become ready after 8s — SoundCloud playback is unavailable " +
+          "(local file tracks still play). This usually means the SoundCloud embed (w.soundcloud.com) is " +
+          "blocked (e.g. third-party cookies/embeds disabled).",
+      );
+    }
+  }, 8000);
 }
 
 function loadCurrent(autoPlay: boolean): void {
   const track = state.queue[state.index];
-  if (!widget || !track) return;
-  commit({ posMs: 0, now: { title: track.title, artist: track.artist ?? "" } }, true);
-  widget.load(track.url, { auto_play: autoPlay, callback: refreshNow });
+  if (!track) return;
+  commit(
+    {
+      posMs: 0,
+      durMs: track.durationMs ?? 0,
+      now: { title: track.title, artist: track.artist ?? "" },
+    },
+    true,
+  );
+  if (isSoundCloudUrl(track.url)) {
+    audioEl?.pause();
+    if (!widget) return;
+    widget.load(track.url, { auto_play: autoPlay, callback: refreshNow });
+  } else {
+    widget?.pause();
+    const el = getAudioEl();
+    el.src = track.url;
+    if (autoPlay) playAudioEl();
+  }
 }
 
 // --- public transport ------------------------------------------------------
@@ -157,25 +294,32 @@ export function playVirtualMp3(payload: VirtualMp3): void {
     title: payload.title,
     artist: payload.artist,
     artwork: payload.artwork ?? null,
+    durationMs: payload.duration,
   });
 }
 
 export function toggle(): void {
-  if (!widget) return;
-  if (state.playing) widget.pause();
-  else widget.play();
+  if (state.playing) pause();
+  else play();
 }
 
 export function play(): void {
-  widget?.play();
+  if (currentEngine() === "file") playAudioEl();
+  else widget?.play();
 }
 export function pause(): void {
-  widget?.pause();
+  if (currentEngine() === "file") audioEl?.pause();
+  else widget?.pause();
 }
 
 export function stop(): void {
-  widget?.pause();
-  widget?.seekTo(0);
+  if (currentEngine() === "file") {
+    audioEl?.pause();
+    if (audioEl) audioEl.currentTime = 0;
+  } else {
+    widget?.pause();
+    widget?.seekTo(0);
+  }
   commit({ posMs: 0 });
 }
 
@@ -188,22 +332,29 @@ export function prev(): void {
 }
 
 export function seek(ms: number): void {
-  widget?.seekTo(ms);
+  if (currentEngine() === "file") {
+    if (audioEl) audioEl.currentTime = ms / 1000;
+  } else {
+    widget?.seekTo(ms);
+  }
   commit({ posMs: ms });
 }
 
 export function setVolume(v: number): void {
   const volume = Math.max(0, Math.min(100, v));
+  if (volume === state.volume) return;
   widget?.setVolume(volume);
+  if (audioEl) audioEl.volume = volume / 100;
   commit({ volume });
 }
 
 export function clearQueue(): void {
   widget?.pause();
+  audioEl?.pause();
   commit({ queue: [], index: -1, playing: false, posMs: 0, durMs: 0, now: null }, true);
 }
 
-// --- VFS command/state bridge (lets the `sc` CLI + agent drive playback) ----
+// --- VFS command/state bridge (lets the `napster` CLI + agent drive playback) ----
 
 interface BridgeCommand {
   id: string;

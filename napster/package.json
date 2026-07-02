@@ -1,0 +1,21 @@
+{
+  "name": "napster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Napster on Cloudflare — OIDC device-flow issuer + SoundCloud API gateway for the almost-os `sc` CLI",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.6.14",
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.95.0"
+  }
+}

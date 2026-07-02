@@ -12,6 +12,15 @@ const SEED_URL = "https://soundcloud.com/avishay-bassa/winamp-it-really-whips-th
  * engine. Rendered once at the desktop root so playback survives any window
  * (Winamp, Terminal) opening or closing.
  */
+// The desktop runs cross-origin-isolated (COOP: same-origin + COEP:
+// credentialless) so its WASM tooling can use SharedArrayBuffer. Under COEP
+// credentialless, a cross-origin <iframe> that doesn't send its own COEP header
+// (like SoundCloud's widget) only loads if it opts into being fetched without
+// credentials via the `credentialless` attribute — otherwise it renders blank
+// and its Widget API never reaches READY, so nothing ever plays. React's iframe
+// types don't include the attribute yet, hence the spread.
+const CREDENTIALLESS = { credentialless: "" } as Record<string, string>;
+
 export function PlayerHost() {
   const ref = useRef<HTMLIFrameElement>(null);
 
@@ -24,6 +33,7 @@ export function PlayerHost() {
 
   return (
     <iframe
+      {...CREDENTIALLESS}
       ref={ref}
       title="almost-os audio engine"
       src={widgetPlayerUrl(SEED_URL)}

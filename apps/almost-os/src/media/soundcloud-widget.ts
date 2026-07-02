@@ -1,7 +1,7 @@
 // SoundCloud HTML5 Widget API wrapper. This is the browser-native way to play
 // real SoundCloud audio with custom controls: the Widget API needs no API key
 // and streams in-sandbox. It is the single audio engine behind every music
-// surface in almost-os (Winamp/Webamp, the `sc` CLI, the OpenCode agent).
+// surface in almost-os (Winamp/Webamp, the `napster` CLI, the OpenCode agent).
 // Napster does NOT play audio — it only downloads virtual mp3s.
 
 export interface SCSound {
