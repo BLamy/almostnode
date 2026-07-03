@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       module:
-        description: "npm module to build"
+        description: "module to build (napi-hello = minimal green-build proof)"
         required: true
-        default: better-sqlite3
+        default: napi-hello
       version:
         description: "version override (blank = recipe default)"
         required: false
@@ -31,7 +31,7 @@ jobs:
     name: Build ${{ github.event.inputs.module || 'better-sqlite3' }} → wasm
     runs-on: ubuntu-latest
     env:
-      MODULE: ${{ github.event.inputs.module || 'better-sqlite3' }}
+      MODULE: ${{ github.event.inputs.module || 'napi-hello' }}
       VERSION: ${{ github.event.inputs.version || '' }}
     steps:
       - name: Checkout
@@ -52,6 +52,16 @@ jobs:
         uses: mymindstorm/setup-emsdk@v14
         with:
           version: 3.1.74
+
+      - name: Setup wasi-sdk
+        # @napi-rs/wasm-runtime loads wasm32-wasi (threaded) modules, so the
+        # correct toolchain is wasi-sdk clang, not emscripten.
+        run: |
+          ver=24
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${ver}/wasi-sdk-${ver}.0-x86_64-linux.tar.gz" -o /tmp/wasi-sdk.tar.gz
+          mkdir -p "$HOME/wasi-sdk"
+          tar xzf /tmp/wasi-sdk.tar.gz -C "$HOME/wasi-sdk" --strip-components=1
+          echo "WASI_SDK=$HOME/wasi-sdk" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         # Non-frozen: this iterative build job may pull in `emnapi` before it's in

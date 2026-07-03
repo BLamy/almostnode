@@ -82,8 +82,12 @@ function writeFailure(err, version) {
 
 function probeToolchain() {
   const emcc = spawnSync("emcc", ["--version"], { encoding: "utf8" });
+  const clang = process.env.WASI_SDK
+    ? spawnSync(`${process.env.WASI_SDK}/bin/clang`, ["--version"], { encoding: "utf8" })
+    : { stdout: "" };
   return {
     emcc: (emcc.stdout ?? "").split("\n")[0] || "missing",
+    "wasi-clang": (clang.stdout ?? "").split("\n")[0] || "missing",
     node: process.version,
   };
 }
@@ -100,6 +104,7 @@ async function main() {
   }
   const config = (await import(configPath)).default;
   const version = versionOverride ?? config.version;
+  const artifactName = config.npmName ?? config.name ?? moduleName;
 
   const tmp = mkdtempSync(join(tmpdir(), `native-wasm-${moduleName}-`));
   try {
@@ -107,25 +112,31 @@ async function main() {
     phase("fetch");
     const srcDir = join(tmp, "src");
     mkdirSync(srcDir, { recursive: true });
-    // `npm pack --json` downloads the exact tarball; stdout is a JSON array with
-    // the produced filename (notices go to stderr, so parse stdout only).
-    const packResult = run("npm", [
-      "pack",
-      `${config.npmName}@${version}`,
-      "--pack-destination",
-      tmp,
-      "--json",
-    ]);
-    let tgz;
-    try {
-      tgz = JSON.parse(packResult.stdout)[0].filename;
-    } catch {
-      throw Object.assign(new Error("could not parse `npm pack --json` output"), {
-        exitCode: 1,
-        logTail: packResult.stdout,
-      });
+    if (config.npmName) {
+      // `npm pack --json` downloads the exact tarball; stdout is a JSON array
+      // with the produced filename (notices go to stderr, so parse stdout only).
+      const packResult = run("npm", [
+        "pack",
+        `${config.npmName}@${version}`,
+        "--pack-destination",
+        tmp,
+        "--json",
+      ]);
+      let tgz;
+      try {
+        tgz = JSON.parse(packResult.stdout)[0].filename;
+      } catch {
+        throw Object.assign(new Error("could not parse `npm pack --json` output"), {
+          exitCode: 1,
+          logTail: packResult.stdout,
+        });
+      }
+      run("tar", ["-xzf", join(tmp, tgz), "-C", srcDir, "--strip-components=1"]);
     }
-    run("tar", ["-xzf", join(tmp, tgz), "-C", srcDir, "--strip-components=1"]);
+    // Inline/synthetic modules (no npm package) write their own sources.
+    if (typeof config.prepare === "function") {
+      await config.prepare({ srcDir, run, log });
+    }
 
     // ── patch ────────────────────────────────────────────────────────────
     phase("patch");
@@ -143,7 +154,7 @@ async function main() {
     // ── build ────────────────────────────────────────────────────────────
     phase("build");
     mkdirSync(distDir, { recursive: true });
-    const outWasm = join(distDir, `${config.npmName}@${version}.wasm`);
+    const outWasm = join(distDir, `${artifactName}@${version}.wasm`);
     // emnapi ships headers + a js library; resolve from this package's deps.
     const emnapiDir = resolveEmnapiDir();
     await config.build({ srcDir, outWasm, emnapiDir, run, phase, log, tmp });
@@ -160,18 +171,18 @@ async function main() {
     // ── manifest ─────────────────────────────────────────────────────────
     const wasmBytes = readFileSync(outWasm);
     const manifest = {
-      module: config.npmName,
+      module: artifactName,
       version,
-      wasm: `${config.npmName}@${version}.wasm`,
+      wasm: `${artifactName}@${version}.wasm`,
       sha256: sha256(wasmBytes),
       bytes: wasmBytes.length,
       toolchain: probeToolchain(),
     };
     writeFileSync(
-      join(distDir, `${config.npmName}@${version}.manifest.json`),
+      join(distDir, `${artifactName}@${version}.manifest.json`),
       JSON.stringify(manifest, null, 2),
     );
-    log(`OK ${config.npmName}@${version} (${wasmBytes.length} bytes, sha256 ${manifest.sha256.slice(0, 12)}…)`);
+    log(`OK ${artifactName}@${version} (${wasmBytes.length} bytes, sha256 ${manifest.sha256.slice(0, 12)}…)`);
   } catch (err) {
     const artifact = writeFailure(err, version);
     console.error(`FAILED at phase '${artifact.phase}': ${err.message}`);

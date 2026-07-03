@@ -33,11 +33,19 @@ async function main() {
     "@napi-rs/wasm-runtime"
   );
   const wasi = new WASI({ version: "preview1" });
+  // The wasm is built with `--import-memory --shared-memory`, so supply a shared
+  // WebAssembly.Memory matching that import.
+  const sharedMemory = new WebAssembly.Memory({ initial: 256, maximum: 65536, shared: true });
   const { napiModule } = instantiateNapiModuleSync(readFileSync(wasmPath), {
     context: getDefaultContext(),
     wasi,
     overwriteImports(importObject) {
-      importObject.env = { ...importObject.env, ...importObject.napi, ...importObject.emnapi };
+      importObject.env = {
+        ...importObject.env,
+        ...importObject.napi,
+        ...importObject.emnapi,
+        memory: sharedMemory,
+      };
       return importObject;
     },
   });
