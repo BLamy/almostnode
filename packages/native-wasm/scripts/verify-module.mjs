@@ -20,7 +20,8 @@ const versionOverride = vIndex >= 0 ? process.argv[vIndex + 1] : null;
 async function main() {
   const config = (await import(join(packageRoot, "modules", `${moduleName}.mjs`))).default;
   const version = versionOverride ?? config.version;
-  const wasmPath = join(distDir, `${config.npmName}@${version}.wasm`);
+  const artifactName = config.npmName ?? config.name ?? moduleName;
+  const wasmPath = join(distDir, `${artifactName}@${version}.wasm`);
 
   if (!existsSync(wasmPath)) {
     console.error(
