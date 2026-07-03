@@ -1,12 +1,14 @@
 /**
  * better-sqlite3 → wasm32-wasi (emscripten + emnapi) build recipe.
  *
- * STATUS: first-draft recipe. The emcc invocation below encodes the real build
- * inputs (source layout + the SQLite compile-time defines from better-sqlite3's
- * binding.gyp + emnapi linkage), but the exact flag set has NOT been validated
- * against a real emsdk build yet — it is the starting point the CI run (and the
- * autonomous fixer loop) tunes against actual compile/link errors. Known hard
- * spots, in the order they'll bite: C++ exceptions, the `bindings` shim, and
+ * STATUS: first-draft recipe, and it targets the WRONG toolchain. CI proved (via
+ * `modules/napi-hello.mjs`) that `@napi-rs/wasm-runtime` loads **wasm32-wasi
+ * (threaded)** modules built with **wasi-sdk clang** — where `napi_*` are wasm
+ * imports (module "napi") supplied by the runtime, so you do NOT link an emnapi
+ * archive, and you export a growable indirect function table. This recipe below
+ * still uses emscripten (emcc) and hit `fatal error: 'node.h' not found` (issue
+ * #2) — it must be reworked to the napi-hello wasi-sdk approach. Additional hard
+ * spots after that: `<node.h>`/V8 usage, C++ exceptions, the `bindings` shim, and
  * on-disk DB file access (start with `:memory:` — no MEMFS↔VFS bridge yet).
  */
 import { join } from "node:path";

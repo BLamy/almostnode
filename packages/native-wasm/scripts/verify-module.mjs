@@ -57,7 +57,7 @@ async function main() {
   } else if (!exports || typeof exports !== "object") {
     throw new Error(`instantiated module has no exports object`);
   }
-  console.log(`verify OK: ${config.npmName}@${version} instantiated (${Object.keys(exports).join(", ")})`);
+  console.log(`verify OK: ${artifactName}@${version} instantiated (${Object.keys(exports).join(", ")})`);
 }
 
 main().catch((err) => {
