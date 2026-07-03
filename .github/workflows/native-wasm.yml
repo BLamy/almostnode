@@ -1,0 +1,121 @@
+name: native-wasm build
+
+# Compiles a native npm module (better-sqlite3, …) to a wasm32-wasi emnapi
+# artifact via emscripten. On failure it files a `native-wasm-compile` issue with
+# the structured failure artifact — the input to the reproduce→fix→PR loop. Runs
+# on demand (or when the build recipe changes); NOT part of package publishing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "npm module to build"
+        required: true
+        default: better-sqlite3
+      version:
+        description: "version override (blank = recipe default)"
+        required: false
+        default: ""
+  push:
+    paths:
+      - "packages/native-wasm/modules/**"
+      - "packages/native-wasm/scripts/**"
+      - ".github/workflows/native-wasm.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  build:
+    name: Build ${{ github.event.inputs.module || 'better-sqlite3' }} → wasm
+    runs-on: ubuntu-latest
+    env:
+      MODULE: ${{ github.event.inputs.module || 'better-sqlite3' }}
+      VERSION: ${{ github.event.inputs.version || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+
+      - name: Install dependencies
+        # Non-frozen: this iterative build job may pull in `emnapi` before it's in
+        # the committed lockfile. (Publish jobs stay frozen.)
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build module → wasm
+        id: build
+        continue-on-error: true
+        working-directory: packages/native-wasm
+        run: |
+          if [ -n "$VERSION" ]; then
+            node scripts/build-module.mjs "$MODULE" --version "$VERSION"
+          else
+            node scripts/build-module.mjs "$MODULE"
+          fi
+
+      - name: Verify wasm
+        if: steps.build.outcome == 'success'
+        working-directory: packages/native-wasm
+        run: |
+          if [ -n "$VERSION" ]; then
+            node scripts/verify-module.mjs "$MODULE" --version "$VERSION"
+          else
+            node scripts/verify-module.mjs "$MODULE"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-wasm-${{ env.MODULE }}
+          path: |
+            packages/native-wasm/dist/*.wasm
+            packages/native-wasm/dist/*.manifest.json
+            packages/native-wasm/dist/failures/*.json
+          if-no-files-found: warn
+
+      - name: File compile-failure issue
+        if: steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          gh label create native-wasm-compile --color FBCA04 \
+            --description "A native npm module needs a wasm32-wasi build" 2>/dev/null || true
+          for f in packages/native-wasm/dist/failures/*.json; do
+            module=$(node -p "require('./$f').module")
+            version=$(node -p "require('./$f').version")
+            phase=$(node -p "require('./$f').phase")
+            title="native-wasm: ${module}@${version} failed at ${phase}"
+            body=$(node -e '
+              const a = require(process.argv[1]);
+              const meta = JSON.stringify({ kind: "native-wasm-compile", module: a.module, version: a.version, phase: a.phase }, null, 2);
+              process.stdout.write(
+                `A CI wasm build of \`${a.module}@${a.version}\` failed at phase **${a.phase}** (exit ${a.exitCode}).\n\n` +
+                "```\n" + (a.logTail || a.message) + "\n```\n\n" +
+                "```json meta\n" + meta + "\n```\n"
+              );
+            ' "$f")
+            # Avoid duplicate issues for the same module@version+phase.
+            existing=$(gh issue list --label native-wasm-compile --search "$title in:title" --json number --jq '.[0].number' || echo "")
+            if [ -n "$existing" ]; then
+              echo "issue #$existing already tracks this failure"
+            else
+              gh issue create --title "$title" --body "$body" --label native-wasm-compile
+            fi
+          done

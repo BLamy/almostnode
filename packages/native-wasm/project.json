@@ -1,0 +1,29 @@
+{
+  "name": "native-wasm",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/native-wasm/src",
+  "projectType": "library",
+  "targets": {
+    "build-modules": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node scripts/build-module.mjs",
+        "cwd": "packages/native-wasm"
+      }
+    },
+    "verify": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node scripts/verify-module.mjs",
+        "cwd": "packages/native-wasm"
+      }
+    },
+    "type-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --project tsconfig.json --noEmit",
+        "cwd": "packages/native-wasm"
+      }
+    }
+  }
+}

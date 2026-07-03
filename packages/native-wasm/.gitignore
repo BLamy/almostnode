@@ -1,0 +1,4 @@
+# Build outputs (produced by CI); the artifacts ship via releases/manifests.
+dist/*.wasm
+dist/*.manifest.json
+dist/failures/
