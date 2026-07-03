@@ -98,20 +98,16 @@ jobs:
           gh label create native-wasm-compile --color FBCA04 \
             --description "A native npm module needs a wasm32-wasi build" 2>/dev/null || true
           for f in packages/native-wasm/dist/failures/*.json; do
-            module=$(node -p "require('./$f').module")
-            version=$(node -p "require('./$f').version")
-            phase=$(node -p "require('./$f').phase")
+            module=$(jq -r .module "$f")
+            version=$(jq -r .version "$f")
+            phase=$(jq -r .phase "$f")
+            exitCode=$(jq -r .exitCode "$f")
+            logTail=$(jq -r '.logTail // .message' "$f")
+            meta=$(jq -c '{kind:"native-wasm-compile",module:.module,version:.version,phase:.phase}' "$f")
             title="native-wasm: ${module}@${version} failed at ${phase}"
-            body=$(node -e '
-              const a = require(process.argv[1]);
-              const meta = JSON.stringify({ kind: "native-wasm-compile", module: a.module, version: a.version, phase: a.phase }, null, 2);
-              process.stdout.write(
-                `A CI wasm build of \`${a.module}@${a.version}\` failed at phase **${a.phase}** (exit ${a.exitCode}).\n\n` +
-                "```\n" + (a.logTail || a.message) + "\n```\n\n" +
-                "```json meta\n" + meta + "\n```\n"
-              );
-            ' "$f")
-            # Avoid duplicate issues for the same module@version+phase.
+            body=$(printf 'A CI wasm build of `%s@%s` failed at phase **%s** (exit %s).\n\n```\n%s\n```\n\n```json meta\n%s\n```\n' \
+              "$module" "$version" "$phase" "$exitCode" "$logTail" "$meta")
+            # Dedupe on the exact title (module@version + phase).
             existing=$(gh issue list --label native-wasm-compile --search "$title in:title" --json number --jq '.[0].number' || echo "")
             if [ -n "$existing" ]; then
               echo "issue #$existing already tracks this failure"
@@ -119,3 +115,10 @@ jobs:
               gh issue create --title "$title" --body "$body" --label native-wasm-compile
             fi
           done
+
+      # Surface the build failure as a red run (the issue is filed above first).
+      - name: Fail run if build failed
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "build failed — a native-wasm-compile issue was filed above."
+          exit 1
