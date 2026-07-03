@@ -66,9 +66,14 @@ export default {
       "-mexec-model=reactor",
       `-I${emnapiInclude}`,
       join(srcDir, "hello.c"),
+      // Pull ALL emnapi objects (napi_* impls have inter-object deps that an
+      // on-demand archive pull misses), and let emnapi's runtime calls resolve
+      // as wasm imports (supplied by @napi-rs/wasm-runtime at instantiate time).
+      "-Wl,--whole-archive",
       emnapiLib,
-      // The module imports shared memory + exports its N-API registration; loaded
-      // by @napi-rs/wasm-runtime (which supplies the emnapi/env imports).
+      "-Wl,--no-whole-archive",
+      "-Wl,--allow-undefined",
+      // The module imports shared memory + exports its N-API registration.
       "-Wl,--import-memory",
       "-Wl,--shared-memory",
       "-Wl,--max-memory=4294967296",
