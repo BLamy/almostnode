@@ -68,6 +68,10 @@ export default {
       "-Wl,--import-memory",
       "-Wl,--shared-memory",
       "-Wl,--max-memory=4294967296",
+      // napi callbacks are registered by the runtime as trampolines in the
+      // indirect function table, so it must be exported + growable.
+      "-Wl,--export-table",
+      "-Wl,--growable-table",
       "-Wl,--export-dynamic",
       "-Wl,--export=napi_register_wasm_v1",
       "-Wl,--export=malloc",
