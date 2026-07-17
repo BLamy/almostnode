@@ -19,7 +19,8 @@ import { scOauthPlugin } from "./src/plugins/vite-plugin-sc-oauth";
 const appDir = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = resolve(appDir, "..", "..");
 const corePkg = resolve(repoRoot, "packages/almostnode");
-const appBase = process.env.GITHUB_PAGES ? "/almostnode/" : "/";
+const appBase =
+  process.env.GITHUB_PAGES_BASE ?? (process.env.GITHUB_PAGES ? "/almostnode/" : "/");
 
 // vim.wasm runtime (worker + .wasm/.data), served by `vimWasmAssets()` at
 // `/vim-wasm/`. `vim` uses the normal build; `vi` the "small" build.
