@@ -12,6 +12,7 @@
   "license": "BSD-3-Clause",
   "main": "./pkg.js",
   "name": "@agent-wasm/tailscale-connect",
+  "private": false,
   "publishConfig": {
     "access": "public"
   },

@@ -172,7 +172,7 @@ export async function initTransformer(): Promise<void> {
       const mod = await dynamicImport(ESBUILD_WASM_ESM_CDN);
 
       // esm.sh wraps the module - get the actual esbuild object
-      const esbuildMod = mod.default || mod;
+      const esbuildMod = (mod.default || mod) as typeof import('esbuild-wasm');
 
       try {
         await esbuildMod.initialize({
