@@ -64,7 +64,6 @@
     "@xterm/xterm": "^6.0.0",
     "ai": "^6.0.85",
     "clsx": "^2.1.1",
-    "codex-wasm": "workspace:*",
     "d3": "^7.9.0",
     "diff": "^7.0.0",
     "html2canvas": "^1.4.1",

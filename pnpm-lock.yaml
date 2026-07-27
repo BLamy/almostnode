@@ -502,9 +502,6 @@ importers:
       diff:
         specifier: ^7.0.0
         version: 7.0.0
-      effect:
-        specifier: 4.0.0-beta.35
-        version: 4.0.0-beta.35
       html2canvas:
         specifier: ^1.4.1
         version: 1.4.1
