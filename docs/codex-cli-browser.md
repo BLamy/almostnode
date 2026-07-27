@@ -1,184 +1,206 @@
-# Codex CLI In Browser
+# Codex CLI in the Browser
 
-This follows the same shape as the OpenCode/OpenTUI browser integration:
+Almost Node runs a browser port of OpenAI Codex in WebAssembly. The current
+port tracks OpenAI Codex `0.145.0` (`rust-v0.145.0`) and exposes both a CLI
+worker and an app-server worker to the Web IDE.
 
-1. Vendor the upstream source and build the browser artifact with
-   `pnpm vendor:install:codex`.
-2. Build the browser-compatible Codex package under `packages/codex-wasm`.
-3. Load that package in a module Worker.
-4. Route filesystem and command access back through almostnode instead of native
-   OS APIs.
+## Upstream pin
 
-`packages/codex-wasm` is intentionally split into explicit build and check
-targets:
+`pnpm vendor:install:codex` installs a reproducible browser fork rather than an
+intermediate build:
 
-- `pnpm vendor:install:codex` clones or updates `vendor/codex` and then runs the
-  Codex CLI WASM adapter build.
-- `pnpm nx build-adapter codex-wasm` builds the current wasm-bindgen CLI
-  module and emits browser-importable JS/WASM under
-  `packages/codex-wasm/dist/pkg`. This is generated build output and can be
-  recreated locally with the target.
-- `pnpm nx smoke-adapter codex-wasm` imports the generated package, loads
-  the WASM, and verifies `codex --help`, `codex login status`, the wasm
-  ratatui frame renderer, and native-only subcommand reporting.
-- `pnpm nx check-codex-wasm codex-wasm` checks upstream
-  `codex-rs/tui` and `codex-rs/cli` for `wasm32-unknown-unknown`
-  compatibility.
+- Official OpenAI release: `rust-v0.145.0`
+- Official release commit:
+  `25af12f7e61572b0bc18ddb1008be543b91519b0`
+- Browser-port commit:
+  `f734cacd239155ace2c304f8e8ae108a0e6ea869`
 
-The vendored fork adds a browser-safe `codex-rs/cli/src/browser_cli.rs` module
-and gates the native CLI dependency graph out of `wasm32` builds. The
-wasm-bindgen adapter imports that forked browser CLI source for its
-`real-codex` build, so the generated browser module uses the Codex fork's
-argv-shaped command surface rather than a separate app-only parser.
+The browser-port commit is one commit whose direct parent is the official
+release commit. `scripts/vendor-install-codex.js` verifies the exact default
+commit, workspace version, official-release ancestry, direct parent, and clean
+vendor checkout before building. Set `CODEX_SOURCE_DIR` to check or build a
+different checkout without replacing `vendor/codex`.
 
-For the browser terminal surface, the fork adds a wasm-only
-`codex-rs/tui/src/browser.rs` renderer and a thin
-`codex-rs/cli/src/browser_tui.rs` argv adapter. The `codex-tui` wasm target
-uses `ratatui` with default terminal backend features disabled, renders a
-Codex frame into `ratatui::backend::TestBackend`, and serializes the styled
-buffer to ANSI for the Web IDE terminal.
+## Runtime shape
 
-The Web IDE wrapper lives in
-`apps/web-ide/src/features/codex-cli-browser-session.ts`. It creates the Worker
-from `apps/web-ide/src/features/codex-cli.worker.ts` and exposes a `codex` shell
-command factory that can be registered on an almostnode container. Web IDE
-startup registers that command on the workbench container, so browser terminal
-commands and direct container calls such as `container.run("codex --help")`
-route through the WASM worker.
+The implementation has three cooperating layers:
 
-The Web IDE Vite config serves and emits the generated files at:
+1. The forked `codex-rs` crates compile for `wasm32-unknown-unknown`. The
+   browser CLI keeps an argv-shaped command surface, and the browser TUI uses a
+   wasm-compatible `ratatui` renderer.
+2. `packages/codex-wasm/rust` links the upstream Codex crates into a
+   `wasm-bindgen` adapter. It exports CLI and app-server constructors and is
+   built to `packages/codex-wasm/dist/pkg`.
+3. The TypeScript workers and host bridge connect WASM to an Almost Node
+   container. The bridge handles auth, virtual-filesystem access, streamed
+   HTTP, command execution, and interactive process operations.
+
+The host bridge currently provides:
+
+- `auth/env` and `auth/refresh`
+- virtual filesystem reads, writes, patch application, directory creation and
+  listing, and metadata
+- buffered and streamed network fetch, including stream cancellation
+- one-off and streaming command execution
+- process spawn, stdin, terminal resize, and termination
+
+These operations use the container's VFS, network controller, and terminal
+sessions. The Rust WASM module does not reach through to the host operating
+system.
+
+The Web IDE registers `codex` as a first-class Almost Node shell command in
+`apps/web-ide/src/features/codex-cli-browser-session.ts`. Vite serves the
+generated browser artifacts at:
 
 - `/codex-wasm/codex_wasm.js`
 - `/codex-wasm/codex_wasm_bg.wasm`
 
-`createWebIdeCodexCliBrowserSession` and
-`createWebIdeCodexCliShellCommand` use that module URL by default.
+## What runs today
 
-## Browser CLI status
+### CLI and one-shot exec
 
-The browser module currently provides an argv-shaped Codex command surface that
-loads in a real browser and returns normal CLI-style results:
+The browser CLI supports:
 
-- `codex --help`
-- `codex --version`
-- `codex login status`
-- `codex login --with-api-key`
-- `codex login --with-access-token`
-- `codex logout`
-- `codex` in an interactive Web IDE terminal, using a wasm ratatui-rendered
-  browser frame loop that forwards submitted prompts through hosted
-  `codex exec`
-- `!command` inside that interactive browser terminal, routed through
-  almostnode shell execution and rendered back into the TUI transcript
-- `codex [PROMPT]` in non-interactive browser shell/container calls, routed to
-  hosted `codex exec`
-- `codex exec [OPTIONS] [PROMPT]` in the hosted Web Worker shell command
-- `codex doctor`
-- `codex features list`
+- `codex --help` and `codex --version`
+- browser-hosted login status, API-key/access-token login, device-login
+  requests, and logout
+- `codex doctor` and `codex features`
+- `codex exec [OPTIONS] [PROMPT]`
+- prompt-shaped non-interactive calls such as
+  `container.run("codex summarize this project")`
+- `--model`, `-c model=...`, `--json`, and `--output-last-message` for the
+  supported one-shot exec slice
 
-Direct raw WASM calls still report `codex exec` as native-only because the
-compiled Rust adapter is synchronous and has no browser host bridge. The hosted
-Web Worker path adds the first runnable browser agent slice:
+One-shot `codex exec` is still a browser-hosted Responses API/tool-call bridge.
+It can call `shell_command`, `apply_patch`, and the browser Playwright shim
+through the Almost Node host bridge, but it is not a persisted upstream core
+thread.
 
-- Parses one-shot `codex exec [OPTIONS] [PROMPT]` invocations.
-- Uses `OPENAI_API_KEY` or `CODEX_API_KEY` with the OpenAI Responses API from
-  the Worker.
-- Advertises the upstream `shell_command` Responses tool when the almostnode
-  host bridge is attached.
-- Executes `shell_command` and `local_shell_call` requests through the
-  almostnode `command/exec` host bridge, then feeds Codex-style
-  `function_call_output` strings back to the model.
-- Supports `-m/--model`, `-c model=...`, `CODEX_MODEL`, `OPENAI_MODEL`,
-  `--json`, and `--output-last-message`.
-- Writes `--output-last-message` through the almostnode host filesystem bridge.
-- Keeps native-only exec modes such as `resume`, `review`, and
-  `--output-schema` explicit with exit code `78`.
+### Interactive TUI and upstream core session
 
-The hosted exec bridge is still not the full native Codex runtime. It does not
-yet run the Rust app-server/TUI session loop, persist native thread state, or
-route approvals and resumable exec sessions through Codex core. It is the
-browser-compatible Responses/tool-call bridge needed for one-shot browser
-`codex exec` to inspect and modify the almostnode workspace.
+Running `codex` in an interactive Web IDE terminal uses the forked
+`codex-tui` wasm renderer for its frame loop, input handling, slash-command
+surfaces, Markdown, plan updates, and streamed transcript.
 
-The registered shell command also provides a first browser interactive entrypoint
-for `codex` in the Web IDE terminal. It keeps the terminal session attached,
-renders the Codex header, model/directory card, tip row, composer row, and
-transcript area through the wasm ratatui frame renderer, accepts typed input,
-sends each submitted prompt through the hosted `codex exec` bridge, and exits
-on `/exit`, `exit`, `quit`, Ctrl-C, or Ctrl-D.
+Submitted prompts now use a real Rust app-server/core session where the Web IDE
+provides the app-server worker:
 
-For non-interactive browser calls, prompt-shaped top-level invocations such as
-`container.run("codex summarize this project")` are routed to hosted
-`codex exec "summarize this project"` instead of falling into the raw WASM
-native-TUI-unavailable path. Native subcommands continue to use their explicit
-argv-shaped implementations.
+1. The shell wrapper initializes the browser app-server.
+2. The adapter creates the upstream Codex `ThreadManager` and `CodexThread`.
+3. Each prompt is submitted with `turn/start`.
+4. Upstream Codex performs the streamed Responses request and tool loop.
+5. Filesystem, network, command, process, and auth effects cross the Almost Node
+   host bridge.
+6. App-server item and turn notifications are fed back into the wasm TUI
+   renderer.
 
-The browser frame renderer now lives in the forked `codex-tui` crate and
-`codex-tui` checks successfully for `wasm32-unknown-unknown`, but it is still
-not the full native app-server session loop. Upstream Codex ties that loop to
-`crossterm`, Tokio process/signal/net features, app-server clients, state
-storage, realtime audio, and clipboard integrations. almostnode and Tailscale
-can provide browser-side filesystem, process, stdio, and network behavior, but
-not through the native Rust syscall APIs those crates use. The fork must route
-those calls through browser host bridges or browser-compatible backend shims.
-The current fork keeps the native services out of the browser build and gives
-the Web IDE terminal a wasm ratatui surface first. The remaining work is to feed
-that surface from Codex session state and route filesystem, process execution,
-auth, networking, approvals, and app-server transport through almostnode host
-bridges.
+This means the interactive model turn is no longer the old JS-only
+`codex exec` fallback. Shell escapes such as `!pwd` still execute directly
+through the Almost Node terminal session and are rendered into the same TUI.
 
-Native subcommands such as `codex app-server`, `codex mcp`, and interactive TUI
-mode are recognized but return exit code `78` with a clear browser-runtime
-message until their filesystem, process, auth, networking, and app-server/TUI
-dependencies are routed through almostnode host bridges.
+### App-server worker
 
-## Fork status
+`createCodexBrowserSession` starts the app-server WASM worker over a
+`MessageChannel`. The implemented protocol slice includes:
 
-The forked upstream TUI and CLI crates are `codex-rs/tui` and `codex-rs/cli`.
-They now check successfully for the browser target:
+- initialization and runtime status
+- thread start, list, search, loaded-list, read, unsubscribe, and in-memory
+  turn/item reads
+- turn start using the upstream core thread
+- item injection
+- filesystem requests
+- one-off and interactive command/process requests
+
+The app-server adapter uses the upstream `codex-app-server-protocol` request
+types and emits normal thread, turn, item, process, and command notifications.
+The deterministic smoke test exercises a streamed model response, an upstream
+tool call, a host-backed process, the follow-up tool result, and completed
+thread/turn/item reads.
+
+## Current limitations
+
+This is a browser port of the supported session path, not a claim that every
+native Codex surface now works:
+
+- The adapter does not embed the native in-process app-server
+  `MessageProcessor`; it implements the supported protocol boundary directly
+  over `MessagePort`.
+- Thread storage is currently in memory. Native rollout files, SQLite-backed
+  state, restart persistence, resume, fork, archive, and unarchive are not
+  available yet.
+- App-server methods outside the implemented request slice return JSON-RPC
+  `-32601`. Native configuration-manager operations, including permission
+  profile selection on `turn/start`, are not yet host-shimmed.
+- Browser command execution does not yet implement app-server output caps,
+  command sandbox-policy overrides, or permission profiles. Browser
+  `process/spawn` does not implement `outputBytesCap`.
+- The browser TUI is a wasm-specific `ratatui` surface, not the native
+  `crossterm` process. The Web IDE shell supplies its app-server session and
+  browser login host.
+- The raw CLI subcommand `codex app-server` remains unavailable because there
+  is no native process/socket daemon in the browser. The app-server is exposed
+  through the worker/session API instead.
+- Native-only CLI workflows such as `review`, `mcp`, `mcp-server`, `plugin`,
+  `remote-control`, `sandbox`, `execpolicy`, `apply`, `resume`, `fork`,
+  `archive`, `cloud`, and update return exit code `78`.
+- `codex exec resume`, `codex exec review`, `--output-schema`, and other
+  unsupported native exec options remain unavailable.
+- A usable session still requires a host container with the relevant VFS,
+  network, terminal, and auth capabilities. Device login also requires the Web
+  IDE/keychain login host.
+- Browser sandboxing and network routing are provided by Almost Node and its
+  selected network controller, not by native OS syscalls. Depending on the
+  target, HTTP may use the configured CORS proxy or the browser Tailscale
+  route.
+
+## Build and verification
+
+Install the pinned fork and build the generated WASM:
 
 ```bash
 pnpm vendor:install:codex
-pnpm nx check-codex-wasm codex-wasm
 ```
 
-The native `codex-tui` session/runtime paths still pull OS-only surfaces through
-several paths, including app-server clients, Tokio net/process/signal, exec
-resume and review, state, SQLite-backed storage, realtime audio, and clipboard.
-The fork now compiles the Codex TUI browser module and CLI browser surface for
-`wasm32-unknown-unknown`; the native session/runtime paths remain excluded from
-the browser module until almostnode host bridges exist for them.
-
-Remaining browser CLI work:
-
-- Route filesystem, process execution, keychain/auth, and network access through
-  the almostnode host bridge.
-- Add browser session state, approvals, and resumable `codex exec` execution.
-- Feed the wasm ratatui frame renderer from the real Codex session loop instead
-  of the current browser transcript state.
-- Replace the remaining native Tokio/crossterm boundaries with browser host
-  bridge implementations: almostnode for filesystem/process/stdin/stdout and
-  Tailscale/browser fetch/WebSocket paths for network transport.
-- Keep the CLI invocation contract argv-shaped so `codex` can be registered as
-  a first-class almostnode shell command.
-
-## Verification
-
-Current focused checks:
+For an already checked-out source tree, the equivalent explicit checks are:
 
 ```bash
-pnpm nx check-codex-wasm codex-wasm
-pnpm nx smoke-adapter codex-wasm
-pnpm nx type-check codex-wasm --skip-nx-cache
-pnpm nx test codex-wasm --skip-nx-cache
-pnpm --dir apps/web-ide exec vitest run tests/webide-command-routing.test.ts tests/codex-cli-shell-command.test.ts tests/webide-vite-config.test.ts
-CODEX_CLI_WASM_BASE_URL=http://127.0.0.1:5177 pnpm --dir apps/web-ide exec node tests/codex-cli-wasm-browser-smoke.mjs
-pnpm --dir apps/web-ide run build
+CODEX_SOURCE_DIR=/path/to/codex pnpm --dir packages/codex-wasm check:codex-wasm
+pnpm --dir packages/codex-wasm build
+CODEX_SOURCE_DIR=/path/to/codex pnpm --dir packages/codex-wasm build:adapter
+pnpm --dir packages/codex-wasm smoke:adapter
+pnpm --dir packages/codex-wasm type-check
+pnpm --dir packages/codex-wasm test
 ```
 
-The browser smoke imports the served WASM module and also verifies
-`createContainer().run("codex --help")`, `codex login status`, hosted
-`codex exec --output-last-message ...`, and hosted `codex exec --json ...` in
-Chromium. It also verifies that `codex` in an interactive terminal renders the
-wasm ratatui Codex frame. The raw WASM smoke still verifies direct
-`cli.run(["exec", ...])` returns the native-only exit-code path.
+`check:codex-wasm` checks the complete locked adapter dependency graph for
+`wasm32-unknown-unknown`. `smoke:adapter` then runs both deterministic generated
+artifact tests:
+
+- `tests/browser-wasm-smoke.mjs` verifies version `0.145.0`, CLI parsing,
+  login behavior, the wasm TUI renderer, and its browser actions.
+- `tests/app-server-browser-wasm-smoke.mjs` verifies the real upstream core
+  thread/turn path with fake streamed Responses data and deterministic host
+  filesystem, network, command, and process bridges.
+
+To verify the served Web IDE integration, start the app and run the two
+Playwright smoke scripts against it:
+
+```bash
+CODEX_SOURCE_DIR=/path/to/codex pnpm nx dev web-ide --skip-nx-cache
+
+CODEX_CLI_WASM_BASE_URL=http://127.0.0.1:5173 \
+  pnpm --dir apps/web-ide exec node tests/codex-cli-wasm-browser-smoke.mjs
+
+CODEX_APP_SERVER_WASM_BASE_URL=http://127.0.0.1:5173 \
+  pnpm --dir apps/web-ide exec node tests/codex-app-server-wasm-browser-smoke.mjs
+```
+
+The CLI browser smoke intercepts model traffic with deterministic SSE fixtures
+and verifies `container.run("codex --version")`, one-shot exec/tool calls,
+interactive `!command`, and an interactive upstream-core TUI turn. The
+app-server browser smoke verifies the worker/session API plus VFS and
+interactive command/process host bridges in Chromium.
+
+The credentialed real-API smoke is separate from these deterministic gates and
+should only be used when explicitly validating live provider credentials and
+network routing.

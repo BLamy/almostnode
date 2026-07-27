@@ -11,16 +11,22 @@ default = ["real-codex"]
 real-codex = ["codex-app-server", "codex-cli/real-tui-wasm"]
 
 [dependencies]
-allocative = "=0.3.4"
-async-trait = "0.1"
 codex-app-server = { path = "../../../vendor/codex/codex-rs/app-server", optional = true }
+codex-home = { path = "../../../vendor/codex/codex-rs/codex-home" }
 codex-cli = { path = "../../../vendor/codex/codex-rs/cli" }
 codex-core = { path = "../../../vendor/codex/codex-rs/core" }
 codex-exec-server = { path = "../../../vendor/codex/codex-rs/exec-server" }
 codex-extension-api = { path = "../../../vendor/codex/codex-rs/ext/extension-api" }
+codex-features = { path = "../../../vendor/codex/codex-rs/features" }
+codex-guardian = { path = "../../../vendor/codex/codex-rs/ext/guardian" }
+codex-image-generation-extension = { path = "../../../vendor/codex/codex-rs/ext/image-generation" }
 codex-login = { path = "../../../vendor/codex/codex-rs/login" }
+codex-mcp-extension = { path = "../../../vendor/codex/codex-rs/ext/mcp" }
+codex-memories-extension = { path = "../../../vendor/codex/codex-rs/ext/memories" }
 codex-protocol = { path = "../../../vendor/codex/codex-rs/protocol" }
+codex-skills-extension = { path = "../../../vendor/codex/codex-rs/ext/skills" }
 codex-utils-absolute-path = { path = "../../../vendor/codex/codex-rs/utils/absolute-path" }
+codex-web-search-extension = { path = "../../../vendor/codex/codex-rs/ext/web-search" }
 console_error_panic_hook = "0.1"
 js-sys = "0.3"
 serde = "1"
@@ -32,8 +38,15 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["MessageEvent", "MessagePort"] }
 
+# getrandom 0.4 (pulled transitively via rand 0.10 -> quickcheck -> starlark ->
+# codex-execpolicy) needs its `wasm_js` backend feature on wasm; the
+# `getrandom_backend="wasm_js"` cfg only covers getrandom 0.3.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
 [patch.crates-io]
 crossterm = { path = "../../../vendor/crossterm-wasm" }
 tokio = { path = "../../../vendor/tokio-wasm" }
-tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

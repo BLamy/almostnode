@@ -1,4 +1,8 @@
-import { browserFetch } from './fetch';
+import {
+  browserFetch,
+  browserFetchStream,
+  createNetworkFetchStreamResponse,
+} from './fetch';
 import { almostnodeDebugWarn } from '../utils/debug';
 import { NETWORK_DIAGNOSTIC_FAILURE_BUCKETS } from './types';
 import {
@@ -20,6 +24,7 @@ import type {
   NetworkDiagnosticsSnapshot,
   NetworkFetchRequest,
   NetworkFetchResponse,
+  NetworkFetchStreamResponse,
   NetworkLookupResult,
   NetworkProvider,
   NetworkOptions,
@@ -450,6 +455,22 @@ export class DefaultNetworkController implements NetworkController {
       }
     }
     return browserFetch(request, this.getResolvedPolicy());
+  }
+
+  async fetchStream(
+    request: NetworkFetchRequest,
+  ): Promise<NetworkFetchStreamResponse> {
+    await this.ensureSessionHydrated();
+    if (this.options.provider === 'tailscale' && this.adapterStatus === null) {
+      await this.getStatus();
+    }
+
+    const options = this.getResolvedOptions();
+    const route = selectNetworkRouteForUrl(request.url, options);
+    if (route === 'tailscale') {
+      return createNetworkFetchStreamResponse(await this.fetch(request));
+    }
+    return browserFetchStream(request, this.getResolvedPolicy());
   }
 
   async connectWebSocket(

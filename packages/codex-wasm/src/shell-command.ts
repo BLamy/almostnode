@@ -10,7 +10,7 @@ import type {
   CodexCliRunOptions,
 } from "./types";
 
-const DEFAULT_BROWSER_CODEX_CLI_VERSION = "0.137.0";
+export const CODEX_BROWSER_CLI_VERSION = "0.145.0";
 
 export interface CodexCliShellCommandResult {
   stdout: string;
@@ -946,7 +946,6 @@ function getBrowserCodexEnv(
   const env = context.getEnv();
   const authEnv = readBrowserCodexAuthEnv(context.vfs);
   return {
-    CODEX_CLI_VERSION: DEFAULT_BROWSER_CODEX_CLI_VERSION,
     ...authEnv,
     ...env,
   };

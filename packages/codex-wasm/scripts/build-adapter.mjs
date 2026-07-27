@@ -2,13 +2,34 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareAdapterSource, resolveCodexSource } from "./adapter-source.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = resolve(__dirname, "..");
-const rustRoot = resolve(packageRoot, "rust");
+const repoRoot = resolve(packageRoot, "../..");
+const codexRoot = resolveCodexSource(repoRoot);
+const adapterSource = prepareAdapterSource({
+  packageRoot,
+  repoRoot,
+  codexRoot,
+});
+const rustRoot = adapterSource.rustRoot;
 const outDir = resolve(packageRoot, "dist/pkg");
 const rustToolchain = "1.95.0";
+const buildProfile = process.env.CODEX_WASM_BUILD_PROFILE ?? "release";
+const profileFlag = {
+  dev: "--dev",
+  profiling: "--profiling",
+  release: "--release",
+}[buildProfile];
+if (!profileFlag) {
+  console.error(
+    "CODEX_WASM_BUILD_PROFILE must be `dev`, `profiling`, or `release`.",
+  );
+  process.exit(1);
+}
+process.on("exit", adapterSource.cleanup);
 
 if (!existsSync(resolve(rustRoot, "Cargo.toml"))) {
   console.error(`Codex WASM Rust crate not found at ${rustRoot}.`);
@@ -25,15 +46,17 @@ run(
   "wasm-pack",
   [
     "build",
-    rustRoot,
     "--target",
     "web",
     "--out-dir",
     outDir,
     "--out-name",
     "codex_wasm",
+    profileFlag,
+    rustRoot,
     "--features",
     "real-codex",
+    "--locked",
   ],
   {
     cwd: packageRoot,

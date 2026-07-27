@@ -295,6 +295,33 @@ describe('network controller', () => {
     expect(curlResult.stdout).toBe('tailnet-response');
   });
 
+  it('adapts tailscale fetch responses into a one-chunk stream', async () => {
+    const createdAdapters: FakeTailscaleAdapter[] = [];
+    setTailscaleAdapterFactory(async (_options, onStatus) => {
+      const adapter = new FakeTailscaleAdapter(onStatus);
+      createdAdapters.push(adapter);
+      return adapter;
+    });
+
+    const controller = createNetworkController({ provider: 'tailscale' });
+    await controller.login();
+
+    const response = await controller.fetchStream({
+      url: 'https://db.ts.net/status',
+      method: 'GET',
+      headers: {},
+    });
+    const reader = response.body.getReader();
+    const first = await reader.read();
+    const done = await reader.read();
+
+    expect(new TextDecoder().decode(first.value)).toBe('tailnet-response');
+    expect(first.done).toBe(false);
+    expect(done).toEqual({ value: undefined, done: true });
+    expect(createdAdapters[0]?.fetches).toHaveLength(1);
+    reader.releaseLock();
+  });
+
   it('routes Claude public fetches through tailscale once login reports a selected exit node', async () => {
     const createdAdapters: FakeTailscaleAdapter[] = [];
     setTailscaleAdapterFactory(async (_options, onStatus) => {

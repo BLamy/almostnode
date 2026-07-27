@@ -5,8 +5,6 @@ import {
   type CodexCliShellCommandResult,
 } from "../src/shell-command";
 
-const DEFAULT_CODEX_CLI_VERSION = "0.137.0";
-
 describe("createCodexCliShellCommand", () => {
   it("runs codex through the provided browser runner and forwards shell state", async () => {
     const seen: unknown[] = [];
@@ -42,7 +40,6 @@ describe("createCodexCliShellCommand", () => {
         options: {
           cwd: "/workspace",
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },
@@ -106,7 +103,6 @@ describe("createCodexCliShellCommand", () => {
         options: {
           cwd: "/workspace",
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "sk-restored",
             CODEX_API_KEY: "sk-restored",
             PWD: "/workspace",
@@ -204,7 +200,6 @@ describe("createCodexCliShellCommand", () => {
         options: {
           cwd: "/workspace",
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },
@@ -269,7 +264,6 @@ describe("createCodexCliShellCommand", () => {
         options: {
           cwd: "/workspace",
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },
@@ -385,7 +379,6 @@ describe("createCodexCliShellCommand", () => {
           stderr: "",
           exitCode: 0,
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },
@@ -434,7 +427,6 @@ describe("createCodexCliShellCommand", () => {
         options: {
           cwd: "/workspace",
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },
@@ -465,7 +457,6 @@ describe("createCodexCliShellCommand", () => {
           stderr: "",
           exitCode: 0,
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },
@@ -512,7 +503,6 @@ describe("createCodexCliShellCommand", () => {
         options: {
           cwd: "/workspace",
           env: {
-            CODEX_CLI_VERSION: DEFAULT_CODEX_CLI_VERSION,
             OPENAI_API_KEY: "test-key",
             PWD: "/workspace",
           },

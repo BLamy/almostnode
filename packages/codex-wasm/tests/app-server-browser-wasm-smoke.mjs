@@ -3,18 +3,23 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MessageChannel, MessagePort } from "node:worker_threads";
+import {
+  compress as zstdCompress,
+  decompress as zstdDecompress,
+  init as initZstd,
+} from "@bokuweb/zstd-wasm";
 
 globalThis.MessagePort ??= MessagePort;
 globalThis.__ALMOSTNODE_CODEX_WASM_TRACE = true;
+const restoreBrowserTimerFacade = installBrowserTimerFacade();
+await initZstd();
+globalThis.__almostnodeCodexZstdCompress = (input, level = 3) =>
+  zstdCompress(input, level);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgDir = resolve(__dirname, "../dist/pkg");
-const moduleUrl = pathToFileURL(
-  resolve(pkgDir, "codex_wasm.js"),
-).href;
-const wasmBytes = readFileSync(
-  resolve(pkgDir, "codex_wasm_bg.wasm"),
-);
+const moduleUrl = pathToFileURL(resolve(pkgDir, "codex_wasm.js")).href;
+const wasmBytes = readFileSync(resolve(pkgDir, "codex_wasm_bg.wasm"));
 
 const module = await import(moduleUrl);
 await module.default({ module_or_path: wasmBytes });
@@ -33,10 +38,13 @@ const commandNotifications = [];
 const hostCommandWrites = [];
 const hostCommandResizes = [];
 const hostCommandTerminates = [];
+const hostCommandExecs = [];
 const threadNotifications = [];
 const turnNotifications = [];
 const processNotifications = [];
 const hostNetworkRequests = [];
+const hostNetworkStreams = new Map();
+const hostNetworkStreamCancels = [];
 const hostProcessSpawns = [];
 const hostProcessWrites = [];
 const hostProcessResizes = [];
@@ -45,6 +53,22 @@ const assistantText =
   "Browser Codex is wired through the upstream core runtime.";
 const execCommandCallId = "wasm_exec_command_call";
 const processOutput = "process output\n";
+let nextHostNetworkStreamId = 1;
+let assistantCompletionChunkReleased = false;
+let releaseAssistantCompletionChunk;
+const assistantCompletionGate = new Promise((resolve) => {
+  releaseAssistantCompletionChunk = resolve;
+});
+const chatgptAccountId = "account-browser-wasm-smoke";
+const chatgptAccessToken = fakeJwt({
+  exp: 4_102_444_800,
+  email: "browser-wasm-smoke@example.invalid",
+  "https://api.openai.com/auth": {
+    chatgpt_plan_type: "pro",
+    chatgpt_user_id: "user-browser-wasm-smoke",
+    chatgpt_account_id: chatgptAccountId,
+  },
+});
 globalThis.__almostnodeCodexHostRequest = (op, params = {}) =>
   new Promise((resolve, reject) => {
     try {
@@ -107,11 +131,8 @@ const initialize = await request(channel.port1, {
     },
   },
 });
-assert.match(
-  initialize.result.userAgent,
-  /^almostnode-codex-wasm\//,
-);
-assert.equal(initialize.result.codexHome, "/codex-browser-home");
+assert.equal(initialize.result.userAgent, "almostnode-codex-wasm/0.145.0");
+assert.equal(initialize.result.codexHome, "/home/user/.codex");
 assert.equal(initialize.result.platformFamily, "wasm");
 assert.equal(initialize.result.platformOs, "browser");
 channel.port1.postMessage({ method: "initialized", params: {} });
@@ -159,12 +180,25 @@ assert.match(threadId, /^[0-9a-fA-F-]{36}$/);
 assert.match(threadStart.result.thread.sessionId, /^[0-9a-fA-F-]{36}$/);
 assert.equal(threadStart.result.thread.cwd, "/project");
 assert.equal(threadStart.result.thread.ephemeral, true);
+assert.equal(threadStart.result.thread.extra, null);
+assert.equal(threadStart.result.thread.historyMode, "legacy");
+assert.equal(threadStart.result.thread.canAcceptDirectInput, true);
+assert.equal(
+  threadStart.result.thread.recencyAt,
+  threadStart.result.thread.createdAt,
+);
+assert.equal(
+  threadStart.result.thread.updatedAt,
+  threadStart.result.thread.createdAt,
+);
 assert.equal(threadStart.result.thread.source, "appServer");
+assert.equal(threadStart.result.thread.cliVersion, "0.145.0");
 assert.deepEqual(threadStart.result.thread.status, { type: "idle" });
 assert.deepEqual(threadStart.result.thread.turns, []);
 assert.equal(threadStart.result.model, "gpt-5.4");
 assert.equal(threadStart.result.modelProvider, "openai");
 assert.equal(threadStart.result.cwd, "/project");
+assert.equal(threadStart.result.multiAgentMode, "explicitRequestOnly");
 assert.deepEqual(threadStart.result.sandbox, {
   type: "workspaceWrite",
   writableRoots: [],
@@ -213,7 +247,74 @@ assert.ifError(listedThreads.error);
 assert.deepEqual(listedThreads.result, {
   data: [threadStart.result.thread],
   nextCursor: null,
+  backwardsCursor: "0",
+});
+
+const reverseListedThreads = await request(channel.port1, {
+  id: "thread-list-reverse",
+  method: "thread/list",
+  params: {
+    cursor: listedThreads.result.backwardsCursor,
+    sortDirection: "asc",
+    sortKey: "created_at",
+    modelProviders: ["openai"],
+    sourceKinds: ["appServer"],
+    cwd: ["/project"],
+    searchTerm: "",
+  },
+});
+assert.ifError(reverseListedThreads.error);
+assert.deepEqual(reverseListedThreads.result, {
+  data: [threadStart.result.thread],
+  nextCursor: null,
+  backwardsCursor: "0",
+});
+
+const filteredThreads = await request(channel.port1, {
+  id: "thread-list-filtered",
+  method: "thread/list",
+  params: {
+    modelProviders: ["different-provider"],
+  },
+});
+assert.ifError(filteredThreads.error);
+assert.deepEqual(filteredThreads.result, {
+  data: [],
+  nextCursor: null,
   backwardsCursor: null,
+});
+
+const archivedThreads = await request(channel.port1, {
+  id: "thread-list-archived",
+  method: "thread/list",
+  params: {
+    archived: true,
+  },
+});
+assert.ifError(archivedThreads.error);
+assert.deepEqual(archivedThreads.result, {
+  data: [],
+  nextCursor: null,
+  backwardsCursor: null,
+});
+
+const searchedThreads = await request(channel.port1, {
+  id: "thread-search",
+  method: "thread/search",
+  params: {
+    searchTerm: threadId,
+  },
+});
+assert.ifError(searchedThreads.error);
+assert.deepEqual(searchedThreads.result, {
+  data: [
+    {
+      thread: threadStart.result.thread,
+      snippet: "",
+    },
+  ],
+  nextCursor: null,
+  backwardsCursor: "0",
 });
 
 const turnStart = await request(channel.port1, {
@@ -249,7 +350,9 @@ assert.equal(turnStartedNotification.turn.status, "inProgress");
 assert.equal(turnStartedNotification.turn.itemsView, "full");
 assert.deepEqual(turnStartedNotification.turn.items, []);
 assert.deepEqual(
-  turnNotifications.find((message) => message.method === "thread/status/changed")?.params,
+  turnNotifications.find(
+    (message) => message.method === "thread/status/changed",
+  )?.params,
   {
     threadId,
     status: {
@@ -259,29 +362,52 @@ assert.deepEqual(
   },
 );
 await waitFor(
-  () => hostNetworkRequests.length >= 1,
+  () => responsesRequests().length >= 1,
   "upstream Codex network request",
 );
-const upstreamRequest = hostNetworkRequests[0];
-assert.match(upstreamRequest.url, /\/responses$/);
-assert.equal(upstreamRequest.method, "POST");
-const upstreamBody = JSON.parse(
-  Buffer.from(upstreamRequest.bodyBase64, "base64").toString("utf8"),
+const modelsRequest = hostNetworkRequests.find((request) =>
+  /\/models(?:\?|$)/.test(request.url),
 );
+assert.ok(modelsRequest);
+assert.equal(modelsRequest.method, "GET");
+const upstreamRequest = responsesRequests()[0];
+assert.match(upstreamRequest.url, /\/responses(?:\?|$)/);
+assert.equal(upstreamRequest.method, "POST");
+assert.equal(
+  upstreamRequest.headers.authorization,
+  `Bearer ${chatgptAccessToken}`,
+);
+assert.equal(upstreamRequest.headers["chatgpt-account-id"], chatgptAccountId);
+assert.equal(upstreamRequest.headers["content-encoding"], "zstd");
+const upstreamBody = decodeNetworkRequestBody(upstreamRequest);
 assert.equal(upstreamBody.model, "gpt-5.4");
 assert.equal(upstreamBody.stream, true);
 assert.equal(upstreamBody.store, false);
 assert.equal(Array.isArray(upstreamBody.input), true);
 assert.equal(Array.isArray(upstreamBody.tools), true);
 await waitFor(
-  () => hostNetworkRequests.length === 2,
+  () => responsesRequests().length === 2,
   "upstream Codex follow-up request after exec_command",
 );
-const followUpBody = JSON.parse(
-  Buffer.from(hostNetworkRequests[1].bodyBase64, "base64").toString("utf8"),
+const followUpBody = decodeNetworkRequestBody(responsesRequests()[1]);
+const functionCallOutput = findFunctionCallOutput(
+  followUpBody.input,
+  execCommandCallId,
+);
+assert.ok(functionCallOutput, "expected exec_command function_call_output");
+assert.match(
+  JSON.stringify(functionCallOutput),
+  /Process running with session ID \d+/,
+);
+assert.doesNotMatch(
+  JSON.stringify(functionCallOutput),
+  /Timed out|exited with code 1/,
 );
 await waitFor(
-  () => hostProcessSpawns.some((spawn) => spawn.command?.join(" ")?.includes("npm run dev")),
+  () =>
+    hostProcessSpawns.some((spawn) =>
+      spawn.command?.join(" ")?.includes("npm run dev"),
+    ),
   "upstream unified exec process spawn",
 );
 const unifiedExecSpawn = hostProcessSpawns.find((spawn) =>
@@ -293,16 +419,28 @@ assert.equal(unifiedExecSpawn.tty, false);
 assert.equal(unifiedExecSpawn.streamStdin, false);
 assert.equal(unifiedExecSpawn.streamStdoutStderr, true);
 assert.equal(unifiedExecSpawn.timeoutMs, undefined);
-const functionCallOutput = findFunctionCallOutput(
-  followUpBody.input,
-  execCommandCallId,
-);
-assert.ok(functionCallOutput, "expected exec_command function_call_output");
-assert.match(JSON.stringify(functionCallOutput), /Process running with session ID \d+/);
-assert.doesNotMatch(JSON.stringify(functionCallOutput), /Timed out|exited with code 1/);
 await waitFor(
-  () => turnNotifications.some((message) => message.method === "turn/completed"),
+  () =>
+    turnNotifications.some(
+      (message) => message.method === "item/agentMessage/delta",
+    ),
+  "streamed agent message delta before response completion",
+);
+assert.equal(
+  assistantCompletionChunkReleased,
+  false,
+  "agent-message delta should be emitted before the final SSE chunk is released",
+);
+releaseAssistantCompletionChunk();
+await waitFor(
+  () =>
+    turnNotifications.some((message) => message.method === "turn/completed"),
   "turn completed",
+);
+assert.equal(assistantCompletionChunkReleased, true);
+await waitFor(
+  () => hostNetworkStreams.size === 0,
+  "completed response stream cleanup",
 );
 const completedTurn = turnNotifications.find(
   (message) => message.method === "turn/completed",
@@ -342,17 +480,38 @@ const turnsList = await request(channel.port1, {
 assert.ifError(turnsList.error);
 assert.equal(turnsList.result.data.length, 1);
 assert.equal(turnsList.result.data[0].id, turnId);
+assert.equal(typeof turnsList.result.backwardsCursor, "string");
 
 const turnItems = await request(channel.port1, {
-  id: "thread-turns-items-list",
-  method: "thread/turns/items/list",
+  id: "thread-items-list",
+  method: "thread/items/list",
   params: {
     threadId,
     turnId,
   },
 });
 assert.ifError(turnItems.error);
-assert.deepEqual(turnItems.result.data, readThreadWithTurns.result.thread.turns[0].items);
+assert.deepEqual(
+  turnItems.result.data,
+  readThreadWithTurns.result.thread.turns[0].items.map((item) => ({
+    turnId,
+    item,
+  })),
+);
+assert.equal(typeof turnItems.result.backwardsCursor, "string");
+
+const reversedTurnItems = await request(channel.port1, {
+  id: "thread-items-list-reversed",
+  method: "thread/items/list",
+  params: {
+    threadId,
+    turnId,
+    cursor: turnItems.result.backwardsCursor,
+    sortDirection: "desc",
+  },
+});
+assert.ifError(reversedTurnItems.error);
+assert.deepEqual(reversedTurnItems.result.data[0], turnItems.result.data[0]);
 
 const createDirectory = await request(channel.port1, {
   id: 4,
@@ -618,6 +777,7 @@ assert.match(
 server.dispose();
 channel.port1.close();
 channel.port2.close();
+restoreBrowserTimerFacade();
 
 function request(port, message) {
   return new Promise((resolve, reject) => {
@@ -650,7 +810,17 @@ function waitFor(predicate, label) {
         return;
       }
       if (Date.now() - started > 5000) {
-        reject(new Error(`Timed out waiting for ${label}`));
+        reject(
+          new Error(
+            `Timed out waiting for ${label}; network requests: ${JSON.stringify(
+              hostNetworkRequests.map(({ method, url }) => ({ method, url })),
+            )}; turn notifications: ${JSON.stringify(
+              turnNotifications.slice(-8),
+            )}; command execs: ${JSON.stringify(
+              hostCommandExecs,
+            )}; process spawns: ${JSON.stringify(hostProcessSpawns)}`,
+          ),
+        );
         return;
       }
       setTimeout(poll, 10);
@@ -683,12 +853,40 @@ function handleHostRequest(port, op, params) {
     case "auth/env":
       return {
         env: {
-          OPENAI_API_KEY: "sk-test-browser-codex-smoke",
+          CODEX_ACCESS_TOKEN: chatgptAccessToken,
+          CODEX_CHATGPT_ACCOUNT_ID: chatgptAccountId,
+          CODEX_CHATGPT_PLAN_TYPE: "pro",
         },
       };
     case "network/fetch": {
-      const requestIndex = hostNetworkRequests.length;
       hostNetworkRequests.push(params);
+      if (/\/models(?:\?|$)/.test(params.url)) {
+        return {
+          url: params.url,
+          status: 200,
+          statusText: "OK",
+          headers: {
+            "content-type": "application/json",
+            "x-request-id": "req_models_smoke",
+          },
+          bodyBase64: Buffer.from('{"models":[]}').toString("base64"),
+        };
+      }
+      if (/\/ps\/plugins\/suggested(?:\?|$)/.test(params.url)) {
+        return {
+          url: params.url,
+          status: 200,
+          statusText: "OK",
+          headers: {
+            "content-type": "application/json",
+            "x-request-id": "req_recommended_plugins_smoke",
+          },
+          bodyBase64: Buffer.from('{"enabled":true,"plugins":[]}').toString(
+            "base64",
+          ),
+        };
+      }
+      const requestIndex = responsesRequests().length - 1;
       const sse =
         requestIndex === 0
           ? execCommandSseResponse()
@@ -704,6 +902,71 @@ function handleHostRequest(port, op, params) {
         bodyBase64: Buffer.from(sse).toString("base64"),
       };
     }
+    case "network/fetchStreamOpen": {
+      hostNetworkRequests.push(params);
+      const requestIndex = responsesRequests().length - 1;
+      const sse =
+        requestIndex === 0
+          ? execCommandSseResponse()
+          : assistantMessageSseResponse();
+      const streamId = `network-stream-${nextHostNetworkStreamId++}`;
+      hostNetworkStreams.set(streamId, {
+        requestIndex,
+        chunks: splitSseEvents(sse),
+        nextChunk: 0,
+      });
+      return {
+        streamId,
+        url: params.url,
+        status: 200,
+        statusText: "OK",
+        headers: {
+          "content-type": "text/event-stream",
+          "x-request-id": "req_smoke",
+        },
+      };
+    }
+    case "network/fetchStreamRead": {
+      const stream = hostNetworkStreams.get(params.streamId);
+      if (!stream) {
+        throw Object.assign(
+          new Error(`Unknown network stream: ${params.streamId}`),
+          { code: "ENOENT" },
+        );
+      }
+      if (stream.nextChunk >= stream.chunks.length) {
+        hostNetworkStreams.delete(params.streamId);
+        return { chunkBase64: "", done: true };
+      }
+      const chunkIndex = stream.nextChunk++;
+      const chunk = stream.chunks[chunkIndex];
+      if (
+        stream.requestIndex === 1 &&
+        chunkIndex === stream.chunks.length - 1
+      ) {
+        return assistantCompletionGate.then(() => {
+          assistantCompletionChunkReleased = true;
+          return {
+            chunkBase64: Buffer.from(chunk).toString("base64"),
+            done: false,
+          };
+        });
+      }
+      return {
+        chunkBase64: Buffer.from(chunk).toString("base64"),
+        done: false,
+      };
+    }
+    case "network/fetchStreamCancel": {
+      if (!hostNetworkStreams.delete(params.streamId)) {
+        throw Object.assign(
+          new Error(`Unknown network stream: ${params.streamId}`),
+          { code: "ENOENT" },
+        );
+      }
+      hostNetworkStreamCancels.push(params.streamId);
+      return { streamId: params.streamId, cancelled: true };
+    }
     case "fs/createDirectory": {
       hostDirectories.add(params.path);
       return { path: params.path };
@@ -715,7 +978,10 @@ function handleHostRequest(port, op, params) {
     }
     case "fs/readFile": {
       const content = hostFiles.get(params.path);
-      if (!content) throw Object.assign(new Error(`ENOENT: ${params.path}`), { code: "ENOENT" });
+      if (!content)
+        throw Object.assign(new Error(`ENOENT: ${params.path}`), {
+          code: "ENOENT",
+        });
       return { content, encoding: "base64" };
     }
     case "fs/getMetadata": {
@@ -737,7 +1003,9 @@ function handleHostRequest(port, op, params) {
           mode: 0o755,
         };
       }
-      throw Object.assign(new Error(`ENOENT: ${params.path}`), { code: "ENOENT" });
+      throw Object.assign(new Error(`ENOENT: ${params.path}`), {
+        code: "ENOENT",
+      });
     }
     case "fs/readDirectory": {
       const prefix = `${params.path.replace(/\/+$/, "")}/`;
@@ -754,6 +1022,7 @@ function handleHostRequest(port, op, params) {
       };
     }
     case "command/exec": {
+      hostCommandExecs.push(params);
       if (params.streamStdoutStderr) {
         port.postMessage({
           type: "codex/host/event",
@@ -834,6 +1103,52 @@ function handleHostRequest(port, op, params) {
     default:
       throw new Error(`Unexpected host op: ${op}`);
   }
+}
+
+function responsesRequests() {
+  return hostNetworkRequests.filter((request) =>
+    /\/responses(?:\?|$)/.test(request.url),
+  );
+}
+
+function installBrowserTimerFacade() {
+  const nodeSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const nodeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+  const timers = new Map();
+  let nextTimerId = 1;
+  globalThis.setTimeout = (callback, delay = 0, ...args) => {
+    const timerId = nextTimerId++;
+    const handle = nodeSetTimeout(() => {
+      timers.delete(timerId);
+      callback(...args);
+    }, delay);
+    timers.set(timerId, handle);
+    return timerId;
+  };
+  globalThis.clearTimeout = (timerId) => {
+    const handle = timers.get(timerId);
+    if (handle !== undefined) {
+      timers.delete(timerId);
+      nodeClearTimeout(handle);
+    }
+  };
+  return () => {
+    for (const handle of timers.values()) {
+      nodeClearTimeout(handle);
+    }
+    timers.clear();
+    globalThis.setTimeout = nodeSetTimeout;
+    globalThis.clearTimeout = nodeClearTimeout;
+  };
+}
+
+function decodeNetworkRequestBody(request) {
+  const body = Buffer.from(request.bodyBase64, "base64");
+  const decoded =
+    request.headers["content-encoding"] === "zstd"
+      ? zstdDecompress(body)
+      : body;
+  return JSON.parse(Buffer.from(decoded).toString("utf8"));
 }
 
 function execCommandSseResponse() {
@@ -924,16 +1239,36 @@ function sse(events) {
     .join("");
 }
 
+function splitSseEvents(payload) {
+  return payload
+    .split("\n\n")
+    .filter(Boolean)
+    .map((event) => `${event}\n\n`);
+}
+
 function findFunctionCallOutput(input, callId) {
   if (!Array.isArray(input)) return null;
-  return input.find(
-    (item) => item?.type === "function_call_output" && item.call_id === callId,
-  ) ?? null;
+  return (
+    input.find(
+      (item) =>
+        item?.type === "function_call_output" && item.call_id === callId,
+    ) ?? null
+  );
 }
 
 function parentPath(path) {
   const index = path.lastIndexOf("/");
   return index <= 0 ? "/" : path.slice(0, index);
+}
+
+function fakeJwt(payload) {
+  const encode = (value) =>
+    Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  return [
+    encode({ alg: "none", typ: "JWT" }),
+    encode(payload),
+    Buffer.from("browser-wasm-smoke-signature", "utf8").toString("base64url"),
+  ].join(".");
 }
 
 function quoteShellArg(value) {

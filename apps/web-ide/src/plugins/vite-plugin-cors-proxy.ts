@@ -19,6 +19,10 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
+const PROXY_ORIGIN_CREDENTIAL_HEADERS = new Set([
+  'cookie',
+  'cookie2',
+]);
 const WS_RESERVED_HEADERS = new Set([
   'connection',
   'upgrade',
@@ -37,6 +41,16 @@ function isAllowedTarget(target: URL): boolean {
 
 function isAllowedWebSocketTarget(target: URL): boolean {
   return target.protocol === 'ws:' || target.protocol === 'wss:';
+}
+
+function isRedirectStatus(status: number): boolean {
+  return (
+    status === 301
+    || status === 302
+    || status === 303
+    || status === 307
+    || status === 308
+  );
 }
 
 async function readRequestBody(req: IncomingMessage): Promise<Buffer | undefined> {
@@ -60,6 +74,7 @@ function copyRequestHeaders(req: IncomingMessage): Headers {
     const lower = key.toLowerCase();
     if (
       HOP_BY_HOP_HEADERS.has(lower)
+      || PROXY_ORIGIN_CREDENTIAL_HEADERS.has(lower)
       || lower === 'origin'
       || lower === 'referer'
       || lower.startsWith('sec-fetch-')
@@ -86,14 +101,12 @@ function copyRequestHeaders(req: IncomingMessage): Headers {
   return headers;
 }
 
-function writeResponse(
+function writeResponseHeaders(
   res: ServerResponse,
   upstream: Response,
-  body: Buffer,
 ): void {
   const isRedirect =
-    upstream.status >= 300
-    && upstream.status < 400
+    isRedirectStatus(upstream.status)
     && upstream.headers.has('location');
 
   // Expose upstream redirects as metadata instead of forwarding a 3xx status.
@@ -107,20 +120,113 @@ function writeResponse(
     res.setHeader(UPSTREAM_STATUS_TEXT_HEADER, upstream.statusText || '');
   }
 
-  for (const [key, value] of upstream.headers.entries()) {
+  upstream.headers.forEach((value, key) => {
     const lower = key.toLowerCase();
     if (
       HOP_BY_HOP_HEADERS.has(lower)
       || lower === 'content-encoding'
       || lower === 'content-length'
     ) {
-      continue;
+      return;
     }
     res.setHeader(key, value);
-  }
+  });
 
   res.setHeader('Cache-Control', 'no-store');
-  res.end(body);
+  res.flushHeaders();
+}
+
+function waitForResponseDrain(res: ServerResponse): Promise<boolean> {
+  if (res.destroyed || res.writableEnded) {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve(false);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onError);
+  });
+}
+
+async function writeResponseBody(
+  res: ServerResponse,
+  upstream: Response,
+  method: string,
+): Promise<void> {
+  writeResponseHeaders(res, upstream);
+
+  if (method === 'HEAD' || !upstream.body) {
+    if (upstream.body) {
+      await upstream.body.cancel().catch(() => undefined);
+    }
+    res.end();
+    return;
+  }
+
+  const reader = upstream.body.getReader();
+  let downstreamClosed = false;
+  let upstreamDone = false;
+  const onClose = () => {
+    if (res.writableEnded) {
+      return;
+    }
+    downstreamClosed = true;
+    void reader.cancel('downstream response closed').catch(() => undefined);
+  };
+  res.once('close', onClose);
+
+  try {
+    while (!downstreamClosed) {
+      const { value, done } = await reader.read();
+      if (done) {
+        upstreamDone = true;
+        break;
+      }
+
+      if (!res.write(Buffer.from(value))) {
+        const drained = await waitForResponseDrain(res);
+        if (!drained) {
+          downstreamClosed = true;
+          break;
+        }
+      }
+    }
+
+    if (!downstreamClosed && !res.writableEnded) {
+      res.end();
+    }
+  } finally {
+    res.off('close', onClose);
+    if (!upstreamDone) {
+      const reason = downstreamClosed
+        ? 'downstream response closed'
+        : 'downstream response did not complete';
+      await reader.cancel(reason).catch(() => undefined);
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancellation may still be settling after the downstream disconnects.
+    }
+  }
 }
 
 function decodeRelayJson<T>(raw: string | null): T | null {
@@ -277,7 +383,10 @@ function attachProxyUpgrade(server: ViteDevServer | PreviewServer): void {
   });
 }
 
-async function handleProxyRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function handleCorsProxyRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
   const parsed = new URL(req.url || '/', 'http://127.0.0.1');
   const rawTarget = parsed.searchParams.get('url');
 
@@ -307,18 +416,28 @@ async function handleProxyRequest(req: IncomingMessage, res: ServerResponse): Pr
     ? undefined
     : await readRequestBody(req);
 
-  const upstream = await fetch(target, {
-    method,
-    headers: copyRequestHeaders(req),
-    body,
-    redirect: 'manual',
-  });
+  const abortController = new AbortController();
+  const abortUpstream = () => {
+    if (!res.writableEnded) {
+      abortController.abort();
+    }
+  };
+  req.once('aborted', abortUpstream);
+  res.once('close', abortUpstream);
 
-  const responseBody = method === 'HEAD'
-    ? Buffer.alloc(0)
-    : Buffer.from(await upstream.arrayBuffer());
-
-  writeResponse(res, upstream, responseBody);
+  try {
+    const upstream = await fetch(target, {
+      method,
+      headers: copyRequestHeaders(req),
+      body: body ? Uint8Array.from(body).buffer : undefined,
+      redirect: 'manual',
+      signal: abortController.signal,
+    });
+    await writeResponseBody(res, upstream, method);
+  } finally {
+    req.off('aborted', abortUpstream);
+    res.off('close', abortUpstream);
+  }
 }
 
 function attachProxyMiddleware(server: ViteDevServer | PreviewServer): void {
@@ -342,8 +461,15 @@ function attachProxyMiddleware(server: ViteDevServer | PreviewServer): void {
     }
 
     try {
-      await handleProxyRequest(req, res);
+      await handleCorsProxyRequest(req, res);
     } catch (error) {
+      if (res.destroyed || res.writableEnded) {
+        return;
+      }
+      if (res.headersSent) {
+        res.destroy(error instanceof Error ? error : undefined);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       res.statusCode = 502;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');

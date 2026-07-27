@@ -29,6 +29,21 @@ npm install @agent-wasm/codex
 > **Note:** the Rust → WASM artifacts are built from the vendored Codex crates via
 > `wasm-pack`; published builds ship the prebuilt `.wasm` under `dist/pkg`.
 
+The browser port currently tracks OpenAI Codex `0.145.0` (`rust-v0.145.0`).
+Install the reproducibly pinned browser fork and build the adapter with:
+
+```bash
+pnpm vendor:install:codex
+```
+
+To validate or build a separate Codex checkout without replacing
+`vendor/codex`, set `CODEX_SOURCE_DIR`:
+
+```bash
+CODEX_SOURCE_DIR=/path/to/codex pnpm nx check-codex-wasm codex-wasm
+CODEX_SOURCE_DIR=/path/to/codex pnpm nx build-adapter codex-wasm
+```
+
 ## License
 
 MIT

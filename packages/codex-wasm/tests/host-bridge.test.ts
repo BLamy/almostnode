@@ -399,6 +399,253 @@ describe("CodexHostBridge", () => {
     channel.port2.close();
   });
 
+  it("exposes each network stream chunk before the response body completes", async () => {
+    const vfs = new FakeVfs();
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        bodyController = controller;
+        controller.enqueue(new TextEncoder().encode("first"));
+      },
+    });
+    const bridge = createCodexHostBridge({
+      container: {
+        vfs,
+        network: {
+          async fetch() {
+            throw new Error("buffered fetch must not be used");
+          },
+          async fetchStream(request) {
+            return {
+              url: request.url,
+              status: 200,
+              statusText: "OK",
+              headers: { "content-type": "text/event-stream" },
+              body,
+            };
+          },
+        },
+        createTerminalSession: createFakeTerminalSession,
+      },
+    });
+    const channel = new MessageChannel();
+    const clientPort = channel.port2 as unknown as MessagePortLike;
+    bridge.attach(channel.port1 as unknown as MessagePortLike);
+
+    const opened = await requestHost(clientPort, {
+      type: "codex/host/request",
+      id: "stream-open",
+      op: "network/fetchStreamOpen",
+      params: {
+        url: "https://api.openai.com/v1/responses",
+        method: "POST",
+      },
+    });
+    expect(opened.result).toMatchObject({
+      streamId: "codex-network-1",
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "stream-read-first",
+        op: "network/fetchStreamRead",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        chunkBase64: Buffer.from("first").toString("base64"),
+        done: false,
+      },
+    });
+
+    let secondReadSettled = false;
+    const secondRead = requestHost(clientPort, {
+      type: "codex/host/request",
+      id: "stream-read-second",
+      op: "network/fetchStreamRead",
+      params: { streamId: "codex-network-1" },
+    }).finally(() => {
+      secondReadSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(secondReadSettled).toBe(false);
+
+    bodyController.enqueue(new TextEncoder().encode("second"));
+    await expect(secondRead).resolves.toMatchObject({
+      result: {
+        chunkBase64: Buffer.from("second").toString("base64"),
+        done: false,
+      },
+    });
+
+    bodyController.close();
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "stream-read-done",
+        op: "network/fetchStreamRead",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      result: { chunkBase64: "", done: true },
+    });
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "stream-read-after-done",
+        op: "network/fetchStreamRead",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "ENOENT",
+        message: "Unknown Codex network stream: codex-network-1",
+      },
+    });
+
+    bridge.dispose();
+    channel.port2.close();
+  });
+
+  it("adapts legacy buffered network controllers into a one-chunk stream", async () => {
+    const bridge = createCodexHostBridge({
+      container: {
+        vfs: new FakeVfs(),
+        network: {
+          async fetch(request) {
+            return {
+              url: request.url,
+              status: 200,
+              statusText: "OK",
+              headers: { "content-type": "text/plain" },
+              bodyBase64: Buffer.from("legacy").toString("base64"),
+            };
+          },
+        },
+        createTerminalSession: createFakeTerminalSession,
+      },
+    });
+    const channel = new MessageChannel();
+    const clientPort = channel.port2 as unknown as MessagePortLike;
+    bridge.attach(channel.port1 as unknown as MessagePortLike);
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "legacy-stream-open",
+        op: "network/fetchStreamOpen",
+        params: { url: "https://example.com/legacy" },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        streamId: "codex-network-1",
+        status: 200,
+      },
+    });
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "legacy-stream-read",
+        op: "network/fetchStreamRead",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        chunkBase64: Buffer.from("legacy").toString("base64"),
+        done: false,
+      },
+    });
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "legacy-stream-done",
+        op: "network/fetchStreamRead",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      result: { chunkBase64: "", done: true },
+    });
+
+    bridge.dispose();
+    channel.port2.close();
+  });
+
+  it("cancels and forgets network streams on cancel and dispose", async () => {
+    const vfs = new FakeVfs();
+    const cancelled: number[] = [];
+    let streamNumber = 0;
+    const bridge = createCodexHostBridge({
+      container: {
+        vfs,
+        network: {
+          async fetch() {
+            throw new Error("buffered fetch must not be used");
+          },
+          async fetchStream(request) {
+            const currentStream = ++streamNumber;
+            return {
+              url: request.url,
+              status: 200,
+              statusText: "OK",
+              headers: {},
+              body: new ReadableStream<Uint8Array>({
+                cancel() {
+                  cancelled.push(currentStream);
+                },
+              }),
+            };
+          },
+        },
+        createTerminalSession: createFakeTerminalSession,
+      },
+    });
+    const channel = new MessageChannel();
+    const clientPort = channel.port2 as unknown as MessagePortLike;
+    bridge.attach(channel.port1 as unknown as MessagePortLike);
+
+    for (const id of ["first", "second"]) {
+      await requestHost(clientPort, {
+        type: "codex/host/request",
+        id: `stream-open-${id}`,
+        op: "network/fetchStreamOpen",
+        params: { url: `https://example.com/${id}` },
+      });
+    }
+
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "stream-cancel",
+        op: "network/fetchStreamCancel",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        streamId: "codex-network-1",
+        cancelled: true,
+      },
+    });
+    expect(cancelled).toEqual([1]);
+    await expect(
+      requestHost(clientPort, {
+        type: "codex/host/request",
+        id: "stream-cancel-again",
+        op: "network/fetchStreamCancel",
+        params: { streamId: "codex-network-1" },
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "ENOENT" },
+    });
+
+    bridge.dispose();
+    await waitFor(() => cancelled.includes(2));
+    expect(cancelled).toEqual([1, 2]);
+    channel.port2.close();
+  });
+
   it("spawns process sessions and emits process lifecycle events", async () => {
     const vfs = new FakeVfs();
     const session = new ControlledTerminalSession();

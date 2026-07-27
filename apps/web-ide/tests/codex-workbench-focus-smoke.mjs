@@ -6,7 +6,9 @@ const projectName = `codex-focus-smoke-${Date.now()}`;
 
 const browser = await chromium.launch({ headless: true });
 try {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({
+    viewport: { width: 1440, height: 900 },
+  });
   await page.addInitScript(() => {
     const activeTerminalBody = () => {
       const activeTab = document.querySelector(
@@ -34,7 +36,11 @@ try {
       },
       activeTerminalContainsFocus() {
         const body = activeTerminalBody();
-        return Boolean(body && document.activeElement && body.contains(document.activeElement));
+        return Boolean(
+          body &&
+          document.activeElement &&
+          body.contains(document.activeElement),
+        );
       },
     };
   });
@@ -43,6 +49,25 @@ try {
     { waitUntil: "domcontentloaded" },
   );
   assert.equal(response?.ok(), true);
+
+  const workbenchToggle = page.getByTestId("workbench-drawer-toggle");
+  await workbenchToggle.waitFor({
+    state: "visible",
+    timeout: 60_000,
+  });
+  if ((await workbenchToggle.getAttribute("aria-expanded")) !== "true") {
+    await workbenchToggle.click();
+  }
+
+  const openAiPanel = page.getByRole("button", {
+    name: "Open OpenCode",
+    exact: true,
+  });
+  await openAiPanel.waitFor({
+    state: "visible",
+    timeout: 60_000,
+  });
+  await openAiPanel.click();
 
   await page.waitForSelector(".almostnode-opencode-surface__launcher-toggle", {
     state: "visible",
@@ -56,7 +81,8 @@ try {
     .filter({ hasText: "Codex 1" })
     .waitFor({ timeout: 60_000 });
   await page.waitForFunction(
-    () => window.__codexFocusSmoke.activeTerminalText().includes("OpenAI Codex"),
+    () =>
+      window.__codexFocusSmoke.activeTerminalText().includes("OpenAI Codex"),
     null,
     { timeout: 60_000 },
   );
@@ -129,7 +155,9 @@ async function seedDisposableCodexAuth(page) {
 
 async function focusActiveXterm(page) {
   await page
-    .locator(".almostnode-opencode-surface__terminal:not([hidden]) .xterm-helper-textarea")
+    .locator(
+      ".almostnode-opencode-surface__terminal:not([hidden]) .xterm-helper-textarea",
+    )
     .click({ force: true });
   await page.waitForFunction(
     () => window.__codexFocusSmoke.activeTerminalContainsFocus(),
@@ -141,14 +169,16 @@ async function focusActiveXterm(page) {
 async function waitForActiveText(page, text) {
   try {
     await page.waitForFunction(
-      (expected) => window.__codexFocusSmoke.activeTerminalText().includes(expected),
+      (expected) =>
+        window.__codexFocusSmoke.activeTerminalText().includes(expected),
       text,
       { timeout: 10_000 },
     );
   } catch (error) {
     const diagnostics = await page.evaluate(() => ({
       activeTab: window.__codexFocusSmoke.activeTabLabel(),
-      activeContainsFocus: window.__codexFocusSmoke.activeTerminalContainsFocus(),
+      activeContainsFocus:
+        window.__codexFocusSmoke.activeTerminalContainsFocus(),
       activeElement:
         document.activeElement instanceof HTMLElement
           ? {

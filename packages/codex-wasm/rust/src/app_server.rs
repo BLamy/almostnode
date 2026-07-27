@@ -8,19 +8,15 @@ use std::path::PathBuf;
 use std::rc::Rc;
 #[cfg(feature = "real-codex")]
 use std::sync::Arc;
-
 #[cfg(feature = "real-codex")]
-use async_trait::async_trait;
+use std::sync::Weak;
+
 #[cfg(feature = "real-codex")]
 use codex_app_server::protocol;
 #[cfg(feature = "real-codex")]
-use codex_core::CodexThread;
+use codex_cli::CODEX_CLI_VERSION;
 #[cfg(feature = "real-codex")]
-use codex_core::CodexThreadSettingsOverrides;
-#[cfg(feature = "real-codex")]
-use codex_core::StartThreadOptions;
-#[cfg(feature = "real-codex")]
-use codex_core::ThreadManager;
+use codex_core::config::Config;
 #[cfg(feature = "real-codex")]
 use codex_core::config::ConfigBuilder;
 #[cfg(feature = "real-codex")]
@@ -30,7 +26,27 @@ use codex_core::config::ThreadStoreConfig;
 #[cfg(feature = "real-codex")]
 use codex_core::thread_store_from_config;
 #[cfg(feature = "real-codex")]
+use codex_core::CodexThread;
+#[cfg(feature = "real-codex")]
+use codex_core::CodexThreadSettingsOverrides;
+#[cfg(feature = "real-codex")]
+use codex_core::NewThread;
+#[cfg(feature = "real-codex")]
+use codex_core::StartThreadOptions;
+#[cfg(feature = "real-codex")]
+use codex_core::ThreadManager;
+#[cfg(feature = "real-codex")]
 use codex_exec_server::EnvironmentManager;
+#[cfg(feature = "real-codex")]
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+#[cfg(feature = "real-codex")]
+use codex_extension_api::AgentSpawnFuture;
+#[cfg(feature = "real-codex")]
+use codex_extension_api::AgentSpawner;
+#[cfg(feature = "real-codex")]
+use codex_extension_api::ExtensionRegistry;
+#[cfg(feature = "real-codex")]
+use codex_extension_api::ExtensionRegistryBuilder;
 #[cfg(feature = "real-codex")]
 use codex_login::AuthManager;
 #[cfg(feature = "real-codex")]
@@ -38,11 +54,11 @@ use codex_login::CodexAuth;
 #[cfg(feature = "real-codex")]
 use codex_login::ExternalAuth;
 #[cfg(feature = "real-codex")]
-use codex_login::ExternalAuthChatgptMetadata;
+use codex_login::ExternalAuthFuture;
 #[cfg(feature = "real-codex")]
 use codex_login::ExternalAuthRefreshContext;
 #[cfg(feature = "real-codex")]
-use codex_login::ExternalAuthTokens;
+use codex_protocol::error::CodexErr;
 #[cfg(feature = "real-codex")]
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 #[cfg(feature = "real-codex")]
@@ -62,6 +78,10 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 #[cfg(feature = "real-codex")]
 use codex_protocol::protocol::TurnEnvironmentSelection;
 #[cfg(feature = "real-codex")]
+use codex_protocol::protocol::TurnEnvironmentSelections;
+#[cfg(feature = "real-codex")]
+use codex_protocol::ThreadId;
+#[cfg(feature = "real-codex")]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use js_sys::Array;
 use js_sys::Object;
@@ -72,13 +92,15 @@ use js_sys::Reflect;
 use serde::de::DeserializeOwned;
 #[cfg(feature = "real-codex")]
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 #[cfg(feature = "real-codex")]
 use wasm_bindgen_futures::JsFuture;
 use web_sys::MessageEvent;
 use web_sys::MessagePort;
+
+const BROWSER_CODEX_HOME: &str = "/home/user/.codex";
 
 #[cfg(feature = "real-codex")]
 #[wasm_bindgen]
@@ -127,14 +149,13 @@ struct BrowserThread {
 #[derive(Clone, Debug)]
 struct BrowserCodexAuthState {
     access_token: String,
-    account_id: Option<String>,
+    account_id: String,
     plan_type: Option<String>,
 }
 
 #[cfg(feature = "real-codex")]
 #[derive(Debug)]
 struct BrowserCodexExternalAuth {
-    auth_mode: protocol::AuthMode,
     state: std::sync::RwLock<BrowserCodexAuthState>,
 }
 
@@ -153,90 +174,74 @@ fn trace_app_server_stage(stage: &str) {
 }
 
 #[cfg(feature = "real-codex")]
-#[async_trait]
 impl ExternalAuth for BrowserCodexExternalAuth {
-    fn auth_mode(&self) -> protocol::AuthMode {
-        self.auth_mode
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| std::io::Error::other("Codex browser auth state is poisoned"))?
+                .clone();
+            browser_codex_auth(&state)
+        })
     }
 
-    async fn resolve(&self) -> std::io::Result<Option<ExternalAuthTokens>> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| std::io::Error::other("Codex browser auth state is poisoned"))?
-            .clone();
-        let tokens = match self.auth_mode {
-            protocol::AuthMode::ApiKey => {
-                ExternalAuthTokens::access_token_only(state.access_token)
-            }
-            protocol::AuthMode::Chatgpt | protocol::AuthMode::ChatgptAuthTokens => {
-                ExternalAuthTokens {
-                    access_token: state.access_token,
-                    chatgpt_metadata: state.account_id.map(|account_id| {
-                        ExternalAuthChatgptMetadata {
-                            account_id,
-                            plan_type: state.plan_type,
-                        }
-                    }),
-                }
-            }
-            protocol::AuthMode::AgentIdentity => {
-                return Ok(None);
-            }
-        };
-        Ok(Some(tokens))
-    }
-
-    async fn refresh(
-        &self,
-        _context: ExternalAuthRefreshContext,
-    ) -> std::io::Result<ExternalAuthTokens> {
-        // host_request_json's future is !Send (it holds JsValues), but the
-        // ExternalAuth trait requires Send futures — bounce through
-        // spawn_local and a oneshot channel to keep this future Send.
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<BrowserCodexAuthState, String>>();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = host_request_json::<HostAuthEnvResult, _>(
-                "auth/refresh",
-                &serde_json::json!({ "reason": "unauthorized" }),
-            )
-            .await
-            .map_err(|err| format!("{err:?}"))
-            .and_then(|result| {
-                let env = result.env;
-                let access_token = env
-                    .get("CODEX_ACCESS_TOKEN")
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
-                        "auth/refresh host shim did not return CODEX_ACCESS_TOKEN".to_string()
-                    })?;
-                Ok(BrowserCodexAuthState {
-                    access_token,
-                    account_id: env
-                        .get("CODEX_CHATGPT_ACCOUNT_ID")
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty()),
-                    plan_type: env
-                        .get("CODEX_CHATGPT_PLAN_TYPE")
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty()),
-                })
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async move {
+            // host_request_json's future is !Send (it holds JsValues), but the
+            // ExternalAuth trait requires Send futures — bounce through
+            // spawn_local and a oneshot channel to keep this future Send.
+            let (tx, rx) = tokio::sync::oneshot::channel::<Result<BrowserCodexAuthState, String>>();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = host_request_json::<HostAuthEnvResult, _>(
+                    "auth/refresh",
+                    &serde_json::json!({ "reason": "unauthorized" }),
+                )
+                .await
+                .map_err(|err| format!("{err:?}"))
+                .and_then(|result| browser_codex_auth_state(result.env));
+                let _ = tx.send(result);
             });
-            let _ = tx.send(result);
-        });
 
-        let refreshed = rx
-            .await
-            .map_err(|_| std::io::Error::other("auth/refresh host request was dropped"))?
-            .map_err(std::io::Error::other)?;
-        if let Ok(mut state) = self.state.write() {
-            *state = refreshed.clone();
-        }
-        self.resolve()
-            .await?
-            .ok_or_else(|| std::io::Error::other("Codex browser auth is unavailable"))
+            let refreshed = rx
+                .await
+                .map_err(|_| std::io::Error::other("auth/refresh host request was dropped"))?
+                .map_err(std::io::Error::other)?;
+            *self
+                .state
+                .write()
+                .map_err(|_| std::io::Error::other("Codex browser auth state is poisoned"))? =
+                refreshed.clone();
+            browser_codex_auth(&refreshed)
+        })
     }
+}
+
+#[cfg(feature = "real-codex")]
+fn browser_codex_auth(state: &BrowserCodexAuthState) -> std::io::Result<CodexAuth> {
+    CodexAuth::from_external_chatgpt_tokens(
+        &state.access_token,
+        &state.account_id,
+        state.plan_type.as_deref(),
+    )
+}
+
+#[cfg(feature = "real-codex")]
+fn browser_codex_auth_state(env: HashMap<String, String>) -> Result<BrowserCodexAuthState, String> {
+    let required = |name: &str| {
+        env.get(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("auth host shim did not return {name}"))
+    };
+    Ok(BrowserCodexAuthState {
+        access_token: required("CODEX_ACCESS_TOKEN")?,
+        account_id: required("CODEX_CHATGPT_ACCOUNT_ID")?,
+        plan_type: env
+            .get("CODEX_CHATGPT_PLAN_TYPE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    })
 }
 
 #[cfg(feature = "real-codex")]
@@ -470,7 +475,7 @@ fn handle_protocol_request(
         protocol::ClientRequest::ThreadTurnsList { request_id, params } => {
             return list_browser_thread_turns(port, state, request_id, params);
         }
-        protocol::ClientRequest::ThreadTurnsItemsList { request_id, params } => {
+        protocol::ClientRequest::ThreadItemsList { request_id, params } => {
             return list_browser_thread_turn_items(port, state, request_id, params);
         }
         protocol::ClientRequest::ThreadInjectItems { request_id, params } => {
@@ -542,6 +547,71 @@ fn handle_protocol_request(
 }
 
 #[cfg(feature = "real-codex")]
+fn browser_extension_registry(
+    thread_manager: Weak<ThreadManager>,
+    auth_manager: Arc<AuthManager>,
+    environment_manager: Arc<EnvironmentManager>,
+    session_source: SessionSource,
+) -> Arc<ExtensionRegistry<Config>> {
+    let mut builder = ExtensionRegistryBuilder::<Config>::new();
+
+    codex_guardian::install(&mut builder, browser_guardian_agent_spawner(thread_manager));
+    codex_memories_extension::install(&mut builder, /*metrics_client*/ None);
+    codex_mcp_extension::install(&mut builder);
+    codex_mcp_extension::install_executor_plugins(&mut builder, Arc::clone(&environment_manager));
+    codex_web_search_extension::install(&mut builder, Arc::clone(&auth_manager));
+    codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
+        Some(config.codex_home.clone())
+    });
+
+    let executor_skill_provider: Arc<dyn codex_skills_extension::SkillProvider> = Arc::new(
+        codex_skills_extension::ExecutorSkillProvider::new_with_restriction_product(
+            environment_manager,
+            session_source.restriction_product(),
+        ),
+    );
+    let skill_providers = codex_skills_extension::SkillProviders::new()
+        .with_executor_provider(executor_skill_provider)
+        .with_orchestrator_provider(Arc::new(
+            codex_skills_extension::OrchestratorSkillProvider::new(),
+        ))
+        .with_host_provider(Arc::new(codex_skills_extension::HostSkillProvider::new()));
+    codex_skills_extension::install_with_providers(
+        &mut builder,
+        skill_providers,
+        |config: &Config| codex_skills_extension::SkillsExtensionConfig {
+            include_instructions: config.include_skill_instructions,
+            bundled_skills_enabled: config.bundled_skills_enabled(),
+            orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+            shadow_selection_enabled: config
+                .features
+                .enabled(codex_features::Feature::SkillSearch),
+        },
+    );
+
+    Arc::new(builder.build())
+}
+
+#[cfg(feature = "real-codex")]
+fn browser_guardian_agent_spawner(
+    thread_manager: Weak<ThreadManager>,
+) -> impl AgentSpawner<StartThreadOptions, Spawned = NewThread, Error = CodexErr> {
+    move |forked_from_thread_id: ThreadId,
+          options: StartThreadOptions|
+          -> AgentSpawnFuture<'static, NewThread, CodexErr> {
+        let thread_manager = thread_manager.clone();
+        Box::pin(async move {
+            let thread_manager = thread_manager.upgrade().ok_or_else(|| {
+                CodexErr::UnsupportedOperation("thread manager dropped".to_string())
+            })?;
+            thread_manager
+                .spawn_subagent(forked_from_thread_id, options)
+                .await
+        })
+    }
+}
+
+#[cfg(feature = "real-codex")]
 fn start_browser_thread(
     port: &MessagePort,
     state: &Rc<RefCell<BrowserProtocolState>>,
@@ -575,7 +645,7 @@ async fn start_core_thread_async(
     let cwd = normalize_browser_path(params.cwd.as_deref().unwrap_or("/project"));
     trace_app_server_stage("thread/start: building Config");
     let mut config = ConfigBuilder::default()
-        .codex_home(PathBuf::from("/home/user/.codex"))
+        .codex_home(PathBuf::from(BROWSER_CODEX_HOME))
         .harness_overrides(ConfigOverrides {
             model: params.model.clone(),
             cwd: Some(PathBuf::from(&cwd)),
@@ -614,48 +684,59 @@ async fn start_core_thread_async(
     trace_app_server_stage("thread/start: building ThreadStore");
     let thread_store = thread_store_from_config(&config, /*state_db*/ None);
     trace_app_server_stage("thread/start: building ThreadManager");
-    let thread_manager = Arc::new(ThreadManager::new(
-        &config,
-        Arc::clone(&auth_manager),
-        SessionSource::Custom("appServer".to_string()),
-        environment_manager,
-        codex_extension_api::empty_extension_registry(),
-        /*analytics_events_client*/ None,
-        thread_store,
-        /*state_db*/ None,
-        uuid::Uuid::new_v4().to_string(),
-        /*attestation_provider*/ None,
-    ));
+    let session_source = SessionSource::Custom("appServer".to_string());
+    let thread_manager = Arc::new_cyclic(|thread_manager| {
+        ThreadManager::new(
+            &config,
+            Arc::clone(&auth_manager),
+            codex_core::build_models_manager(&config, Arc::clone(&auth_manager)),
+            codex_core::CodexAppsToolsCache::default(),
+            session_source.clone(),
+            Arc::clone(&environment_manager),
+            browser_extension_registry(
+                thread_manager.clone(),
+                Arc::clone(&auth_manager),
+                Arc::clone(&environment_manager),
+                session_source.clone(),
+            ),
+            Arc::new(codex_home::CodexHomeUserInstructionsProvider::new(
+                config.codex_home.clone(),
+            )),
+            /*analytics_events_client*/ None,
+            Arc::clone(&thread_store),
+            /*agent_graph_store*/ None,
+            uuid::Uuid::new_v4().to_string(),
+            /*attestation_provider*/ None,
+            /*external_time_provider*/ None,
+        )
+    });
     trace_app_server_stage("thread/start: resolving environments");
-    let environments = params
-        .environments
-        .clone()
-        .map(turn_environment_params_to_core)
-        .unwrap_or_else(|| thread_manager.default_environment_selections(&config.cwd));
-    let dynamic_tools = params
-        .dynamic_tools
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tool| codex_protocol::dynamic_tools::DynamicToolSpec {
-            namespace: tool.namespace,
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
-            defer_loading: tool.defer_loading,
-        })
-        .collect();
+    let environments = match params.environments.clone() {
+        Some(environments) => {
+            let selections = turn_environment_params_to_core(environments)?;
+            thread_manager
+                .validate_environment_selections(&selections)
+                .map_err(to_js_error)?;
+            selections
+        }
+        None => thread_manager.default_environment_selections(&config.cwd, &config.workspace_roots),
+    };
+    let dynamic_tools = params.dynamic_tools.clone().unwrap_or_default();
     trace_app_server_stage("thread/start: starting upstream CodexThread");
     let new_thread = thread_manager
         .start_thread_with_options(StartThreadOptions {
             config,
+            allow_provider_model_fallback: params.allow_provider_model_fallback,
             initial_history: InitialHistory::New,
+            history_mode: params.history_mode.map(Into::into),
             session_source: Some(SessionSource::Custom("appServer".to_string())),
             thread_source: params.thread_source.map(Into::into),
             dynamic_tools,
             metrics_service_name: params.service_name.clone(),
             parent_trace: None,
             environments,
+            thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
         })
         .await
         .map_err(|error| to_js_error(format!("Codex thread start failed: {error}")))?;
@@ -663,13 +744,7 @@ async fn start_core_thread_async(
 
     let thread_id = new_thread.thread_id.to_string();
     let config_snapshot = new_thread.thread.config_snapshot().await;
-    let instruction_sources = new_thread
-        .thread
-        .instruction_sources()
-        .await
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+    let instruction_sources = new_thread.thread.legacy_instruction_sources().await;
     let created_at = browser_epoch_seconds();
     let sandbox = sandbox_policy_json(params.sandbox);
     let thread_source = new_thread
@@ -686,19 +761,23 @@ async fn start_core_thread_async(
         .unwrap_or(serde_json::Value::Null);
     let thread = serde_json::json!({
         "id": thread_id,
+        "extra": null,
         "sessionId": new_thread.session_configured.session_id.to_string(),
         "forkedFromId": new_thread.session_configured.forked_from_id.map(|id| id.to_string()),
         "parentThreadId": new_thread.session_configured.parent_thread_id.map(|id| id.to_string()),
         "preview": "",
         "ephemeral": config_snapshot.ephemeral,
+        "historyMode": params.history_mode.unwrap_or_default(),
         "modelProvider": config_snapshot.model_provider_id.clone(),
         "createdAt": created_at,
         "updatedAt": created_at,
+        "recencyAt": created_at,
         "status": { "type": "idle" },
         "path": rollout_path,
-        "cwd": config_snapshot.cwd.to_string_lossy().into_owned(),
-        "cliVersion": env!("CARGO_PKG_VERSION"),
+        "cwd": config_snapshot.cwd().to_string_lossy().into_owned(),
+        "cliVersion": CODEX_CLI_VERSION,
         "source": "appServer",
+        "canAcceptDirectInput": true,
         "threadSource": thread_source,
         "agentNickname": null,
         "agentRole": null,
@@ -711,7 +790,7 @@ async fn start_core_thread_async(
         "model": config_snapshot.model,
         "modelProvider": config_snapshot.model_provider_id,
         "serviceTier": config_snapshot.service_tier,
-        "cwd": config_snapshot.cwd.to_string_lossy().into_owned(),
+        "cwd": config_snapshot.cwd().to_string_lossy().into_owned(),
         "runtimeWorkspaceRoots": config_snapshot.workspace_roots.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
         "instructionSources": instruction_sources,
         "approvalPolicy": protocol::AskForApproval::from(config_snapshot.approval_policy),
@@ -719,18 +798,22 @@ async fn start_core_thread_async(
         "sandbox": sandbox,
         "activePermissionProfile": config_snapshot.active_permission_profile,
         "reasoningEffort": config_snapshot.reasoning_effort,
+        "multiAgentMode": "explicitRequestOnly",
     });
 
     {
         let mut state = state.borrow_mut();
         state.thread_manager = Some(Arc::clone(&thread_manager));
         state.loaded_thread_ids.push(thread_id.clone());
-        state.threads.insert(thread_id.clone(), BrowserThread {
-            core_thread: Arc::clone(&new_thread.thread),
-            thread: start_response["thread"].clone(),
-            history: protocol::ThreadHistoryBuilder::new(),
-            events: Vec::new(),
-        });
+        state.threads.insert(
+            thread_id.clone(),
+            BrowserThread {
+                core_thread: Arc::clone(&new_thread.thread),
+                thread: start_response["thread"].clone(),
+                history: protocol::ThreadHistoryBuilder::new(),
+                events: Vec::new(),
+            },
+        );
     }
 
     post_protocol_json_response(port, request_id, start_response)?;
@@ -768,22 +851,30 @@ async fn browser_auth_manager(
         ));
     };
 
+    let account_id = env
+        .get("CODEX_CHATGPT_ACCOUNT_ID")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            JsValue::from_str(
+                "CODEX_CHATGPT_ACCOUNT_ID is required for browser-managed ChatGPT auth.",
+            )
+        })?;
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await;
-    auth_manager.set_external_auth(Arc::new(BrowserCodexExternalAuth {
-        auth_mode: protocol::AuthMode::ChatgptAuthTokens,
-        state: std::sync::RwLock::new(BrowserCodexAuthState {
-            access_token,
-            account_id: env
-                .get("CODEX_CHATGPT_ACCOUNT_ID")
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            plan_type: env
-                .get("CODEX_CHATGPT_PLAN_TYPE")
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-        }),
-    }));
+    auth_manager
+        .set_external_auth(Arc::new(BrowserCodexExternalAuth {
+            state: std::sync::RwLock::new(BrowserCodexAuthState {
+                access_token,
+                account_id,
+                plan_type: env
+                    .get("CODEX_CHATGPT_PLAN_TYPE")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            }),
+        }))
+        .await
+        .map_err(|error| to_js_error(format!("Codex external auth setup failed: {error}")))?;
     Ok(auth_manager)
 }
 
@@ -810,14 +901,41 @@ where
 #[cfg(feature = "real-codex")]
 fn turn_environment_params_to_core(
     environments: Vec<protocol::TurnEnvironmentParams>,
-) -> Vec<TurnEnvironmentSelection> {
-    environments
-        .into_iter()
-        .map(|environment| TurnEnvironmentSelection {
-            environment_id: environment.environment_id,
-            cwd: environment.cwd,
-        })
-        .collect()
+) -> Result<Vec<TurnEnvironmentSelection>, JsValue> {
+    let mut selections = Vec::with_capacity(environments.len());
+    for environment in environments {
+        let environment_id = environment.environment_id;
+        let cwd = environment.cwd.to_inferred_path_uri().ok_or_else(|| {
+            to_js_error(format!(
+                "invalid cwd for environment `{environment_id}`: path `{}` does not use absolute POSIX or Windows path syntax",
+                environment.cwd
+            ))
+        })?;
+        let workspace_roots = environment
+            .runtime_workspace_roots
+            .map(|roots| {
+                let mut resolved_roots = Vec::new();
+                for root in roots {
+                    let root = root.to_inferred_path_uri().ok_or_else(|| {
+                        to_js_error(format!(
+                            "invalid runtime workspace root for environment `{environment_id}`: path `{root}` does not use absolute POSIX or Windows path syntax"
+                        ))
+                    })?;
+                    if !resolved_roots.contains(&root) {
+                        resolved_roots.push(root);
+                    }
+                }
+                Ok::<_, JsValue>(resolved_roots)
+            })
+            .transpose()?
+            .unwrap_or_else(|| vec![cwd.clone()]);
+        selections.push(TurnEnvironmentSelection {
+            environment_id,
+            cwd,
+            workspace_roots,
+        });
+    }
+    Ok(selections)
 }
 
 #[cfg(feature = "real-codex")]
@@ -828,29 +946,28 @@ fn map_additional_context(
         .unwrap_or_default()
         .into_iter()
         .map(|(key, entry)| {
-            (key, CoreAdditionalContextEntry {
-                value: entry.value,
-                kind: match entry.kind {
-                    protocol::AdditionalContextKind::Untrusted => {
-                        CoreAdditionalContextKind::Untrusted
-                    }
-                    protocol::AdditionalContextKind::Application => {
-                        CoreAdditionalContextKind::Application
-                    }
+            (
+                key,
+                CoreAdditionalContextEntry {
+                    value: entry.value,
+                    kind: match entry.kind {
+                        protocol::AdditionalContextKind::Untrusted => {
+                            CoreAdditionalContextKind::Untrusted
+                        }
+                        protocol::AdditionalContextKind::Application => {
+                            CoreAdditionalContextKind::Application
+                        }
+                    },
                 },
-            })
+            )
         })
         .collect()
 }
 
 #[cfg(feature = "real-codex")]
-fn resolve_runtime_workspace_roots(
-    workspace_roots: Vec<PathBuf>,
-    base_cwd: &AbsolutePathBuf,
-) -> Vec<AbsolutePathBuf> {
+fn resolve_runtime_workspace_roots(workspace_roots: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
     let mut resolved_roots = Vec::new();
-    for path in workspace_roots {
-        let root = AbsolutePathBuf::resolve_path_against_base(path, base_cwd.as_path());
+    for root in workspace_roots {
         if !resolved_roots.iter().any(|existing| existing == &root) {
             resolved_roots.push(root);
         }
@@ -1151,22 +1268,71 @@ fn list_browser_thread_turns(
         };
         turns_from_events(&thread.events)
     };
-    turns.reverse();
+    apply_browser_turn_items_view(
+        &mut turns,
+        params
+            .items_view
+            .unwrap_or(protocol::TurnItemsView::Summary),
+    );
+    if !matches!(params.sort_direction, Some(protocol::SortDirection::Asc)) {
+        turns.reverse();
+    }
     let turn_values = turns
         .into_iter()
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_js_error)?;
-    let (turns, next_cursor) = paginate_values(&turn_values, params.cursor, params.limit);
+    let (turns, next_cursor, backwards_cursor) =
+        paginate_values(&turn_values, params.cursor, params.limit);
     post_protocol_json_response(
         port,
         request_id,
         serde_json::json!({
             "data": turns,
             "nextCursor": next_cursor,
-            "backwardsCursor": null,
+            "backwardsCursor": backwards_cursor,
         }),
     )
+}
+
+#[cfg(feature = "real-codex")]
+fn apply_browser_turn_items_view(
+    turns: &mut [protocol::Turn],
+    items_view: protocol::TurnItemsView,
+) {
+    for turn in turns {
+        match items_view {
+            protocol::TurnItemsView::NotLoaded => {
+                turn.items.clear();
+                turn.items_view = protocol::TurnItemsView::NotLoaded;
+            }
+            protocol::TurnItemsView::Summary => {
+                let first_user_message = turn
+                    .items
+                    .iter()
+                    .find(|item| matches!(item, protocol::ThreadItem::UserMessage { .. }))
+                    .cloned();
+                let final_agent_message = turn
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|item| matches!(item, protocol::ThreadItem::AgentMessage { .. }))
+                    .cloned();
+                turn.items = match (first_user_message, final_agent_message) {
+                    (Some(user_message), Some(agent_message)) => {
+                        vec![user_message, agent_message]
+                    }
+                    (Some(user_message), None) => vec![user_message],
+                    (None, Some(agent_message)) => vec![agent_message],
+                    (None, None) => Vec::new(),
+                };
+                turn.items_view = protocol::TurnItemsView::Summary;
+            }
+            protocol::TurnItemsView::Full => {
+                turn.items_view = protocol::TurnItemsView::Full;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "real-codex")]
@@ -1174,9 +1340,9 @@ fn list_browser_thread_turn_items(
     port: &MessagePort,
     state: &Rc<RefCell<BrowserProtocolState>>,
     request_id: protocol::RequestId,
-    params: protocol::ThreadTurnsItemsListParams,
+    params: protocol::ThreadItemsListParams,
 ) -> Result<(), JsValue> {
-    let items = {
+    let mut items = {
         let state = state.borrow();
         let Some(thread) = state.threads.get(&params.thread_id) else {
             return post_error_response(
@@ -1186,29 +1352,36 @@ fn list_browser_thread_turn_items(
                 &format!("browser thread not found: {}", params.thread_id),
             );
         };
-        let turns = turns_from_events(&thread.events);
-        let Some(turn) = turns.iter().find(|turn| turn.id == params.turn_id) else {
-            return post_error_response(
-                port,
-                request_id_to_js_value(&request_id),
-                -32004,
-                &format!("browser turn not found: {}", params.turn_id),
-            );
-        };
-        turn.items
+        turns_from_events(&thread.events)
             .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(to_js_error)?
+            .filter(|turn| {
+                params
+                    .turn_id
+                    .as_ref()
+                    .is_none_or(|turn_id| turn.id == *turn_id)
+            })
+            .flat_map(|turn| {
+                turn.items.iter().map(move |item| {
+                    serde_json::json!({
+                        "turnId": turn.id,
+                        "item": item,
+                    })
+                })
+            })
+            .collect::<Vec<_>>()
     };
-    let (items, next_cursor) = paginate_values(&items, params.cursor, params.limit);
+    if matches!(params.sort_direction, Some(protocol::SortDirection::Desc)) {
+        items.reverse();
+    }
+    let (items, next_cursor, backwards_cursor) =
+        paginate_values(&items, params.cursor, params.limit);
     post_protocol_json_response(
         port,
         request_id,
         serde_json::json!({
             "data": items,
             "nextCursor": next_cursor,
-            "backwardsCursor": null,
+            "backwardsCursor": backwards_cursor,
         }),
     )
 }
@@ -1274,23 +1447,36 @@ fn start_browser_turn(
     request_id: protocol::RequestId,
     params: protocol::TurnStartParams,
 ) -> Result<(), JsValue> {
-    let Some(thread) = state
-        .borrow()
-        .threads
-        .get(&params.thread_id)
-        .map(|thread| Arc::clone(&thread.core_thread))
-    else {
-        return post_error_response(
-            port,
-            request_id_to_js_value(&request_id),
-            -32004,
-            &format!("browser thread not found: {}", params.thread_id),
-        );
+    let (thread, thread_manager) = {
+        let state = state.borrow();
+        let Some(thread) = state
+            .threads
+            .get(&params.thread_id)
+            .map(|thread| Arc::clone(&thread.core_thread))
+        else {
+            return post_error_response(
+                port,
+                request_id_to_js_value(&request_id),
+                -32004,
+                &format!("browser thread not found: {}", params.thread_id),
+            );
+        };
+        let Some(thread_manager) = state.thread_manager.as_ref().map(Arc::clone) else {
+            return post_error_response(
+                port,
+                request_id_to_js_value(&request_id),
+                -32000,
+                "browser thread manager is not initialized",
+            );
+        };
+        (thread, thread_manager)
     };
 
     let port = port.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(error) = start_core_turn_async(&port, thread, request_id.clone(), params).await {
+        if let Err(error) =
+            start_core_turn_async(&port, thread_manager, thread, request_id.clone(), params).await
+        {
             let _ = post_error_response(
                 &port,
                 request_id_to_js_value(&request_id),
@@ -1305,11 +1491,13 @@ fn start_browser_turn(
 #[cfg(feature = "real-codex")]
 async fn start_core_turn_async(
     port: &MessagePort,
+    thread_manager: Arc<ThreadManager>,
     thread: Arc<CodexThread>,
     request_id: protocol::RequestId,
     params: protocol::TurnStartParams,
 ) -> Result<(), JsValue> {
-    let thread_settings = build_turn_thread_settings_overrides(&thread, &params).await?;
+    let thread_settings =
+        build_turn_thread_settings_overrides(&thread_manager, &thread, &params).await?;
     let thread_id = params.thread_id;
     let client_user_message_id = params.client_user_message_id;
     let input = params
@@ -1318,14 +1506,12 @@ async fn start_core_turn_async(
         .map(protocol::UserInput::into_core)
         .collect::<Vec<_>>();
     let turn_has_input = !input.is_empty();
-    let environments = params.environments.map(turn_environment_params_to_core);
     let additional_context = map_additional_context(params.additional_context);
 
     let turn_id = thread
         .submit_user_input_with_client_user_message_id(
             Op::UserInput {
                 items: input,
-                environments,
                 final_output_json_schema: params.output_schema,
                 responsesapi_client_metadata: params.responsesapi_client_metadata,
                 additional_context,
@@ -1366,6 +1552,7 @@ async fn start_core_turn_async(
 
 #[cfg(feature = "real-codex")]
 async fn build_turn_thread_settings_overrides(
+    thread_manager: &ThreadManager,
     thread: &CodexThread,
     params: &protocol::TurnStartParams,
 ) -> Result<ThreadSettingsOverrides, JsValue> {
@@ -1380,27 +1567,24 @@ async fn build_turn_thread_settings_overrides(
         ));
     }
 
-    let snapshot = if params.runtime_workspace_roots.is_some() {
-        Some(thread.config_snapshot().await)
-    } else {
-        None
-    };
-    let runtime_workspace_roots =
-        if let Some(workspace_roots) = params.runtime_workspace_roots.clone() {
-            let Some(snapshot) = snapshot.as_ref() else {
-                return Err(JsValue::from_str(
-                    "turn/start runtime workspace roots missing thread snapshot",
-                ));
-            };
-            let base_cwd = params
-                .cwd
-                .as_ref()
-                .map(|cwd| AbsolutePathBuf::resolve_path_against_base(cwd, snapshot.cwd.as_path()))
-                .unwrap_or_else(|| snapshot.cwd.clone());
-            Some(resolve_runtime_workspace_roots(workspace_roots, &base_cwd))
-        } else {
-            None
-        };
+    let environment_selections = params
+        .environments
+        .clone()
+        .map(turn_environment_params_to_core)
+        .transpose()?;
+    if let Some(environment_selections) = environment_selections.as_ref() {
+        thread_manager
+            .validate_environment_selections(environment_selections)
+            .map_err(to_js_error)?;
+    }
+    let environments = build_turn_environment_override(
+        thread_manager,
+        thread,
+        params.cwd.clone(),
+        params.runtime_workspace_roots.clone(),
+        environment_selections,
+    )
+    .await;
     let approval_policy = params
         .approval_policy
         .map(protocol::AskForApproval::to_core);
@@ -1413,8 +1597,7 @@ async fn build_turn_thread_settings_overrides(
         .map(protocol::SandboxPolicy::to_core);
     let effort = params.effort.clone().map(Some);
     let overrides = ThreadSettingsOverrides {
-        cwd: params.cwd.clone(),
-        workspace_roots: runtime_workspace_roots.clone(),
+        environments: environments.clone(),
         profile_workspace_roots: None,
         approval_policy,
         approvals_reviewer,
@@ -1433,8 +1616,7 @@ async fn build_turn_thread_settings_overrides(
     if overrides != ThreadSettingsOverrides::default() {
         thread
             .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
-                cwd: overrides.cwd.clone(),
-                workspace_roots: overrides.workspace_roots.clone(),
+                environments,
                 profile_workspace_roots: overrides.profile_workspace_roots.clone(),
                 approval_policy: overrides.approval_policy,
                 approvals_reviewer: overrides.approvals_reviewer,
@@ -1457,14 +1639,95 @@ async fn build_turn_thread_settings_overrides(
 }
 
 #[cfg(feature = "real-codex")]
+async fn build_turn_environment_override(
+    thread_manager: &ThreadManager,
+    thread: &CodexThread,
+    cwd: Option<PathBuf>,
+    workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    environment_selections: Option<Vec<TurnEnvironmentSelection>>,
+) -> Option<TurnEnvironmentSelections> {
+    if cwd.is_none() && workspace_roots.is_none() && environment_selections.is_none() {
+        return None;
+    }
+
+    let snapshot = thread.config_snapshot().await;
+    let current_cwd = snapshot.cwd().clone();
+    let cwd = cwd.map(|cwd| AbsolutePathBuf::resolve_path_against_base(cwd, current_cwd.as_path()));
+
+    // Explicit environments own their runtime roots. The top-level
+    // runtimeWorkspaceRoots input only configures the default environment.
+    if let Some(environment_selections) = environment_selections {
+        let legacy_fallback_cwd = cwd.unwrap_or_else(|| {
+            environment_selections
+                .iter()
+                .find(|selection| selection.environment_id == LOCAL_ENVIRONMENT_ID)
+                .and_then(|selection| {
+                    AbsolutePathBuf::from_absolute_path_checked(selection.cwd.to_path_buf()).ok()
+                })
+                .unwrap_or(current_cwd)
+        });
+        return Some(TurnEnvironmentSelections::new(
+            legacy_fallback_cwd,
+            environment_selections,
+        ));
+    }
+
+    let legacy_fallback_cwd = cwd.unwrap_or_else(|| current_cwd.clone());
+    let workspace_roots = match workspace_roots {
+        Some(workspace_roots) => resolve_runtime_workspace_roots(workspace_roots),
+        None => {
+            // Preserve additional roots while retargeting the old cwd root when
+            // callers update only cwd.
+            let mut retargeted_workspace_roots = Vec::new();
+            for root in snapshot.workspace_roots {
+                let root = if root == current_cwd {
+                    legacy_fallback_cwd.clone()
+                } else {
+                    root
+                };
+                if !retargeted_workspace_roots.contains(&root) {
+                    retargeted_workspace_roots.push(root);
+                }
+            }
+            retargeted_workspace_roots
+        }
+    };
+    let environment_selections =
+        thread_manager.default_environment_selections(&legacy_fallback_cwd, &workspace_roots);
+    Some(TurnEnvironmentSelections::new(
+        legacy_fallback_cwd,
+        environment_selections,
+    ))
+}
+
+#[cfg(feature = "real-codex")]
 fn thread_list_result(
     state: &Rc<RefCell<BrowserProtocolState>>,
     params: protocol::ThreadListParams,
 ) -> Result<serde_json::Value, JsValue> {
     let state = state.borrow();
-    let mut ids = state.loaded_thread_ids.clone();
-    ids.reverse();
-    let (ids, next_cursor) = paginate_ids(&ids, params.cursor, params.limit);
+    let mut ids = state
+        .loaded_thread_ids
+        .iter()
+        .filter(|id| {
+            let Some(thread) = state.threads.get(*id) else {
+                return false;
+            };
+            thread_matches_list_params(&state, thread, &params)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_thread_ids(
+        &state,
+        &mut ids,
+        params
+            .sort_key
+            .unwrap_or(protocol::ThreadSortKey::CreatedAt),
+        params
+            .sort_direction
+            .unwrap_or(protocol::SortDirection::Desc),
+    );
+    let (ids, next_cursor, backwards_cursor) = paginate_ids(&ids, params.cursor, params.limit);
     let data = ids
         .into_iter()
         .filter_map(|id| state.threads.get(&id).map(|thread| thread.thread.clone()))
@@ -1472,7 +1735,7 @@ fn thread_list_result(
     Ok(serde_json::json!({
         "data": data,
         "nextCursor": next_cursor,
-        "backwardsCursor": null,
+        "backwardsCursor": backwards_cursor,
     }))
 }
 
@@ -1483,14 +1746,18 @@ fn thread_search_result(
 ) -> Result<serde_json::Value, JsValue> {
     let state = state.borrow();
     let query = params.search_term.to_lowercase();
-    let mut ids = state.loaded_thread_ids.clone();
-    ids.reverse();
-    let ids = ids
-        .into_iter()
+    let mut ids = state
+        .loaded_thread_ids
+        .iter()
         .filter(|id| {
-            let Some(thread) = state.threads.get(id) else {
+            let Some(thread) = state.threads.get(*id) else {
                 return false;
             };
+            if params.archived.unwrap_or(false)
+                || !thread_source_matches(thread, params.source_kinds.as_deref())
+            {
+                return false;
+            }
             let haystack = format!(
                 "{} {}",
                 thread.thread["preview"].as_str().unwrap_or_default(),
@@ -1499,8 +1766,19 @@ fn thread_search_result(
             .to_lowercase();
             query.is_empty() || haystack.contains(&query) || id.to_lowercase().contains(&query)
         })
+        .cloned()
         .collect::<Vec<_>>();
-    let (ids, next_cursor) = paginate_ids(&ids, params.cursor, params.limit);
+    sort_thread_ids(
+        &state,
+        &mut ids,
+        params
+            .sort_key
+            .unwrap_or(protocol::ThreadSortKey::CreatedAt),
+        params
+            .sort_direction
+            .unwrap_or(protocol::SortDirection::Desc),
+    );
+    let (ids, next_cursor, backwards_cursor) = paginate_ids(&ids, params.cursor, params.limit);
     let data = ids
         .into_iter()
         .filter_map(|id| {
@@ -1515,8 +1793,135 @@ fn thread_search_result(
     Ok(serde_json::json!({
         "data": data,
         "nextCursor": next_cursor,
-        "backwardsCursor": null,
+        "backwardsCursor": backwards_cursor,
     }))
+}
+
+#[cfg(feature = "real-codex")]
+fn thread_matches_list_params(
+    state: &BrowserProtocolState,
+    thread: &BrowserThread,
+    params: &protocol::ThreadListParams,
+) -> bool {
+    if params.archived.unwrap_or(false) {
+        return false;
+    }
+    if !params.model_providers.as_deref().is_none_or(|providers| {
+        providers.is_empty()
+            || providers
+                .iter()
+                .any(|provider| thread.thread["modelProvider"].as_str() == Some(provider.as_str()))
+    }) {
+        return false;
+    }
+    if !thread_source_matches(thread, params.source_kinds.as_deref()) {
+        return false;
+    }
+    if !params.cwd.as_ref().is_none_or(|filter| match filter {
+        protocol::ThreadListCwdFilter::One(cwd) => {
+            thread.thread["cwd"].as_str() == Some(cwd.as_str())
+        }
+        protocol::ThreadListCwdFilter::Many(cwds) => cwds
+            .iter()
+            .any(|cwd| thread.thread["cwd"].as_str() == Some(cwd.as_str())),
+    }) {
+        return false;
+    }
+    if !params.search_term.as_ref().is_none_or(|query| {
+        let query = query.to_lowercase();
+        let haystack = format!(
+            "{} {}",
+            thread.thread["preview"].as_str().unwrap_or_default(),
+            thread.thread["name"].as_str().unwrap_or_default()
+        )
+        .to_lowercase();
+        query.is_empty() || haystack.contains(&query)
+    }) {
+        return false;
+    }
+    if !params.parent_thread_id.as_ref().is_none_or(|parent_id| {
+        thread.thread["parentThreadId"].as_str() == Some(parent_id.as_str())
+    }) {
+        return false;
+    }
+    params
+        .ancestor_thread_id
+        .as_ref()
+        .is_none_or(|ancestor_id| thread_has_ancestor(state, thread, ancestor_id))
+}
+
+#[cfg(feature = "real-codex")]
+fn thread_has_ancestor(
+    state: &BrowserProtocolState,
+    thread: &BrowserThread,
+    ancestor_id: &str,
+) -> bool {
+    let mut parent_id = thread.thread["parentThreadId"].as_str();
+    let mut remaining = state.threads.len();
+    while let Some(id) = parent_id {
+        if id == ancestor_id {
+            return true;
+        }
+        if remaining == 0 {
+            return false;
+        }
+        remaining -= 1;
+        parent_id = state
+            .threads
+            .get(id)
+            .and_then(|parent| parent.thread["parentThreadId"].as_str());
+    }
+    false
+}
+
+#[cfg(feature = "real-codex")]
+fn thread_source_matches(
+    thread: &BrowserThread,
+    source_kinds: Option<&[protocol::ThreadSourceKind]>,
+) -> bool {
+    let Some(source_kinds) = source_kinds else {
+        return true;
+    };
+    if source_kinds.is_empty() {
+        return true;
+    }
+    let source = thread.thread["source"].as_str().unwrap_or_default();
+    source_kinds.iter().any(|kind| {
+        serde_json::to_value(kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(source)
+    })
+}
+
+#[cfg(feature = "real-codex")]
+fn sort_thread_ids(
+    state: &BrowserProtocolState,
+    ids: &mut [String],
+    sort_key: protocol::ThreadSortKey,
+    sort_direction: protocol::SortDirection,
+) {
+    let field = match sort_key {
+        protocol::ThreadSortKey::CreatedAt => "createdAt",
+        protocol::ThreadSortKey::UpdatedAt => "updatedAt",
+        protocol::ThreadSortKey::RecencyAt => "recencyAt",
+    };
+    ids.sort_by(|left, right| {
+        let timestamp = |id: &str| {
+            state
+                .threads
+                .get(id)
+                .and_then(|thread| thread.thread[field].as_i64())
+                .unwrap_or_default()
+        };
+        timestamp(left)
+            .cmp(&timestamp(right))
+            .then_with(|| left.cmp(right))
+    });
+    if matches!(sort_direction, protocol::SortDirection::Desc) {
+        ids.reverse();
+    }
 }
 
 #[cfg(feature = "real-codex")]
@@ -1525,7 +1930,8 @@ fn thread_loaded_list_result(
     params: protocol::ThreadLoadedListParams,
 ) -> serde_json::Value {
     let state = state.borrow();
-    let (data, next_cursor) = paginate_ids(&state.loaded_thread_ids, params.cursor, params.limit);
+    let (data, next_cursor, _) =
+        paginate_ids(&state.loaded_thread_ids, params.cursor, params.limit);
     serde_json::json!({
         "data": data,
         "nextCursor": next_cursor,
@@ -1548,7 +1954,7 @@ fn paginate_ids(
     ids: &[String],
     cursor: Option<String>,
     limit: Option<u32>,
-) -> (Vec<String>, Option<String>) {
+) -> (Vec<String>, Option<String>, Option<String>) {
     let start = cursor
         .and_then(|cursor| cursor.parse::<usize>().ok())
         .unwrap_or(0)
@@ -1564,7 +1970,8 @@ fn paginate_ids(
     } else {
         None
     };
-    (ids[start..end].to_vec(), next_cursor)
+    let backwards_cursor = (start < end).then(|| ids.len().saturating_sub(start + 1).to_string());
+    (ids[start..end].to_vec(), next_cursor, backwards_cursor)
 }
 
 #[cfg(feature = "real-codex")]
@@ -1572,7 +1979,7 @@ fn paginate_values(
     values: &[serde_json::Value],
     cursor: Option<String>,
     limit: Option<u32>,
-) -> (Vec<serde_json::Value>, Option<String>) {
+) -> (Vec<serde_json::Value>, Option<String>, Option<String>) {
     let start = cursor
         .and_then(|cursor| cursor.parse::<usize>().ok())
         .unwrap_or(0)
@@ -1588,7 +1995,9 @@ fn paginate_values(
     } else {
         None
     };
-    (values[start..end].to_vec(), next_cursor)
+    let backwards_cursor =
+        (start < end).then(|| values.len().saturating_sub(start + 1).to_string());
+    (values[start..end].to_vec(), next_cursor, backwards_cursor)
 }
 
 #[cfg(feature = "real-codex")]
@@ -1643,9 +2052,7 @@ fn post_json_notification(
 ) -> Result<(), JsValue> {
     let notification = Object::new();
     set(&notification, "method", method);
-    let params = params
-        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(to_js_error)?;
+    let params = serialize_json_to_js(&params)?;
     set_value(&notification, "params", params);
     port.post_message(&notification)
 }
@@ -1655,9 +2062,7 @@ fn post_protocol_notification(
     port: &MessagePort,
     notification: protocol::ServerNotification,
 ) -> Result<(), JsValue> {
-    let value = notification
-        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(to_js_error)?;
+    let value = serialize_json_to_js(&notification)?;
     port.post_message(&value)
 }
 
@@ -2317,9 +2722,13 @@ fn handle_host_response(
                     "host fs/readFile did not return base64 data",
                 );
             }
-            post_protocol_response(port, request_id, protocol::FsReadFileResponse {
-                data_base64: result.content,
-            })
+            post_protocol_response(
+                port,
+                request_id,
+                protocol::FsReadFileResponse {
+                    data_base64: result.content,
+                },
+            )
         }
         PendingHostRequest::FsWriteFile { request_id } => {
             post_protocol_json_response(port, request_id, serde_json::json!({}))
@@ -2339,20 +2748,26 @@ fn handle_host_response(
                     is_file: entry.entry_type == "file",
                 })
                 .collect();
-            post_protocol_response(port, request_id, protocol::FsReadDirectoryResponse {
-                entries,
-            })
+            post_protocol_response(
+                port,
+                request_id,
+                protocol::FsReadDirectoryResponse { entries },
+            )
         }
         PendingHostRequest::FsGetMetadata { request_id } => {
             let result: HostMetadataResult =
                 serde_wasm_bindgen::from_value(result).map_err(to_js_error)?;
-            post_protocol_response(port, request_id, protocol::FsGetMetadataResponse {
-                is_directory: result.entry_type == "directory",
-                is_file: result.entry_type == "file",
-                is_symlink: false,
-                created_at_ms: 0,
-                modified_at_ms: result.mtime_ms.round() as i64,
-            })
+            post_protocol_response(
+                port,
+                request_id,
+                protocol::FsGetMetadataResponse {
+                    is_directory: result.entry_type == "directory",
+                    is_file: result.entry_type == "file",
+                    is_symlink: false,
+                    created_at_ms: 0,
+                    modified_at_ms: result.mtime_ms.round() as i64,
+                },
+            )
         }
         PendingHostRequest::CommandExec {
             request_id,
@@ -2360,19 +2775,23 @@ fn handle_host_response(
         } => {
             let result: HostCommandExecResult =
                 serde_wasm_bindgen::from_value(result).map_err(to_js_error)?;
-            post_protocol_response(port, request_id, protocol::CommandExecResponse {
-                exit_code: result.exit_code,
-                stdout: if streamed {
-                    String::new()
-                } else {
-                    result.stdout
+            post_protocol_response(
+                port,
+                request_id,
+                protocol::CommandExecResponse {
+                    exit_code: result.exit_code,
+                    stdout: if streamed {
+                        String::new()
+                    } else {
+                        result.stdout
+                    },
+                    stderr: if streamed {
+                        String::new()
+                    } else {
+                        result.stderr
+                    },
                 },
-                stderr: if streamed {
-                    String::new()
-                } else {
-                    result.stderr
-                },
-            })
+            )
         }
         PendingHostRequest::CommandExecWrite { request_id }
         | PendingHostRequest::CommandExecTerminate { request_id }
@@ -2482,8 +2901,8 @@ fn handle_protocol_request(
 #[cfg(feature = "real-codex")]
 fn initialize_result() -> serde_json::Value {
     serde_json::json!({
-        "userAgent": format!("almostnode-codex-wasm/{}", env!("CARGO_PKG_VERSION")),
-        "codexHome": "/codex-browser-home",
+        "userAgent": format!("almostnode-codex-wasm/{CODEX_CLI_VERSION}"),
+        "codexHome": BROWSER_CODEX_HOME,
         "platformFamily": "wasm",
         "platformOs": "browser",
     })
@@ -2519,9 +2938,13 @@ fn jsonrpc_response_value(
     id: protocol::RequestId,
     result: serde_json::Value,
 ) -> Result<JsValue, JsValue> {
-    protocol::JSONRPCResponse { id, result }
-        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(to_js_error)
+    serialize_json_to_js(&protocol::JSONRPCResponse { id, result })
+}
+
+#[cfg(feature = "real-codex")]
+fn serialize_json_to_js(value: &impl Serialize) -> Result<JsValue, JsValue> {
+    let json = serde_json::to_string(value).map_err(to_js_error)?;
+    js_sys::JSON::parse(&json)
 }
 
 #[cfg(feature = "real-codex")]

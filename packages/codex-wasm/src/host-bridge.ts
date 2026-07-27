@@ -10,6 +10,9 @@ export type CodexHostOperation =
   | "fs/readDirectory"
   | "fs/getMetadata"
   | "network/fetch"
+  | "network/fetchStreamOpen"
+  | "network/fetchStreamRead"
+  | "network/fetchStreamCancel"
   | "command/exec"
   | "command/write"
   | "command/resize"
@@ -90,6 +93,9 @@ export interface CodexHostStats {
 
 export interface CodexHostNetworkController {
   fetch(request: CodexHostNetworkFetchRequest): Promise<CodexHostNetworkFetchResponse>;
+  fetchStream?(
+    request: CodexHostNetworkFetchRequest,
+  ): Promise<CodexHostNetworkFetchStreamResponse>;
 }
 
 export interface CodexHostNetworkFetchRequest {
@@ -108,6 +114,32 @@ export interface CodexHostNetworkFetchResponse {
   statusText: string;
   headers: Record<string, string>;
   bodyBase64: string;
+}
+
+export interface CodexHostNetworkFetchStreamResponse {
+  url: string;
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: ReadableStream<Uint8Array>;
+}
+
+export interface CodexHostNetworkFetchStreamOpenResponse {
+  streamId: string;
+  url: string;
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+}
+
+export interface CodexHostNetworkFetchStreamReadResponse {
+  chunkBase64: string;
+  done: boolean;
+}
+
+export interface CodexHostNetworkFetchStreamCancelResponse {
+  streamId: string;
+  cancelled: true;
 }
 
 export interface CodexHostTerminalSessionOptions {
@@ -198,7 +230,12 @@ interface CommandProcess {
 
 export class CodexHostBridge {
   private readonly commands = new Map<string, CommandProcess>();
+  private readonly networkStreams = new Map<
+    string,
+    ReadableStreamDefaultReader<Uint8Array>
+  >();
   private nextProcessId = 1;
+  private nextNetworkStreamId = 1;
   private detachPort: (() => void) | null = null;
 
   private env: Record<string, string>;
@@ -243,6 +280,14 @@ export class CodexHostBridge {
       process.session.dispose();
     }
     this.commands.clear();
+
+    for (const reader of this.networkStreams.values()) {
+      void reader
+        .cancel()
+        .catch(() => undefined)
+        .then(() => releaseNetworkStreamReader(reader));
+    }
+    this.networkStreams.clear();
   }
 
   private async respondToRequest(
@@ -288,6 +333,12 @@ export class CodexHostBridge {
         return this.getMetadata(request.params);
       case "network/fetch":
         return this.fetchNetwork(request.params);
+      case "network/fetchStreamOpen":
+        return this.openNetworkStream(request.params);
+      case "network/fetchStreamRead":
+        return this.readNetworkStream(request.params);
+      case "network/fetchStreamCancel":
+        return this.cancelNetworkStream(request.params);
       case "command/exec":
         return this.execCommand(port, request.params);
       case "command/write":
@@ -416,6 +467,100 @@ export class CodexHostBridge {
       throw new Error("Codex host bridge container does not expose network/fetch.");
     }
     return network.fetch(assertNetworkFetchParams(params));
+  }
+
+  private async openNetworkStream(
+    params: unknown,
+  ): Promise<CodexHostNetworkFetchStreamOpenResponse> {
+    const network = this.options.container.network;
+    if (!network) {
+      throw new Error(
+        "Codex host bridge container does not expose network/fetchStreamOpen.",
+      );
+    }
+
+    const request = assertNetworkFetchParams(
+      params,
+      "network/fetchStreamOpen params",
+    );
+    const response = network.fetchStream
+      ? await network.fetchStream(request)
+      : createCodexHostNetworkFetchStreamResponse(await network.fetch(request));
+    const streamId = `codex-network-${this.nextNetworkStreamId++}`;
+    this.networkStreams.set(streamId, response.body.getReader());
+
+    return {
+      streamId,
+      url: response.url,
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    };
+  }
+
+  private async readNetworkStream(
+    params: unknown,
+  ): Promise<CodexHostNetworkFetchStreamReadResponse> {
+    const { streamId } = assertNetworkStreamParams(
+      params,
+      "network/fetchStreamRead params",
+    );
+    const reader = this.getNetworkStreamReader(streamId);
+
+    try {
+      const { value, done } = await reader.read();
+      if (done) {
+        this.releaseNetworkStream(streamId, reader);
+        return { chunkBase64: "", done: true };
+      }
+      return {
+        chunkBase64: bytesToBase64(value),
+        done: false,
+      };
+    } catch (error) {
+      this.releaseNetworkStream(streamId, reader);
+      throw error;
+    }
+  }
+
+  private async cancelNetworkStream(
+    params: unknown,
+  ): Promise<CodexHostNetworkFetchStreamCancelResponse> {
+    const { streamId } = assertNetworkStreamParams(
+      params,
+      "network/fetchStreamCancel params",
+    );
+    const reader = this.getNetworkStreamReader(streamId);
+    this.networkStreams.delete(streamId);
+    try {
+      await reader.cancel();
+    } finally {
+      releaseNetworkStreamReader(reader);
+    }
+    return { streamId, cancelled: true };
+  }
+
+  private getNetworkStreamReader(
+    streamId: string,
+  ): ReadableStreamDefaultReader<Uint8Array> {
+    const reader = this.networkStreams.get(streamId);
+    if (!reader) {
+      throw Object.assign(
+        new Error(`Unknown Codex network stream: ${streamId}`),
+        { code: "ENOENT" },
+      );
+    }
+    return reader;
+  }
+
+  private releaseNetworkStream(
+    streamId: string,
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+  ): void {
+    if (this.networkStreams.get(streamId) === reader) {
+      this.networkStreams.delete(streamId);
+    }
+    releaseNetworkStreamReader(reader);
   }
 
   private async execCommand(
@@ -1041,8 +1186,11 @@ function assertStringRecord(
   return result;
 }
 
-function assertNetworkFetchParams(params: unknown): CodexHostNetworkFetchRequest {
-  const record = assertRecord(params, "network/fetch params");
+function assertNetworkFetchParams(
+  params: unknown,
+  label = "network/fetch params",
+): CodexHostNetworkFetchRequest {
+  const record = assertRecord(params, label);
   return {
     url: assertString(record.url, "url"),
     method:
@@ -1062,6 +1210,46 @@ function assertNetworkFetchParams(params: unknown): CodexHostNetworkFetchRequest
         : assertString(record.credentials, "credentials") as RequestCredentials,
     retryOnTailscaleRecovery: record.retryOnTailscaleRecovery === true,
   };
+}
+
+function assertNetworkStreamParams(
+  params: unknown,
+  label: string,
+): { streamId: string } {
+  const record = assertRecord(params, label);
+  return {
+    streamId: assertString(record.streamId, "streamId"),
+  };
+}
+
+function createCodexHostNetworkFetchStreamResponse(
+  response: CodexHostNetworkFetchResponse,
+): CodexHostNetworkFetchStreamResponse {
+  const body = base64ToBytes(response.bodyBase64);
+  return {
+    url: response.url,
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (body.byteLength > 0) {
+          controller.enqueue(body);
+        }
+        controller.close();
+      },
+    }),
+  };
+}
+
+function releaseNetworkStreamReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): void {
+  try {
+    reader.releaseLock();
+  } catch {
+    // A concurrent read may still be settling after cancellation.
+  }
 }
 
 function assertCommandExecParams(params: unknown): CommandExecParams {

@@ -20,8 +20,10 @@ export {
 } from './tailscale-session-storage';
 export {
   networkFetch,
+  browserFetchStream,
   serializeFetchRequest,
   createResponseFromNetwork,
+  createNetworkFetchStreamResponse,
   base64ToUint8Array,
   headersToRecord,
 } from './fetch';
@@ -57,6 +59,7 @@ export type {
   NetworkExitNode,
   NetworkFetchRequest,
   NetworkFetchResponse,
+  NetworkFetchStreamResponse,
   NetworkIntegration,
   NetworkLookupAddress,
   NetworkLookupOptions,

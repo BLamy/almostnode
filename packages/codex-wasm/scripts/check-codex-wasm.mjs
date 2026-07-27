@@ -2,20 +2,21 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareAdapterSource, resolveCodexSource } from "./adapter-source.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = resolve(__dirname, "..");
 const repoRoot = resolve(packageRoot, "../..");
-const codexRoot = process.env.CODEX_SOURCE_DIR
-  ? resolve(process.env.CODEX_SOURCE_DIR)
-  : resolve(repoRoot, "vendor/codex");
+const codexRoot = resolveCodexSource(repoRoot);
 const codexRsRoot = resolve(codexRoot, "codex-rs");
 const rustToolchain = "1.95.0";
 
 if (!existsSync(resolve(codexRsRoot, "Cargo.toml"))) {
   console.error(`Codex source not found at ${codexRoot}.`);
-  console.error("Run `pnpm vendor:install:codex` or set CODEX_SOURCE_DIR=/path/to/openai/codex.");
+  console.error(
+    "Run `pnpm vendor:install:codex` or set CODEX_SOURCE_DIR=/path/to/openai/codex.",
+  );
   process.exit(1);
 }
 
@@ -25,40 +26,40 @@ run("rustup", ["target", "add", "wasm32-unknown-unknown"], {
   allowFailure: true,
 });
 
-for (const check of [
-  ["codex-core", ["check", "-p", "codex-core", "--lib", "--target", "wasm32-unknown-unknown"]],
-  ["codex-tui", ["check", "-p", "codex-tui", "--target", "wasm32-unknown-unknown", "--features", "real-tui-wasm"]],
-  ["codex-cli", ["check", "-p", "codex-cli", "--target", "wasm32-unknown-unknown", "--features", "real-tui-wasm"]],
-  ["codex-app-server", ["check", "-p", "codex-app-server", "--target", "wasm32-unknown-unknown"]],
-]) {
-  const [label, args] = check;
-  const result = run("cargo", args, {
-    cwd: codexRsRoot,
+const adapterSource = prepareAdapterSource({
+  packageRoot,
+  repoRoot,
+  codexRoot,
+});
+process.on("exit", adapterSource.cleanup);
+// Check the complete graph from the adapter root. Its wasm-only getrandom
+// dependencies select the supported JS backends for transitive getrandom 0.2
+// and 0.4 users; checking Codex workspace packages in isolation would omit
+// that feature unification and report a false target error.
+const adapterResult = run(
+  "cargo",
+  [
+    "check",
+    "--locked",
+    "--target",
+    "wasm32-unknown-unknown",
+    "--features",
+    "real-codex",
+  ],
+  {
+    cwd: adapterSource.rustRoot,
     stdio: "pipe",
     allowFailure: true,
-  });
-
-  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  if (result.status === 0) {
-    console.log(`${label} checked successfully for wasm32-unknown-unknown.`);
-    continue;
-  }
-
-  console.error(output);
-  process.exit(result.status ?? 1);
-}
-
-const adapterResult = run("cargo", ["check", "--target", "wasm32-unknown-unknown", "--features", "real-codex"], {
-  cwd: resolve(packageRoot, "rust"),
-  stdio: "pipe",
-  allowFailure: true,
-});
+  },
+);
 const adapterOutput = `${adapterResult.stdout ?? ""}\n${adapterResult.stderr ?? ""}`;
 if (adapterResult.status !== 0) {
   console.error(adapterOutput);
   process.exit(adapterResult.status ?? 1);
 }
-console.log("codex-wasm adapter checked successfully for wasm32-unknown-unknown.");
+console.log(
+  "codex-wasm adapter checked successfully for wasm32-unknown-unknown.",
+);
 
 function run(command, args, options) {
   const wasmRustFlags = [

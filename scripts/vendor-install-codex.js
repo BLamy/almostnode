@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,42 +6,145 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "..");
-const codexRoot = resolve(repoRoot, "vendor/codex");
-const buildAdapterScript = resolve(repoRoot, "packages/codex-wasm/scripts/build-adapter.mjs");
-const codexUrl = process.env.CODEX_VENDOR_URL ?? "https://github.com/BLamy/codex.git";
-// Pinned to a specific commit on the BLamy/codex fork (branch
-// almostnode-browser-wasm) so CI builds the exact codex that
-// packages/codex-wasm/rust/src/cli.rs was written against. That commit carries
-// the browser-wasm patches the adapter needs (apply_patch_grammar, scrollback,
-// login/wasm); the plain release branch does not. Override with CODEX_VENDOR_REF
-// (accepts a sha, branch, or tag).
-const codexRef = process.env.CODEX_VENDOR_REF ?? "76685598def751be4c94390438713d597be663f1";
+const codexRoot = resolve(
+  repoRoot,
+  process.env.CODEX_VENDOR_DIR ?? "vendor/codex",
+);
+const codexUrl =
+  process.env.CODEX_VENDOR_URL ?? "https://github.com/BLamy/codex.git";
+const officialCodexVersion = "0.145.0";
+const officialCodexBase = "25af12f7e61572b0bc18ddb1008be543b91519b0";
+// Pinned to a clean, single-commit browser port whose direct parent is the
+// official OpenAI rust-v0.145.0 release. Override with CODEX_VENDOR_REF for
+// development against another commit, branch, or tag.
+const codexRef =
+  process.env.CODEX_VENDOR_REF ?? "f734cacd239155ace2c304f8e8ae108a0e6ea869";
+const usingDefaultRef = process.env.CODEX_VENDOR_REF === undefined;
 
 if (!existsSync(codexRoot)) {
   // `git clone --branch` only accepts ref names, not commit SHAs, so fetch the
   // pinned commit into a fresh repo instead (works for a sha, branch, or tag).
   run("git", ["init", "-q", codexRoot], repoRoot);
-  run("git", ["-C", codexRoot, "fetch", "--depth", "1", codexUrl, codexRef], repoRoot);
+  fetchCodexRef();
   run("git", ["-C", codexRoot, "checkout", "-q", "FETCH_HEAD"], repoRoot);
 } else {
-  const dirty = spawnSync("git", ["-C", codexRoot, "diff", "--quiet"], {
-    cwd: repoRoot,
-    stdio: "ignore",
-  });
-  if (dirty.status !== 0) {
+  const status = capture("git", [
+    "-C",
+    codexRoot,
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+  ]);
+  if (status.trim() !== "") {
     console.error(`Refusing to update dirty Codex checkout at ${codexRoot}.`);
-    process.exit(dirty.status ?? 1);
+    console.error(status);
+    process.exit(1);
   }
 
-  run("git", ["-C", codexRoot, "fetch", "--depth", "1", codexUrl, codexRef], repoRoot);
-  run("git", ["-C", codexRoot, "checkout", "FETCH_HEAD"], repoRoot);
+  fetchCodexRef();
+  run("git", ["-C", codexRoot, "checkout", "--detach", "FETCH_HEAD"], repoRoot);
 }
 
-run(process.execPath, [buildAdapterScript], repoRoot);
+const installedHead = capture("git", [
+  "-C",
+  codexRoot,
+  "rev-parse",
+  "HEAD",
+]).trim();
+if (usingDefaultRef && installedHead !== codexRef) {
+  fail(`Expected pinned Codex commit ${codexRef}, found ${installedHead}.`);
+}
 
-function run(command, args, cwd) {
+const installedVersion = readWorkspaceVersion(
+  resolve(codexRoot, "codex-rs/Cargo.toml"),
+);
+if (installedVersion !== officialCodexVersion) {
+  fail(
+    `Expected Codex ${officialCodexVersion}, found ${installedVersion ?? "no workspace version"}.`,
+  );
+}
+
+const baseCheck = spawnSync(
+  "git",
+  ["-C", codexRoot, "merge-base", "--is-ancestor", officialCodexBase, "HEAD"],
+  { cwd: repoRoot, stdio: "ignore" },
+);
+if (baseCheck.status !== 0) {
+  fail(
+    `Codex ${installedHead} is not based on official rust-v${officialCodexVersion} (${officialCodexBase}).`,
+  );
+}
+
+if (usingDefaultRef) {
+  const installedParent = capture("git", [
+    "-C",
+    codexRoot,
+    "rev-parse",
+    "HEAD^",
+  ]).trim();
+  if (installedParent !== officialCodexBase) {
+    fail(
+      `Pinned browser port must be one clean commit on official rust-v${officialCodexVersion}; found parent ${installedParent}.`,
+    );
+  }
+}
+
+const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+run(
+  pnpmCommand,
+  ["nx", "build-adapter", "codex-wasm", "--skip-nx-cache"],
+  repoRoot,
+  {
+    CODEX_SOURCE_DIR: codexRoot,
+    NX_DAEMON: "false",
+  },
+);
+
+function fetchCodexRef() {
+  run(
+    "git",
+    ["-C", codexRoot, "fetch", "--depth", "256", codexUrl, codexRef],
+    repoRoot,
+  );
+}
+
+function readWorkspaceVersion(cargoTomlPath) {
+  const cargoToml = readFileSync(cargoTomlPath, "utf8");
+  const workspacePackage = cargoToml.match(
+    /^\[workspace\.package\][^\S\r\n]*\r?\n([\s\S]*?)(?=^\[|(?![\s\S]))/m,
+  )?.[1];
+  return workspacePackage?.match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
+}
+
+function capture(command, args) {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (result.error) {
+    fail(`Failed to run ${command}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    if (result.stderr) {
+      console.error(result.stderr.trim());
+    }
+    process.exit(result.status ?? 1);
+  }
+  return result.stdout ?? "";
+}
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+function run(command, args, cwd, extraEnv = {}) {
   const result = spawnSync(command, args, {
     cwd,
+    env: {
+      ...process.env,
+      ...extraEnv,
+    },
     stdio: "inherit",
   });
 

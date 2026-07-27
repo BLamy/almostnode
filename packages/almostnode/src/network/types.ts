@@ -154,6 +154,14 @@ export interface NetworkFetchResponse {
   bodyBase64: string;
 }
 
+export interface NetworkFetchStreamResponse {
+  url: string;
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: ReadableStream<Uint8Array>;
+}
+
 export interface NetworkLookupAddress {
   address: string;
   family: 4 | 6;
@@ -204,6 +212,9 @@ export interface NetworkController {
   login(): Promise<NetworkStatus>;
   logout(): Promise<NetworkStatus>;
   fetch(request: NetworkFetchRequest): Promise<NetworkFetchResponse>;
+  fetchStream?(
+    request: NetworkFetchRequest,
+  ): Promise<NetworkFetchStreamResponse>;
   connectWebSocket(
     url: string,
     init?: NetworkWebSocketInit,

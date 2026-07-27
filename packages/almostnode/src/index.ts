@@ -29,6 +29,7 @@ export type {
   NetworkExitNode,
   NetworkFetchRequest,
   NetworkFetchResponse,
+  NetworkFetchStreamResponse,
   NetworkIntegration,
   NetworkLookupAddress,
   NetworkLookupOptions,

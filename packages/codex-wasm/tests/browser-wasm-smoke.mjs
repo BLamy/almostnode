@@ -15,9 +15,7 @@ await module.default({ module_or_path: wasmBytes });
 const cli = module.createCodexCliWasm();
 cli.start(undefined);
 
-const codexReleaseEnv = { CODEX_CLI_VERSION: "0.137.0" };
 const authenticatedCodexEnv = {
-  ...codexReleaseEnv,
   CODEX_API_KEY: "test-key",
 };
 
@@ -26,11 +24,9 @@ assert.equal(help.exitCode, 0);
 assert.match(help.stdout, /Codex CLI/);
 assert.match(help.stdout, /exec/);
 
-const version = cli.run(["--version"], {
-  env: codexReleaseEnv,
-});
+const version = cli.run(["--version"], {});
 assert.equal(version.exitCode, 0);
-assert.equal(version.stdout, "codex 0.137.0\n");
+assert.equal(version.stdout, "codex 0.145.0\n");
 
 const unauthenticated = cli.run(["login", "status"], {
   env: {},
@@ -49,7 +45,6 @@ assert.equal(explicitDeviceLogin.browserLogin?.type, "deviceCode");
 
 const unauthenticatedTui = cli.run(["debug", "browser-tui-start"], {
   cwd: "/workspace",
-  env: codexReleaseEnv,
   terminalSize: { columns: 119, rows: 30 },
 });
 assert.equal(unauthenticatedTui.exitCode, 0);
@@ -61,12 +56,10 @@ assert.doesNotMatch(
 );
 cli.run(["debug", "browser-tui-input", "--input", "hey"], {
   cwd: "/workspace",
-  env: codexReleaseEnv,
   terminalSize: { columns: 119, rows: 30 },
 });
 const unauthenticatedSubmit = cli.run(["debug", "browser-tui-submit"], {
   cwd: "/workspace",
-  env: codexReleaseEnv,
   terminalSize: { columns: 119, rows: 30 },
 });
 assert.equal(unauthenticatedSubmit.exitCode, 0);
@@ -84,7 +77,6 @@ const unauthenticatedInteractiveCli = module.createCodexCliWasm();
 unauthenticatedInteractiveCli.start(undefined);
 const interactive = unauthenticatedInteractiveCli.run([], {
   cwd: "/workspace",
-  env: codexReleaseEnv,
   terminalSize: { columns: 80, rows: 24 },
 });
 assert.equal(interactive.exitCode, 0);
@@ -113,7 +105,7 @@ const tuiStart = cli.run(["debug", "browser-tui-start"], {
 assert.equal(tuiStart.exitCode, 0);
 assert.match(tuiStart.browserTui.ansi, /OpenAI Codex/);
 assert.doesNotMatch(tuiStart.browserTui.ansi, /v0\.0\.0/);
-assert.match(tuiStart.browserTui.ansi, /v0\.137\.0/);
+assert.match(tuiStart.browserTui.ansi, /v0\.145\.0/);
 assert.match(tuiStart.browserTui.ansi, /model:/);
 assert.match(tuiStart.browserTui.ansi, /gpt-5\.5/);
 assert.match(tuiStart.browserTui.ansi, /directory:/);

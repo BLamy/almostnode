@@ -13,6 +13,7 @@
     },
     "build-adapter": {
       "executor": "nx:run-commands",
+      "dependsOn": ["build"],
       "options": {
         "command": "node scripts/build-adapter.mjs",
         "cwd": "packages/codex-wasm"

@@ -75,11 +75,8 @@ try {
         }
       };
 
-      const module =
-        await import("/codex-wasm/codex_wasm.js");
-      const wasm = await fetch(
-        "/codex-wasm/codex_wasm_bg.wasm",
-      );
+      const module = await import("/codex-wasm/codex_wasm.js");
+      const wasm = await fetch("/codex-wasm/codex_wasm_bg.wasm");
       const wasmBytes = await wasm.arrayBuffer();
       await module.default({ module_or_path: wasmBytes });
 
@@ -421,10 +418,7 @@ setTimeout(() => {
     nextCursor: null,
     backwardsCursor: null,
   });
-  assert.match(
-    result.directThreadStart.result.thread.id,
-    /^[0-9a-fA-F-]{36}$/,
-  );
+  assert.match(result.directThreadStart.result.thread.id, /^[0-9a-fA-F-]{36}$/);
   assert.equal(result.directThreadStart.result.thread.cwd, "/project");
   assert.equal(result.directThreadStart.result.thread.source, "appServer");
   assert.deepEqual(result.directThreadStart.result.thread.status, {
@@ -445,10 +439,7 @@ setTimeout(() => {
   assert.deepEqual(result.directThreadRead.result, {
     thread: result.directThreadStart.result.thread,
   });
-  assert.match(
-    result.sessionInitialize.userAgent,
-    /^almostnode-codex-wasm\//,
-  );
+  assert.match(result.sessionInitialize.userAgent, /^almostnode-codex-wasm\//);
   assert.equal(result.sessionStatus.status, "ready");
   assert.equal(result.sessionStatus.runtime, "browser-wasm");
   assert.equal(result.sessionStatus.realCodexLinked, true);
@@ -484,7 +475,7 @@ setTimeout(() => {
   assert.deepEqual(result.sessionThreadsAfterStart, {
     data: [result.sessionThreadStart.thread],
     nextCursor: null,
-    backwardsCursor: null,
+    backwardsCursor: "0",
   });
   assert.deepEqual(result.sessionMkdir, {});
   assert.deepEqual(result.sessionWrite, {});

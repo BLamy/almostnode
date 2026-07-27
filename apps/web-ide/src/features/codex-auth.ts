@@ -1,4 +1,5 @@
 import type { VirtualFS } from "@agent-wasm/core";
+import { CODEX_BROWSER_CLI_VERSION } from "@agent-wasm/codex";
 
 import { getDesktopOAuthLoopbackBridge } from "./desktop-oauth-loopback";
 import { CODEX_AUTH_PATH } from "@agent-wasm/keychain";
@@ -14,7 +15,6 @@ const CODEX_OAUTH_SCOPE =
   "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CODEX_LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const CODEX_DEVICE_LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
-const CODEX_BROWSER_CLI_VERSION = "0.137.0";
 const CODEX_LOGIN_SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Codex login complete</title></head><body><h1>Codex login complete</h1><p>You can return to Codex.</p></body></html>`;
 
 interface CodexAuthVfs

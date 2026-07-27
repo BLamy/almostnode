@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  decompress as zstdDecompress,
+  init as initZstd,
+} from "@bokuweb/zstd-wasm";
 import { chromium } from "playwright";
+
+await initZstd();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../../..");
@@ -16,11 +22,32 @@ try {
   const nativeAppServerResponseRequests = [];
   const nativeAppServerAssistantText = "browser tui ok";
   const handleResponsesRoute = async (route) => {
-    if (route.request().method() !== "POST") {
+    const request = route.request();
+    const targetUrl = extractTargetUrl(request.url());
+    if (request.method() === "GET" && /\/models(?:\?|$)/.test(targetUrl)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: '{"models":[]}',
+      });
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      /\/ps\/plugins\/suggested(?:\?|$)/.test(targetUrl)
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: '{"enabled":true,"plugins":[]}',
+      });
+      return;
+    }
+    if (request.method() !== "POST") {
       await route.fulfill({ status: 204, body: "" });
       return;
     }
-    const body = JSON.parse(route.request().postData() ?? "{}");
+    const body = decodeRequestBody(request);
     const prompt = extractResponsePrompt(body);
     if (prompt.includes("hello tui")) {
       nativeAppServerResponseRequests.push(body);
@@ -99,6 +126,15 @@ try {
     "https://chatgpt.com/backend-api/codex/responses",
     handleResponsesRoute,
   );
+  await page.route("https://api.openai.com/v1/models*", handleResponsesRoute);
+  await page.route(
+    "https://chatgpt.com/backend-api/codex/models*",
+    handleResponsesRoute,
+  );
+  await page.route(
+    "https://chatgpt.com/backend-api/codex/ps/plugins/suggested*",
+    handleResponsesRoute,
+  );
   await page.route("**/__api/cors-proxy?url=*", handleResponsesRoute);
 
   const response = await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
@@ -126,24 +162,18 @@ try {
 
       const cli = module.createCodexCliWasm();
       cli.start(undefined);
-      const codexReleaseEnv = { CODEX_CLI_VERSION: "0.137.0" };
       const help = cli.run(["--help"], {});
-      const version = cli.run(["--version"], {
-        env: codexReleaseEnv,
-      });
+      const version = cli.run(["--version"], {});
       const unauthenticatedTui = cli.run(["debug", "browser-tui-start"], {
         cwd: "/project",
-        env: codexReleaseEnv,
         terminalSize: { columns: 119, rows: 30 },
       });
       cli.run(["debug", "browser-tui-input", "--input", "hey"], {
         cwd: "/project",
-        env: codexReleaseEnv,
         terminalSize: { columns: 119, rows: 30 },
       });
       const unauthenticatedSubmit = cli.run(["debug", "browser-tui-submit"], {
         cwd: "/project",
-        env: codexReleaseEnv,
         terminalSize: { columns: 119, rows: 30 },
       });
       const directDeviceLogin = cli.run(["login"], {});
@@ -152,7 +182,6 @@ try {
       unauthenticatedInteractiveCli.start(undefined);
       const unauthenticatedInteractive = unauthenticatedInteractiveCli.run([], {
         cwd: "/project",
-        env: codexReleaseEnv,
         terminalSize: { columns: 80, rows: 24 },
       });
       unauthenticatedInteractiveCli.dispose();
@@ -164,7 +193,6 @@ try {
       });
       const tuiStart = cli.run(["debug", "browser-tui-start"], {
         cwd: "/project",
-        env: codexReleaseEnv,
         terminalSize: { columns: 119, rows: 30 },
       });
       const planUpdate = cli.run(
@@ -380,7 +408,7 @@ try {
   assert.match(result.help.stdout, /Codex CLI/);
   assert.match(result.help.stdout, /exec/);
   assert.equal(result.version.exitCode, 0);
-  assert.equal(result.version.stdout, "codex 0.137.0\n");
+  assert.equal(result.version.stdout, "codex 0.145.0\n");
   assert.equal(result.unauthenticatedTui.exitCode, 0);
   assert.equal(result.unauthenticatedTui.browserTui.action.type, "login");
   assert.doesNotMatch(
@@ -423,7 +451,7 @@ try {
   assert.match(result.authenticated.stdout, /browser session/);
   assert.equal(result.tuiStart.exitCode, 0);
   assert.match(result.tuiStart.browserTui.ansi, /OpenAI Codex/);
-  assert.match(result.tuiStart.browserTui.ansi, /v0\.137\.0/);
+  assert.match(result.tuiStart.browserTui.ansi, /v0\.145\.0/);
   assert.match(result.tuiStart.browserTui.ansi, /model:/);
   assert.match(result.tuiStart.browserTui.ansi, /gpt-5\.5/);
   assert.match(result.tuiStart.browserTui.ansi, /directory:/);
@@ -457,7 +485,7 @@ try {
   assert.equal(result.shellHelp.exitCode, 0);
   assert.match(result.shellHelp.stdout, /Codex CLI/);
   assert.equal(result.shellVersion.exitCode, 0);
-  assert.equal(result.shellVersion.stdout, "codex 0.137.0\n");
+  assert.equal(result.shellVersion.stdout, "codex 0.145.0\n");
   assert.equal(result.shellLogin.exitCode, 0);
   assert.match(result.shellLogin.stdout, /CODEX_API_KEY/);
   assert.equal(result.shellExec.exitCode, 0);
@@ -655,6 +683,22 @@ function responseHasToolOutput(body) {
           item.type === "function_call_output",
       )
     : false;
+}
+
+function extractTargetUrl(requestUrl) {
+  const url = new URL(requestUrl);
+  return url.pathname === "/__api/cors-proxy"
+    ? (url.searchParams.get("url") ?? requestUrl)
+    : requestUrl;
+}
+
+function decodeRequestBody(request) {
+  const encoded = request.postDataBuffer() ?? Buffer.from("{}");
+  const decoded =
+    request.headers()["content-encoding"] === "zstd"
+      ? zstdDecompress(encoded)
+      : encoded;
+  return JSON.parse(Buffer.from(decoded).toString("utf8"));
 }
 
 function stripAnsi(value) {

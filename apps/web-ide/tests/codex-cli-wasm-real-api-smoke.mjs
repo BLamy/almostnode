@@ -72,7 +72,6 @@ try {
           env: {
             CODEX_API_KEY: apiKey,
             OPENAI_API_KEY: apiKey,
-            CODEX_CLI_VERSION: "0.137.0",
           },
         },
       );

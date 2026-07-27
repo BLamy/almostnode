@@ -64,8 +64,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -103,6 +101,9 @@ jobs:
 
       - name: Build vendored Codex wasm adapter
         run: pnpm vendor:install:codex
+
+      - name: Smoke-test Codex wasm adapter
+        run: pnpm --dir packages/codex-wasm smoke:adapter
 
       - name: Run package tests
         run: pnpm nx run-many -t test --projects="$PACKAGE_TEST_PROJECTS"

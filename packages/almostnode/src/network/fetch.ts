@@ -4,6 +4,7 @@ import type {
   NetworkController,
   NetworkFetchRequest,
   NetworkFetchResponse,
+  NetworkFetchStreamResponse,
   NetworkOptions,
   ResolvedNetworkPolicy,
 } from './types';
@@ -12,6 +13,18 @@ const DEFAULT_CORS_PROXY = 'https://almostnode-cors-proxy.langtail.workers.dev/?
 const MAX_REDIRECTS = 10;
 const PROXY_UPSTREAM_STATUS_HEADER = 'x-almostnode-upstream-status';
 const PROXY_UPSTREAM_STATUS_TEXT_HEADER = 'x-almostnode-upstream-status-text';
+const CROSS_ORIGIN_REDIRECT_CREDENTIAL_HEADERS = [
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'cookie2',
+] as const;
+const REQUEST_BODY_HEADERS = [
+  'content-encoding',
+  'content-language',
+  'content-location',
+  'content-type',
+] as const;
 
 type FetchLike = typeof globalThis.fetch;
 type NetworkFetchRequestInit = RequestInit & {
@@ -46,6 +59,28 @@ function removeProxyFingerprintHeaders(headers: Headers): void {
   }
 }
 
+function removeCrossOriginRedirectCredentials(headers: Headers): void {
+  for (const name of CROSS_ORIGIN_REDIRECT_CREDENTIAL_HEADERS) {
+    headers.delete(name);
+  }
+}
+
+function removeRequestBodyHeaders(headers: Headers): void {
+  for (const name of REQUEST_BODY_HEADERS) {
+    headers.delete(name);
+  }
+}
+
+function isRedirectStatus(status: number): boolean {
+  return (
+    status === 301
+    || status === 302
+    || status === 303
+    || status === 307
+    || status === 308
+  );
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   if (typeof Buffer !== 'undefined') {
     return Buffer.from(bytes).toString('base64');
@@ -62,6 +97,66 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function createByteStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (bytes.byteLength > 0) {
+        controller.enqueue(bytes);
+      }
+      controller.close();
+    },
+  });
+}
+
+function getResponseBodyStream(response: Response): ReadableStream<Uint8Array> {
+  if (response.body) {
+    return response.body;
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        const body = new Uint8Array(await response.arrayBuffer());
+        if (body.byteLength > 0) {
+          controller.enqueue(body);
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
+}
+
+async function readStreamBase64(
+  stream: ReadableStream<Uint8Array>,
+): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(value);
+      byteLength += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytesToBase64(body);
 }
 
 export function base64ToUint8Array(input: string): Uint8Array {
@@ -225,10 +320,22 @@ export function createResponseFromNetwork(result: NetworkFetchResponse): Respons
   return response;
 }
 
-export async function browserFetch(
+export function createNetworkFetchStreamResponse(
+  result: NetworkFetchResponse,
+): NetworkFetchStreamResponse {
+  return {
+    url: result.url,
+    status: result.status,
+    statusText: result.statusText,
+    headers: result.headers,
+    body: createByteStream(base64ToUint8Array(result.bodyBase64)),
+  };
+}
+
+export async function browserFetchStream(
   request: NetworkFetchRequest,
   policyOrOptions: ResolvedNetworkPolicy | NetworkOptions,
-): Promise<NetworkFetchResponse> {
+): Promise<NetworkFetchStreamResponse> {
   const policy = 'options' in policyOrOptions && 'browser' in policyOrOptions && 'env' in policyOrOptions
     ? policyOrOptions
     : resolveNetworkPolicy(policyOrOptions);
@@ -242,6 +349,7 @@ export async function browserFetch(
     method: request.method || 'GET',
     headers,
     credentials: request.credentials,
+    redirect: request.redirect,
   };
 
   if (bodyBytes.byteLength > 0 && init.method !== 'GET' && init.method !== 'HEAD') {
@@ -268,11 +376,10 @@ export async function browserFetch(
       url: response.url || targetUrl,
       status: response.status,
       statusText: response.statusText,
-      // The browser fetch implementation already materializes the response body.
-      // Preserve semantic headers, but drop transport/compression metadata that no
-      // longer matches the ArrayBuffer we hand back to runtime consumers.
+      // Browser fetch decodes content encodings while preserving body streaming.
+      // Drop transport/compression metadata that no longer describes those bytes.
       headers: stripProxyMetadataHeaders(response.headers),
-      bodyBase64: bytesToBase64(new Uint8Array(await response.arrayBuffer())),
+      body: getResponseBodyStream(response),
     };
   }
 
@@ -294,26 +401,41 @@ export async function browserFetch(
     const responseStatusText = proxyRedirect?.statusText ?? response.statusText;
     const responseHeaders = stripProxyMetadataHeaders(response.headers);
 
-    const shouldFollow = (request.redirect || 'follow') === 'follow';
-    if (
-      shouldFollow &&
-      responseStatus >= 300 &&
-      responseStatus < 400
-    ) {
+    const redirectMode = request.redirect || 'follow';
+    if (isRedirectStatus(responseStatus)) {
       const locationHeader = response.headers.get('location');
       if (locationHeader) {
-        currentUrl = new URL(locationHeader, currentUrl).href;
-        if (responseStatus === 303) {
-          currentMethod = 'GET';
-          currentBody = undefined;
+        if (redirectMode === 'error') {
+          await response.body?.cancel().catch(() => undefined);
+          throw new TypeError('Failed to fetch: redirect mode is set to error');
         }
-        if (
-          (responseStatus === 301 || responseStatus === 302) &&
-          currentMethod !== 'GET' &&
-          currentMethod !== 'HEAD'
-        ) {
+        if (redirectMode !== 'follow') {
+          return {
+            url: currentUrl,
+            status: responseStatus,
+            statusText: responseStatusText,
+            headers: responseHeaders,
+            body: getResponseBodyStream(response),
+          };
+        }
+
+        await response.body?.cancel().catch(() => undefined);
+        const nextUrl = new URL(locationHeader, currentUrl);
+        if (nextUrl.origin !== new URL(currentUrl).origin) {
+          removeCrossOriginRedirectCredentials(headers);
+        }
+        currentUrl = nextUrl.href;
+        const normalizedMethod = currentMethod.toUpperCase();
+        const shouldRewriteToGet =
+          (responseStatus === 301 || responseStatus === 302)
+            ? normalizedMethod === 'POST'
+            : responseStatus === 303
+              && normalizedMethod !== 'GET'
+              && normalizedMethod !== 'HEAD';
+        if (shouldRewriteToGet) {
           currentMethod = 'GET';
           currentBody = undefined;
+          removeRequestBodyHeaders(headers);
         }
         if (redirectCount === MAX_REDIRECTS) {
           throw new TypeError('Failed to fetch: too many redirects');
@@ -327,15 +449,29 @@ export async function browserFetch(
     }
 
     return {
-      url: response.url || currentUrl,
+      url: currentUrl,
       status: responseStatus,
       statusText: responseStatusText,
       headers: responseHeaders,
-      bodyBase64: bytesToBase64(new Uint8Array(await response.arrayBuffer())),
+      body: getResponseBodyStream(response),
     };
   }
 
   throw new TypeError('Failed to fetch: too many redirects');
+}
+
+export async function browserFetch(
+  request: NetworkFetchRequest,
+  policyOrOptions: ResolvedNetworkPolicy | NetworkOptions,
+): Promise<NetworkFetchResponse> {
+  const response = await browserFetchStream(request, policyOrOptions);
+  return {
+    url: response.url,
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+    bodyBase64: await readStreamBase64(response.body),
+  };
 }
 
 export async function networkFetch(
