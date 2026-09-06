@@ -56,5 +56,8 @@
     "type": "git",
     "url": "git+https://github.com/BLamy/agent-wasm.git"
   },
-  "sideEffects": false
+  "sideEffects": [
+    "./dist/cli-browser-worker.js",
+    "./dist/app-server-browser-worker.js"
+  ]
 }

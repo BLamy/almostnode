@@ -76,6 +76,7 @@ jobs:
         run: pnpm nx build almost-os
         env:
           GITHUB_PAGES: true
+          ALMOSTOS_ORIGIN: https://blamy.github.io
 
       - name: Add AlmostOS to deploy directory
         run: |

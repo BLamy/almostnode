@@ -13,7 +13,7 @@
     },
     "build": {
       "executor": "nx:run-commands",
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "codex-wasm:build-adapter"],
       "options": {
         "command": "node --max-old-space-size=8192 ./node_modules/vite/bin/vite.js build",
         "cwd": "apps/almost-os"
