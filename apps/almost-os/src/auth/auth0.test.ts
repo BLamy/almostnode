@@ -3,6 +3,7 @@ import {
   getSession,
   handleRedirectCallback,
   loginWithRedirect,
+  logout,
 } from "./auth0";
 
 const CLIENT_ID = "J0U5KKcVSO451nCeBO0XaOfgrQrtXpu2";
@@ -114,10 +115,22 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
 describe("almost-os Auth0 login", () => {
+  it("returns logout to the deployed application subpath", () => {
+    vi.stubEnv("BASE_URL", "/almostnode/os/");
+    const browser = installBrowser("https://blamy.github.io/almostnode/os/");
+
+    logout();
+
+    const logoutUrl = new URL(browser.href);
+    expect(logoutUrl.pathname).toBe("/v2/logout");
+    expect(logoutUrl.searchParams.get("returnTo")).toBe("https://blamy.github.io/almostnode/os/");
+  });
+
   it("uses the configured default Auth0 client with the supported implicit response mode", async () => {
     const browser = installBrowser("http://localhost:4000/");
     vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation((array) => {

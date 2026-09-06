@@ -1,4 +1,4 @@
-name: Deploy Web IDE Demo
+name: Deploy Web IDE and AlmostOS
 
 on:
   push:
@@ -71,6 +71,19 @@ jobs:
           mkdir -p deploy
           cp -R apps/web-ide/dist-site/client/. deploy/
           cp apps/web-ide/dist-site/client/_shell.html deploy/index.html
+
+      - name: Build AlmostOS
+        run: pnpm nx build almost-os
+        env:
+          GITHUB_PAGES: true
+
+      - name: Add AlmostOS to deploy directory
+        run: |
+          mkdir -p deploy/os
+          cp -R apps/almost-os/dist-site/client/. deploy/os/
+          cp apps/almost-os/dist-site/client/_shell.html deploy/os/index.html
+          mkdir -p deploy/os/oauth/callback
+          cp deploy/os/index.html deploy/os/oauth/callback/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

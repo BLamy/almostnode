@@ -93,6 +93,7 @@ export function getWorkspace(): WorkspaceController {
     // the session — the live subscription below rewrites it for the next boot.
     bootEstablished = readEstablished();
     workspace = createWorkspace({
+      basePath: import.meta.env.BASE_URL.replace(/\/$/, ""),
       installMode: "auto",
       autoStartPreview: false,
       browserEnv: { themeMode: "dark" },

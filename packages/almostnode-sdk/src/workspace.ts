@@ -82,6 +82,8 @@ export interface WorkspaceSnapshot {
 }
 
 export interface WorkspaceCreateOptions {
+  /** Hosting path prefix for the service worker and virtual preview URLs. */
+  basePath?: string;
   template?: WorkspaceTemplate;
   initialFiles?: Record<string, string>;
   shellCommands?: ShellCommandDefinition[];
@@ -405,6 +407,7 @@ class WorkspaceControllerImpl implements WorkspaceController {
         : createIndexedDbSnapshotStore());
     this.template = options.template || DEFAULT_WORKSPACE_TEMPLATE;
     this.container = createContainer({
+      basePath: options.basePath,
       installMode: options.installMode as NonNullable<Parameters<typeof createContainer>[0]>["installMode"],
       shellCommands: options.shellCommands,
       network: options.network,
