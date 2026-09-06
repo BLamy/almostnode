@@ -389,7 +389,10 @@ export function logout(): void {
   writeSession(null);
   const clientId = getAuth0ClientId();
   if (!clientId) return;
-  const params = new URLSearchParams({ client_id: clientId, returnTo: window.location.origin });
+  const params = new URLSearchParams({
+    client_id: clientId,
+    returnTo: new URL(import.meta.env.BASE_URL, window.location.origin).href,
+  });
   window.location.href = `https://${getAuth0Domain()}/v2/logout?${params.toString()}`;
 }
 

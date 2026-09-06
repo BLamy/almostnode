@@ -762,14 +762,14 @@ export default defineConfig(async ({ mode }) => {
       // OpenCode's build stubs @pierre/diffs, but the web-ide chat surface
       // uses the real package for tool-call diff rendering — only stub it for
       // imports coming from outside our own source tree. The chat tool-call card
-      // now ships from @agent-wasm/react, so exclude that package's src too.
+      // now ships from @agent-wasm/react, so exclude its source and built output.
       stubModulePrefixes(
         resolve(opencodeBrowserSrc, "shims/stubs.ts"),
         ["@pierre/diffs"],
         {
           excludeImporterPrefixes: [
             resolve(__dirname, "src"),
-            resolve(workspaceRoot, "packages/almostnode-react/src"),
+            resolve(workspaceRoot, "packages/almostnode-react"),
           ],
         },
       ),

@@ -1,8 +1,26 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
+import { resetServerBridge } from "@agent-wasm/core";
 import { createWorkspace } from "../src";
 
 describe("almostnode-sdk workspace", () => {
+  it("keeps virtual previews under the configured hosting path", async () => {
+    resetServerBridge();
+    const workspace = createWorkspace({
+      basePath: "/almostnode/os/",
+      autoStartPreview: false,
+    });
+    try {
+      await workspace.ready;
+      expect(workspace.container.serverBridge.getBasePath()).toBe("/almostnode/os");
+      expect(new URL(workspace.container.serverBridge.getServerUrl(3000)).pathname)
+        .toBe("/almostnode/os/__virtual__/3000");
+    } finally {
+      workspace.destroy();
+      resetServerBridge();
+    }
+  });
+
   it("seeds the default template and persists snapshots", async () => {
     let savedSnapshot: unknown = null;
     const snapshotStore = {
