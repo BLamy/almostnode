@@ -85,6 +85,11 @@ jobs:
           mkdir -p deploy/os/oauth/callback
           cp deploy/os/index.html deploy/os/oauth/callback/index.html
 
+      - name: Verify AlmostOS hosting behavior
+        run: |
+          pnpm --dir apps/almost-os exec vitest run src/auth/auth0.test.ts
+          pnpm nx test almostnode-sdk
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
