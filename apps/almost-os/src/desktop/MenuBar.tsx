@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { SerializedMenuItem } from "@agent-wasm/core";
 import { TailscaleMenu } from "../apps/tailscale/TailscaleMenu";
 import { useNetwork } from "../apps/tailscale/use-network";
-import { logout } from "../auth/auth0";
-import { useAuthSession } from "../auth/use-auth-session";
 import { showContextMenu } from "../apps/electron/context-menu-store";
 import { useTrays } from "../apps/electron/tray-store";
 import { TailscaleGlyph } from "../os/icons";
@@ -265,7 +263,6 @@ export function MenuBar({ menu, chatOpen, onToggleChat }: MenuBarProps) {
   const [wifiOpen, setWifiOpen] = useState(false);
   const [appleOpen, setAppleOpen] = useState(false);
   const { isFullscreen, toggle: toggleFullscreen } = useFullscreen();
-  const session = useAuthSession();
   const trays = useTrays();
 
   // Dismiss the Apple menu on outside click / Escape.
@@ -306,9 +303,6 @@ export function MenuBar({ menu, chatOpen, onToggleChat }: MenuBarProps) {
         </button>
         {appleOpen && (
           <div className="os-menubar__apple-menu">
-            {session?.profile.email && (
-              <div className="os-menubar__apple-user">{session.profile.email}</div>
-            )}
             <button
               type="button"
               className="os-menubar__apple-item"
@@ -318,17 +312,6 @@ export function MenuBar({ menu, chatOpen, onToggleChat }: MenuBarProps) {
               }}
             >
               {isFullscreen ? "Exit Full Screen" : "Enter Full Screen"}
-            </button>
-            <div className="os-menubar__apple-sep" />
-            <button
-              type="button"
-              className="os-menubar__apple-item"
-              onClick={() => {
-                setAppleOpen(false);
-                logout();
-              }}
-            >
-              Log Out…
             </button>
           </div>
         )}

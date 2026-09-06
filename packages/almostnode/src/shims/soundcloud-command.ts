@@ -5,18 +5,21 @@ import { getDefaultNetworkController, networkFetch } from '../network';
 // The `napster` (aka `soundcloud`) CLI. Search + download SoundCloud tracks and
 // drive the almost-os player (Winamp/Webamp) over a VFS bridge.
 //
-// There is no `napster login`: almost-os already requires an Auth0 login to
-// use the desktop at all, and the napster gateway (napster/src/index.ts, a
-// Cloudflare Worker holding the SoundCloud app secret) verifies that exact
-// Auth0 ID token directly. So every command just asks the OS (via the
-// `window.almostOS.soundcloud` bridge installed by media/soundcloud-bridge.ts)
-// for the token that's already active, with no separate sign-in step.
+// Online commands use a host-provided session through almostOS.soundcloud.
+// Hosts without online music support can set onlineEnabled to false on that
+// bridge; transport controls continue to work without a session.
 
 const GATEWAY_URL = 'https://napster.brett-lamy.workers.dev';
 const DOWNLOADS_DIR = '/home/user/Desktop/Napster Downloads';
 const BRIDGE_DIR = '/home/user/.winamp';
 const COMMAND_PATH = `${BRIDGE_DIR}/command.json`;
 const VMP3_MAGIC = 'NAPSTER-VMP3/1';
+const ONLINE_DISABLED = 'Napster online features are disabled in this workspace. Local playback controls remain available.';
+
+function onlineEnabled(): boolean {
+  return (globalThis as { almostOS?: { soundcloud?: { onlineEnabled?: boolean } } })
+    .almostOS?.soundcloud?.onlineEnabled !== false;
+}
 
 function ok(stdout: string): JustBashExecResult {
   return { stdout, stderr: '', exitCode: 0 };
@@ -192,6 +195,9 @@ export async function runSoundCloudCommand(
 ): Promise<JustBashExecResult> {
   const sub = args[0];
   const rest = args.slice(1);
+  if (!onlineEnabled() && ['whoami', 'search', 'resolve', 'download', 'play', 'queue'].includes(sub)) {
+    return err(`${ONLINE_DISABLED}\n`);
+  }
   try {
     switch (sub) {
       case undefined:
@@ -202,8 +208,9 @@ export async function runSoundCloudCommand(
           [
             'napster — SoundCloud for almost-os (Napster 4.0 + Winamp)',
             '',
-            "No sign-in needed — you're already logged into almost-os, and the",
-            'napster gateway trusts that same login.',
+            onlineEnabled()
+              ? 'Online features use the workspace session.'
+              : ONLINE_DISABLED,
             '',
             'Usage:',
             '  napster whoami                           Show the signed-in user',

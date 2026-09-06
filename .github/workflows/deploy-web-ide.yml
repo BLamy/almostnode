@@ -88,7 +88,8 @@ jobs:
 
       - name: Verify AlmostOS hosting behavior
         run: |
-          pnpm --dir apps/almost-os exec vitest run src/auth/auth0.test.ts
+          pnpm --dir apps/almost-os exec vitest run src/media/player-store.test.ts src/media/virtual-url-map.test.ts
+          pnpm --dir packages/almostnode exec vitest run tests/soundcloud-command.test.ts
           pnpm nx test almostnode-sdk
 
       - name: Upload artifact

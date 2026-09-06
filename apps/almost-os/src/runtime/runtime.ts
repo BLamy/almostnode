@@ -89,6 +89,9 @@ export function getWorkspace(): WorkspaceController {
     throw new Error("AlmostOS runtime is browser-only");
   }
   if (!workspace) {
+    // Disable online Napster commands before the shared shell can run them.
+    const host = window as unknown as { almostOS?: Record<string, unknown> };
+    host.almostOS = { ...host.almostOS, soundcloud: { onlineEnabled: false } };
     // Snapshot the "was it established?" flag before createWorkspace hydrates
     // the session — the live subscription below rewrites it for the next boot.
     bootEstablished = readEstablished();

@@ -7,7 +7,6 @@ import {
   playUrl,
   type PlayerState,
 } from "../../media/player-store";
-import { resolveTrack } from "../../media/soundcloud-api";
 import { useMaybeWindow } from "../../windows/WindowContext";
 import { PlayerStoreMedia, withSuppressedReflection } from "./webamp-media";
 import { useWinampSkin } from "./winamp-store";
@@ -113,15 +112,8 @@ export function WinampApp() {
       const input = window.prompt("Add a SoundCloud track URL:");
       const url = input?.trim();
       if (!url) return null;
-      let title = url.replace(/^https?:\/\//, "");
-      let artist = "SoundCloud";
-      try {
-        const t = await resolveTrack(url);
-        title = t.title;
-        artist = t.artist;
-      } catch {
-        /* not signed in / unresolvable — still playable by the keyless widget */
-      }
+      const title = url.replace(/^https?:\/\//, "");
+      const artist = "SoundCloud";
       playUrl(url, { title, artist });
       return null;
     };

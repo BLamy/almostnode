@@ -40,14 +40,6 @@ export function OsRuntimeProvider({ children }: { children: ReactNode }) {
   // Register the real agent CLI commands (`codex`, `opencode`) on the shared
   // container. Lazy-loaded + guarded so a heavy agent module can't block or
   // crash the desktop boot.
-  // Expose the current Auth0 session on window so the `napster` CLI can use it
-  // directly — no separate SoundCloud sign-in step.
-  useEffect(() => {
-    void import("../media/soundcloud-bridge")
-      .then((m) => m.installSoundcloudBridge())
-      .catch((error) => console.error("[almostos] soundcloud bridge unavailable", error));
-  }, []);
-
   useEffect(() => {
     let cancelled = false;
     void import("../apps/terminal/codex/register-codex")
